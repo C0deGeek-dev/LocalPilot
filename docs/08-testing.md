@@ -28,7 +28,7 @@ Required for:
 
 ### Golden-Task Evals
 
-The worker loop needs an eval suite before post-MVP features are built. Unit
+The worker loop needs an eval suite before higher-level features are built. Unit
 tests prove contracts; evals prove the agent actually completes work.
 
 Golden tasks should be small, deterministic repositories with expected outcomes:

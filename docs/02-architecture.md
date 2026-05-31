@@ -24,6 +24,13 @@ Session Runtime
 The runtime owns conversation flow. The provider runtime owns model calls. The
 tool runtime owns local effects. The harness orchestrator owns project workflow.
 
+The session runtime runs in one of two operating modes. Agent mode is a direct
+conversational loop with no rule engine. Harness mode wraps the same loop in the
+rule engine, commit policy, and replan loop. Both modes share the tool runtime
+and the permission engine. The permission engine is configurable from
+least-privilege (default) up to a bypass (allow-all) launch mode; the operating
+mode does not change which profile is active.
+
 ## Crate Responsibilities
 
 ### `unshackled-cli`
@@ -167,7 +174,7 @@ Owns:
 
 Storage must be inspectable plain files where possible.
 
-### Future `unshackled-memory`
+### `unshackled-memory`
 
 Owns:
 
@@ -178,7 +185,7 @@ Owns:
 
 Memory must be local-only by design.
 
-### Future `unshackled-skills`
+### `unshackled-skills`
 
 Owns:
 
@@ -190,7 +197,7 @@ Owns:
 
 Auto-generated skills are suggestions until the user reviews and accepts them.
 
-### Future `unshackled-recovery`
+### `unshackled-recovery`
 
 Owns:
 
@@ -202,7 +209,7 @@ Owns:
 
 Recovery must prefer stopping safely over continuing with corrupted context.
 
-### Future `unshackled-quota`
+### `unshackled-quota`
 
 Owns:
 
@@ -217,6 +224,7 @@ Owns:
 Owns:
 
 - permission rules
+- permission profiles (default, relaxed, bypass)
 - workspace path policy
 - command risk classification
 - platform sandbox integration
@@ -228,6 +236,10 @@ V1 should implement conservative policy without relying on OS sandboxing:
 - never run network commands without approval unless allowlisted
 - never read secret-like files without approval
 
+The default profile enforces these. The relaxed profile auto-approves a
+user-defined allowlist. The bypass profile is a launch mode that disables
+prompting entirely, like running fully unshackled, and is never the default.
+
 ### `unshackled-mcp`
 
 Owns:
@@ -238,7 +250,11 @@ Owns:
 - resource reads
 - permission integration
 
-MCP is post-MVP.
+MCP is in scope for v1.
+
+Remote agents, a web UI surface, and multi-repo orchestration are planned as
+separate tracks after v1. They reuse the same session runtime rather than forking
+it.
 
 ## Runtime Flow
 

@@ -83,6 +83,30 @@ Default decisions:
 | privileged | ask with explicit warning | deny |
 | unknown | ask | deny |
 
+## Permission Profiles
+
+The permission engine is configurable so users can trade safety for speed
+deliberately. Profiles apply in both agent mode and harness mode.
+
+- `default`: least privilege. Risky actions (writes, deletes, shell, network,
+  secret-like reads) require approval. This is the out-of-box behavior.
+- `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
+  still prompt.
+- `bypass`: a launch mode that approves everything with no prompts, equivalent to
+  running fully unshackled.
+
+Rules:
+
+- `bypass` is never the default. It must be set explicitly, through a launch flag
+  or config, and the active profile is always shown in the footer/status output.
+- `bypass` does not silently disable redaction, logging, or the workspace
+  boundary; disabling those requires separate explicit settings.
+- Harness rule verdicts still apply on top of the permission profile. A profile
+  controls prompting, not the harness correctness gates.
+
+Bypass removes the main safety net against model-initiated destructive actions.
+It should be used only in disposable or sandboxed environments.
+
 ## Windows Tier-1 Policy
 
 Windows is a first-class platform. Shell and filesystem policy must be explicit

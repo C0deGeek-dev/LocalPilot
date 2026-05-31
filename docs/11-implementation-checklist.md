@@ -52,6 +52,14 @@
 - [ ] Implement git tools.
 - [ ] Add approval interface.
 
+## Modes and Permissions
+
+- [ ] Implement agent mode loop (no rule engine).
+- [ ] Implement harness mode entry paths (ground-up, single task, adopt existing).
+- [ ] Implement mode switching at safe boundaries.
+- [ ] Implement permission profiles (default, relaxed, bypass).
+- [ ] Implement bypass launch flag with active-profile indicator.
+
 ## Harness
 
 - [ ] Implement brief parser.
@@ -116,6 +124,14 @@
 - [ ] Implement memory opt-out.
 - [ ] Add memory redaction.
 - [ ] Add memory relevance threshold and token cap.
+
+## MCP
+
+- [ ] Implement MCP client.
+- [ ] Discover MCP tools.
+- [ ] Route MCP tool calls through permission checks.
+- [ ] Read MCP resources.
+- [ ] Persist server configs and show server health.
 
 ## Evals
 

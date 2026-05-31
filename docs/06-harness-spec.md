@@ -6,6 +6,43 @@ The harness is a deterministic workflow layer around an LLM agent. It controls
 state, rules, retries, and commits. The model proposes actions. The harness
 decides whether those actions are allowed to advance the project.
 
+## Operating Modes
+
+The harness is the enforced operating mode. The other mode is agent mode, a plain
+conversational loop with no rule engine. See the product spec for the split.
+
+Harness mode is entered three ways:
+
+- ground-up: `unshackled harness intake` then `unshackled harness plan` on a new
+  project
+- single task: wrap one bounded task in the rule engine without a full project
+  plan
+- adopt existing: summarize an existing repo, generate or import
+  `brief.md`/`PROGRESS.md`, then `unshackled harness resume`
+
+## Mode and Permission Flags
+
+Mode and permission profile are selectable per launch. Flags override config;
+config overrides built-in defaults.
+
+- `--mode <agent|harness>`: operating mode. Default `agent`.
+- `--permission <default|relaxed|bypass>`: permission profile. Default `default`.
+- `--bypass`: shorthand for `--permission bypass`. Allow-all, no prompts. Must be
+  set explicitly; the active profile is shown in the footer/status.
+
+These flags apply to the interactive REPL, print mode, and every `unshackled
+harness` subcommand. The `unshackled harness` subcommands imply `--mode harness`.
+
+Config equivalents:
+
+```toml
+[harness]
+mode = "agent"
+
+[permissions]
+profile = "default"
+```
+
 ## Files
 
 ### `.unshackled.toml`
@@ -14,6 +51,7 @@ Project-local config.
 
 ```toml
 [harness]
+mode = "agent"
 attempts_per_step = 3
 auto_commit = true
 test_command = "cargo test"

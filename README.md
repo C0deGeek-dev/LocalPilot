@@ -6,6 +6,8 @@ It is not a fork, clone, port, or redistribution of any vendor CLI. The project
 is designed from first principles around a small set of public concepts:
 
 - a terminal interface for agentic software development
+- two operating modes: a default conversational agent mode and an opt-in,
+  rule-enforced harness mode
 - official model/provider APIs
 - a rule-enforced harness that turns vague tasks into inspectable plans
 - local state stored in ordinary project files

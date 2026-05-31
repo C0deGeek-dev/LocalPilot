@@ -135,7 +135,51 @@ harness run when the provider becomes usable again.
 This must be configurable per run and globally. Global unattended resume is
 allowed only when the user explicitly enables it.
 
-## Modes
+## Operating Modes
+
+Unshackled has two operating modes. The operating mode decides how much control
+the harness exerts. It is independent of the interface (REPL, CLI, print). Mode
+and permission profile are selectable per launch via flags (`--mode`,
+`--permission`/`--bypass`) or config; see the harness spec.
+
+### Agent Mode (default)
+
+A conversational coding agent. The model drives the loop, calls tools, and edits
+the workspace directly. There is no enforced rule engine, no forced per-step
+commits, and no required plan file. This is the familiar default for exploratory
+work and the closest analog to a general coding assistant.
+
+Tools still pass through the permission engine. The permission policy is
+configurable per project and globally:
+
+- `default`: prompts on for risky actions (writes, shell, network, secret-like
+  reads). Least privilege.
+- `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
+  still prompt.
+- `bypass`: allow-all launch mode, no prompts, like running fully unshackled.
+  Explicit opt-in, surfaced in the footer.
+
+The default is least privilege. Bypass is never the default and must be set by
+the user.
+
+### Harness Mode (enforced)
+
+The deterministic workflow. The model proposes actions; the rule engine decides
+whether they advance the project. Per-step commits, the anti-sunk-cost replan
+loop, test gates, and `brief.md`/`PROGRESS.md` as source of truth all apply.
+
+Harness mode is entered three ways:
+
+- ground-up: greenfield project, full intake -> plan -> build
+- single task: wrap one bounded task in the rule engine without a full project
+  plan
+- adopt existing: summarize an existing repo, generate or import
+  `brief.md`/`PROGRESS.md`, then resume under the rules
+
+Switching between modes is allowed at safe boundaries. Harness mode reuses the
+same permission engine; rule verdicts layer on top of permission decisions.
+
+## Interfaces
 
 ### Interactive REPL
 
@@ -205,9 +249,11 @@ Ignored runtime state:
 - generated skill drafts
 - quota wait/resume records
 
-## Minimum Viable Product
+## Scope
 
-MVP must support:
+### First Milestone
+
+The first runnable milestone is intentionally small and auditable:
 
 - config loading
 - one official hosted provider
@@ -215,6 +261,7 @@ MVP must support:
 - text-only model calls
 - file read/write/edit tools
 - shell command tool with approval
+- agent mode loop with the permission engine
 - brief generation
 - plan generation
 - progress parsing
@@ -222,15 +269,35 @@ MVP must support:
 - deterministic rule engine
 - tests for all parsers and rule decisions
 
-MVP does not need:
+### v1 Committed Scope
 
-- image input
-- MCP
+v1 is not limited to the first milestone. The following are committed v1
+capabilities, not deferred ideas:
+
+- both operating modes (agent and harness)
+- configurable permission profiles, including the bypass launch mode
+- MCP client (servers, tools, resources)
+- local memory store with inspect/delete controls
+- skills, including auto-suggested skill drafts
+- recovery engine for bad-output states
+- quota wait/resume and continuous development mode
+
+### Later (Separate Tracks)
+
+Real goals, sequenced after v1. These are larger surfaces, not core agent
+capabilities:
+
 - remote agents
-- voice
-- plugin marketplace
+- web UI surface
+- plugin/skill marketplace
+- multi-repo orchestration
+- image input
 - IDE integration
-- complex terminal rendering
-- global memory
-- automatic skill generation
-- unattended quota-reset resume
+
+### Out of Scope
+
+- voice
+- hidden telemetry
+- vendor-specific clone behavior
+- private or undocumented endpoint adapters
+- model training or fine-tuning
