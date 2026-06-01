@@ -16,8 +16,9 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/OWNER/unshackled"
-homepage = "https://github.com/OWNER/unshackled"
+authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
+repository = "https://github.com/David-c0degeek/Unshackled-Rust"
+homepage = "https://github.com/David-c0degeek/Unshackled-Rust"
 rust-version = "1.82"
 
 [workspace.dependencies]
