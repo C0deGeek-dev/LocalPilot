@@ -88,6 +88,15 @@
       main (`docs/09` Release Channels) — no stability guarantee — so post-alpha
       iteration has a pipeline. (Verified: a nightly workflow builds main
       artifacts.)
+- [ ] **09.14** (agent) Add the **LocalMind-native integration handoff** for the
+      next development track: document that Unshackled ships learning as built-in
+      UX, mark current `unshackled-memory` / `unshackled-skills` behavior as
+      alpha bridge surfaces, and create/check in the follow-up contract or plan
+      that maps Unshackled session bundles, tool events, diffs, tests, commits,
+      recovery events, memory retrieval, review queues, and skill drafts onto the
+      LocalMind core without requiring users to install LocalMind separately.
+      (Verified: D016 referenced; follow-up plan/contract checked in; no subject
+      05-08 history rewritten.)
 
 
 ## Hindsight checkpoint

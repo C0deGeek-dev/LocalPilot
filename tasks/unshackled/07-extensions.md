@@ -9,6 +9,10 @@
 > `docs/12`). Ordering note: memory (12) before skill suggestions (11) because
 > suggestions depend on a local usage/memory store (`docs/12` Skill
 > Suggestions, `docs/03` Phase 12 "defer graph until flat store proves useful").
+> Per D016, the memory and skills shipped here are alpha bridge surfaces toward
+> LocalMind, Unshackled's native extracted learning engine; they should be wrapped
+> or replaced by LocalMind core rather than expanded into a separate rich learning
+> system.
 
 ## Boxes
 > ID = `07.<box-number>`. Owners: agent · tech-lead.

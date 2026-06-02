@@ -34,7 +34,9 @@ deterministic rule engine, anti-sunk-cost replan loop, per-step commits);
 quota wait/resume with safety gates; MCP client; local memory store; skills
 incl. generated drafts; a ratatui/crossterm TUI; a golden-task eval suite; and
 release hardening (installers, supply-chain gates, clean-room audit, docs) to
-the §9 "Public Alpha Criteria".
+the §9 "Public Alpha Criteria". The current v1 memory/skills surfaces are the
+native alpha bridge toward LocalMind, the extracted learning engine that
+Unshackled will ship as a built-in subsystem.
 
 **Out of scope** (per `docs/01-product-spec.md` Non-Goals / Later / Out of
 Scope): cloud sync; remote-execution service; web UI surface; remote agents;
@@ -69,6 +71,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | `CONTRIBUTING.md` / `SECURITY.md` | PR requirements + provenance note; security scope and defaults. |
 | Existing scaffold (`crates/*`, `Cargo.toml`, `.github/workflows/ci.yml`, `deny.toml`, `rust-toolchain.toml`, `rustfmt.toml`) | Current state to build on, not replace. 10 stub crates, MSRV/edition pinned, CI fmt+clippy+test+check on 3 OSes. |
 | Read-only behavior reference `D:\repos\unshackled` (ADR-0005) | High-level workflow/edge-case clarification ONLY when local docs are silent. Never a source of code/prompts/identifiers/tests; requires a PR provenance note when consulted. |
+| LocalMind plan in `D:\repos\localmind` | Extracted learning-engine direction: LocalMind owns learning/memory promotion/review/skill self-improvement core; Unshackled is the first native host and owns runtime capture, permissions, TUI, and bundled UX. |
 
 **`<base>`** = `main` at commit `eab7123` (plan branches from here).
 
@@ -121,6 +124,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | D013 | 2026-06-02 | Session runtime lives in `unshackled-harness`; interactive REPL deferred to the TUI | The shared agent-mode loop is a module in `unshackled-harness` (no separate session crate exists in the 14-crate roster). The interactive agent REPL with live approval prompting and the footer status line are built in subject 08 (TUI); subject 05 ships the non-interactive `print` entry. | The architecture names no session crate; harness is the orchestration layer with one-way deps onto llm/tools/sandbox/store/recovery. Interactive prompting needs the approval modal/footer, which are TUI concerns. | 05.1, 05.8, 05.13 |
 | D014 | 2026-06-02 | Quota wait/resume engine done; live `harness wait-resume` CLI wrapper deferred | `unshackled-quota` implements and tests window estimation, the inspectable `PausedRun` format, resume modes, and the safety gates (incl. the step-boundary gate). The thin `unshackled harness wait-resume` CLI command and the session-loop pause-point that classifies a provider quota error and writes the `PausedRun` file are a follow-up wrapper around this engine. | 07.2's verifiable contracts (resume gated to a step boundary; paused state persisted as an inspectable round-trippable file) are met at the engine level; wiring the catch-point into the resume loop is mechanical and lower-risk than the engine. | 07.2 |
 | D015 | 2026-06-02 | TUI core decoupled from crossterm; terminal driver lives in the CLI | `unshackled-tui` renders with `ratatui` (default-features off, no crossterm backend) and its own `Key` type, so the whole UI snapshot-tests via `TestBackend`. The committed stack's `crossterm` backend, the `tui-textarea` input widget, and the interactive REPL launch are a thin terminal driver in the CLI that maps real key events to `tui::Key` and runs `tui::run`. | `crossterm`'s terminal init crashes the test harness on the local `x86_64-pc-windows-gnu` toolchain (D012-class), which would block generating the required snapshots. Decoupling keeps the testable UI logic in `unshackled-tui` and isolates the un-testable terminal I/O at the edge; ADR-0006's stack is honored in the driver, verified on real terminals / MSVC CI. | 08.1, 08.3 |
+| D016 | 2026-06-02 | LocalMind is Unshackled's native learning engine | Treat the current `unshackled-memory` and `unshackled-skills` crates as alpha bridge surfaces, not the final rich learning system. LocalMind owns the extracted host-neutral core for session closeout, candidate lessons, review queues, memory promotion, retrieval, skill generation/maintenance, audit, and self-improvement. Unshackled is the first native host and owns session/evidence capture, runtime hooks, permission/TUI integration, and built-in commands. LocalMind core must not depend on Unshackled; Unshackled may depend on LocalMind core through an adapter. | Avoids duplicated memory/skill systems while preserving Unshackled's built-in UX and LocalMind's standalone role for other agents. Since subjects 05-08 have already landed, alpha release must record a forward integration contract rather than reopen completed subject history. | 05, 06, 07, 08, 09.14, `D:\repos\localmind\tasks\LocalMind-Plan.md` |
 
 ---
 
@@ -147,7 +151,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | [x] | 06 | `tasks/unshackled/06-harness-core.md` | DONE | agent: 17; tech-lead: 1 | yes |
 | [x] | 07 | `tasks/unshackled/07-extensions.md` | DONE | agent: 15; tech-lead: 1 | yes |
 | [x] | 08 | `tasks/unshackled/08-terminal-ui.md` | DONE | agent: 11 | n/a |
-| [ ] | 09 | `tasks/unshackled/09-evals-and-release.md` | TODO | agent: 9; release-engineer: 3; tech-lead: 1 | yes |
+| [ ] | 09 | `tasks/unshackled/09-evals-and-release.md` | TODO | agent: 10; release-engineer: 3; tech-lead: 1 | yes |
 
 ---
 
@@ -238,6 +242,12 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
     decisions, or append lessons before closing. Subjects 00–04 were marked
     `DONE` before this rule existed; they keep their tracker state, but each
     must receive a retroactive Hindsight checkpoint before §7 is ticked.
+19. **LocalMind owns rich learning behavior.** New work on session closeout,
+    candidate lessons, review queues, memory promotion, graph/search retrieval,
+    skill generation/maintenance, audit, or self-improvement must target the
+    LocalMind contract unless a Decision-log row records why the behavior is
+    intentionally Unshackled-only. Unshackled owns native capture, runtime hooks,
+    permission enforcement, TUI/CLI presentation, and bundled UX.
 
 ---
 
@@ -263,6 +273,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 - [ ] Commit messages plan-agnostic — `git log <base>..HEAD` mentions no box IDs, `D###`, `tasks/unshackled/`, `Unshackled-Plan.md`, or `slice`/`slices` (same triage).
 - [ ] `tasks/unshackled/manual-actions.md` — every human-owned box resolved or explicitly deferred with rationale.
 - [ ] `docs/09` Public-Alpha Criteria met: clean-room audit complete, no private endpoints, no prohibited framing, tests green, TUI usable, harness completes a small repo task, docs explain provider setup, security model documented; installers build; release archives contain license files.
+- [ ] LocalMind-native learning posture recorded before release: current memory/skills are documented as alpha bridge surfaces, and a checked-in follow-up integration plan/contract exists for replacing/wrapping them with LocalMind core while keeping the feature built into Unshackled.
 - [ ] `tasks/unshackled/lessons.md` reconciled; lasting lessons migrated to permanent `tasks/lessons.md` (create if missing) before `tasks/unshackled/` is deleted.
 - [ ] Plan handed to reviewer for §8 sign-off.
 
