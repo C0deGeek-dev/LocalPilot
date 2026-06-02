@@ -47,7 +47,9 @@
   UI: it maps key events into the UI core, runs a session turn per submission,
   and streams the response into the transcript. Risky actions are denied by
   default (use `--bypass` for a trusted run); a live approval modal is a
-  follow-up.
+  follow-up. The REPL is behind the opt-in `tui` build feature (enabled in
+  release builds) so the default binary links no terminal backend and runs on
+  every toolchain.
 - Added the harness core: lossless `brief.md` / `PROGRESS.md` documents, the
   `init`, `harness status`, `intake`, `plan`, `feature`, and `resume` commands,
   original intake and planner prompts, a deterministic rule engine with

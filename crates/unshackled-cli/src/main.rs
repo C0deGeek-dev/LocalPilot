@@ -12,6 +12,7 @@ use unshackled_store::Store;
 mod doctor;
 mod harness_cmd;
 mod memory_cmd;
+#[cfg(feature = "tui")]
 mod repl;
 mod session_cmd;
 
@@ -63,7 +64,8 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Launch the interactive terminal REPL (the TUI).
+    /// Launch the interactive terminal REPL (the TUI). Requires the `tui` build feature.
+    #[cfg(feature = "tui")]
     Chat {
         /// Model name to request.
         #[arg(long)]
@@ -242,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             ask(&prompt, &model, provider.as_deref()).await?;
         }
+        #[cfg(feature = "tui")]
         Command::Chat {
             model,
             provider,

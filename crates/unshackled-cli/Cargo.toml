@@ -12,12 +12,19 @@ workspace = true
 name = "unshackled"
 path = "src/main.rs"
 
+[features]
+# The interactive `chat` REPL links crossterm. It is opt-in so the default
+# binary (doctor/ask/print/harness/memory/export) links no terminal backend and
+# runs on every toolchain. Release and CI builds enable it.
+default = []
+tui = ["dep:crossterm", "dep:ratatui", "dep:unshackled-tui"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, optional = true }
 futures.workspace = true
-ratatui = { workspace = true, features = ["crossterm"] }
+ratatui = { workspace = true, features = ["crossterm"], optional = true }
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -31,7 +38,7 @@ unshackled-recovery = { path = "../unshackled-recovery" }
 unshackled-sandbox = { path = "../unshackled-sandbox" }
 unshackled-store = { path = "../unshackled-store" }
 unshackled-tools = { path = "../unshackled-tools" }
-unshackled-tui = { path = "../unshackled-tui" }
+unshackled-tui = { path = "../unshackled-tui", optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
