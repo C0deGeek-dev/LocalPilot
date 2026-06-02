@@ -38,4 +38,9 @@
   (`read_file`, `write_file`, `edit_file`, `list_files`, `search_text`,
   `run_shell`, `git_status`, `git_commit`) with generated JSON schemas, atomic
   writes, and output redaction on every profile.
+- Added the shared agent-mode session runtime: a cancellable streaming loop with
+  tool execution, transcript persistence, context compaction, and loop limits,
+  plus context-aware bad-output detection and a budgeted recovery ladder.
+- Added the `unshackled print` command for a non-interactive, single-prompt
+  agent run that makes no workspace writes by default.
 

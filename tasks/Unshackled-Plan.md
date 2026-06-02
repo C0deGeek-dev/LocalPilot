@@ -118,6 +118,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | D010 | 2026-06-02 | Pin provider-runtime transitives to MSRV 1.82 | Lock `hyper-rustls 0.27.5`, `idna_adapter 1.2.0`, and the `getrandom@0.3` line to `0.3.1`. | `reqwest`/`wiremock` otherwise resolve `hyper-rustls`≥0.27.9 (rustc 1.85), `idna_adapter` 1.2.2 and `getrandom` 0.3.4→`wasip2`→`wit-bindgen 0.57` (all need `edition2024`), which fail under 1.82 and break `cargo deny` manifest parsing. | 03.6, 03.12 |
 | D011 | 2026-06-02 | deny: allow CDLA-Permissive-2.0, ignore RUSTSEC-2025-0134 | Add `CDLA-Permissive-2.0` to the license allow-list and ignore advisory `RUSTSEC-2025-0134`. | CDLA-Permissive-2.0 is `webpki-roots`' CA-data license (needed for TLS to official APIs), a permissive data license. RUSTSEC-2025-0134 marks transitive `rustls-pemfile` *unmaintained* (no vulnerability); we do not control it directly. | 03.12 |
 | D012 | 2026-06-02 | windows-gnu `ring` test crash is environmental | Verify locally with per-crate `cargo test -p <crate>`; treat aggregate `cargo test --workspace` / `nextest` as CI's job. | On the local `x86_64-pc-windows-gnu` toolchain, `ring` (via `reqwest` rustls-tls) crashes the CLI bin test binary under the aggregate runner. Every per-crate suite passes; CI runs MSVC where the crash does not occur. Not a code defect. | 03 |
+| D013 | 2026-06-02 | Session runtime lives in `unshackled-harness`; interactive REPL deferred to the TUI | The shared agent-mode loop is a module in `unshackled-harness` (no separate session crate exists in the 14-crate roster). The interactive agent REPL with live approval prompting and the footer status line are built in subject 08 (TUI); subject 05 ships the non-interactive `print` entry. | The architecture names no session crate; harness is the orchestration layer with one-way deps onto llm/tools/sandbox/store/recovery. Interactive prompting needs the approval modal/footer, which are TUI concerns. | 05.1, 05.8, 05.13 |
 
 ---
 
@@ -140,7 +141,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | [x] | 02 | `tasks/unshackled/02-core-config-store.md` | DONE | agent: 15 | n/a |
 | [x] | 03 | `tasks/unshackled/03-provider-runtime.md` | DONE | agent: 12; tech-lead: 1; release-engineer: 1 | yes |
 | [x] | 04 | `tasks/unshackled/04-tools-and-sandbox.md` | DONE | agent: 14 | n/a |
-| [ ] | 05 | `tasks/unshackled/05-session-and-recovery.md` | TODO | agent: 13 | n/a |
+| [x] | 05 | `tasks/unshackled/05-session-and-recovery.md` | DONE | agent: 13 | n/a |
 | [ ] | 06 | `tasks/unshackled/06-harness-core.md` | TODO | agent: 17; tech-lead: 1 | yes |
 | [ ] | 07 | `tasks/unshackled/07-extensions.md` | TODO | agent: 15; tech-lead: 1 | yes |
 | [ ] | 08 | `tasks/unshackled/08-terminal-ui.md` | TODO | agent: 11 | n/a |

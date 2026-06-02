@@ -2057,11 +2057,16 @@ dependencies = [
  "insta",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing-subscriber",
  "unshackled-config",
  "unshackled-core",
+ "unshackled-harness",
  "unshackled-llm",
+ "unshackled-recovery",
+ "unshackled-sandbox",
  "unshackled-store",
+ "unshackled-tools",
  "wiremock",
 ]
 

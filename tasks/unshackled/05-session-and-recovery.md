@@ -40,11 +40,11 @@
 - [x] **05.6** (agent) Implement loop **limits**: max turns and max tool calls,
       configurable, enforced deterministically. (Verified: limit tests — loop
       stops at the cap with a clear status.)
-- [ ] **05.7** (agent) Implement **print mode** (`docs/01` Interfaces): single
+- [x] **05.7** (agent) Implement **print mode** (`docs/01` Interfaces): single
       prompt in, answer out; no workspace mutation unless explicitly enabled;
       useful in pipelines. (Verified: `assert_cmd` test — print mode emits an
       answer and makes no writes by default.)
-- [ ] **05.8** (agent) Implement **agent-mode** entry wiring the loop to config
+- [x] **05.8** (agent) Implement **agent-mode** entry wiring the loop to config
       mode (`--mode agent`, default) and permission profile
       (`--permission`/`--bypass`), with the active profile surfaced for the
       footer (`docs/06` Mode and Permission Flags). Tools still pass through the
@@ -75,7 +75,7 @@
       progress until a clean turn. Repair prompt has a **hard token/turn budget**
       (`docs/11`). (Verified: ladder test with a fake that emits a bad class then
       recovers; budget-exhaustion marks degraded.)
-- [ ] **05.13** (agent) Persist recovery diagnostics and expose degraded status
+- [x] **05.13** (agent) Persist recovery diagnostics and expose degraded status
       to CLI/TUI; enforce the invariant that a recovered turn may continue but a
       **bad turn may not complete a harness step** (`docs/12`, `docs/03` Phase 9
       Done-when). (Verified: `docs/08` Recovery test — exhausted recovery cannot
@@ -96,8 +96,32 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
+### Review result
+
+1. **Keep:** The shared agent loop lives in `unshackled-harness` and is the single
+   path from model output to side effects — it routes every tool call through the
+   subject-04 permission-gated registry, persists redacted messages, and treats a
+   denied/failed tool call as data. UI-agnostic `RuntimeEvent` over `broadcast`
+   keeps print mode and the future TUI on one source. Cancellation via
+   `CancellationToken`/`select!` only persists complete messages, so the transcript
+   stays consistent. Recovery is a separate crate with context-aware detection and
+   a budgeted ladder, and the `step_completable` invariant is enforced at the type
+   level. These are the right durable seams.
+2. **Fix before closing:** None blocking. The interactive agent REPL with live
+   approval prompting and the footer status line are intentionally deferred to the
+   TUI (subject 08); print mode covers the non-interactive agent entry and is
+   tested. Compaction's "preserve the current step contract" half is exercised once
+   harness steps exist (subject 06), which reuses this loop.
+3. **Record:** D013 (session runtime location + interactive-REPL deferral) added to
+   §4. Lessons unchanged — no new traps beyond those already logged.
+4. **Risk:** The token estimate for compaction is a chars/4 heuristic, adequate for
+   alpha but coarse; the live cancellation race is only exercised via pre-cancel,
+   not a mid-stream race (deterministic test limitation). Both acceptable for alpha.
+5. **Verdict:** CLOSE.
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 
@@ -122,3 +146,11 @@
   (bad turn → ladder/repair, degraded → stop). Verified: 9 tests (read-then-answer
   loop, reasoning-as-metadata, denied-tool data, redacted transcript, cancel
   consistency, both caps, compaction pairing); clippy(-D)/fmt clean.
+- 2026-06-02 · slice 3 · 05.7, 05.8, 05.13 · CLI `unshackled print` (non-interactive
+  single-prompt agent run): streams the answer, runs `NonInteractive` so writes are
+  denied by default (`--allow-writes` to enable), `--permission`/`--bypass` mapped
+  to profiles. Degraded status surfaced to stderr; recovery diagnostics persisted
+  via the store. Verified: `assert_cmd` print test (emits answer, no source writes,
+  vs wiremock) + a profile flag-mapping unit test; clippy(-D)/fmt clean. The
+  interactive agent REPL with live approval prompting and the footer status line
+  land with the TUI (subject 08) — see D013.

@@ -10,6 +10,7 @@ use unshackled_llm::{ModelEvent, ModelRequest, ProviderRegistry};
 use unshackled_store::Store;
 
 mod doctor;
+mod session_cmd;
 
 #[derive(Debug, Parser)]
 #[command(name = "unshackled")]
@@ -45,6 +46,26 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Run the agent loop once non-interactively and print the answer (pipelines).
+    Print {
+        /// The prompt text.
+        prompt: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+        /// Allow the run to write to the workspace (off by default).
+        #[arg(long)]
+        allow_writes: bool,
+    },
 }
 
 #[tokio::main]
@@ -76,6 +97,18 @@ async fn main() -> anyhow::Result<()> {
             provider,
         } => {
             ask(&prompt, &model, provider.as_deref()).await?;
+        }
+        Command::Print {
+            prompt,
+            model,
+            provider,
+            permission,
+            bypass,
+            allow_writes,
+        } => {
+            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            session_cmd::print_mode(&prompt, &model, provider.as_deref(), profile, allow_writes)
+                .await?;
         }
     }
 

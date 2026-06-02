@@ -17,11 +17,16 @@ anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing-subscriber.workspace = true
 unshackled-config = { path = "../unshackled-config" }
 unshackled-core = { path = "../unshackled-core" }
+unshackled-harness = { path = "../unshackled-harness" }
 unshackled-llm = { path = "../unshackled-llm" }
+unshackled-recovery = { path = "../unshackled-recovery" }
+unshackled-sandbox = { path = "../unshackled-sandbox" }
 unshackled-store = { path = "../unshackled-store" }
+unshackled-tools = { path = "../unshackled-tools" }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
