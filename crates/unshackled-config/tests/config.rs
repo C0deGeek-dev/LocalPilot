@@ -138,6 +138,49 @@ fn namespaced_provider_options_are_preserved() {
 }
 
 #[test]
+fn resolve_model_uses_the_default_provider_when_unspecified() {
+    Jail::expect_with(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[provider]\ndefault = \"local\"\n\n[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"http://localhost:8080/v1\"\nmodel = \"local-coder\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+        assert_eq!(cfg.resolve_model(None).as_deref(), Some("local-coder"));
+        assert_eq!(
+            cfg.resolve_model(Some("local")).as_deref(),
+            Some("local-coder")
+        );
+        assert_eq!(cfg.resolve_model(Some("absent")), None);
+        Ok(())
+    });
+}
+
+#[test]
+fn resolve_model_is_none_without_a_configured_model() {
+    Jail::expect_with(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"http://localhost:8080/v1\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+        assert_eq!(cfg.resolve_model(None), None);
+        Ok(())
+    });
+}
+
+#[test]
 fn invalid_config_names_the_offending_key() {
     Jail::expect_with(|jail| {
         let project = write(

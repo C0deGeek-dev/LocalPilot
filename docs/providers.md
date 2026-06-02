@@ -16,11 +16,19 @@ default = "local"
 [providers.local]
 kind = "openai-compatible"
 base_url = "http://localhost:11434/v1"
+# Default model, used when a command does not pass --model (and by the REPL):
+model = "your-local-model"
 # Optional, only if your gateway requires a key:
 api_key_env = "UNSHACKLED_LOCAL_API_KEY"
 ```
 
 TLS is not required for `localhost`.
+
+With a `model` set on the default provider, running `unshackled` with no
+subcommand launches the interactive REPL against it. Without a resolvable
+provider and model it prints the doctor report instead, so a fresh or headless
+checkout still gives a useful result. (The REPL is in release builds; the
+default-feature build prints the doctor report.)
 
 ## The official OpenAI API
 

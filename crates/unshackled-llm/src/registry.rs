@@ -113,6 +113,7 @@ mod tests {
             kind: kind.to_string(),
             base_url: base_url.map(str::to_string),
             api_key_env: None,
+            model: None,
             options: Default::default(),
         }
     }

@@ -54,6 +54,10 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Default model for this provider, used when a command does not name one
+    /// (for example launching the interactive REPL with no `--model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,

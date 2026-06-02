@@ -28,7 +28,12 @@ auto_commit = true\n\
 [permissions]\n\
 profile = \"default\"\n\n\
 [provider]\n\
-default = \"local\"\n";
+default = \"local\"\n\n\
+# Configure your default provider, then `unshackled` launches the REPL against it.\n\
+# [providers.local]\n\
+# kind = \"openai-compatible\"\n\
+# base_url = \"http://localhost:8080/v1\"\n\
+# model = \"your-local-model\"\n";
 
 const GITIGNORE_ENTRY: &str = ".unshackled/";
 

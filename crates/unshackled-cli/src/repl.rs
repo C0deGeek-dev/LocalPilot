@@ -32,12 +32,21 @@ use unshackled_tui::{
 /// Returns an error if configuration, the provider, the workspace, or the
 /// terminal cannot be set up.
 pub async fn run_chat(
-    model: &str,
+    model: Option<&str>,
     provider_id: Option<&str>,
     profile: Profile,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = unshackled_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    let model = model
+        .map(str::to_string)
+        .or_else(|| config.resolve_model(provider_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model: pass --model, or set a default in .unshackled.toml \
+                 ([providers.<id>] model = \"...\")"
+            )
+        })?;
     let registry = ProviderRegistry::from_config(&config)?;
     let provider = match provider_id {
         Some(id) => registry.get(id),

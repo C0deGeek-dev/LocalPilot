@@ -117,4 +117,13 @@ impl Config {
             Some(Secret::new(value))
         }
     }
+
+    /// Resolve the default model for the selected provider (or the configured
+    /// default provider when `provider_id` is `None`). Returns `None` when the
+    /// provider has no configured model.
+    #[must_use]
+    pub fn resolve_model(&self, provider_id: Option<&str>) -> Option<String> {
+        let id = provider_id.unwrap_or(self.provider.default.as_str());
+        self.providers.get(id)?.model.clone()
+    }
 }

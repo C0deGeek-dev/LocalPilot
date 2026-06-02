@@ -67,9 +67,9 @@ enum Command {
     /// Launch the interactive terminal REPL (the TUI). Requires the `tui` build feature.
     #[cfg(feature = "tui")]
     Chat {
-        /// Model name to request.
+        /// Model name to request; defaults to the provider's configured model.
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
@@ -183,7 +183,12 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
-    match cli.command.unwrap_or(Command::Doctor) {
+    let command = match cli.command {
+        Some(command) => command,
+        None => return run_default().await,
+    };
+
+    match command {
         Command::Doctor => {
             let mut stdout = io::stdout().lock();
             doctor::run(&mut stdout)?;
@@ -284,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
             bypass,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
-            repl::run_chat(&model, provider.as_deref(), profile).await?;
+            repl::run_chat(model.as_deref(), provider.as_deref(), profile).await?;
         }
         Command::Print {
             prompt,
@@ -300,6 +305,29 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Bare `unshackled` with no subcommand. On a `tui`-enabled build it launches the
+/// interactive REPL when a provider and model are resolvable; otherwise (and on
+/// the default build) it prints the doctor report so a misconfigured or headless
+/// environment still gets a useful, non-interactive result.
+async fn run_default() -> anyhow::Result<()> {
+    #[cfg(feature = "tui")]
+    {
+        let cwd = std::env::current_dir()?;
+        if let Ok(config) =
+            unshackled_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
+        {
+            if config.resolve_model(None).is_some() {
+                let profile = session_cmd::resolve_profile(None, false);
+                return repl::run_chat(None, None, profile).await;
+            }
+        }
+    }
+    let mut stdout = io::stdout().lock();
+    doctor::run(&mut stdout)?;
+    stdout.flush()?;
     Ok(())
 }
 
