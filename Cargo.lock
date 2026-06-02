@@ -2055,6 +2055,7 @@ dependencies = [
  "clap",
  "futures",
  "insta",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2102,6 +2103,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "indexmap",
+ "insta",
  "serde",
  "serde_json",
  "tempfile",

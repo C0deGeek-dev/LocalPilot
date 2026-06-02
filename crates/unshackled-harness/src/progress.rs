@@ -119,6 +119,20 @@ impl Progress {
         self.steps.iter().filter(|s| s.done).count()
     }
 
+    /// Append a new step after the highest existing number, leaving existing
+    /// steps (and their completion metadata) untouched. Returns the new number.
+    pub fn append_step(&mut self, description: impl Into<String>) -> usize {
+        let number = self.steps.iter().map(|s| s.number).max().unwrap_or(0) + 1;
+        self.steps.push(Step {
+            number,
+            description: description.into(),
+            done: false,
+            commit: None,
+            attempts: 0,
+        });
+        number
+    }
+
     /// Mark a step complete, recording its commit and attempt count.
     pub fn mark_complete(&mut self, number: usize, commit: Option<String>, attempts: u32) -> bool {
         if let Some(step) = self.steps.iter_mut().find(|s| s.number == number) {
@@ -212,6 +226,20 @@ mod tests {
         let progress = Progress::parse(VALID).unwrap();
         let reparsed = Progress::parse(&progress.render()).unwrap();
         assert_eq!(progress, reparsed);
+    }
+
+    #[test]
+    fn append_step_leaves_existing_steps_and_metadata_intact() {
+        let mut progress = Progress::parse(VALID).unwrap();
+        let number = progress.append_step("New feature step");
+        assert_eq!(number, 4);
+        // Existing completed step 1 keeps its commit and attempts.
+        assert_eq!(progress.steps[0].commit.as_deref(), Some("abc1234"));
+        assert_eq!(progress.steps[0].attempts, 1);
+        assert!(progress.steps[0].done);
+        // The new step is last and incomplete.
+        assert_eq!(progress.steps.last().unwrap().number, 4);
+        assert!(!progress.steps.last().unwrap().done);
     }
 
     #[test]

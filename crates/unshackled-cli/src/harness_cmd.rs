@@ -7,7 +7,8 @@ use std::io::Write;
 use std::path::Path;
 
 use unshackled_config::{CliOverrides, Config, ConfigPaths};
-use unshackled_harness::Progress;
+use unshackled_harness::{run_intake, run_plan, Brief, Progress};
+use unshackled_llm::ProviderRegistry;
 
 const DEFAULT_CONFIG: &str = "[harness]\n\
 mode = \"agent\"\n\
@@ -179,6 +180,93 @@ pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     let report = gather_status(root)?;
     out.write_all(report.render().as_bytes())?;
     Ok(())
+}
+
+fn provider_for(
+    root: &Path,
+    provider_id: Option<&str>,
+) -> anyhow::Result<std::sync::Arc<dyn unshackled_llm::ModelProvider>> {
+    let config = unshackled_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
+    let registry = ProviderRegistry::from_config(&config)?;
+    match provider_id {
+        Some(id) => registry.get(id),
+        None => registry.default_provider(),
+    }
+    .cloned()
+    .ok_or_else(|| anyhow::anyhow!("no provider is configured"))
+}
+
+/// Run intake: an idea becomes `brief.md`, with an `.unshackled/intake.jsonl`
+/// record.
+///
+/// # Errors
+/// Returns an error if the provider fails or files cannot be written.
+pub async fn intake(
+    root: &Path,
+    model: &str,
+    provider_id: Option<&str>,
+    idea: &str,
+) -> anyhow::Result<()> {
+    let provider = provider_for(root, provider_id)?;
+    let brief = run_intake(provider.as_ref(), model, idea).await?;
+    std::fs::write(root.join("brief.md"), brief.render())?;
+
+    let intake_dir = root.join(".unshackled");
+    std::fs::create_dir_all(&intake_dir)?;
+    let record = serde_json::json!({ "idea": idea, "name": brief.name });
+    let mut line = serde_json::to_string(&record)?;
+    line.push('\n');
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(intake_dir.join("intake.jsonl"))?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// Run planning: `brief.md` becomes `PROGRESS.md`.
+///
+/// # Errors
+/// Returns an error if the brief is missing/invalid or the provider fails.
+pub async fn plan(root: &Path, model: &str, provider_id: Option<&str>) -> anyhow::Result<()> {
+    let brief_text = std::fs::read_to_string(root.join("brief.md")).map_err(|_| {
+        anyhow::anyhow!("brief.md not found; run `unshackled harness intake` first")
+    })?;
+    let brief = Brief::parse(&brief_text)?;
+    let provider = provider_for(root, provider_id)?;
+    let summary = repo_summary(root);
+    let progress = run_plan(provider.as_ref(), model, &brief, &summary).await?;
+    std::fs::write(root.join("PROGRESS.md"), progress.render())?;
+    Ok(())
+}
+
+/// Add a feature to an existing brief and plan, without renumbering completed
+/// steps. This is deterministic and needs no provider.
+///
+/// # Errors
+/// Returns an error if the brief or progress files are missing or invalid.
+pub fn feature(root: &Path, description: &str) -> anyhow::Result<()> {
+    let mut brief = Brief::parse(&std::fs::read_to_string(root.join("brief.md"))?)?;
+    brief.add_requirement(description);
+    std::fs::write(root.join("brief.md"), brief.render())?;
+
+    let mut progress = Progress::parse(&std::fs::read_to_string(root.join("PROGRESS.md"))?)?;
+    progress.append_step(format!("Implement: {description}"));
+    std::fs::write(root.join("PROGRESS.md"), progress.render())?;
+    Ok(())
+}
+
+fn repo_summary(root: &Path) -> String {
+    let mut entries: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    entries.sort();
+    format!("Top-level entries: {}", entries.join(", "))
 }
 
 #[cfg(test)]

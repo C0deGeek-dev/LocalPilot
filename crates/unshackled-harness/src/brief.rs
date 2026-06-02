@@ -51,6 +51,12 @@ impl Brief {
         })
     }
 
+    /// Append a requirement note (used when a feature is added to an existing
+    /// brief), leaving the rest of the brief untouched.
+    pub fn add_requirement(&mut self, text: impl Into<String>) {
+        self.requirements.push(text.into());
+    }
+
     /// Render the brief back to markdown.
     #[must_use]
     pub fn render(&self) -> String {

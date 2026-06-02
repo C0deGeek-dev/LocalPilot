@@ -36,7 +36,7 @@
       state, test command, provider config status — and it MUST work without a
       model provider (`docs/03` Phase 5 Done-when). (Verified: snapshot test of
       status output on a fixture repo, no provider configured.)
-- [ ] **06.5** (agent) Author the **original Unshackled intake prompt** and
+- [x] **06.5** (agent) Author the **original Unshackled intake prompt** and
       implement `unshackled harness intake` (`--idea`, `--refine`, `--continue`,
       `--auto`, `docs/06`): idea → `brief.md` + `.unshackled/intake.jsonl`.
       Validate generated artifacts before writing; invalid model output is
@@ -44,19 +44,19 @@
       harness module and is snapshot-tested (`docs/13` §10). (Verified: idea →
       `brief.md` works with the fake provider; invalid-output retry test;
       prompt snapshot.)
-- [ ] **06.6** (agent) Author the **original Unshackled planner prompt** and
+- [x] **06.6** (agent) Author the **original Unshackled planner prompt** and
       implement `unshackled harness plan` (`--replan`, `docs/06`): `brief.md` +
       repo summary → `PROGRESS.md` with numbered steps, branch name, test
       strategy. Validate before writing (`docs/03` Phase 6). (Verified:
       `brief.md` → `PROGRESS.md` works with the fake provider; prompt snapshot;
       invalid-output retry test.)
-- [ ] **06.7** (agent) Create prompt fixtures + snapshot tests and iterate
+- [x] **06.7** (agent) Create prompt fixtures + snapshot tests and iterate
       prompts against golden tasks; prompt changes are reviewed through snapshot
       diffs and eval scores (`docs/03` Phase 6 Done-when, `docs/08` Snapshot).
       Fixtures authored for this repo, never copied (`docs/08` Fixture Policy).
       (Verified: `cargo insta` snapshots for intake + planner prompts; eval hook
       ready for subject 09.)
-- [ ] **06.8** (agent) Implement `unshackled harness feature` (`docs/06`): a
+- [x] **06.8** (agent) Implement `unshackled harness feature` (`docs/06`): a
       feature description → appended brief notes + appended/inserted progress
       steps without renumbering completed steps. (Verified: test — feature
       append leaves existing step IDs/commit metadata intact.)

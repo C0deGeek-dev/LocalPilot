@@ -25,4 +25,8 @@ pub enum HarnessError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The provider failed or did not produce a usable document after retries.
+    #[error("provider error: {0}")]
+    Provider(String),
 }
