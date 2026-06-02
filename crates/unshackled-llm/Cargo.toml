@@ -9,8 +9,19 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+async-trait = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+unshackled-config = { path = "../unshackled-config" }
 unshackled-core = { path = "../unshackled-core" }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }

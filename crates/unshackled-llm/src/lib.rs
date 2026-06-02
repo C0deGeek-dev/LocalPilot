@@ -1,41 +1,81 @@
-//! Provider-neutral LLM contracts.
+//! Provider runtime for Unshackled.
+//!
+//! Connects the agent to models behind one object-safe [`ModelProvider`] trait
+//! that hides API differences behind a single internal stream contract while
+//! exposing typed capabilities, quota metadata, and a stable error taxonomy.
+//! Provider-specific code lives only in this crate; official public APIs and
+//! local OpenAI-compatible servers only — never private or undocumented
+//! endpoints.
 #![forbid(unsafe_code)]
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use unshackled_core::Message;
+mod error;
+mod event;
+mod fake;
+mod openai;
+mod provider;
+mod registry;
+mod request;
+mod retry;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolSpec>,
-}
+pub use error::{ProviderError, QuotaInfo};
+pub use event::{ModelEvent, ModelEventStream};
+pub use fake::FakeProvider;
+pub use openai::OpenAiProvider;
+pub use provider::{
+    AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
+    ReasoningShape, SourceType, ToolCallShape,
+};
+pub use registry::ProviderRegistry;
+pub use request::{ModelRequest, ToolSpec};
+pub use retry::{retry, RetryPolicy};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSpec {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelEvent {
-    TextDelta(String),
-    ToolCall {
-        id: String,
-        name: String,
-        input_json: serde_json::Value,
-    },
-    Done,
-}
+    #[test]
+    fn provider_trait_is_object_safe() {
+        let _provider: Box<dyn ModelProvider> = Box::new(FakeProvider::new());
+    }
 
-#[async_trait]
-pub trait ModelProvider: Send + Sync {
-    async fn stream(&self, request: ModelRequest) -> anyhow::Result<Box<dyn ModelStream>>;
-}
+    #[tokio::test]
+    async fn fake_drives_text_then_tool_call_deterministically() {
+        let provider = FakeProvider::new().text("hello").tool_call(
+            "c1",
+            "read_file",
+            serde_json::json!({ "path": "a" }),
+        );
+        let request = ModelRequest::new("model", Vec::new());
 
-#[async_trait]
-pub trait ModelStream: Send + Unpin {
-    async fn next_event(&mut self) -> anyhow::Result<Option<ModelEvent>>;
+        let first: Vec<_> = provider
+            .stream(request.clone())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(matches!(first.first(), Some(Ok(ModelEvent::TextDelta(t))) if t == "hello"));
+        assert!(matches!(first.last(), Some(Ok(ModelEvent::Done))));
+
+        let second: Vec<_> = provider.stream(request).await.unwrap().collect().await;
+        assert!(matches!(
+            second.first(),
+            Some(Ok(ModelEvent::ToolCall { name, .. })) if name == "read_file"
+        ));
+    }
+
+    #[tokio::test]
+    async fn fake_can_emit_a_malformed_stream() {
+        let provider = FakeProvider::new().malformed();
+        let events: Vec<_> = provider
+            .stream(ModelRequest::new("m", Vec::new()))
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(matches!(
+            events.first(),
+            Some(Err(ProviderError::StreamDecode(_)))
+        ));
+    }
 }

@@ -25,4 +25,10 @@
 - Replaced the stub `doctor` command with real diagnostics: version, platform,
   config search paths, provider credential presence (never values), tool
   availability, and workspace trust state.
+- Added the provider runtime: an object-safe provider trait with typed
+  capabilities, a stable error taxonomy, and quota metadata, behind one internal
+  streaming contract. One OpenAI-compatible adapter serves both local
+  OpenAI-compatible servers and the official OpenAI API, with streaming, tool
+  calls, reasoning round-trip, retry/backoff, and a config-driven registry.
+- Added the `unshackled ask` command for a single streamed text completion.
 

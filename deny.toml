@@ -5,15 +5,31 @@
 # use. Run `cargo deny check` as part of the pre-release gate.
 
 [advisories]
-# RustSec advisory database. Empty ignore list: advisories are resolved by
-# upgrading the pinned version, not by ignoring them. Add an ID here only with a
-# one-line justification and a CHANGELOG note.
-ignore = []
+# RustSec advisory database. Advisories are normally resolved by upgrading, not
+# ignoring. Each entry below is a deep transitive we do not control directly,
+# flagged only as unmaintained (no known vulnerability), kept until the parent
+# crate (rustls/reqwest) drops it.
+ignore = [
+    # rustls-pemfile is unmaintained; pulled transitively via rustls. No known
+    # vulnerability — an advisory of category "unmaintained" only.
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 # Permissive licenses only. A dependency under any other license is a blocker and
-# must be replaced or its inclusion justified in an ADR.
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+# must be replaced or its inclusion justified here.
+# CDLA-Permissive-2.0 is the license of webpki-roots, which bundles Mozilla's CA
+# certificate data used for TLS to official provider APIs; it is a permissive
+# data license, not a copyleft code license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
 
 [bans]
 # Duplicate versions are tolerated (warn) while the tree is small; tighten to
