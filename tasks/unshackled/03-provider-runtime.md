@@ -108,8 +108,27 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+### Review result
+
+1. Keep: Provider runtime stayed contract-level and clean-room: one
+   provider-neutral trait/event model, capability-based behavior, OpenAI chosen
+   through official public docs, local and hosted OpenAI-compatible paths sharing
+   one adapter, and no private endpoints.
+2. Fix before closing: None. The live-provider credential action is explicitly
+   deferred in `manual-actions.md`; the local aggregate Windows GNU runner crash
+   is documented as environmental rather than product behavior.
+3. Record: D009, D010, D011, and D012 cover the provider choice, MSRV transitive
+   pins, license/advisory posture, and local runner issue. `lessons.md` captures
+   the dependency and runner learnings.
+4. Risk: `03.14` remains deferred until release validation: the opt-in live
+   OpenAI run still needs real credentials before alpha. CI/MSVC should remain
+   the authority for aggregate workspace tests until the local Windows GNU
+   `ring` crash is no longer relevant.
+5. Verdict: CLOSE.
+
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 

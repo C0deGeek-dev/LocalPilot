@@ -115,8 +115,25 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+### Review result
+
+1. Keep: The subject correctly treated tools as the sole side-effect path:
+   registry dispatch, schema generation, permission engine, path containment,
+   per-OS command classification, bounded/redacted tool results, and bypass
+   retaining workspace boundaries are all load-bearing for later agent/harness
+   work.
+2. Fix before closing: None. The completed work aligns with the security model,
+   and the hard platform lessons were captured rather than hidden in tests.
+3. Record: `lessons.md` already records the `globset` MSRV pin, clippy test
+   helper behavior, and cross-platform outside-workspace test nuance.
+4. Risk: Subjects 05 and 06 must use this permission/dispatch path directly and
+   must not introduce a second tool path or bypass. That risk is already covered
+   by the subject 05/06 box wording and §6 security principles.
+5. Verdict: CLOSE.
+
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 

@@ -87,8 +87,24 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+### Review result
+
+1. Keep: Starting with tooling, repo skills, MCP posture, credentials policy,
+   and baseline commands was the right first move. D003 and D004 captured the
+   important setup decisions instead of leaving them as session-only context.
+2. Fix before closing: None. The `cargo deny check` advisory failure found here
+   was carried into subject 01 and resolved there, so it does not need to reopen
+   subject 00.
+3. Record: Already recorded. MCP posture is D003; MSRV-compatible tool pins are
+   D004; the deny failure lesson is in `lessons.md`.
+4. Risk: The human skill/security review was agent-audited in this run and may
+   still be re-confirmed by the owner before trusting repo skills, but the box
+   requirement was mirrored and resolved in `manual-actions.md`.
+5. Verdict: CLOSE.
+
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 > Append a `lessons.md` line here whenever a slice teaches something.

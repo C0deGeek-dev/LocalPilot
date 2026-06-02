@@ -113,8 +113,25 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+### Review result
+
+1. Keep: The subject kept the core/config/store boundary clean: provider-neutral
+   domain types, deterministic config layering, a single shared secret detector,
+   redaction-before-persistence, and atomic store writes are the right durable
+   contracts for later subjects.
+2. Fix before closing: None. The only spec-literal mismatch, `ToolUseId` using
+   the provider-assigned string instead of `Uuid`, is the correct design and was
+   recorded.
+3. Record: D008 records the `ToolUseId` amendment. No additional lesson or
+   decision is needed from this hindsight pass.
+4. Risk: Secret detection is documented as best-effort, so later logging,
+   tools, memory, and export paths must keep calling the shared detector and
+   avoid reimplementing redaction.
+5. Verdict: CLOSE.
+
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 

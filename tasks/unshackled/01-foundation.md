@@ -86,8 +86,25 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+### Review result
+
+1. Keep: Foundation work correctly stabilized the workspace before feature
+   subjects: missing crates were added, unsafe/lint policy centralized, CI/local
+   gates expanded, supply-chain checks made visible, and `doctor` became real
+   user-facing diagnostics.
+2. Fix before closing: None. The deviations around cargo aliases, wildcard path
+   deps, and MSRV-compatible transitive pins are explicit decisions rather than
+   silent drift.
+3. Record: Already recorded as D005, D006, and D007. The supply-chain lesson
+   carried from subject 00 is also recorded in `lessons.md`.
+4. Risk: `bans.wildcards = warn` is intentionally not the final release posture;
+   D006 says to tighten it at release. That is a subject 09/release gate risk,
+   not a subject 01 close blocker.
+5. Verdict: CLOSE.
+
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 
