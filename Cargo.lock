@@ -2406,7 +2406,6 @@ version = "0.1.0"
 dependencies = [
  "figment",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror",
 ]
@@ -2437,7 +2436,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing",
  "unshackled-config",
  "unshackled-core",
  "unshackled-sandbox",

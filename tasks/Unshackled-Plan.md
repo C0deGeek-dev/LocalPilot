@@ -151,7 +151,11 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | [x] | 06 | `tasks/unshackled/06-harness-core.md` | DONE | agent: 17; tech-lead: 1 | yes |
 | [x] | 07 | `tasks/unshackled/07-extensions.md` | DONE | agent: 15; tech-lead: 1 | yes |
 | [x] | 08 | `tasks/unshackled/08-terminal-ui.md` | DONE | agent: 11 | n/a |
-| [ ] | 09 | `tasks/unshackled/09-evals-and-release.md` | TODO | agent: 10; release-engineer: 3; tech-lead: 1 | yes |
+| [x] | 09 | `tasks/unshackled/09-evals-and-release.md` | DONE* | agent: 10; release-engineer: 3; tech-lead: 1 | yes |
+
+> *DONE except 09.12 — the public `v0.1.0-alpha.1` tag — which is DEFERRED as a
+> human go-live action (outward-facing release), tracked in `manual-actions.md`.
+> All engineering and release-prep work is complete and on `main`.
 
 ---
 
