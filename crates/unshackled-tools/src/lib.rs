@@ -1,24 +1,20 @@
-//! Tool registry and execution contracts.
+//! Tool system for Unshackled.
+//!
+//! Tools are the only path from model output to local side effects. Every call
+//! goes through one registry that validates input against a generated schema,
+//! authorizes each effect through the permission engine, executes, and redacts
+//! the result. This crate owns local side effects; permission decisions live in
+//! `unshackled-sandbox`, and the registry never bypasses them.
 #![forbid(unsafe_code)]
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+mod builtins;
+mod error;
+mod registry;
+mod tool;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolInvocation {
-    pub name: String,
-    pub input_json: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolOutput {
-    pub text: String,
-    pub is_error: bool,
-}
-
-#[async_trait]
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn schema(&self) -> serde_json::Value;
-    async fn invoke(&self, invocation: ToolInvocation) -> anyhow::Result<ToolOutput>;
-}
+pub use builtins::{
+    EditFile, GitCommit, GitStatus, ListFiles, ReadFile, RunShell, SearchText, WriteFile,
+};
+pub use error::ToolError;
+pub use registry::ToolRegistry;
+pub use tool::{Tool, ToolContext, ToolOutput};

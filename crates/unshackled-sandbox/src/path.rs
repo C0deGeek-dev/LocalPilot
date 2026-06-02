@@ -38,23 +38,34 @@ impl Workspace {
         &self.root
     }
 
-    /// Resolve a candidate path (absolute or relative to the root) to an absolute
-    /// path, guaranteeing it stays within the workspace.
+    /// Resolve a candidate path (absolute or relative to the root) to an absolute,
+    /// symlink/case/8.3-normalized path **without** enforcing containment. The
+    /// workspace boundary is enforced by the permission engine, which can approve
+    /// an out-of-workspace access; use [`Workspace::contains`] to drive that
+    /// decision and [`Workspace::resolve`] when containment must be guaranteed.
     ///
     /// # Errors
-    /// Returns [`SandboxError::OutsideWorkspace`] if the path escapes the root, or
-    /// [`SandboxError::Io`] if canonicalization of an existing ancestor fails.
-    pub fn resolve(&self, candidate: &Path) -> Result<PathBuf, SandboxError> {
+    /// Returns [`SandboxError::Io`] if canonicalizing an existing ancestor fails.
+    pub fn normalize(&self, candidate: &Path) -> Result<PathBuf, SandboxError> {
         let joined = if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             self.root.join(candidate)
         };
         let lexical = lexically_normalize(&joined);
-        let real = canonicalize_existing_prefix(&lexical).map_err(|source| SandboxError::Io {
+        canonicalize_existing_prefix(&lexical).map_err(|source| SandboxError::Io {
             path: lexical.display().to_string(),
             source,
-        })?;
+        })
+    }
+
+    /// Resolve a candidate path, guaranteeing it stays within the workspace.
+    ///
+    /// # Errors
+    /// Returns [`SandboxError::OutsideWorkspace`] if the path escapes the root, or
+    /// [`SandboxError::Io`] if canonicalization of an existing ancestor fails.
+    pub fn resolve(&self, candidate: &Path) -> Result<PathBuf, SandboxError> {
+        let real = self.normalize(candidate)?;
         if real.starts_with(&self.root) {
             Ok(real)
         } else {
@@ -67,7 +78,10 @@ impl Workspace {
     /// Whether a candidate path is contained in the workspace, without erroring.
     #[must_use]
     pub fn contains(&self, candidate: &Path) -> bool {
-        self.resolve(candidate).is_ok()
+        match self.normalize(candidate) {
+            Ok(real) => real.starts_with(&self.root),
+            Err(_) => false,
+        }
     }
 }
 

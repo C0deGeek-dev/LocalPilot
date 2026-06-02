@@ -31,4 +31,11 @@
   OpenAI-compatible servers and the official OpenAI API, with streaming, tool
   calls, reasoning round-trip, retry/backoff, and a config-driven registry.
 - Added the `unshackled ask` command for a single streamed text completion.
+- Added the sandbox: a workspace path boundary, per-OS command risk
+  classification, and a permission engine with `default`/`relaxed`/`bypass`
+  profiles, a secret-file guard, and a workspace-trust floor.
+- Added the tool system: a permission-gated registry and the eight builtin tools
+  (`read_file`, `write_file`, `edit_file`, `list_files`, `search_text`,
+  `run_shell`, `git_status`, `git_commit`) with generated JSON schemas, atomic
+  writes, and output redaction on every profile.
 

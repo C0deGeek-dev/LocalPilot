@@ -13,12 +13,12 @@
 ## Boxes
 > ID = `04.<box-number>`. All agent-owned.
 
-- [ ] **04.1** (agent) Implement the tool registry holding
+- [x] **04.1** (agent) Implement the tool registry holding
       `Vec<Box<dyn Tool>>` (object-safe trait, `docs/05`/`docs/13` §6) with
       dispatch by name; the model cannot call a tool outside the registry
       (safety invariant, `docs/05`). (Verified: registry dispatch test; unknown
       tool returns a typed error as data, not a panic.)
-- [ ] **04.2** (agent) Implement **typed-struct → JSON Schema** generation per
+- [x] **04.2** (agent) Implement **typed-struct → JSON Schema** generation per
       tool with `schemars` so schema and deserialized input cannot drift
       (`docs/13` §3). One generation path owned by `unshackled-tools`. (Verified:
       schema snapshot test per tool; bad input deserializes to a typed error.)
@@ -30,21 +30,21 @@
       §7). A naive string `starts_with` is a security bug. (Verified: proptest +
       enumerated path-escape tests for both OS families, `#[cfg]`-gated and run
       on their OS.)
-- [ ] **04.4** (agent) Implement `read_file` (`docs/05`): UTF-8 from a workspace
+- [x] **04.4** (agent) Implement `read_file` (`docs/05`): UTF-8 from a workspace
       path; deny paths outside workspace unless approved; deny secret-like files
       by default; line ranges; capped output with explicit truncation marker.
       (Verified: `docs/08` Tools tests — read in workspace; deny read outside
       workspace.)
-- [ ] **04.5** (agent) Implement `write_file` (`docs/05`): require approval for
+- [x] **04.5** (agent) Implement `write_file` (`docs/05`): require approval for
       overwrite until trust established; create parent dirs only inside
       workspace; preserve newline style; temp-then-rename atomic write
       (`docs/13` §5). (Verified: write in workspace; deny write outside
       workspace; overwrite prompts.)
-- [ ] **04.6** (agent) Implement `edit_file` (`docs/05`): reject ambiguous
+- [x] **04.6** (agent) Implement `edit_file` (`docs/05`): reject ambiguous
       edits; require exact old-text match (or AST-aware op); produce a diff for
       approval when interactive. (Verified: `docs/08` Tools tests — edit exact
       match; reject ambiguous edit.)
-- [ ] **04.7** (agent) Implement `list_files` (respect ignore files, cap count,
+- [x] **04.7** (agent) Implement `list_files` (respect ignore files, cap count,
       hidden only when requested) and `search_text` (ripgrep when available,
       respect ignore files, cap matches, never traverse outside workspace
       without approval) (`docs/05`). Use native Rust FS APIs, not string-built
@@ -66,12 +66,12 @@
       privileged; `$VAR` syntax; distinguish workspace-local vs external writes;
       do not hardcode `/bin/sh`. (Verified: `#[cfg(unix)]` tests run on
       Linux+macOS CI.)
-- [ ] **04.11** (agent) Implement `run_shell` execution (`docs/05`): argument
+- [x] **04.11** (agent) Implement `run_shell` execution (`docs/05`): argument
       lists not shell strings (`docs/13` §7); timeout; stdout/stderr captured
       separately; never chain destructive commands built from untrusted path
       lists; result bounded + redacted. (Verified: `docs/08` Tools tests — shell
       read-only allowed; shell destructive denied in non-interactive mode.)
-- [ ] **04.12** (agent) Implement `git_status` (read-only, allowed by default in
+- [x] **04.12** (agent) Implement `git_status` (read-only, allowed by default in
       workspace) and `git_commit` (pre-commit rules must pass — interface hook
       for subject 06; message must not contain secrets; only intended files)
       (`docs/05`). (Verified: git_status round-trips on a temp repo; git_commit
@@ -85,7 +85,7 @@
       with a scriptable test impl. The model and harness MUST NOT bypass it
       (safety invariants). (Verified: scripted-decision tests for each class ×
       interactivity; a "harness cannot bypass" test.)
-- [ ] **04.14** (agent) Implement the three **permission profiles** (`docs/07`,
+- [x] **04.14** (agent) Implement the three **permission profiles** (`docs/07`,
       `docs/01`): `default` (least privilege), `relaxed` (user-defined allowlist
       auto-approves common safe actions; rest prompt), `bypass` (launch mode,
       no prompts, never default, must be set explicitly, always shown in
@@ -116,3 +116,15 @@
   windows root cfg-gated), classification (+adversarial proptest), per-class
   decisions, secret reads prompt under default/relaxed, bypass denies
   out-of-workspace + a harness-cannot-bypass test; clippy(-D)/fmt clean.
+- 2026-06-02 · slice 2 · 04.1, 04.2, 04.4–04.7, 04.11, 04.12, 04.14 ·
+  `unshackled-tools`: object-safe `Tool` trait + `schemars` schema generation,
+  registry with one permission-gated `dispatch` (authorizes every effect, then
+  redacts every output — the single path to side effects) returning failures as
+  data. Eight builtins: `read_file` (line ranges, cap, outside-denied),
+  `write_file` (newline-preserving atomic temp-then-rename), `edit_file`
+  (exact-unique match, rejects ambiguous), `list_files`/`search_text`
+  (ignore-file-aware, capped, contained), `run_shell` (arg-list, timeout,
+  separate stdout/stderr), `git_status`/`git_commit` (secret-bearing message
+  rejected). Verified: 12 tests incl. the `docs/08` Tools MVP set, schema
+  snapshot, and a bypass-still-redacts-and-keeps-boundary test; clippy(-D)/fmt/
+  deny green. Note: pinned `globset 0.4.16` (0.4.18 needs `edition2024`).
