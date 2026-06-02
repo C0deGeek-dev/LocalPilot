@@ -45,12 +45,12 @@
       bypasses permission policy, never continues after destructive pending
       approvals without consent. (Verified: integration test — continuous run
       pauses + resumes across a fake reset window without bypassing approvals.)
-- [ ] **07.6** (agent) Implement the **MCP client** in `unshackled-mcp`
+- [x] **07.6** (agent) Implement the **MCP client** in `unshackled-mcp`
       (`docs/02` §`unshackled-mcp`, `docs/03` Phase 14): protocol client, server
       lifecycle, tool discovery, resource reads, persisted server configs, server
       health status. (Verified: client handshake + tool-discovery test against a
       scripted/fake MCP server.)
-- [ ] **07.7** (agent) Route **all** MCP tool calls through the same permission
+- [x] **07.7** (agent) Route **all** MCP tool calls through the same permission
       checks + redaction as builtin tools — MCP tools behave like builtin tools
       from the model's perspective and permissions apply uniformly; not a side
       channel (`docs/03` Phase 14 Done-when, `docs/02`). (Verified: a permission
