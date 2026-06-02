@@ -11,6 +11,7 @@ mod compaction;
 mod error;
 mod planning;
 mod progress;
+mod resume;
 mod rules;
 mod session;
 mod worker;
@@ -20,6 +21,7 @@ pub use compaction::{compact, estimate_tokens};
 pub use error::HarnessError;
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
+pub use resume::{resume_one_step, ResumeOutcome};
 pub use rules::{Rule, RuleContext, RuleEngine, Trigger, Verdict};
 pub use session::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 pub use worker::{

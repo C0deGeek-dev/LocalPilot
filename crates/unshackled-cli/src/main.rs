@@ -108,6 +108,21 @@ enum HarnessCommand {
         /// The feature description.
         description: String,
     },
+    /// Work the plan: run incomplete steps, committing each.
+    Resume {
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+    },
 }
 
 #[tokio::main]
@@ -149,6 +164,17 @@ async fn main() -> anyhow::Result<()> {
                 HarnessCommand::Feature { description } => {
                     harness_cmd::feature(&cwd, &description)?;
                     println!("appended feature to brief.md and PROGRESS.md");
+                }
+                HarnessCommand::Resume {
+                    model,
+                    provider,
+                    permission,
+                    bypass,
+                } => {
+                    let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                    let mut stdout = io::stdout().lock();
+                    harness_cmd::resume(&cwd, &model, provider.as_deref(), profile, &mut stdout)
+                        .await?;
                 }
             }
         }

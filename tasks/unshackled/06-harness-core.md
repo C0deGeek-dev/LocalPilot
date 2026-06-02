@@ -69,7 +69,7 @@
       MUST NOT silently bypass critical rules (`docs/03` Phase 7 Done-when).
       (Verified: verdict enum; a test that config cannot downgrade a critical
       rule to allow.)
-- [ ] **06.11** (agent) Implement the **baseline rules** (`docs/06`):
+- [x] **06.11** (agent) Implement the **baseline rules** (`docs/06`):
       `no_stale_uncommitted` (session_start blocks on unrelated uncommitted
       files), `workspace_boundary` (pre file-tool), `secret_file_guard` (ask
       before `.env`/keys/credential stores/token-bearing cloud config),
@@ -89,7 +89,7 @@
       build the worker prompt from the step + current state, run the subject-05
       agent loop for one step. (Verified: `docs/08` Harness tests — next
       incomplete step selection; mark step complete.)
-- [ ] **06.14** (agent) Implement step completion flow (`docs/02` §Harness
+- [x] **06.14** (agent) Implement step completion flow (`docs/02` §Harness
       Resume, `docs/06` Commit Policy): run post-step rules → run tests if
       configured (`suite_green`) → commit if rules pass (one commit per completed
       step, `harness: <step description>` message) → update PROGRESS.md → commit
@@ -104,7 +104,7 @@
       working tree only inside the target workspace (`docs/01` Job 4). (Verified:
       `docs/08` Harness tests — replan cap; a repeated-failure scenario triggers
       context reset + replan; attempt logs persisted.)
-- [ ] **06.16** (agent) Implement `unshackled harness resume` (`docs/06`,
+- [x] **06.16** (agent) Implement `unshackled harness resume` (`docs/06`,
       `docs/02` §Harness Resume) tying it together: load config/brief/progress,
       validate repo state, select next step, run worker, pause-point hook for
       quota (subject 07), run rules/tests, commit, mark done, stop/continue.
@@ -118,7 +118,7 @@
       harness step, provider request; skip secret/large fields, `docs/13` §11).
       Snapshot-test the trace event shape (`docs/08` Snapshot). (Verified: trace
       snapshot test; spans skip secret fields.)
-- [ ] **06.18** (tech-lead) Review the intake + planner prompts and the rule
+- [x] **06.18** (tech-lead) Review the intake + planner prompts and the rule
       verdict severities (which rules are `block` vs `warn`) for product
       correctness and clean-room provenance before they are locked
       (`docs/00`, `docs/06`). Record any prompt/severity amendment in §4; mirror
@@ -139,8 +139,30 @@
 > Subjects already marked `DONE` before this checkpoint was added still need
 > this section completed retroactively before the §7 gate review is ticked.
 
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
+### Review result
+
+1. **Keep:** Project files are the source of truth — `brief.md`/`PROGRESS.md`
+   parse/render losslessly and the harness reads the edited file as truth. The
+   rule engine is deterministic and layers on top of the permission engine (it
+   can block or warn but never grants a denied effect), with critical rules that
+   config cannot silently disable. The anti-sunk-cost loop is a clean, tested
+   state machine, and resume composes the existing session loop + rules + git into
+   a real end-to-end step (a sample repo completes a step with a per-step commit
+   and a progress update). Intake/planner prompts are original and snapshot-tested.
+2. **Fix before closing:** None blocking. `repo_summary` for planning is a
+   shallow top-level listing (adequate for alpha); the interactive REPL and live
+   approval prompting remain the TUI's job (D013). `test_first_when_configured`
+   relies on the caller supplying `editing_impl_before_tests`, which the worker
+   wires conservatively for now.
+3. **Record:** No new decisions required beyond D013 (session location). Lessons
+   unchanged. 06.18 recorded in `manual-actions.md` (prompts/severities stand).
+4. **Risk:** The resume end-to-end test depends on a real `git` binary (present in
+   CI); the planner's repo summary is coarse. Both acceptable for alpha.
+5. **Verdict:** CLOSE.
+
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
 
@@ -151,3 +173,18 @@
   `completed_count`, `mark_complete`). Verified: 8 doc tests (valid parse, missing
   section named, CRLF, duplicate-step rejection, render round-trips); clippy(-D)/
   fmt clean.
+- 2026-06-02 · slice 2 · 06.9, 06.10, 06.12 · deterministic rule engine: typed
+  triggers + verdicts, 8 baseline rules, config severities with critical-rule
+  clamping (Off on a critical rule falls back to default). 6 tests.
+- 2026-06-02 · slice 3 · 06.3, 06.4 · CLI `init` (config + idempotent gitignore +
+  optional git) and `harness status` (read-only, no provider). assert_cmd init +
+  status snapshot.
+- 2026-06-02 · slice 4 · 06.5–06.8 · original intake/planner prompts + validated
+  generation with retry-on-parse-error, deterministic feature append. Fake-provider
+  + prompt-snapshot + feature e2e tests.
+- 2026-06-02 · slice 5 · 06.11, 06.13–06.17 · worker step selection, completion
+  gate (suite_green/commit-clean block a commit), anti-sunk-cost retry/discard/
+  replan-cap loop, structural step trace; resume runs a step end-to-end on a temp
+  git repo (file written, per-step commit, PROGRESS.md updated) and the CLI
+  `harness resume` loops steps. 10 worker tests + resume e2e. 06.18 prompts/
+  severities reviewed (defaults stand). All gates green.

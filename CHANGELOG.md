@@ -43,4 +43,9 @@
   plus context-aware bad-output detection and a budgeted recovery ladder.
 - Added the `unshackled print` command for a non-interactive, single-prompt
   agent run that makes no workspace writes by default.
+- Added the harness core: lossless `brief.md` / `PROGRESS.md` documents, the
+  `init`, `harness status`, `intake`, `plan`, `feature`, and `resume` commands,
+  original intake and planner prompts, a deterministic rule engine with
+  configurable severities and protected critical rules, and a worker with an
+  anti-sunk-cost retry/discard/replan loop that commits one step at a time.
 

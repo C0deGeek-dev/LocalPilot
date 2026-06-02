@@ -5,10 +5,18 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use unshackled_config::{CliOverrides, Config, ConfigPaths};
-use unshackled_harness::{run_intake, run_plan, Brief, Progress};
-use unshackled_llm::ProviderRegistry;
+use unshackled_harness::{
+    resume_one_step, run_intake, run_plan, Brief, Progress, RuleEngine, SessionConfig,
+    SessionRuntime,
+};
+use unshackled_llm::{ModelProvider, ProviderRegistry};
+use unshackled_recovery::{RecoveryBudget, RecoveryEngine};
+use unshackled_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
+use unshackled_store::Store;
+use unshackled_tools::ToolRegistry;
 
 const DEFAULT_CONFIG: &str = "[harness]\n\
 mode = \"agent\"\n\
@@ -255,6 +263,93 @@ pub fn feature(root: &Path, description: &str) -> anyhow::Result<()> {
     progress.append_step(format!("Implement: {description}"));
     std::fs::write(root.join("PROGRESS.md"), progress.render())?;
     Ok(())
+}
+
+/// Run harness steps from `PROGRESS.md` until none remain, a step is blocked, or
+/// the step cap is reached. Each step runs with fresh context.
+///
+/// # Errors
+/// Returns an error if config/provider setup or a step fails.
+pub async fn resume(
+    root: &Path,
+    model: &str,
+    provider_id: Option<&str>,
+    profile: Profile,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let config = unshackled_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
+        .unwrap_or_else(|_| Config::default());
+    let provider = provider_for(root, provider_id)?;
+    let workspace = Workspace::new(root)?;
+    let rules = RuleEngine::with_baseline(&config.harness.rules);
+    let test_command = config.harness.test_command.clone();
+    let max_attempts = config.harness.attempts_per_step;
+
+    const MAX_STEPS: usize = 100;
+    for _ in 0..MAX_STEPS {
+        let remaining = std::fs::read_to_string(root.join("PROGRESS.md"))
+            .ok()
+            .and_then(|t| Progress::parse(&t).ok())
+            .map(|p| p.next_incomplete().is_some())
+            .unwrap_or(false);
+        if !remaining {
+            writeln!(out, "all steps complete")?;
+            break;
+        }
+
+        let mut runtime = build_runtime(
+            root,
+            Arc::clone(&provider),
+            workspace.clone(),
+            profile,
+            model,
+        );
+        let outcome = resume_one_step(
+            &mut runtime,
+            root,
+            &rules,
+            test_command.as_deref(),
+            max_attempts,
+        )
+        .await?;
+        if outcome.committed {
+            writeln!(out, "step {} complete", outcome.step_number)?;
+        } else {
+            writeln!(
+                out,
+                "step {} blocked: {}",
+                outcome.step_number,
+                outcome.blocked_reason.as_deref().unwrap_or("unknown")
+            )?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn build_runtime(
+    root: &Path,
+    provider: Arc<dyn ModelProvider>,
+    workspace: Workspace,
+    profile: Profile,
+    model: &str,
+) -> SessionRuntime {
+    SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(profile, Vec::new()),
+        Box::new(ScriptedApprover::new(Vec::new())),
+        Store::open(root),
+        workspace,
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            model: model.to_string(),
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    )
 }
 
 fn repo_summary(root: &Path) -> String {

@@ -142,7 +142,7 @@ out of scope (see `docs/00-clean-room.md`, §6.12 below).
 | [x] | 03 | `tasks/unshackled/03-provider-runtime.md` | DONE | agent: 12; tech-lead: 1; release-engineer: 1 | yes |
 | [x] | 04 | `tasks/unshackled/04-tools-and-sandbox.md` | DONE | agent: 14 | n/a |
 | [x] | 05 | `tasks/unshackled/05-session-and-recovery.md` | DONE | agent: 13 | n/a |
-| [ ] | 06 | `tasks/unshackled/06-harness-core.md` | TODO | agent: 17; tech-lead: 1 | yes |
+| [x] | 06 | `tasks/unshackled/06-harness-core.md` | DONE | agent: 17; tech-lead: 1 | yes |
 | [ ] | 07 | `tasks/unshackled/07-extensions.md` | TODO | agent: 15; tech-lead: 1 | yes |
 | [ ] | 08 | `tasks/unshackled/08-terminal-ui.md` | TODO | agent: 11 | n/a |
 | [ ] | 09 | `tasks/unshackled/09-evals-and-release.md` | TODO | agent: 9; release-engineer: 3; tech-lead: 1 | yes |
