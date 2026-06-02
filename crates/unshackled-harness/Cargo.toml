@@ -9,5 +9,22 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-serde.workspace = true
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+unshackled-config = { path = "../unshackled-config" }
+unshackled-core = { path = "../unshackled-core" }
+unshackled-llm = { path = "../unshackled-llm" }
+unshackled-recovery = { path = "../unshackled-recovery" }
+unshackled-sandbox = { path = "../unshackled-sandbox" }
+unshackled-store = { path = "../unshackled-store" }
+unshackled-tools = { path = "../unshackled-tools" }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

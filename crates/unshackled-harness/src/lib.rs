@@ -1,5 +1,15 @@
-//! Rule-enforced agent workflow contracts.
+//! Rule-enforced agent workflow contracts and the shared session runtime.
+//!
+//! Owns the agent-mode conversational loop (the shared loop both operating modes
+//! use), context compaction, and the brief/progress data model that the harness
+//! mode builds on.
 #![forbid(unsafe_code)]
+
+mod compaction;
+mod session;
+
+pub use compaction::{compact, estimate_tokens};
+pub use session::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 
 use serde::{Deserialize, Serialize};
 

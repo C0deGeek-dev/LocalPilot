@@ -65,6 +65,16 @@ impl ToolRegistry {
         self.tools.iter().map(|t| (t.name(), t.schema())).collect()
     }
 
+    /// The registered tools' name, description, and JSON schema, for building
+    /// provider tool specifications.
+    #[must_use]
+    pub fn specs(&self) -> Vec<(&'static str, &'static str, Value)> {
+        self.tools
+            .iter()
+            .map(|t| (t.name(), t.description(), t.schema()))
+            .collect()
+    }
+
     /// Dispatch a tool call: authorize every effect, invoke, then redact. A
     /// failure or denial is returned as an error [`ToolResult`], never a panic.
     pub async fn dispatch(
