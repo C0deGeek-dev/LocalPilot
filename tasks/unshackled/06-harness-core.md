@@ -84,7 +84,7 @@
       driven by `[harness.rules]` and `attempts_per_step` (`docs/06`). (Verified:
       `docs/08` Harness tests — attempt counter increment; config override
       changes a non-critical rule's verdict.)
-- [ ] **06.13** (agent) Implement the worker role + **next-incomplete-step
+- [x] **06.13** (agent) Implement the worker role + **next-incomplete-step
       selection** (`docs/03` Phase 8, `docs/06`): start from committed state,
       build the worker prompt from the step + current state, run the subject-05
       agent loop for one step. (Verified: `docs/08` Harness tests — next
@@ -96,7 +96,7 @@
       progress update. Commits go through the permission engine + `git_commit`
       tool (subject 04). (Verified: end-to-end on a sample repo — one commit per
       completed step; PROGRESS.md updated.)
-- [ ] **06.15** (agent) Implement the **anti-sunk-cost loop** (`docs/06`,
+- [x] **06.15** (agent) Implement the **anti-sunk-cost loop** (`docs/06`,
       `docs/03` Phase 8): `retry` keeps context + feeds back the reason;
       `discard` saves an attempt log and restores committed state with **fresh**
       context; after capped discard/retry failures, replan the step with the
@@ -113,7 +113,7 @@
       resume). Implement mode switching at safe boundaries (`docs/11`).
       (Verified: a small sample repo completes a task end to end via resume;
       adopt-existing path generates a valid brief+progress.)
-- [ ] **06.17** (agent) Implement worker-loop **trace events** (`docs/03` Phase
+- [x] **06.17** (agent) Implement worker-loop **trace events** (`docs/03` Phase
       8, `docs/11`) instrumented via `tracing` spans (chat turn, tool call,
       harness step, provider request; skip secret/large fields, `docs/13` §11).
       Snapshot-test the trace event shape (`docs/08` Snapshot). (Verified: trace
