@@ -33,11 +33,9 @@ jobs:
       - run: cargo check --workspace
 
   supply-chain:
-    name: supply-chain (advisories, licenses, bans)
+    name: supply-chain (advisories, licenses, bans, unused deps)
     runs-on: ubuntu-latest
-    # Non-blocking for now; promote to a required check before the v1 release
-    # (docs/14 §4, docs/09 release checklist).
-    continue-on-error: true
+    # Blocking before the v1 release (docs/14 §4, docs/09 release checklist).
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,6 +43,7 @@ jobs:
           toolchain: "1.82"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny,cargo-audit
+          tool: cargo-deny,cargo-audit,cargo-machete
       - run: cargo deny check
       - run: cargo audit
+      - run: cargo machete
