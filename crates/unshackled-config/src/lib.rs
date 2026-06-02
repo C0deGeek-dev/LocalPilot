@@ -1,21 +1,20 @@
-//! Configuration schema and loading contracts.
+//! Configuration schema, loading, and redaction for Unshackled.
+//!
+//! Owns the config schema, layered loading with deterministic precedence,
+//! environment-variable mapping, and the workspace's shared secret-detection /
+//! redaction helpers ([`redact`]). Credentials are never stored in config; only
+//! the name of the environment variable carrying each is configured, resolved at
+//! use into [`unshackled_core::Secret`].
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
+mod error;
+mod load;
+pub mod redact;
+mod schema;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfig {
-    pub default_provider: String,
-    pub default_model: Option<String>,
-    pub workspace_trust_required: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            default_provider: "local".to_string(),
-            default_model: None,
-            workspace_trust_required: true,
-        }
-    }
-}
+pub use error::ConfigError;
+pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
+pub use schema::{
+    Config, HarnessConfig, Mode, PermissionProfile, PermissionsConfig, ProviderConfig,
+    ProviderSelection, QuotaAutoResume, QuotaConfig, RuleSeverity,
+};

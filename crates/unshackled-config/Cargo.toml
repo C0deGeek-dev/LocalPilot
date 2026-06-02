@@ -9,5 +9,16 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-serde.workspace = true
+figment = { workspace = true }
+indexmap = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+unshackled-core = { path = "../unshackled-core" }
 
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+insta = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }

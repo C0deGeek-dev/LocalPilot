@@ -38,22 +38,22 @@
       whose `Debug`/`Display` prints `***`, raw value only via `expose()`
       (`docs/13` §8, `docs/07`). (Verified: test asserts `format!("{:?}")` and
       `Display` never contain the secret.)
-- [ ] **02.7** (agent) Implement the full config schema in `unshackled-config`
+- [x] **02.7** (agent) Implement the full config schema in `unshackled-config`
       reflecting `docs/06`/`docs/04`: `[provider]` + `[providers.*]`,
       `[harness]` (mode, attempts_per_step, auto_commit, test_command,
       `[harness.rules]`), `[permissions] profile`, `[quota]`. Use `figment`
       (already a dep) for layering. (Verified: a representative `.unshackled.toml`
       deserializes; unknown-but-namespaced provider options preserved.)
-- [ ] **02.8** (agent) Implement config precedence (`docs/02` §`unshackled-config`):
+- [x] **02.8** (agent) Implement config precedence (`docs/02` §`unshackled-config`):
       CLI flags > env vars > project `.unshackled.toml` > user config > built-in
       defaults. Implement user-config-directory resolution (cross-platform, no
       hardcoded paths, `docs/13` §7) and project-config resolution. (Verified:
       precedence is deterministic — see 02.10.)
-- [ ] **02.9** (agent) Implement env-var override mapping and redaction helpers
+- [x] **02.9** (agent) Implement env-var override mapping and redaction helpers
       in config; api keys come from env (`SECURITY.md`, `docs/04` config
       example), wrapped in the secret type. (Verified: env override test; key
       never appears in debug output.)
-- [ ] **02.10** (agent) Add the `docs/08` "Required MVP Tests / Config":
+- [x] **02.10** (agent) Add the `docs/08` "Required MVP Tests / Config":
       default config loads; project overrides user; env overrides project; CLI
       overrides env; secrets redacted in debug output. Use snapshot tests
       (`insta`) for precedence outcomes and proptest for precedence invariants
@@ -66,7 +66,7 @@
       `docs/13` §5), and redaction applied **before** persistence (`docs/07`,
       `docs/13` §8). (Verified: `docs/08` Store tests — write/read round trip;
       interrupted write leaves no corrupt session; redaction before persistence.)
-- [ ] **02.12** (agent) Implement a **reusable secret-detection** primitive
+- [x] **02.12** (agent) Implement a **reusable secret-detection** primitive
       (best-effort, `docs/07` Secret Redaction, `docs/11` Security
       "Implement secret detection") as a shared function/helper: detect API
       keys, bearer tokens, private keys, passwords, cloud credentials, and
@@ -110,3 +110,13 @@
   redacts `Debug`/`Display` and omits `Serialize`. Verified: 12 unit tests
   (serde round-trips per variant, distinct IDs, secret never leaks); clippy
   `-D warnings` + fmt clean.
+- 2026-06-02 · slice 2 · 02.7–02.10, 02.12 · `unshackled-config`: full schema
+  (`[provider]`/`[providers.*]` with preserved namespaced options, `[harness]`
+  +`[harness.rules]`, `[permissions]`, `[quota]`); figment-layered precedence
+  (CLI > env > project > user > defaults) with cross-platform user-dir resolution
+  and env→`Secret` credential resolution (keys never in config). Shared best-effort
+  secret detector/redactor (`redact` module: api keys, bearer, PEM keys, passwords,
+  cloud creds, connection strings) — the single detector store/tools/logging/memory
+  call. Verified: 12 tests — 5 MVP precedence/redaction (figment `Jail`),
+  namespaced-options preserved, invalid-config diagnostic names the key, a proptest
+  precedence invariant, per-class detector tests; clippy `-D warnings` + fmt clean.
