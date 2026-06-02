@@ -161,6 +161,21 @@ enum HarnessCommand {
         #[arg(long)]
         bypass: bool,
     },
+    /// Continue a run that paused on a provider quota/rate limit, if now safe.
+    WaitResume {
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+    },
 }
 
 #[tokio::main]
@@ -213,6 +228,23 @@ async fn main() -> anyhow::Result<()> {
                     let mut stdout = io::stdout().lock();
                     harness_cmd::resume(&cwd, &model, provider.as_deref(), profile, &mut stdout)
                         .await?;
+                }
+                HarnessCommand::WaitResume {
+                    model,
+                    provider,
+                    permission,
+                    bypass,
+                } => {
+                    let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                    let mut stdout = io::stdout().lock();
+                    harness_cmd::wait_resume(
+                        &cwd,
+                        &model,
+                        provider.as_deref(),
+                        profile,
+                        &mut stdout,
+                    )
+                    .await?;
                 }
             }
         }

@@ -6,13 +6,15 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use unshackled_config::{CliOverrides, Config, ConfigPaths};
 use unshackled_harness::{
     resume_one_step, run_intake, run_plan, Brief, Progress, RuleEngine, SessionConfig,
-    SessionRuntime,
+    SessionRuntime, QUOTA_PAUSE_KEY,
 };
 use unshackled_llm::{ModelProvider, ProviderRegistry};
+use unshackled_quota::{decide_resume, PausedRun, ResumeContext, ResumeDecision, ResumePolicy};
 use unshackled_recovery::{RecoveryBudget, RecoveryEngine};
 use unshackled_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
 use unshackled_store::Store;
@@ -325,6 +327,75 @@ pub async fn resume(
         }
     }
     Ok(())
+}
+
+/// Continue a run that paused on a provider quota/rate limit, if it is now safe.
+///
+/// # Errors
+/// Returns an error if the paused-run file is unreadable or resume fails.
+pub async fn wait_resume(
+    root: &Path,
+    model: &str,
+    provider_id: Option<&str>,
+    profile: Profile,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let store = Store::open(root);
+    let Some(bytes) = store.get_cache(QUOTA_PAUSE_KEY)? else {
+        writeln!(out, "no paused run")?;
+        return Ok(());
+    };
+    let paused: PausedRun =
+        serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("invalid paused-run file: {e}"))?;
+
+    let config = unshackled_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
+        .unwrap_or_else(|_| Config::default());
+    let policy = ResumePolicy::from(&config.quota);
+    let now = now_unix();
+    let ctx = ResumeContext {
+        window_elapsed: paused.resume_eligible_unix.is_none_or(|t| now >= t),
+        at_step_boundary: true,
+        workspace_clean: !workspace_dirty(root),
+        pending_destructive_approval: false,
+        user_cancelled: false,
+        provider_identity_changed: false,
+        waited: Duration::from_secs(now.saturating_sub(paused.paused_at_unix)),
+    };
+
+    match decide_resume(&policy, &ctx) {
+        ResumeDecision::Resume => {
+            writeln!(out, "resuming paused run at step {}", paused.step_number)?;
+            store.delete_cache(QUOTA_PAUSE_KEY)?;
+            resume(root, model, provider_id, profile, out).await?;
+        }
+        ResumeDecision::Wait => {
+            let eta = paused
+                .resume_eligible_unix
+                .map_or(0, |t| t.saturating_sub(now));
+            writeln!(out, "paused ({}); resume eligible in ~{eta}s", paused.reason)?;
+        }
+        ResumeDecision::AskUser => {
+            writeln!(
+                out,
+                "auto_resume is 'ask'; set quota.auto_resume = run|global to continue automatically"
+            )?;
+        }
+        ResumeDecision::BlockedBy(reason) => {
+            writeln!(out, "cannot resume: {reason}")?;
+        }
+    }
+    Ok(())
+}
+
+fn workspace_dirty(root: &Path) -> bool {
+    git_line(root, &["status", "--porcelain"]).is_some_and(|s| !s.trim().is_empty())
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn build_runtime(

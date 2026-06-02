@@ -34,6 +34,7 @@ unshackled-core = { path = "../unshackled-core" }
 unshackled-harness = { path = "../unshackled-harness" }
 unshackled-llm = { path = "../unshackled-llm" }
 unshackled-memory = { path = "../unshackled-memory" }
+unshackled-quota = { path = "../unshackled-quota" }
 unshackled-recovery = { path = "../unshackled-recovery" }
 unshackled-sandbox = { path = "../unshackled-sandbox" }
 unshackled-store = { path = "../unshackled-store" }

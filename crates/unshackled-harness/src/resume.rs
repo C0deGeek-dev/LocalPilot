@@ -8,10 +8,13 @@ use std::process::Command;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use unshackled_llm::QuotaInfo;
+use unshackled_quota::{estimate_window, PausedRun};
+
 use crate::error::HarnessError;
 use crate::progress::Progress;
 use crate::rules::RuleEngine;
-use crate::session::{RuntimeEvent, SessionRuntime};
+use crate::session::{RuntimeEvent, SessionRuntime, StopReason};
 use crate::worker::{evaluate_completion, CompletionDecision, CompletionInputs};
 
 const WORKER_PROMPT: &str = "\
@@ -19,12 +22,19 @@ You are completing exactly one step of an implementation plan. Make the change \
 using the available tools, then briefly confirm completion. Do not start any other \
 step.\n\nStep: ";
 
+/// The store key under which a paused run is persisted (an inspectable file
+/// under `.unshackled/cache/`).
+pub const QUOTA_PAUSE_KEY: &str = "quota-paused.json";
+
 /// The outcome of attempting one step via resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeOutcome {
     pub step_number: usize,
     pub committed: bool,
     pub blocked_reason: Option<String>,
+    /// Whether the run paused on a provider quota/rate limit; a `PausedRun` was
+    /// persisted and `harness wait-resume` can continue it.
+    pub paused: bool,
 }
 
 /// Run the next incomplete step: work it, test it, gate it through the rules,
@@ -54,7 +64,38 @@ pub async fn resume_one_step(
     let (events, _rx) = broadcast::channel::<RuntimeEvent>(256);
     let cancel = CancellationToken::new();
     let prompt = format!("{WORKER_PROMPT}{}. {}", step.number, step.description);
-    runtime.run_turn(&prompt, &events, &cancel).await;
+    let reason = runtime.run_turn(&prompt, &events, &cancel).await;
+
+    // A provider quota/rate error pauses the run cleanly at this step boundary:
+    // persist an inspectable PausedRun and stop without committing.
+    if reason == StopReason::ProviderError {
+        let window = estimate_window(
+            &QuotaInfo {
+                retryable: true,
+                ..QuotaInfo::default()
+            },
+            1,
+        );
+        let paused = PausedRun::new(step.number, "provider", &window);
+        if let Ok(json) = serde_json::to_string(&paused) {
+            let _ = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes());
+        }
+        return Ok(ResumeOutcome {
+            step_number: step.number,
+            committed: false,
+            blocked_reason: Some(format!("paused on provider limit: {}", window.reason)),
+            paused: true,
+        });
+    }
+    // Any other non-completing turn must not commit the step.
+    if reason != StopReason::Done {
+        return Ok(ResumeOutcome {
+            step_number: step.number,
+            committed: false,
+            blocked_reason: Some(format!("turn did not complete ({reason:?})")),
+            paused: false,
+        });
+    }
 
     // Run configured tests.
     let tests_passed = test_command.map(|cmd| run_test_command(root, cmd));
@@ -76,6 +117,7 @@ pub async fn resume_one_step(
             step_number: step.number,
             committed: false,
             blocked_reason: Some(reason),
+            paused: false,
         });
     }
 
@@ -96,6 +138,7 @@ pub async fn resume_one_step(
         step_number: step.number,
         committed: true,
         blocked_reason: None,
+        paused: false,
     })
 }
 
