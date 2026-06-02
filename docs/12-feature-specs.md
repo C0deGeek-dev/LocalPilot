@@ -218,6 +218,13 @@ Safety gates:
 - always record why the run paused and why it resumed
 - honor documented provider retry windows; do not frame this as bypassing limits
 
+CLI:
+
+- a run that hits a provider quota/rate limit pauses cleanly at the step
+  boundary and writes an inspectable paused-run record under the project store
+- `unshackled harness wait-resume --model <m>` re-evaluates every safety gate and
+  either continues the run, reports the remaining wait, or explains what blocks it
+
 UI:
 
 - footer shows quota state and reset timer

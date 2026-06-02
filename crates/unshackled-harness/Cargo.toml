@@ -20,6 +20,7 @@ tracing = { workspace = true }
 unshackled-config = { path = "../unshackled-config" }
 unshackled-core = { path = "../unshackled-core" }
 unshackled-llm = { path = "../unshackled-llm" }
+unshackled-quota = { path = "../unshackled-quota" }
 unshackled-recovery = { path = "../unshackled-recovery" }
 unshackled-sandbox = { path = "../unshackled-sandbox" }
 unshackled-store = { path = "../unshackled-store" }

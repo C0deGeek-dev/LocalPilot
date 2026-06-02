@@ -139,6 +139,12 @@ impl SessionRuntime {
         self.recovery.health()
     }
 
+    /// The store backing this session (for persisting paused-run state).
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
     fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .specs()

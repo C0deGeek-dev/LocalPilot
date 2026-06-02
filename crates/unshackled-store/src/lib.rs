@@ -183,6 +183,19 @@ impl Store {
         read_bytes_opt(&path)
     }
 
+    /// Remove a cached entry. A no-op if the key is absent.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidKey`] for an unsafe key, or an io error.
+    pub fn delete_cache(&self, key: &str) -> Result<(), StoreError> {
+        let path = self.root.join(CACHE_DIR).join(safe_key(key)?);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::io(&path, source)),
+        }
+    }
+
     // --- tool-output snapshots --------------------------------------------
 
     /// Persist a redacted tool-output snapshot keyed by `id`.
