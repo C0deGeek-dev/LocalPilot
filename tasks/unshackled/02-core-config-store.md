@@ -60,7 +60,7 @@
       (`docs/13` §10). Invalid config produces precise diagnostics naming the
       offending key/section. (Verified: all five tests pass; an invalid-config
       test asserts the diagnostic text.)
-- [ ] **02.11** (agent) Implement `unshackled-store` transcript persistence:
+- [x] **02.11** (agent) Implement `unshackled-store` transcript persistence:
       inspectable plain files (JSONL or similar), a session index, atomic writes
       (temp-then-rename so an interrupted write leaves no corrupt session,
       `docs/13` §5), and redaction applied **before** persistence (`docs/07`,
@@ -78,13 +78,13 @@
       §`unshackled-config`). (Verified: unit tests detect each secret class and
       pass clean text through; a redaction-applies-everywhere test references
       this detector from store + tool paths.)
-- [ ] **02.13** (agent) Implement the store **export** command/path (`docs/11`
+- [x] **02.13** (agent) Implement the store **export** command/path (`docs/11`
       Store "Implement export command", `docs/07` Telemetry
       "user-exported debug bundles after review"): export a session/transcript
       as an inspectable bundle, redacted before export (calls 02.12). (Verified:
       `assert_cmd` export test — bundle written; redaction applied; no secret in
       output.)
-- [ ] **02.14** (agent) Implement the broader `.unshackled/` runtime-state
+- [x] **02.14** (agent) Implement the broader `.unshackled/` runtime-state
       persistence the store owns (`docs/01` §`.unshackled/`, `docs/02`
       §`unshackled-store`, `docs/11` Store): file-backed cache, tool-output
       snapshots, and provider-metadata persistence — all under the ignored
@@ -93,7 +93,7 @@
       drafts, and quota wait records are persisted by their owning subjects
       07.15 using this store layer.) (Verified: round-trip + atomic-write +
       redaction tests for cache, tool-output snapshot, and provider metadata.)
-- [ ] **02.15** (agent) Confirm Phase 1 "Done when": config precedence
+- [x] **02.15** (agent) Confirm Phase 1 "Done when": config precedence
       deterministic, invalid config has precise diagnostics, `unshackled-core`
       has no provider dependencies (grep its `Cargo.toml`). Document each crate
       with a `//!` responsibility doc and `///` on public items with `# Errors`
@@ -120,3 +120,13 @@
   call. Verified: 12 tests — 5 MVP precedence/redaction (figment `Jail`),
   namespaced-options preserved, invalid-config diagnostic names the key, a proptest
   precedence invariant, per-class detector tests; clippy `-D warnings` + fmt clean.
+- 2026-06-02 · slice 3 · 02.11, 02.13–02.15 · `unshackled-store`: `.unshackled/`
+  persistence — JSONL transcripts + `index.json`, file-backed cache, tool-output
+  snapshots, provider-metadata; all atomic (temp-then-rename) and redacted before
+  persistence via the shared detector; path-safe keys reject traversal. Added
+  `export_session` bundle + an `unshackled export --session --out` CLI command.
+  Verified: 9 store tests (round-trip, stray-temp leaves canonical intact,
+  redaction-before-persist, cache/tool/provider round-trip+redact, unsafe-key
+  reject, export) + 2 `assert_cmd` CLI export tests. 02.15: core deps are
+  serde/serde_json/thiserror/uuid only (no provider dep); `cargo doc` clean;
+  workspace fmt/clippy(-D)/deny/audit all green.

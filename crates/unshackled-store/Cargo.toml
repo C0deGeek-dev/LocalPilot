@@ -9,4 +9,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+unshackled-config = { path = "../unshackled-config" }
+unshackled-core = { path = "../unshackled-core" }
 
+[dev-dependencies]
+tempfile = { workspace = true }
