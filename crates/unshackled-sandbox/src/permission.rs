@@ -81,6 +81,10 @@ pub struct PermissionRequest {
     pub effect: Effect,
     pub interactivity: Interactivity,
     pub trusted: bool,
+    /// A short, human-readable description of the concrete target (the path,
+    /// command, or URL the tool intends to act on), for an approval prompt.
+    /// Empty when the caller has nothing more specific than the effect.
+    pub detail: String,
 }
 
 /// The configurable permission engine.
@@ -197,9 +201,15 @@ fn untrusted_floor(decision: Decision, trusted: bool) -> Decision {
 }
 
 /// An approval source consulted when a decision is [`Decision::Ask`].
+///
+/// `approve` is asynchronous so an interactive front-end can suspend the turn
+/// while it prompts the user, without blocking the executor.
 pub trait Approver {
-    /// Return `true` to approve the requested effect.
-    fn approve(&self, request: &PermissionRequest) -> bool;
+    /// Resolve to `true` to approve the requested effect.
+    fn approve<'a>(
+        &'a self,
+        request: &'a PermissionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>>;
 }
 
 /// A test approver scripted with fixed responses, in order.
@@ -225,12 +235,17 @@ impl ScriptedApprover {
 }
 
 impl Approver for ScriptedApprover {
-    fn approve(&self, _request: &PermissionRequest) -> bool {
-        self.responses
+    fn approve<'a>(
+        &'a self,
+        _request: &'a PermissionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>> {
+        let decision = self
+            .responses
             .lock()
             .ok()
             .and_then(|mut r| r.pop_front())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        Box::pin(async move { decision })
     }
 }
 
@@ -244,6 +259,7 @@ mod tests {
             effect,
             interactivity,
             trusted,
+            detail: String::new(),
         }
     }
 
