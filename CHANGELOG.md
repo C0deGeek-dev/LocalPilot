@@ -7,4 +7,22 @@
 - Specified two operating modes: default agent mode and enforced harness mode.
 - Specified configurable permission profiles, including a bypass launch mode.
 - Moved MCP, memory, skills, recovery, and quota wait/resume into committed v1 scope.
+- Added a root `CLAUDE.md` and the repository's project skills.
+- Added the `unshackled-memory`, `unshackled-skills`, `unshackled-recovery`, and
+  `unshackled-quota` crates, bringing the workspace to its full crate roster.
+- Centralized the lint policy in `[workspace.lints]`: `unsafe_code` forbidden and
+  `unwrap`/`expect`/`todo`/`dbg!` denied on library runtime paths (relaxed in
+  tests). The `clippy::pedantic` group is intentionally deferred to a later,
+  deliberate adoption.
+- Updated pinned dependencies for security: `tokio` 1.42.0 → 1.44.2
+  (RUSTSEC-2025-0023) and `tracing-subscriber` 0.3.19 → 0.3.20
+  (RUSTSEC-2025-0055). No MSRV change.
+- Added `.editorconfig`, `.gitattributes` (LF normalization), `.cargo` CI-quartet
+  aliases, and an opt-in `.githooks/pre-commit` gate.
+- Expanded CI: tests run under `cargo nextest`, plus a non-blocking supply-chain
+  job (`cargo deny check`, `cargo audit`) to be promoted to blocking before
+  release.
+- Replaced the stub `doctor` command with real diagnostics: version, platform,
+  config search paths, provider credential presence (never values), tool
+  availability, and workspace trust state.
 

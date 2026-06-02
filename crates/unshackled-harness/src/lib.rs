@@ -1,4 +1,5 @@
 //! Rule-enforced agent workflow contracts.
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 

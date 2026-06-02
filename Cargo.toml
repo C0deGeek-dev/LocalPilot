@@ -10,6 +10,10 @@ members = [
     "crates/unshackled-store",
     "crates/unshackled-sandbox",
     "crates/unshackled-mcp",
+    "crates/unshackled-memory",
+    "crates/unshackled-skills",
+    "crates/unshackled-recovery",
+    "crates/unshackled-quota",
 ]
 resolver = "2"
 
@@ -28,12 +32,28 @@ clap = { version = "=4.5.23", features = ["derive", "env"] }
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
 futures = "=0.3.31"
 indexmap = { version = "=2.7.0", features = ["serde"] }
+insta = "=1.47.2"
 reqwest = { version = "=0.12.11", features = ["json", "stream", "rustls-tls"], default-features = false }
 serde = { version = "=1.0.217", features = ["derive"] }
 serde_json = "=1.0.134"
 serde_yaml = "=0.9.34"
 thiserror = "=2.0.9"
-tokio = { version = "=1.42.0", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util"] }
+tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util"] }
 tracing = "=0.1.41"
-tracing-subscriber = { version = "=0.3.19", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "=1.11.0", features = ["v4", "serde"] }
+
+# Centralized lint policy (docs/13 §9/§12). Members opt in with
+# `[lints] workspace = true`. The clippy::pedantic group is intentionally NOT
+# enabled here yet: the CI gate runs `-D warnings`, so a blanket pedantic-at-warn
+# would become a hard failure across the whole tree before the triggering code
+# exists. Adopt pedantic deliberately in its own later commit (see docs/13 §9).
+# `unwrap_used`/`expect_used` are relaxed inside tests via `clippy.toml`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+dbg_macro = "deny"

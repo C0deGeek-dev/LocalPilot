@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "unshackled"
 path = "src/main.rs"
@@ -14,6 +17,7 @@ anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
-unshackled-config = { path = "../unshackled-config" }
-unshackled-tui = { path = "../unshackled-tui" }
+
+[dev-dependencies]
+insta = { workspace = true }
 

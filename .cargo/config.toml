@@ -1,0 +1,8 @@
+# Local mirror of the CI quartet (.github/workflows/ci.yml). Cargo aliases cannot
+# chain subcommands into a single `cargo ci`, so each CI step is its own alias;
+# run the four together as the local gate (see CONTRIBUTING.md). docs/14 §4.
+[alias]
+ci-fmt = "fmt --check"
+ci-lint = "clippy --workspace --all-targets -- -D warnings"
+ci-test = "nextest run --workspace"
+ci-check = "check --workspace"

@@ -18,11 +18,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.82
+          toolchain: "1.82"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Prebuilt nextest binary; install-action does not build from source, so the
+      # pinned 1.82 toolchain does not constrain the runner version.
+      - uses: taiki-e/install-action@nextest
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Unit + integration tests via nextest. Fallback without nextest installed:
+      # `cargo test --workspace`. nextest does not run doctests, so run those too.
+      - run: cargo nextest run --workspace
+      - run: cargo test --doc --workspace
       - run: cargo check --workspace
 
+  supply-chain:
+    name: supply-chain (advisories, licenses, bans)
+    runs-on: ubuntu-latest
+    # Non-blocking for now; promote to a required check before the v1 release
+    # (docs/14 §4, docs/09 release checklist).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.82"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo deny check
+      - run: cargo audit

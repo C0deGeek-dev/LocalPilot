@@ -17,6 +17,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+The CI quartet above is also available as `cargo ci-fmt`, `cargo ci-lint`,
+`cargo ci-test`, and `cargo ci-check` (see `.cargo/config.toml`); run all four to
+mirror `.github/workflows/ci.yml`.
+
+### Optional pre-commit hook
+
+A `pre-commit` hook that runs `cargo fmt --check` and a fast `cargo clippy` lives
+in `.githooks/`. It is opt-in so contributors without a local toolchain are not
+blocked. Enable it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Pull Request Requirements
 
 Each PR should include:

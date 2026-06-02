@@ -1,6 +1,7 @@
 //! Core domain types for Unshackled.
 //!
 //! This crate must stay provider-neutral and UI-neutral.
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

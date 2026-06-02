@@ -1,6 +1,34 @@
-[licenses]
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+# Supply-chain policy (docs/13 §1-2, §8). Every workspace dependency is
+# exact-pinned (`=x.y.z`) in the root `[workspace.dependencies]` and referenced by
+# members with `dep = { workspace = true }`; there is no second pin in a member
+# crate. New dependencies must pass `cargo deny check` and `cargo audit` before
+# use. Run `cargo deny check` as part of the pre-release gate.
 
 [advisories]
+# RustSec advisory database. Empty ignore list: advisories are resolved by
+# upgrading the pinned version, not by ignoring them. Add an ID here only with a
+# one-line justification and a CHANGELOG note.
 ignore = []
 
+[licenses]
+# Permissive licenses only. A dependency under any other license is a blocker and
+# must be replaced or its inclusion justified in an ADR.
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+
+[bans]
+# Duplicate versions are tolerated (warn) while the tree is small; tighten to
+# "deny" before release once the graph stabilizes.
+multiple-versions = "warn"
+# Internal `{ path = ... }` members carry no version and read as wildcards;
+# `allow-wildcard-paths` does not exempt them while the crates remain publishable.
+# Keep this at "warn" until the publish posture is settled at release (subject 09),
+# then tighten to "deny" alongside `publish = false` on internal crates.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# Crates come from crates.io only. An unknown registry or git source is a blocker
+# until explicitly allow-listed here with justification.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

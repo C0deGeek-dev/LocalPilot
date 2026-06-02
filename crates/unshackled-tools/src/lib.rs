@@ -1,4 +1,5 @@
 //! Tool registry and execution contracts.
+#![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

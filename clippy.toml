@@ -1,0 +1,4 @@
+# Relax the workspace `unwrap_used` / `expect_used` denials inside test code only;
+# they remain denied on library runtime paths (docs/13 §8, §10).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

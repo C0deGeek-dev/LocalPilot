@@ -1,0 +1,9 @@
+# Normalize tracked text to LF in the repository so behaviour is identical on
+# Windows, Linux, and macOS (ADR-0007, docs/13 §7). Binary assets are left alone.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

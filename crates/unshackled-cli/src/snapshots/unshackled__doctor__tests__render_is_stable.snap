@@ -1,0 +1,23 @@
+---
+source: crates/unshackled-cli/src/doctor.rs
+expression: render(&fixture())
+---
+Unshackled 0.0.0-test
+
+platform:
+  os:   testos
+  arch: testarch
+
+config search paths:
+  user: /config/unshackled/config.toml (missing)
+  project: /work/.unshackled.toml (present)
+
+providers:
+  local: credential UNSHACKLED_LOCAL_API_KEY not set
+  openai: credential OPENAI_API_KEY set
+
+tools:
+  git (git): available
+  ripgrep (rg): not found
+
+workspace trust: unknown (evaluated when a session starts)

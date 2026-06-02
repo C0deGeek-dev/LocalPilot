@@ -1,4 +1,8 @@
+use std::io::{self, Write};
+
 use clap::{Parser, Subcommand};
+
+mod doctor;
 
 #[derive(Debug, Parser)]
 #[command(name = "unshackled")]
@@ -10,7 +14,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print version and build information.
+    /// Report version, platform, config, providers, tools, and trust state.
     Doctor,
     /// Initialize project-local harness state.
     Init,
@@ -23,11 +27,13 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command.unwrap_or(Command::Doctor) {
         Command::Doctor => {
-            println!("{} {}", unshackled_tui::APP_NAME, env!("CARGO_PKG_VERSION"));
-            println!("status: scaffold");
+            let mut stdout = io::stdout().lock();
+            doctor::run(&mut stdout)?;
+            stdout.flush()?;
         }
         Command::Init => {
-            println!("initialized scaffold");
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "initialized scaffold")?;
         }
     }
 

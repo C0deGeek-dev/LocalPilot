@@ -1,4 +1,5 @@
 //! Configuration schema and loading contracts.
+#![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
 
