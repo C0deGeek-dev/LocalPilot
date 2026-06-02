@@ -82,6 +82,32 @@ enum Command {
 enum HarnessCommand {
     /// Read-only summary of the harness state (works without a provider).
     Status,
+    /// Turn a rough idea into brief.md.
+    Intake {
+        /// The idea to develop into a brief.
+        #[arg(long)]
+        idea: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Turn brief.md into a PROGRESS.md plan.
+    Plan {
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Add a feature to the existing brief and plan (no provider needed).
+    Feature {
+        /// The feature description.
+        description: String,
+    },
 }
 
 #[tokio::main]
@@ -100,13 +126,32 @@ async fn main() -> anyhow::Result<()> {
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{summary}")?;
         }
-        Command::Harness { command } => match command {
-            HarnessCommand::Status => {
-                let mut stdout = io::stdout().lock();
-                harness_cmd::status(&std::env::current_dir()?, &mut stdout)?;
-                stdout.flush()?;
+        Command::Harness { command } => {
+            let cwd = std::env::current_dir()?;
+            match command {
+                HarnessCommand::Status => {
+                    let mut stdout = io::stdout().lock();
+                    harness_cmd::status(&cwd, &mut stdout)?;
+                    stdout.flush()?;
+                }
+                HarnessCommand::Intake {
+                    idea,
+                    model,
+                    provider,
+                } => {
+                    harness_cmd::intake(&cwd, &model, provider.as_deref(), &idea).await?;
+                    println!("wrote brief.md");
+                }
+                HarnessCommand::Plan { model, provider } => {
+                    harness_cmd::plan(&cwd, &model, provider.as_deref()).await?;
+                    println!("wrote PROGRESS.md");
+                }
+                HarnessCommand::Feature { description } => {
+                    harness_cmd::feature(&cwd, &description)?;
+                    println!("appended feature to brief.md and PROGRESS.md");
+                }
             }
-        },
+        }
         Command::Export { session, out } => {
             let session_id = SessionId::from_str(&session)
                 .map_err(|e| anyhow::anyhow!("invalid session id '{session}': {e}"))?;
