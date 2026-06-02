@@ -27,6 +27,7 @@ rust-version = "1.82"
 
 [workspace.dependencies]
 anyhow = "=1.0.95"
+assert_cmd = "=2.0.16"
 async-trait = "=0.1.83"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
