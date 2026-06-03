@@ -74,7 +74,52 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
         figment = figment.merge(Serialized::default("permissions.profile", profile));
     }
 
-    figment.extract().map_err(ConfigError::from)
+    let mut config: Config = figment.extract().map_err(ConfigError::from)?;
+    synthesize_env_providers(&mut config);
+    Ok(config)
+}
+
+/// When no providers are configured, derive a default one from the documented
+/// public provider env vars so a launcher that exports them (e.g.
+/// `ANTHROPIC_BASE_URL`) works with no config file. Anthropic is preferred when
+/// both are present. Existing configured providers are never overridden; the
+/// registry fills their missing base URLs from the same env vars.
+fn synthesize_env_providers(config: &mut Config) {
+    use crate::schema::ProviderConfig;
+
+    if !config.providers.is_empty() {
+        return;
+    }
+
+    // Register the env-derived provider under the existing default id so the
+    // configured `[provider].default` (or the built-in) keeps pointing at it;
+    // `provider.default` is never overridden. Anthropic is preferred.
+    let id = config.provider.default.clone();
+    let synthesized = if let Some(base) = env_non_empty("ANTHROPIC_BASE_URL") {
+        Some(ProviderConfig {
+            kind: "anthropic".to_string(),
+            base_url: Some(base),
+            model: env_non_empty("ANTHROPIC_MODEL"),
+            ..ProviderConfig::default()
+        })
+    } else {
+        env_non_empty("OPENAI_BASE_URL").map(|base| ProviderConfig {
+            kind: "openai-compatible".to_string(),
+            base_url: Some(base),
+            model: env_non_empty("OPENAI_MODEL"),
+            ..ProviderConfig::default()
+        })
+    };
+    if let Some(provider) = synthesized {
+        config.providers.insert(id, provider);
+    }
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// The per-user config file location, resolved cross-platform without hardcoded
@@ -110,16 +155,22 @@ impl Config {
     #[must_use]
     pub fn resolve_credential(&self, provider_id: &str) -> Option<Secret> {
         let provider = self.providers.get(provider_id)?;
-        let env_name = provider
+        // Try the explicitly named env var first, then the kind's conventional
+        // ones in order (Anthropic's gateway auth is carried by
+        // `ANTHROPIC_AUTH_TOKEN` when `ANTHROPIC_API_KEY` is empty).
+        let candidates = provider
             .api_key_env
             .as_deref()
-            .or_else(|| default_api_key_env(&provider.kind))?;
-        let value = std::env::var(env_name).ok()?;
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(Secret::new(value))
+            .into_iter()
+            .chain(default_api_key_envs(&provider.kind).iter().copied());
+        for env_name in candidates {
+            if let Ok(value) = std::env::var(env_name) {
+                if !value.trim().is_empty() {
+                    return Some(Secret::new(value));
+                }
+            }
         }
+        None
     }
 
     /// Resolve the default model for the selected provider (or the configured
@@ -136,13 +187,15 @@ impl Config {
     }
 }
 
-fn default_api_key_env(kind: &str) -> Option<&'static str> {
+fn default_api_key_envs(kind: &str) -> &'static [&'static str] {
     match kind {
-        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        // Anthropic gateways carry auth in `ANTHROPIC_AUTH_TOKEN` when
+        // `ANTHROPIC_API_KEY` is empty; try both.
+        "anthropic" => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
         "openai" | "openai-compatible" | "local" | "custom" | "custom-user-endpoint" => {
-            Some("OPENAI_API_KEY")
+            &["OPENAI_API_KEY"]
         }
-        _ => None,
+        _ => &[],
     }
 }
 

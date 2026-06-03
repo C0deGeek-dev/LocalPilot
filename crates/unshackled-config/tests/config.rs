@@ -16,6 +16,36 @@ fn write(jail: &Jail, name: &str, contents: &str) -> Result<std::path::PathBuf, 
 }
 
 #[test]
+fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() {
+    // A launcher that exports the documented Anthropic env vars (and no config
+    // file) should produce a usable default provider — the drop-in path.
+    Jail::expect_with(|jail| {
+        jail.set_env("ANTHROPIC_BASE_URL", "http://127.0.0.1:11435");
+        jail.set_env("ANTHROPIC_MODEL", "local-model");
+        // Gateway auth via AUTH_TOKEN; API_KEY is empty.
+        jail.set_env("ANTHROPIC_API_KEY", "");
+        jail.set_env("ANTHROPIC_AUTH_TOKEN", "secret");
+
+        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+
+        // The env provider is registered under the existing default id without
+        // changing `provider.default`.
+        let id = cfg.provider.default.clone();
+        let provider = cfg.providers.get(&id).expect("synthesized provider");
+        assert_eq!(provider.kind, "anthropic");
+        assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:11435"));
+        assert_eq!(cfg.resolve_model(None).as_deref(), Some("local-model"));
+        // Credential falls back to AUTH_TOKEN when API_KEY is empty.
+        assert_eq!(
+            cfg.resolve_credential(&id).map(|s| s.expose().to_string()),
+            Some("secret".to_string())
+        );
+        Ok(())
+    });
+}
+
+#[test]
 fn default_config_loads() {
     Jail::expect_with(|_jail| {
         let cfg = load(&ConfigPaths::default(), &CliOverrides::default())

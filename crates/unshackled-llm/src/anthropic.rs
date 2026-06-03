@@ -138,7 +138,12 @@ impl AnthropicProvider {
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/messages", self.base_url.trim_end_matches('/'))
+        // Normalize to the documented `/v1/messages` path so a base URL given in
+        // either the Anthropic-SDK convention (no `/v1`, e.g. from
+        // `ANTHROPIC_BASE_URL`) or with a trailing `/v1` both resolve correctly.
+        let base = self.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        format!("{base}/v1/messages")
     }
 }
 
@@ -609,6 +614,26 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, Err(ProviderError::StreamDecode(m)) if m == "overloaded")));
+    }
+
+    #[test]
+    fn endpoint_normalizes_to_v1_messages() {
+        // Both the SDK convention (no `/v1`) and an explicit `/v1` base resolve
+        // to the documented `/v1/messages` path.
+        for base in [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://api.anthropic.com/v1",
+            "http://127.0.0.1:11435",
+        ] {
+            let provider = AnthropicProvider::new("a", "A", base, None);
+            assert!(
+                provider.endpoint().ends_with("/v1/messages"),
+                "base {base} -> {}",
+                provider.endpoint()
+            );
+            assert!(!provider.endpoint().contains("/v1/v1/"));
+        }
     }
 
     #[test]
