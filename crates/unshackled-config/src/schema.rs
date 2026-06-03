@@ -110,6 +110,9 @@ pub struct HarnessConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_command: Option<String>,
     pub rules: IndexMap<String, RuleSeverity>,
+    /// Token budget the session keeps the conversation within (compaction trims
+    /// older turns to stay under it). Set it to the model's usable context.
+    pub context_token_limit: usize,
 }
 
 impl Default for HarnessConfig {
@@ -120,6 +123,7 @@ impl Default for HarnessConfig {
             auto_commit: true,
             test_command: None,
             rules: IndexMap::new(),
+            context_token_limit: 24_000,
         }
     }
 }

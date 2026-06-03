@@ -144,6 +144,7 @@ pub async fn run_chat(
             model: model.to_string(),
             interactivity: Interactivity::Interactive,
             trusted: profile == Profile::Bypass,
+            context_token_limit: config.harness.context_token_limit,
             ..SessionConfig::default()
         },
         Vec::new(),

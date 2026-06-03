@@ -64,6 +64,7 @@ pub async fn print_mode(
             model: model.to_string(),
             interactivity: Interactivity::NonInteractive,
             trusted: allow_writes,
+            context_token_limit: config.harness.context_token_limit,
             ..SessionConfig::default()
         },
         Vec::new(),

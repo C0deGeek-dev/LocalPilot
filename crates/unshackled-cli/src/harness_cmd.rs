@@ -311,6 +311,7 @@ pub async fn resume(
             profile,
             model,
             &mcp,
+            config.harness.context_token_limit,
         );
         crate::context_inject::seed(root, &mut runtime, &step_description);
         let outcome = resume_one_step(
@@ -416,6 +417,7 @@ fn build_runtime(
     profile: Profile,
     model: &str,
     mcp: &crate::mcp::McpTools,
+    context_token_limit: usize,
 ) -> SessionRuntime {
     SessionRuntime::new(
         provider,
@@ -429,6 +431,7 @@ fn build_runtime(
             model: model.to_string(),
             interactivity: Interactivity::NonInteractive,
             trusted: true,
+            context_token_limit,
             ..SessionConfig::default()
         },
         Vec::new(),
