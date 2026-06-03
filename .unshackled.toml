@@ -1,7 +1,0 @@
-[provider]
-default = "local"
-
-[providers.local]
-kind = "openai-compatible"
-base_url = "http://localhost:11435/v1"
-api_key_env = "UNSHACKLED_LOCAL_API_KEY"
