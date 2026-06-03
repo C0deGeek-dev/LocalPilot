@@ -34,6 +34,8 @@ use unshackled_tui::{
     Profile as UiProfile, TrustPrompt, UiEvent,
 };
 
+use crate::key_input::{insert_newline, is_cancel, is_newline, is_submit};
+
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
 struct ApprovalCall {
@@ -341,46 +343,6 @@ fn resolve_key(
         }
         None
     }
-}
-
-fn is_cancel(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
-}
-
-fn is_submit(key: KeyEvent, input: &str) -> bool {
-    // Only a plain Enter submits; a newline request (see `is_newline`) does not.
-    key.code == KeyCode::Enter
-        && key.modifiers.is_empty()
-        && !input.trim().is_empty()
-        && !input.trim_start().starts_with('/')
-        && !ends_with_continuation(input)
-}
-
-/// A keypress that inserts a newline rather than submitting. Two paths so it works
-/// regardless of terminal: a modified Enter / Ctrl+J reaches us when the terminal
-/// reports enhanced keys (the kitty protocol); a trailing backslash before a plain
-/// Enter always works, even on terminals that collapse Ctrl+J and Enter.
-fn is_newline(key: KeyEvent, input: &str) -> bool {
-    match key.code {
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
-        KeyCode::Enter if !key.modifiers.is_empty() => true,
-        KeyCode::Enter => ends_with_continuation(input),
-        _ => false,
-    }
-}
-
-/// Whether the line ends with a `\` continuation marker (ignoring trailing spaces).
-fn ends_with_continuation(input: &str) -> bool {
-    input.trim_end_matches(' ').ends_with('\\')
-}
-
-/// Insert a newline, consuming a trailing `\` continuation marker if one is present.
-fn insert_newline(input: &mut String) {
-    let kept = input.trim_end_matches(' ').len();
-    if input[..kept].ends_with('\\') {
-        input.truncate(kept - 1);
-    }
-    input.push('\n');
 }
 
 fn map_key(key: KeyEvent) -> Option<Key> {

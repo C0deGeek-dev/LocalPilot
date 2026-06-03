@@ -12,6 +12,8 @@ use unshackled_store::Store;
 mod context_inject;
 mod doctor;
 mod harness_cmd;
+#[cfg(feature = "tui")]
+mod key_input;
 #[cfg(feature = "learning")]
 mod learning_cmd;
 mod mcp;

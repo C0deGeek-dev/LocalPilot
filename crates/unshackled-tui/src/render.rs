@@ -191,7 +191,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             state.working_secs
         )
     } else {
-        "input  (Enter sends · trailing \\, Ctrl+J, or Shift+Enter make a newline)".to_string()
+        "input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \\ make a newline)".to_string()
     };
     // Keep the end of the input visible: when the text is taller than the box,
     // scroll so the most recently typed rows show.
