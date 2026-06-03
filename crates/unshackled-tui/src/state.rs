@@ -69,6 +69,13 @@ pub struct ThinkingPanel {
     pub text: String,
 }
 
+/// One task in the model's plan checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanItem {
+    pub title: String,
+    pub status: String,
+}
+
 /// A pending tool-approval request.
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
@@ -106,6 +113,8 @@ pub struct AppState {
     pub approval: Option<ApprovalRequest>,
     pub picker: Option<Picker>,
     pub search: Option<String>,
+    /// The model's current task checklist (empty until it calls `update_plan`).
+    pub plan: Vec<PlanItem>,
     pub should_quit: bool,
     /// Whether a turn is in flight (drives the working indicator).
     pub busy: bool,
@@ -131,6 +140,7 @@ impl AppState {
             approval: None,
             picker: None,
             search: None,
+            plan: Vec::new(),
             should_quit: false,
             busy: false,
             spinner: 0,
@@ -170,6 +180,7 @@ impl AppState {
                 speaker: "system".to_string(),
                 text,
             }),
+            UiEvent::PlanUpdated(plan) => self.plan = plan,
             UiEvent::ApprovalRequested(request) => self.approval = Some(request),
             UiEvent::ApprovalResolved => self.approval = None,
             UiEvent::ToggleThinking => self.thinking.visible = !self.thinking.visible,
@@ -195,6 +206,8 @@ pub enum UiEvent {
     },
     /// A system notice (warning or error) to show in the transcript.
     Notice(String),
+    /// The model's task checklist changed.
+    PlanUpdated(Vec<PlanItem>),
     ApprovalRequested(ApprovalRequest),
     ApprovalResolved,
     ToggleThinking,

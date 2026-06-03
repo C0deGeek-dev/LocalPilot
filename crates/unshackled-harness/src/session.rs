@@ -54,6 +54,8 @@ pub enum RuntimeEvent {
     Usage(TokenUsage),
     /// A provider warning.
     Warning(String),
+    /// The model updated the task plan shown to the user.
+    Plan(Vec<PlanStep>),
     /// The provider rate-limited or exhausted quota; carries a human-readable
     /// description of when a retry is eligible, for the UI.
     QuotaPaused { reset: String },
@@ -61,6 +63,13 @@ pub enum RuntimeEvent {
     Recovery { health: ModelHealth },
     /// The loop stopped.
     Stopped(StopReason),
+}
+
+/// One entry in the task plan the model maintains via the `update_plan` tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStep {
+    pub title: String,
+    pub status: String,
 }
 
 /// Tuning for a session.
@@ -360,6 +369,13 @@ impl SessionRuntime {
                 }
                 tool_calls_used += 1;
 
+                // Surface the task plan to the UI as the model updates it.
+                if name == "update_plan" {
+                    if let Some(steps) = parse_plan(&input) {
+                        let _ = events.send(RuntimeEvent::Plan(steps));
+                    }
+                }
+
                 let _ = events.send(RuntimeEvent::ToolStarted {
                     id: id.clone(),
                     name: name.clone(),
@@ -401,6 +417,25 @@ impl SessionRuntime {
             let _ = self.store.put_tool_output(&key, &redact(&json));
         }
     }
+}
+
+/// Parse the `update_plan` tool input into plan steps. Lenient: a malformed or
+/// partial entry is skipped rather than failing the turn.
+fn parse_plan(input: &serde_json::Value) -> Option<Vec<PlanStep>> {
+    let steps = input.get("steps")?.as_array()?;
+    let parsed: Vec<PlanStep> = steps
+        .iter()
+        .filter_map(|step| {
+            let title = step.get("title")?.as_str()?.to_string();
+            let status = step
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("pending")
+                .to_string();
+            Some(PlanStep { title, status })
+        })
+        .collect();
+    Some(parsed)
 }
 
 /// The outcome of failing to open a provider stream after retries.

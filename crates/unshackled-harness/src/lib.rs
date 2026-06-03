@@ -23,7 +23,7 @@ pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use resume::{resume_one_step, ResumeOutcome, QUOTA_PAUSE_KEY};
 pub use rules::{Rule, RuleContext, RuleEngine, Trigger, Verdict};
-pub use session::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
+pub use session::{PlanStep, RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 pub use worker::{
     evaluate_completion, select_next_step, AttemptResult, CompletionDecision, CompletionInputs,
     StepDecision, StepLoop, StepTrace,

@@ -52,6 +52,17 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, state: &AppState, narrow: bool) {
+    // A task-plan panel sits above the transcript when the model has set a plan.
+    let area = if state.plan.is_empty() {
+        area
+    } else {
+        let plan_height = (state.plan.len() as u16 + 2).min(area.height / 2);
+        let rows =
+            Layout::vertical([Constraint::Length(plan_height), Constraint::Min(3)]).split(area);
+        render_plan(frame, rows[0], state);
+        rows[1]
+    };
+
     if state.thinking.visible && !narrow {
         let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(30)]).split(area);
         render_transcript(frame, cols[0], state);
@@ -59,6 +70,30 @@ fn render_body(frame: &mut Frame, area: Rect, state: &AppState, narrow: bool) {
     } else {
         render_transcript(frame, area, state);
     }
+}
+
+fn render_plan(frame: &mut Frame, area: Rect, state: &AppState) {
+    let lines: Vec<Line> = state
+        .plan
+        .iter()
+        .map(|item| {
+            let (marker, style) = match item.status.as_str() {
+                "done" => ("[x]", Style::default().fg(Color::Green)),
+                "in_progress" => ("[~]", Style::default().fg(Color::Yellow)),
+                _ => ("[ ]", Style::default()),
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker} "), style),
+                Span::raw(item.title.clone()),
+            ])
+        })
+        .collect();
+    let done = state.plan.iter().filter(|i| i.status == "done").count();
+    let title = format!("plan ({done}/{})", state.plan.len());
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(title)),
+        area,
+    );
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, state: &AppState) {

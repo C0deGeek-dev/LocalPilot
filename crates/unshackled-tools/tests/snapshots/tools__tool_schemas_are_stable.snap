@@ -1,5 +1,6 @@
 ---
 source: crates/unshackled-tools/tests/tools.rs
+assertion_line: 80
 expression: "serde_json::to_string_pretty(&schemas).unwrap()"
 ---
 [
@@ -225,6 +226,45 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "message"
       ],
       "title": "GitCommitInput",
+      "type": "object"
+    }
+  ],
+  [
+    "update_plan",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "PlanStepInput": {
+          "properties": {
+            "status": {
+              "description": "One of: `pending`, `in_progress`, `done`.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short imperative description of the task.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "steps": {
+          "description": "The ordered task list shown to the user.",
+          "items": {
+            "$ref": "#/definitions/PlanStepInput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "title": "UpdatePlanInput",
       "type": "object"
     }
   ]

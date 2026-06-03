@@ -1,4 +1,4 @@
-//! The eight builtin tools.
+//! The builtin tools.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -554,5 +554,53 @@ async fn run_git(ctx: &ToolContext<'_>, args: &[&str]) -> Result<String, ToolErr
         Ok(stdout.into_owned())
     } else {
         Err(ToolError::Failed(format!("git failed: {stderr}")))
+    }
+}
+
+// --- update_plan ------------------------------------------------------------
+
+// These mirror the `update_plan` schema and validate the call shape on
+// dispatch; the session reads the plan from the raw input value, so the fields
+// are not otherwise accessed.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct UpdatePlanInput {
+    /// The ordered task list shown to the user.
+    steps: Vec<PlanStepInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct PlanStepInput {
+    /// Short imperative description of the task.
+    title: String,
+    /// One of: `pending`, `in_progress`, `done`.
+    status: String,
+}
+
+/// Records the task checklist shown to the user. It performs no side effect; the
+/// session surfaces the plan to the UI as it changes.
+pub struct UpdatePlan;
+
+#[async_trait]
+impl Tool for UpdatePlan {
+    fn name(&self) -> &'static str {
+        "update_plan"
+    }
+    fn description(&self) -> &'static str {
+        "Record or update the task checklist shown to the user. Call it when you \
+         start work, whenever a step changes status, and when finishing. Each step \
+         has a title and a status of pending, in_progress, or done."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<UpdatePlanInput>()
+    }
+    fn effects(&self, input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        // Validate the shape; the tool has no side effect of its own.
+        let _: UpdatePlanInput = parse_input(input)?;
+        Ok(Vec::new())
+    }
+    async fn invoke(&self, _input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("plan updated"))
     }
 }

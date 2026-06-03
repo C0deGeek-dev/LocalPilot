@@ -29,7 +29,7 @@ use unshackled_sandbox::{
 };
 use unshackled_store::Store;
 use unshackled_tui::{
-    handle_input, render, AppInput, AppState, ApprovalRequest, Header, Key, Mode,
+    handle_input, render, AppInput, AppState, ApprovalRequest, Header, Key, Mode, PlanItem,
     Profile as UiProfile, UiEvent,
 };
 
@@ -352,6 +352,15 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
         // Surface provider warnings/errors in the transcript so a failed turn is
         // visible instead of silently producing no response.
         RuntimeEvent::Warning(message) => Some(UiEvent::Notice(message)),
+        RuntimeEvent::Plan(steps) => Some(UiEvent::PlanUpdated(
+            steps
+                .into_iter()
+                .map(|step| PlanItem {
+                    title: step.title,
+                    status: step.status,
+                })
+                .collect(),
+        )),
         _ => None,
     }
 }

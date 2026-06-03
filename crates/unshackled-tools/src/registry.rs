@@ -6,7 +6,8 @@ use unshackled_core::{ToolCall, ToolResult};
 use unshackled_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest};
 
 use crate::builtins::{
-    EditFile, GitCommit, GitStatus, ListFiles, ReadFile, RunShell, SearchText, WriteFile,
+    EditFile, GitCommit, GitStatus, ListFiles, ReadFile, RunShell, SearchText, UpdatePlan,
+    WriteFile,
 };
 use crate::tool::{Tool, ToolContext};
 
@@ -36,6 +37,7 @@ impl ToolRegistry {
         registry.register(Box::new(RunShell));
         registry.register(Box::new(GitStatus));
         registry.register(Box::new(GitCommit));
+        registry.register(Box::new(UpdatePlan));
         registry
     }
 

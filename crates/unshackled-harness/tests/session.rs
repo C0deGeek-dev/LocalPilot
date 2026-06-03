@@ -91,6 +91,37 @@ async fn loop_reads_a_file_then_produces_a_final_answer() {
     assert_eq!(transcript.len(), 4);
 }
 
+#[tokio::test]
+async fn update_plan_tool_emits_a_plan_event() {
+    let provider = FakeProvider::new()
+        .tool_call(
+            "p1",
+            "update_plan",
+            json!({ "steps": [
+                { "title": "investigate", "status": "done" },
+                { "title": "fix", "status": "in_progress" }
+            ] }),
+        )
+        .text("on it");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let plans: Vec<_> = drain(&mut rx)
+        .into_iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::Plan(steps) => Some(steps),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].len(), 2);
+    assert_eq!(plans[0][0].status, "done");
+    assert_eq!(plans[0][1].title, "fix");
+}
+
 #[tokio::test(start_paused = true)]
 async fn retries_a_transient_connection_failure_then_succeeds() {
     // Two connection failures, then a normal response: within the retry budget.
