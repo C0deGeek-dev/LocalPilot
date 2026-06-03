@@ -145,19 +145,41 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &AppState) {
             .as_deref()
             .is_some_and(|q| !q.is_empty() && entry.text.contains(q));
         let prefix = if matched { ">" } else { " " };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{prefix}{}: ", entry.speaker),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(entry.text.clone()),
-        ]));
+        // Split on newlines so each line gets the speaker prefix (first line) or
+        // a continuation indent (subsequent lines).  This makes `\n` in model
+        // output actually render as line breaks instead of being swallowed.
+        for (i, text_line) in entry.text.trim_start_matches('\n').split('\n').enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{prefix}{}: ", entry.speaker),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text_line.to_string()),
+                ]));
+            } else {
+                // Continuation lines get a two-space indent to visually align
+                // with the text after "speaker: ".
+                lines.push(Line::from(Span::raw(format!("  {text_line}"))));
+            }
+        }
     }
     if !state.streaming.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("assistant: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.streaming.clone()),
-        ]));
+        for (i, text_line) in state
+            .streaming
+            .trim_start_matches('\n')
+            .split('\n')
+            .enumerate()
+        {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("assistant: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(text_line.to_string()),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(format!("  {text_line}"))));
+            }
+        }
     }
     let title = match &state.search {
         Some(q) if !q.is_empty() => format!("transcript [search: {q}]"),

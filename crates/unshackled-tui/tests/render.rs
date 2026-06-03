@@ -151,6 +151,37 @@ fn a_slash_command_triggers_the_matching_action() {
 }
 
 #[test]
+fn transcript_splits_multiline_assistant_responses() {
+    let mut state = base();
+    // Replace the single-line assistant message with a multiline one.
+    state.transcript.clear();
+    state.transcript.push(TranscriptLine {
+        speaker: "you".to_string(),
+        text: "hello".to_string(),
+    });
+    state.transcript.push(TranscriptLine {
+        speaker: "assistant".to_string(),
+        text: "line one\nline two\nline three".to_string(),
+    });
+    let rendered = render_string(&state, 90, 18);
+    // Each line should appear on its own row.
+    assert!(rendered.contains("you: hello"));
+    assert!(rendered.contains("assistant: line one"));
+    assert!(rendered.contains("  line two"));
+    assert!(rendered.contains("  line three"));
+}
+
+#[test]
+fn streaming_text_splits_on_newlines() {
+    let mut state = base();
+    state.streaming = "first\nsecond\nthird".to_string();
+    let rendered = render_string(&state, 90, 18);
+    assert!(rendered.contains("assistant: first"));
+    assert!(rendered.contains("  second"));
+    assert!(rendered.contains("  third"));
+}
+
+#[test]
 fn picker_selection_moves_and_search_highlights() {
     let mut state = base();
     state.picker = Some(Picker {
