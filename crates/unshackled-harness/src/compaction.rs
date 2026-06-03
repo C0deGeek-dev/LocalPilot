@@ -89,18 +89,30 @@ pub fn compact_with_summary(messages: Vec<Message>, token_limit: usize) -> Compa
         dropped.push(exchanges.remove(0));
     }
 
-    let mut out: Vec<Message> = system
-        .into_iter()
-        .chain(summary_message(&dropped))
-        .chain(exchanges.into_iter().flatten())
-        .collect();
+    let mut summary = summary_message(&dropped);
 
-    while estimate_tokens(&out) > token_limit && out.len() > 1 {
-        let removable = out
-            .iter()
-            .position(|message| message.role != Role::System)
-            .unwrap_or(1);
-        out.remove(removable);
+    // If a single very large recent window still exceeds the limit, keep
+    // removing whole oldest exchanges before considering the summary. Removing
+    // individual messages here can strand a tool_result without its tool_use.
+    while exchanges.len() > 1
+        && estimate_tokens(&build_messages(&system, summary.as_ref(), &exchanges)) > token_limit
+    {
+        dropped.push(exchanges.remove(0));
+        summary = summary_message(&dropped);
+    }
+
+    let mut out = build_messages(&system, summary.as_ref(), &exchanges);
+    if estimate_tokens(&out) > token_limit && !dropped.is_empty() {
+        for (max_exchanges, max_user_chars) in [(4, 60), (2, 60), (1, 60), (1, 30)] {
+            summary = summary_message_with(&dropped, max_exchanges, max_user_chars);
+            out = build_messages(&system, summary.as_ref(), &exchanges);
+            if estimate_tokens(&out) <= token_limit {
+                break;
+            }
+        }
+        if estimate_tokens(&out) > token_limit {
+            out = build_messages(&system, None, &exchanges);
+        }
     }
 
     CompactionResult {
@@ -109,25 +121,46 @@ pub fn compact_with_summary(messages: Vec<Message>, token_limit: usize) -> Compa
     }
 }
 
+fn build_messages(
+    system: &[Message],
+    summary: Option<&Message>,
+    exchanges: &[Vec<Message>],
+) -> Vec<Message> {
+    system
+        .iter()
+        .cloned()
+        .chain(summary.cloned())
+        .chain(exchanges.iter().flatten().cloned())
+        .collect()
+}
+
 fn summary_message(dropped: &[Vec<Message>]) -> Option<Message> {
+    summary_message_with(dropped, 4, 120)
+}
+
+fn summary_message_with(
+    dropped: &[Vec<Message>],
+    max_exchanges: usize,
+    max_user_chars: usize,
+) -> Option<Message> {
     if dropped.is_empty() {
         return None;
     }
     let mut lines = vec!["Conversation summary for trimmed history:".to_string()];
-    for exchange in dropped.iter().rev().take(4).rev() {
-        if let Some(line) = summarize_exchange(exchange) {
+    for exchange in dropped.iter().rev().take(max_exchanges).rev() {
+        if let Some(line) = summarize_exchange(exchange, max_user_chars) {
             lines.push(line);
         }
     }
     Some(Message::text(Role::System, lines.join("\n")))
 }
 
-fn summarize_exchange(exchange: &[Message]) -> Option<String> {
+fn summarize_exchange(exchange: &[Message], max_user_chars: usize) -> Option<String> {
     let user = exchange
         .iter()
         .find(|message| message.role == Role::User)
         .and_then(first_text)
-        .map(|text| truncate(text, 120));
+        .map(|text| truncate(text, max_user_chars));
     let tools: Vec<String> = exchange
         .iter()
         .flat_map(|message| &message.content)
@@ -231,6 +264,34 @@ mod tests {
         assert_eq!(compacted.first().map(|m| m.role), Some(Role::System));
         // It actually dropped something.
         assert!(call_ids.len() < 6);
+    }
+
+    #[test]
+    fn final_trimming_does_not_orphan_tool_results() {
+        let mut messages = vec![Message::text(Role::System, "sys")];
+        for i in 0..4 {
+            messages.push(user(&format!("turn {i} {}", "x".repeat(200))));
+            messages.extend(tool_exchange(&format!("call_{i}")));
+        }
+        let compacted = compact(messages, 25);
+
+        let call_ids: Vec<_> = compacted
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse(c) => Some(c.id.clone()),
+                _ => None,
+            })
+            .collect();
+        let result_ids: Vec<_> = compacted
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult(r) => Some(r.id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_ids, result_ids);
     }
 
     #[test]
