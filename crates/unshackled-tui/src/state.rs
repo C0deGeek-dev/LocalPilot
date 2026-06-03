@@ -244,6 +244,15 @@ impl AppState {
                 speaker: "system".to_string(),
                 text,
             }),
+            UiEvent::RecoveryNotice(text) => {
+                // Drop the in-progress (bad) streamed text so the retry starts on a
+                // fresh line instead of appending to the discarded output.
+                self.streaming.clear();
+                self.transcript.push(TranscriptLine {
+                    speaker: "system".to_string(),
+                    text,
+                });
+            }
             UiEvent::PlanUpdated(plan) => self.plan = plan,
             UiEvent::ApprovalRequested(request) => self.approval = Some(request),
             UiEvent::ApprovalResolved => self.approval = None,
@@ -274,6 +283,9 @@ pub enum UiEvent {
     },
     /// A system notice (warning or error) to show in the transcript.
     Notice(String),
+    /// A recovery notice: posts a system line and discards the in-progress
+    /// streamed text so a retry does not append to the bad output.
+    RecoveryNotice(String),
     /// The model's task checklist changed.
     PlanUpdated(Vec<PlanItem>),
     ApprovalRequested(ApprovalRequest),
@@ -315,6 +327,16 @@ mod tests {
         // The set is cleared once consumed, and the input is taken.
         assert!(state.pastes.is_empty());
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn a_recovery_notice_discards_the_in_progress_stream() {
+        let mut state = state();
+        state.streaming = "////////".to_string();
+        state.apply(UiEvent::RecoveryNotice("recovering…".to_string()));
+        // The bad partial output is dropped so the retry starts on a fresh line.
+        assert!(state.streaming.is_empty());
+        assert!(matches!(state.transcript.last(), Some(line) if line.speaker == "system"));
     }
 
     #[test]

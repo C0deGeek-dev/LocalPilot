@@ -419,10 +419,10 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
         RuntimeEvent::Warning(message) => Some(UiEvent::Notice(message)),
         // Surface the recovery outcome after a bad turn.
         RuntimeEvent::Recovery { health } => match health {
-            ModelHealth::Recovering => Some(UiEvent::Notice(
+            ModelHealth::Recovering => Some(UiEvent::RecoveryNotice(
                 "recovering from a bad response…".to_string(),
             )),
-            ModelHealth::Degraded => Some(UiEvent::Notice(
+            ModelHealth::Degraded => Some(UiEvent::RecoveryNotice(
                 "model marked degraded after repeated bad output — try a stronger \
                  model/quant or check the endpoint"
                     .to_string(),
