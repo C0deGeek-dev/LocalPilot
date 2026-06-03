@@ -63,6 +63,16 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// The quota/rate-limit metadata carried by a [`RateLimit`](Self::RateLimit)
+    /// or [`Quota`](Self::Quota) error, used to schedule a precise pause window.
+    #[must_use]
+    pub fn quota(&self) -> Option<&QuotaInfo> {
+        match self {
+            ProviderError::RateLimit { quota } | ProviderError::Quota { quota } => Some(quota),
+            _ => None,
+        }
+    }
+
     /// Whether retrying the request (after any indicated wait) may succeed.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
@@ -160,6 +170,26 @@ mod tests {
             ProviderError::from_http(429, None, None, quota),
             ProviderError::RateLimit { .. }
         ));
+    }
+
+    #[test]
+    fn quota_metadata_is_exposed_only_for_limit_errors() {
+        let quota = QuotaInfo {
+            retryable: true,
+            retry_after: Some(Duration::from_secs(30)),
+            ..QuotaInfo::default()
+        };
+        assert_eq!(
+            ProviderError::RateLimit {
+                quota: quota.clone()
+            }
+            .quota()
+            .and_then(|q| q.retry_after),
+            Some(Duration::from_secs(30))
+        );
+        assert!(ProviderError::Quota { quota }.quota().is_some());
+        assert!(ProviderError::Auth { request_id: None }.quota().is_none());
+        assert!(ProviderError::Network("down".to_string()).quota().is_none());
     }
 
     #[test]

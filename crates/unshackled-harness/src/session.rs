@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use unshackled_config::redact::redact;
 use unshackled_core::{ContentBlock, Message, Role, SessionId, TokenUsage, ToolCall, ToolUseId};
-use unshackled_llm::{ModelEvent, ModelProvider, ModelRequest, ToolSpec};
+use unshackled_llm::{ModelEvent, ModelProvider, ModelRequest, QuotaInfo, ToolSpec};
 use unshackled_recovery::{detect, ModelHealth, RecoveryEngine};
 use unshackled_sandbox::{Approver, Interactivity, PermissionEngine};
 use unshackled_store::Store;
@@ -96,6 +96,9 @@ pub struct SessionRuntime {
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
+    /// Quota metadata from the most recent provider rate-limit/quota error in a
+    /// turn, used to schedule a precise pause. Reset at the start of each turn.
+    last_quota: Option<QuotaInfo>,
 }
 
 impl SessionRuntime {
@@ -124,6 +127,7 @@ impl SessionRuntime {
             config,
             session_id: SessionId::new(),
             messages: seed,
+            last_quota: None,
         }
     }
 
@@ -143,6 +147,13 @@ impl SessionRuntime {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Quota metadata from the last provider rate-limit/quota error this turn,
+    /// if any. Consulted after a [`StopReason::ProviderError`] to size the pause.
+    #[must_use]
+    pub fn last_quota(&self) -> Option<&QuotaInfo> {
+        self.last_quota.as_ref()
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
@@ -176,6 +187,7 @@ impl SessionRuntime {
         cancel: &CancellationToken,
     ) -> StopReason {
         self.append(Message::text(Role::User, user_input));
+        self.last_quota = None;
         let mut tool_calls_used = 0u32;
 
         for _ in 0..self.config.max_turns {
@@ -192,6 +204,7 @@ impl SessionRuntime {
             let mut stream = match self.provider.stream(request).await {
                 Ok(stream) => stream,
                 Err(err) => {
+                    self.last_quota = err.quota().cloned();
                     let _ = events.send(RuntimeEvent::Warning(err.to_string()));
                     return self.stop(events, StopReason::ProviderError);
                 }

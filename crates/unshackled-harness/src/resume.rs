@@ -69,13 +69,14 @@ pub async fn resume_one_step(
     // A provider quota/rate error pauses the run cleanly at this step boundary:
     // persist an inspectable PausedRun and stop without committing.
     if reason == StopReason::ProviderError {
-        let window = estimate_window(
-            &QuotaInfo {
-                retryable: true,
-                ..QuotaInfo::default()
-            },
-            1,
-        );
+        // Prefer the provider's own quota metadata (retry-after, limit kind) so
+        // the pause window is precise; fall back to a conservative retryable
+        // default when the error carried none.
+        let quota = runtime.last_quota().cloned().unwrap_or(QuotaInfo {
+            retryable: true,
+            ..QuotaInfo::default()
+        });
+        let window = estimate_window(&quota, 1);
         let paused = PausedRun::new(step.number, "provider", &window);
         if let Ok(json) = serde_json::to_string(&paused) {
             let _ = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes());
