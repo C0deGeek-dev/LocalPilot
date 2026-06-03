@@ -395,14 +395,14 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
     execute!(stdout, terminal::EnterAlternateScreen, EnableBracketedPaste)?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
-    // protocol), so modified keys like Shift+Enter reach the app on terminals
-    // that support it. Best-effort: ignored where unsupported.
-    if terminal::supports_keyboard_enhancement().unwrap_or(false) {
-        let _ = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
+    // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
+    // Pushed unconditionally (as Codex does): a terminal that doesn't support it
+    // ignores the sequence, and the support query can false-negative. The flags
+    // are popped on exit.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
