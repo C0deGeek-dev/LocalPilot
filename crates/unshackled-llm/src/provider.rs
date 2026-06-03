@@ -44,6 +44,8 @@ pub enum ToolCallShape {
     None,
     /// OpenAI-style `tool_calls` with JSON arguments.
     OpenAiToolCalls,
+    /// Anthropic-style `tool_use` content blocks with a streamed JSON input.
+    AnthropicToolUse,
 }
 
 /// The reasoning/thinking shape a provider exposes.

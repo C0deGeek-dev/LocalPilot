@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use unshackled_config::{Config, ProviderConfig};
 
+use crate::anthropic::AnthropicProvider;
 use crate::error::ProviderError;
 use crate::openai::OpenAiProvider;
 use crate::provider::{ModelProvider, SourceType};
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 /// A set of constructed providers keyed by id, with a configured default.
 pub struct ProviderRegistry {
@@ -29,7 +31,7 @@ impl ProviderRegistry {
         for (id, entry) in &config.providers {
             let credential = config.resolve_credential(id);
             let provider = build_provider(id, entry, credential)?;
-            providers.insert(id.clone(), Arc::new(provider));
+            providers.insert(id.clone(), provider);
         }
         Ok(Self {
             providers,
@@ -66,7 +68,18 @@ fn build_provider(
     id: &str,
     entry: &ProviderConfig,
     credential: Option<unshackled_core::Secret>,
-) -> Result<OpenAiProvider, ProviderError> {
+) -> Result<Arc<dyn ModelProvider>, ProviderError> {
+    // Anthropic speaks a different wire protocol, so it has its own adapter.
+    if entry.kind == "anthropic" {
+        let base_url = entry
+            .base_url
+            .clone()
+            .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string());
+        return Ok(Arc::new(AnthropicProvider::new(
+            id, id, base_url, credential,
+        )));
+    }
+
     let (source_type, base_url) = match entry.kind.as_str() {
         "openai" => (
             SourceType::OfficialApi,
@@ -85,13 +98,13 @@ fn build_provider(
             )))
         }
     };
-    Ok(OpenAiProvider::new(
+    Ok(Arc::new(OpenAiProvider::new(
         id,
         id,
         source_type,
         base_url,
         credential,
-    ))
+    )))
 }
 
 fn require_base_url(id: &str, entry: &ProviderConfig) -> Result<String, ProviderError> {
@@ -151,6 +164,23 @@ mod tests {
         assert_eq!(
             registry.get("custom").unwrap().declaration().source_type,
             SourceType::CustomUserEndpoint
+        );
+    }
+
+    #[test]
+    fn resolves_the_anthropic_provider() {
+        let mut config = Config::default();
+        config
+            .providers
+            .insert("anthropic".to_string(), entry("anthropic", None));
+        config.provider.default = "anthropic".to_string();
+
+        let registry = ProviderRegistry::from_config(&config).unwrap();
+        let declaration = registry.get("anthropic").unwrap().declaration();
+        assert_eq!(declaration.source_type, SourceType::OfficialApi);
+        assert_eq!(
+            declaration.tool_call_shape,
+            crate::provider::ToolCallShape::AnthropicToolUse
         );
     }
 

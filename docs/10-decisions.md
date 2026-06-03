@@ -2,6 +2,24 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0008: Anthropic Messages API as the Second Provider
+
+Status: accepted
+
+A second, protocol-distinct provider adapter is added alongside the
+OpenAI-compatible one: the Anthropic Messages API. It is implemented clean-room
+from the public API reference, talks only to the documented official endpoint,
+and exercises the provider trait's generality (top-level `system`,
+`tool_use`/`tool_result` content blocks, a required `max_tokens`, and a typed
+SSE stream).
+
+Reason:
+
+- satisfies the Stable requirement of at least two provider implementations
+  ([`docs/09`](09-release-plan.md))
+- proves the provider abstraction is not OpenAI-shaped by construction
+- adds a major hosted model family without coupling the core to it (ADR-0002)
+
 ## ADR-0007: Windows, Linux, and macOS Are All Tier-1
 
 Status: accepted

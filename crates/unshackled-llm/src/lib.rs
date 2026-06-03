@@ -8,6 +8,7 @@
 //! endpoints.
 #![forbid(unsafe_code)]
 
+mod anthropic;
 mod error;
 mod event;
 mod fake;
@@ -17,6 +18,7 @@ mod registry;
 mod request;
 mod retry;
 
+pub use anthropic::AnthropicProvider;
 pub use error::{ProviderError, QuotaInfo};
 pub use event::{ModelEvent, ModelEventStream};
 pub use fake::FakeProvider;

@@ -51,6 +51,29 @@ Credentials are read from the named environment variable at use and wrapped so
 they never appear in logs, transcripts, or error output. The config file only
 records the *name* of the variable, never the secret.
 
+## The official Anthropic API
+
+Uses the documented Anthropic Messages API (a distinct wire protocol from
+OpenAI: a top-level `system`, `tool_use`/`tool_result` content blocks, and a
+required `max_tokens`).
+
+```toml
+[providers.anthropic]
+kind = "anthropic"
+model = "claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+# max_tokens defaults to 4096; override per provider if you like:
+# max_tokens = 8192
+```
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...     # Linux / macOS
+$env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
+```
+
+The credential is sent as the `x-api-key` header with the documented
+`anthropic-version`; it is wrapped so it never appears in logs or transcripts.
+
 ## Verifying
 
 ```sh
