@@ -116,14 +116,14 @@
    one adapter, and no private endpoints.
 2. Fix before closing: None. The live-provider credential action is explicitly
    deferred in `manual-actions.md`; the local aggregate Windows GNU runner crash
-   is documented as environmental rather than product behavior.
+   was mitigated by removing a dev-only feature-unification edge (D012).
 3. Record: D009, D010, D011, and D012 cover the provider choice, MSRV transitive
    pins, license/advisory posture, and local runner issue. `lessons.md` captures
    the dependency and runner learnings.
 4. Risk: `03.14` remains deferred until release validation: the opt-in live
-   OpenAI run still needs real credentials before alpha. CI/MSVC should remain
-   the authority for aggregate workspace tests until the local Windows GNU
-   `ring` crash is no longer relevant.
+   OpenAI run still needs real credentials before alpha. The local Windows GNU
+   aggregate-test crash has a mitigation in D012; keep dev-only feature graphs
+   minimal so it does not return.
 5. Verdict: CLOSE.
 
 - [x] Captain Hindsight review recorded
@@ -146,5 +146,6 @@
   end-to-end vs wiremock; opt-in `live.rs` (skips w/o `UNSHACKLED_LIVE_TESTS`).
   Clean-room: provenance note cites public OpenAI docs; endpoint grep finds no
   private endpoints (only localhost / api.openai.com). fmt/clippy(-D)/deny/audit
-  green. Local aggregate test runner crashes on windows-gnu `ring` (D012); CI is
-  MSVC. 03.13 OpenAI chosen; 03.14 live creds deferred (manual-actions).
+  green. Later D012 mitigation removed the local windows-gnu aggregate test crash
+  by avoiding dev-feature bleed from config tests. 03.13 OpenAI chosen; 03.14 live
+  creds deferred (manual-actions).

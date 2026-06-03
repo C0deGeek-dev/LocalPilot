@@ -41,13 +41,16 @@ TOML through `figment` so there is no direct `toml` dependency to keep in sync.
 
 ## Windows `x86_64-pc-windows-gnu` native-crate crashes
 
-The GNU toolchain on Windows crashes (`0xc0000005`) in two native deps where the
-MSVC toolchain (used by CI) does not:
+The GNU toolchain on Windows is sensitive to native-dependency build shape.
+Avoid dev-only feature unification when a member crate is also a dependency of
+another member: `unshackled-config` enabling `figment/test` made
+`cargo test --workspace` build a different `unshackled-harness` test binary that
+crashed (`0xc0000005`) before test listing. Replacing `figment::Jail` with a
+small local environment-isolation helper removed that feature edge and made
+`cargo test --workspace` pass locally again.
 
-- `ring` (via `reqwest` rustls-tls): the CLI binary's test binary crashes under
-  `cargo test --workspace` and `cargo nextest --list`. Per-crate
-  `cargo test -p <crate>` runs are reliable and all suites pass — use those to
-  verify locally; trust the MSVC CI matrix for the aggregate run.
+One native crash class remains known:
+
 - `crossterm` (ratatui's default backend / `tui-textarea`): crashes the test
   binary at init. Set `ratatui = { default-features = false }` workspace-wide and
   keep `crossterm`/`tui-textarea` only in the CLI terminal driver (behind the

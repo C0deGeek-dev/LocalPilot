@@ -127,9 +127,10 @@
    place and clean-room-compliant.
 2. **Fix before closing:** The public `v0.1.0-alpha.1` tag (09.12) is deliberately
    not created — it is an outward-facing go-live that must be a human decision and
-   triggers `release.yml`. The 3-OS CI matrix runs on GitHub (MSVC), not this local
-   windows-gnu host, where the `ring`/`crossterm` test binaries crash (D012/D015);
-   per-crate suites pass locally and the matrix is the release-engineer's gate.
+   triggers `release.yml`. The local windows-gnu aggregate-test crash was
+   mitigated in D012; crossterm remains feature-gated and verified through the TUI
+   core tests plus real-terminal checks (D015). The 3-OS matrix is still the
+   release-engineer's gate.
 3. **Record:** 09.10/09.11/09.13 done and 09.12 DEFERRED with rationale in
    `manual-actions.md`. No new decisions.
 4. **Risk:** The eval suite ships four representative tasks (three real + a control)
