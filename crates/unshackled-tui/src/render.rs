@@ -41,10 +41,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let h = &state.header;
-    let text = format!(
+    let mut text = format!(
         "Unshackled v{} | {}/{} | ws:{} | session:{}",
         h.version, h.provider, h.model, h.workspace, h.session_id
     );
+    if let Some(update) = &h.update {
+        text.push_str(&format!("  ·  update available: {update}"));
+    }
     frame.render_widget(
         Paragraph::new(text).block(Block::bordered().title("Unshackled")),
         area,

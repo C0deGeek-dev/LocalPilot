@@ -19,6 +19,7 @@ mod memory_cmd;
 #[cfg(feature = "tui")]
 mod repl;
 mod session_cmd;
+mod update;
 
 #[derive(Debug, Parser)]
 #[command(name = "unshackled")]
@@ -32,6 +33,12 @@ struct Cli {
 enum Command {
     /// Report version, platform, config, providers, tools, and trust state.
     Doctor,
+    /// Check the project repository for a newer release and optionally update.
+    Update {
+        /// Only report whether an update is available; do not install.
+        #[arg(long)]
+        check: bool,
+    },
     /// Initialize project-local harness state (.unshackled.toml + .gitignore).
     Init {
         /// Also initialize a git repository if one is not present.
@@ -318,6 +325,10 @@ async fn main() -> anyhow::Result<()> {
             doctor::run(&mut stdout)?;
             stdout.flush()?;
         }
+        Command::Update { check } => {
+            let mut stdout = io::stdout().lock();
+            update::run(check, &mut stdout).await?;
+        }
         Command::Init { git } => {
             let summary = harness_cmd::init(&std::env::current_dir()?, git)?;
             let mut stdout = io::stdout().lock();
@@ -522,6 +533,13 @@ async fn run_default() -> anyhow::Result<()> {
                 let profile = session_cmd::resolve_profile(None, false);
                 return repl::run_chat(None, None, profile).await;
             }
+        }
+    }
+    // Doctor fallback: surface a cached update notice on stderr (the REPL shows
+    // it in its header on the chat path above).
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(tag) = update::cached_notice(&cwd).await {
+            eprintln!("a newer version is available: {tag} — run `unshackled update`");
         }
     }
     let mut stdout = io::stdout().lock();

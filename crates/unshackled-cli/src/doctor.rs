@@ -62,7 +62,7 @@ pub enum TrustState {
 #[must_use]
 pub fn report() -> DoctorReport {
     DoctorReport {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("UNSHACKLED_VERSION").to_string(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         config_paths: config_paths(),
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn report_reads_real_environment_without_panicking() {
         let r = report();
-        assert_eq!(r.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(r.version, env!("UNSHACKLED_VERSION"));
         assert!(r.providers.iter().any(|p| p.name == "openai"));
         assert!(r.tools.iter().any(|t| t.command == "git"));
     }

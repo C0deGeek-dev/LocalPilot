@@ -149,7 +149,7 @@ pub async fn run_chat(
     );
 
     let header = Header {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: env!("UNSHACKLED_VERSION").to_string(),
         provider: provider_id.unwrap_or(&config.provider.default).to_string(),
         model: model.to_string(),
         workspace: cwd
@@ -157,6 +157,7 @@ pub async fn run_chat(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string()),
         session_id: runtime.session_id().to_string(),
+        update: crate::update::cached_notice(&cwd).await,
     };
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
 

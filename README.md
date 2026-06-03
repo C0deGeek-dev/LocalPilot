@@ -74,6 +74,7 @@ See [`docs/providers.md`](docs/providers.md) for provider setup and
 | Command | What it does |
 | --- | --- |
 | `doctor` | Report version, platform, config, providers, tools, trust state |
+| `update [--check]` | Check the repo for a newer release and reinstall from source on confirm |
 | `init` | Initialize project-local state (`.unshackled.toml`, `.gitignore`) |
 | `ask` | Send one prompt and stream the answer (no tools) |
 | `chat` | Interactive terminal REPL with tool approvals, a working indicator, and a task panel |

@@ -70,6 +70,24 @@ rustup toolchain install stable-x86_64-pc-windows-msvc
 If you only need non-interactive commands (`ask`, `print`, `harness`, `memory`,
 `learning`), the gnu toolchain is fine — run with `-Features learning`.
 
+## Updating
+
+```sh
+unshackled update          # check the repo and, on confirmation, reinstall
+unshackled update --check   # only report whether a newer release exists
+```
+
+`update` queries the project repository for the newest release tag, compares it
+to the running binary's embedded version, and on your confirmation reinstalls
+from source with the same feature set (`cargo install --git … --tag …`), using
+the MSVC toolchain on Windows when the TUI is built.
+
+The interactive REPL and the bare `unshackled` launch also do a best-effort,
+cached check (at most once a day) and show a notice when an update is available.
+Disable it with `UNSHACKLED_NO_UPDATE_CHECK=1`. The automatic check is off on the
+`windows-gnu` toolchain (its TLS stack is unstable); `unshackled update` still
+works there.
+
 ## From a release archive
 
 Each tagged release publishes per-platform archives that contain the

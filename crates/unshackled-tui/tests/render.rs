@@ -16,6 +16,7 @@ fn header() -> Header {
         model: "test-model".to_string(),
         workspace: "demo".to_string(),
         session_id: "ab12cd".to_string(),
+        update: None,
     }
 }
 

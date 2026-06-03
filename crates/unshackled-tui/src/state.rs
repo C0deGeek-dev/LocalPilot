@@ -48,6 +48,8 @@ pub struct Header {
     pub model: String,
     pub workspace: String,
     pub session_id: String,
+    /// A newer release tag, if one is available (shown in the header).
+    pub update: Option<String>,
 }
 
 /// Always-visible footer stats.
