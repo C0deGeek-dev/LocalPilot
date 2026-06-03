@@ -61,6 +61,42 @@ fn build_with(
     }
 }
 
+fn build_from_arc(
+    provider: Arc<FakeProvider>,
+    files: &[(&str, &str)],
+    config: SessionConfig,
+    profile: Profile,
+) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    for (rel, contents) in files {
+        let path = dir.path().join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+    let store = Store::open(dir.path());
+    let runtime = SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(profile, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        config,
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(256);
+    Harness {
+        _dir: dir,
+        runtime,
+        events,
+        cancel: CancellationToken::new(),
+        store,
+    }
+}
+
 fn drain(rx: &mut broadcast::Receiver<RuntimeEvent>) -> Vec<RuntimeEvent> {
     let mut out = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -89,6 +125,44 @@ async fn loop_reads_a_file_then_produces_a_final_answer() {
     let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
     // user, assistant(tool_use), tool(result), assistant(final).
     assert_eq!(transcript.len(), 4);
+}
+
+#[tokio::test]
+async fn first_request_carries_the_agent_system_prompt_once() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+
+    let reason = h.runtime.run_turn("hello", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    let messages = &requests[0].messages;
+    assert_eq!(
+        messages.first().map(|message| message.role),
+        Some(unshackled_core::Role::System)
+    );
+    let system_text = messages
+        .first()
+        .and_then(|message| message.content.first())
+        .and_then(|block| match block {
+            unshackled_core::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(system_text.contains("Available tools:"));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.role == unshackled_core::Role::System)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -155,6 +229,38 @@ async fn update_plan_tool_emits_a_plan_event() {
     assert_eq!(plans[0].len(), 2);
     assert_eq!(plans[0][0].status, "done");
     assert_eq!(plans[0][1].title, "fix");
+}
+
+#[tokio::test]
+async fn context_usage_event_is_emitted_before_request() {
+    let provider = FakeProvider::new().text("ok");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    assert!(drain(&mut rx).iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ContextUsage { used, limit } if *used > 0 && *limit == SessionConfig::default().context_token_limit
+    )));
+}
+
+#[tokio::test]
+async fn malformed_tool_call_is_reported_and_reprompted() {
+    let provider = FakeProvider::new()
+        .tool_call("", "read_file", json!({ "path": "a" }))
+        .text("fixed");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    assert!(drain(&mut rx).iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Warning(message) if message.contains("missing tool-call id")
+    )));
 }
 
 #[tokio::test(start_paused = true)]

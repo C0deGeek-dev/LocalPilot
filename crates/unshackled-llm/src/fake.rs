@@ -26,6 +26,7 @@ pub struct FakeProvider {
     declaration: ProviderDeclaration,
     scripts: Mutex<VecDeque<Script>>,
     open_failures: Mutex<u32>,
+    requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl FakeProvider {
@@ -36,6 +37,7 @@ impl FakeProvider {
             declaration: default_declaration(),
             scripts: Mutex::new(VecDeque::new()),
             open_failures: Mutex::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -99,6 +101,15 @@ impl FakeProvider {
             "scripted malformed stream".to_string(),
         ))])
     }
+
+    /// Requests received so far, for offline tests.
+    #[must_use]
+    pub fn requests(&self) -> Vec<ModelRequest> {
+        self.requests
+            .lock()
+            .map(|requests| requests.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl Default for FakeProvider {
@@ -113,7 +124,10 @@ impl ModelProvider for FakeProvider {
         &self.declaration
     }
 
-    async fn stream(&self, _request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+    async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.push(request);
+        }
         if let Ok(mut failures) = self.open_failures.lock() {
             if *failures > 0 {
                 *failures -= 1;

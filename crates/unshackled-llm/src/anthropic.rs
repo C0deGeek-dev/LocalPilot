@@ -15,11 +15,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use futures::StreamExt;
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use unshackled_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 
 use crate::error::{ProviderError, QuotaInfo};
-use crate::event::{ModelEvent, ModelEventStream};
+use crate::event::{split_inline_thinking, ModelEvent, ModelEventStream};
 use crate::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
@@ -37,7 +38,10 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<Secret>,
+    default_options: IndexMap<String, Value>,
 }
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl AnthropicProvider {
     /// Build a provider against `base_url` (without a trailing `/messages`).
@@ -78,10 +82,26 @@ impl AnthropicProvider {
                 auth,
                 rate_limit_behavior: None,
             },
-            client: reqwest::Client::new(),
+            client: reqwest_client(None),
             base_url: base_url.into(),
             api_key,
+            default_options: IndexMap::new(),
         }
+    }
+
+    /// Override the HTTP request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.client = reqwest_client(timeout);
+        self
+    }
+
+    /// Provider-level request options merged into every request body before
+    /// request-specific options.
+    #[must_use]
+    pub fn with_default_options(mut self, options: IndexMap<String, Value>) -> Self {
+        self.default_options = options;
+        self
     }
 
     /// Build the JSON request body sent to `/messages`.
@@ -91,6 +111,7 @@ impl AnthropicProvider {
         let max_tokens = request
             .options
             .get("max_tokens")
+            .or_else(|| self.default_options.get("max_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -107,8 +128,8 @@ impl AnthropicProvider {
             body["tools"] = Value::Array(request.tools.iter().map(translate_tool).collect());
         }
         if let Value::Object(map) = &mut body {
-            for (key, value) in &request.options {
-                if key != "max_tokens" {
+            for (key, value) in self.default_options.iter().chain(request.options.iter()) {
+                if key != "max_tokens" && key != "suppress_thinking" {
                     map.insert(key.clone(), value.clone());
                 }
             }
@@ -118,6 +139,17 @@ impl AnthropicProvider {
 
     fn endpoint(&self) -> String {
         format!("{}/messages", self.base_url.trim_end_matches('/'))
+    }
+}
+
+fn reqwest_client(timeout: Option<Duration>) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+    match builder.build() {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build configured HTTP client");
+            reqwest::Client::new()
+        }
     }
 }
 
@@ -423,7 +455,9 @@ impl SseDecoder {
             Some("text_delta") => {
                 if let Some(text) = delta["text"].as_str() {
                     if !text.is_empty() {
-                        out.push_back(Ok(ModelEvent::TextDelta(text.to_string())));
+                        for event in split_inline_thinking(text) {
+                            out.push_back(Ok(event));
+                        }
                     }
                 }
             }
@@ -549,6 +583,25 @@ mod tests {
     }
 
     #[test]
+    fn routes_inline_think_tags_to_reasoning() {
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"visible <think>private</think> tail\"}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(ModelEvent::TextDelta(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "visible  tail");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Ok(ModelEvent::ReasoningDelta(r)) if r == "private")));
+    }
+
+    #[test]
     fn error_event_yields_typed_error() {
         let events = collect_sse(&[
             "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n",
@@ -576,6 +629,23 @@ mod tests {
         // The system message is not duplicated into the messages array.
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn default_options_are_applied_without_internal_switches() {
+        let mut options = IndexMap::new();
+        options.insert("max_tokens".to_string(), json!(123));
+        options.insert("suppress_thinking".to_string(), json!(true));
+        let provider = AnthropicProvider::new(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            None,
+        )
+        .with_default_options(options);
+        let body = provider.build_body(&ModelRequest::new("claude", Vec::new()));
+        assert_eq!(body["max_tokens"], 123);
+        assert!(body.get("suppress_thinking").is_none());
     }
 
     #[test]

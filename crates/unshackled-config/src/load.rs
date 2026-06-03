@@ -109,7 +109,11 @@ impl Config {
     /// or empty.
     #[must_use]
     pub fn resolve_credential(&self, provider_id: &str) -> Option<Secret> {
-        let env_name = self.providers.get(provider_id)?.api_key_env.as_ref()?;
+        let provider = self.providers.get(provider_id)?;
+        let env_name = provider
+            .api_key_env
+            .as_deref()
+            .or_else(|| default_api_key_env(&provider.kind))?;
         let value = std::env::var(env_name).ok()?;
         if value.trim().is_empty() {
             None
@@ -124,6 +128,27 @@ impl Config {
     #[must_use]
     pub fn resolve_model(&self, provider_id: Option<&str>) -> Option<String> {
         let id = provider_id.unwrap_or(self.provider.default.as_str());
-        self.providers.get(id)?.model.clone()
+        let provider = self.providers.get(id)?;
+        provider
+            .model
+            .clone()
+            .or_else(|| default_model_env(&provider.kind).and_then(|name| std::env::var(name).ok()))
+    }
+}
+
+fn default_api_key_env(kind: &str) -> Option<&'static str> {
+    match kind {
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "openai" | "openai-compatible" | "local" | "custom" | "custom-user-endpoint" => {
+            Some("OPENAI_API_KEY")
+        }
+        _ => None,
+    }
+}
+
+fn default_model_env(kind: &str) -> Option<&'static str> {
+    match kind {
+        "anthropic" => Some("ANTHROPIC_MODEL"),
+        _ => None,
     }
 }

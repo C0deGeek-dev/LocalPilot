@@ -5,8 +5,7 @@ use assert_cmd::Command;
 use unshackled_memory::{MemoryKind, MemoryStore};
 
 fn run(dir: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::cargo_bin("unshackled")
-        .unwrap()
+    let output = unshackled_cmd()
         .current_dir(dir)
         .args(args)
         .output()
@@ -46,4 +45,16 @@ fn memory_inspect_delete_and_disable() {
     // Disable stops injection.
     run(dir.path(), &["memory", "disable"]);
     assert!(!store.is_enabled());
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

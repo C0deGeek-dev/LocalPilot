@@ -21,7 +21,7 @@ use unshackled_sandbox::{Approver, Interactivity, PermissionEngine};
 use unshackled_store::Store;
 use unshackled_tools::{ToolContext, ToolRegistry};
 
-use crate::compaction::compact;
+use crate::compaction::{compact_with_summary, estimate_tokens};
 
 /// Why a turn loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,8 @@ pub enum RuntimeEvent {
     ToolFinished { id: String, is_error: bool },
     /// Token usage.
     Usage(TokenUsage),
+    /// Estimated context usage for the request about to be sent.
+    ContextUsage { used: usize, limit: usize },
     /// A provider warning.
     Warning(String),
     /// The model updated the task plan shown to the user.
@@ -137,6 +139,13 @@ impl SessionRuntime {
         config: SessionConfig,
         seed: Vec<Message>,
     ) -> Self {
+        let mut messages = Vec::with_capacity(seed.len() + 1);
+        messages.push(Message::text(
+            Role::System,
+            crate::system_prompt::agent_system_prompt(&tools),
+        ));
+        messages.extend(seed);
+
         Self {
             provider,
             tools,
@@ -147,7 +156,7 @@ impl SessionRuntime {
             recovery,
             config,
             session_id: SessionId::new(),
-            messages: seed,
+            messages,
             last_quota: None,
         }
     }
@@ -265,11 +274,15 @@ impl SessionRuntime {
                 return self.stop(events, StopReason::Cancelled);
             }
 
-            let request = ModelRequest::new(
-                self.config.model.clone(),
-                compact(self.messages.clone(), self.config.context_token_limit),
-            )
-            .with_tools(self.tool_specs());
+            let compacted =
+                compact_with_summary(self.messages.clone(), self.config.context_token_limit);
+            let used = estimate_tokens(&compacted.messages);
+            let _ = events.send(RuntimeEvent::ContextUsage {
+                used,
+                limit: self.config.context_token_limit,
+            });
+            let request = ModelRequest::new(self.config.model.clone(), compacted.messages)
+                .with_tools(self.tool_specs());
 
             let mut stream = match self.open_stream(&request, events, cancel).await {
                 Ok(stream) => stream,
@@ -382,6 +395,12 @@ impl SessionRuntime {
                 return self.stop(events, StopReason::Done);
             }
 
+            if let Some(message) = invalid_tool_calls(&calls) {
+                let _ = events.send(RuntimeEvent::Warning(message.clone()));
+                self.messages.push(Message::text(Role::User, message));
+                continue;
+            }
+
             // Execute tool calls through the permission-gated registry.
             for (id, name, input) in calls {
                 if tool_calls_used >= self.config.max_tool_calls {
@@ -437,6 +456,28 @@ impl SessionRuntime {
             let _ = self.store.put_tool_output(&key, &redact(&json));
         }
     }
+}
+
+fn invalid_tool_calls(calls: &[(String, String, serde_json::Value)]) -> Option<String> {
+    for (id, name, input) in calls {
+        if id.trim().is_empty() {
+            return Some(
+                "Tool call error: missing tool-call id. Retry with a valid id.".to_string(),
+            );
+        }
+        if name.trim().is_empty() {
+            return Some(
+                "Tool call error: missing tool name. Retry with a registered tool name."
+                    .to_string(),
+            );
+        }
+        if !input.is_object() {
+            return Some(format!(
+                "Tool call error for {name}: input must be a JSON object matching the tool schema."
+            ));
+        }
+    }
+    None
 }
 
 /// Parse the `update_plan` tool input into plan steps. Lenient: a malformed or

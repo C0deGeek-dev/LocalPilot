@@ -47,6 +47,24 @@ fn bypass_engine() -> PermissionEngine {
     PermissionEngine::new(Profile::Bypass, Vec::new())
 }
 
+fn init_git_repo(dir: &std::path::Path) {
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.invalid"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn unknown_tool_returns_an_error_result_not_a_panic() {
     let (_dir, ws) = workspace_with(&[]);
@@ -67,7 +85,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 9);
+    assert_eq!(registry.names().len(), 15);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -96,6 +114,7 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
     )
     .await;
     assert!(!inside.is_error);
+    assert!(inside.output.contains("status: success"));
     assert!(inside.output.contains("fn main"));
 
     let outside_dir = tempfile::tempdir().unwrap();
@@ -111,6 +130,7 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
     )
     .await;
     assert!(outside.is_error);
+    assert!(outside.output.contains("status: error"));
     assert!(outside.output.contains("permission denied"));
 }
 
@@ -203,6 +223,55 @@ async fn edit_file_exact_match_and_rejects_ambiguous() {
 }
 
 #[tokio::test]
+async fn multi_edit_applies_all_edits_atomically() {
+    let (dir, ws) = workspace_with(&[("u.txt", "alpha beta gamma")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let ok = dispatch(
+        &registry,
+        "multi_edit",
+        json!({
+            "path": "u.txt",
+            "edits": [
+                { "old_text": "alpha", "new_text": "one" },
+                { "old_text": "gamma", "new_text": "three" }
+            ]
+        }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!ok.is_error, "{}", ok.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
+        "one beta three"
+    );
+
+    let failed = dispatch(
+        &registry,
+        "multi_edit",
+        json!({
+            "path": "u.txt",
+            "edits": [
+                { "old_text": "one", "new_text": "1" },
+                { "old_text": "missing", "new_text": "x" }
+            ]
+        }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(failed.is_error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
+        "one beta three"
+    );
+}
+
+#[tokio::test]
 async fn list_files_respects_ignore_files() {
     let (_dir, ws) = workspace_with(&[
         ("keep.rs", ""),
@@ -226,6 +295,33 @@ async fn list_files_respects_ignore_files() {
         "ignore file not respected: {}",
         result.output
     );
+}
+
+#[tokio::test]
+async fn find_files_matches_filename_patterns() {
+    let (_dir, ws) = workspace_with(&[
+        ("src/main.rs", ""),
+        ("src/lib.rs", ""),
+        ("README.md", ""),
+        ("target/ignored.rs", ""),
+        (".gitignore", "target/\n"),
+    ]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "find_files",
+        json!({ "pattern": "*.rs" }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error);
+    let output = result.output.replace('\\', "/");
+    assert!(output.contains("src/main.rs"));
+    assert!(output.contains("src/lib.rs"));
+    assert!(!result.output.contains("README.md"));
+    assert!(!result.output.contains("ignored.rs"));
 }
 
 #[tokio::test]
@@ -304,6 +400,61 @@ async fn git_commit_rejects_a_secret_bearing_message() {
     .await;
     assert!(result.is_error);
     assert!(result.output.contains("secret"));
+}
+
+#[tokio::test]
+async fn git_diff_and_add_are_gated_by_command_class() {
+    let (dir, ws) = workspace_with(&[("tracked.txt", "one\n")]);
+    init_git_repo(dir.path());
+    std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
+
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::Interactive, true);
+    let diff = dispatch(
+        &registry,
+        "git_diff",
+        json!({ "paths": ["tracked.txt"] }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!diff.is_error, "{}", diff.output);
+    assert!(diff.output.contains("-one"));
+    assert!(diff.output.contains("+two"));
+
+    let add = dispatch(
+        &registry,
+        "git_add",
+        json!({ "paths": ["tracked.txt"] }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(vec![true]),
+    )
+    .await;
+    assert!(!add.is_error, "{}", add.output);
+
+    let restore = dispatch(
+        &registry,
+        "git_restore",
+        json!({ "paths": ["tracked.txt"] }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(restore.is_error);
+    assert!(restore.output.contains("permission denied"));
 }
 
 #[tokio::test]

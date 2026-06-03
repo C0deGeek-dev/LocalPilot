@@ -355,6 +355,10 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
                 0.0
             },
         }),
+        RuntimeEvent::ContextUsage { used, limit } => Some(UiEvent::ContextUsage {
+            context_used: used,
+            context_limit: limit,
+        }),
         RuntimeEvent::QuotaPaused { reset } => Some(UiEvent::QuotaPaused { reset }),
         // Surface provider warnings/errors in the transcript so a failed turn is
         // visible instead of silently producing no response.

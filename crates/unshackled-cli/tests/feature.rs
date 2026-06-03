@@ -17,8 +17,7 @@ fn feature_appends_without_renumbering_completed_steps() {
     std::fs::write(dir.path().join("brief.md"), BRIEF).unwrap();
     std::fs::write(dir.path().join("PROGRESS.md"), PROGRESS).unwrap();
 
-    Command::cargo_bin("unshackled")
-        .unwrap()
+    unshackled_cmd()
         .current_dir(dir.path())
         .args(["harness", "feature", "add a config flag"])
         .assert()
@@ -33,4 +32,16 @@ fn feature_appends_without_renumbering_completed_steps() {
     assert!(progress.contains("commit: abc1234"));
     // The new step is appended as number 3.
     assert!(progress.contains("- [ ] 3. Implement: add a config flag"));
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

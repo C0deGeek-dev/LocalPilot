@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use unshackled_config::{Config, ProviderConfig};
+use unshackled_core::Secret;
 
 use crate::anthropic::AnthropicProvider;
 use crate::error::ProviderError;
@@ -67,17 +69,26 @@ impl ProviderRegistry {
 fn build_provider(
     id: &str,
     entry: &ProviderConfig,
-    credential: Option<unshackled_core::Secret>,
+    credential: Option<Secret>,
 ) -> Result<Arc<dyn ModelProvider>, ProviderError> {
+    let timeout = entry.request_timeout_secs.map(Duration::from_secs);
+    let mut options = entry.options.clone();
+    if entry.suppress_thinking == Some(true) {
+        options.insert("suppress_thinking".to_string(), serde_json::json!(true));
+    }
+
     // Anthropic speaks a different wire protocol, so it has its own adapter.
     if entry.kind == "anthropic" {
         let base_url = entry
             .base_url
             .clone()
+            .or_else(|| env_non_empty("ANTHROPIC_BASE_URL"))
             .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string());
-        return Ok(Arc::new(AnthropicProvider::new(
-            id, id, base_url, credential,
-        )));
+        return Ok(Arc::new(
+            AnthropicProvider::new(id, id, base_url, credential)
+                .with_timeout(timeout)
+                .with_default_options(options),
+        ));
     }
 
     let (source_type, base_url) = match entry.kind.as_str() {
@@ -86,9 +97,17 @@ fn build_provider(
             entry
                 .base_url
                 .clone()
+                .or_else(|| env_non_empty("OPENAI_BASE_URL"))
                 .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_string()),
         ),
-        "openai-compatible" | "local" => (SourceType::LocalServer, require_base_url(id, entry)?),
+        "openai-compatible" | "local" => (
+            SourceType::LocalServer,
+            entry
+                .base_url
+                .clone()
+                .or_else(|| env_non_empty("OPENAI_BASE_URL"))
+                .ok_or_else(|| missing_base_url(id, entry))?,
+        ),
         "custom" | "custom-user-endpoint" => {
             (SourceType::CustomUserEndpoint, require_base_url(id, entry)?)
         }
@@ -98,22 +117,30 @@ fn build_provider(
             )))
         }
     };
-    Ok(Arc::new(OpenAiProvider::new(
-        id,
-        id,
-        source_type,
-        base_url,
-        credential,
-    )))
+    Ok(Arc::new(
+        OpenAiProvider::new(id, id, source_type, base_url, credential)
+            .with_timeout(timeout)
+            .with_default_options(options),
+    ))
 }
 
 fn require_base_url(id: &str, entry: &ProviderConfig) -> Result<String, ProviderError> {
     entry
         .base_url
         .clone()
-        .ok_or_else(|| ProviderError::InvalidRequest {
-            message: format!("provider '{id}' of kind '{}' requires base_url", entry.kind),
-        })
+        .ok_or_else(|| missing_base_url(id, entry))
+}
+
+fn missing_base_url(id: &str, entry: &ProviderConfig) -> ProviderError {
+    ProviderError::InvalidRequest {
+        message: format!("provider '{id}' of kind '{}' requires base_url", entry.kind),
+    }
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -127,6 +154,8 @@ mod tests {
             base_url: base_url.map(str::to_string),
             api_key_env: None,
             model: None,
+            request_timeout_secs: None,
+            suppress_thinking: None,
             options: Default::default(),
         }
     }

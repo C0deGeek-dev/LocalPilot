@@ -238,6 +238,81 @@ impl Tool for EditFile {
     }
 }
 
+// --- multi_edit -------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MultiEditInput {
+    /// Path to edit within the workspace.
+    path: String,
+    /// Ordered exact-text replacements. Each `old_text` must match exactly once
+    /// at the point that edit is applied.
+    edits: Vec<TextEditInput>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TextEditInput {
+    /// Exact text to replace.
+    old_text: String,
+    /// Replacement text.
+    new_text: String,
+}
+
+pub struct MultiEdit;
+
+#[async_trait]
+impl Tool for MultiEdit {
+    fn name(&self) -> &'static str {
+        "multi_edit"
+    }
+    fn description(&self) -> &'static str {
+        "Apply several exact text replacements to one workspace file atomically; rejects missing or ambiguous context."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<MultiEditInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: MultiEditInput = parse_input(input)?;
+        Ok(vec![write_path_effect(ctx, Path::new(&input.path), true)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: MultiEditInput = parse_input(&input)?;
+        if input.edits.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "edits must contain at least one replacement".to_string(),
+            ));
+        }
+        let path = ctx.workspace.normalize(Path::new(&input.path))?;
+        let original = std::fs::read_to_string(&path)
+            .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+        let mut updated = original.clone();
+        for (index, edit) in input.edits.iter().enumerate() {
+            let matches = updated.matches(&edit.old_text).count();
+            match matches {
+                0 => {
+                    return Err(ToolError::Failed(format!(
+                        "edit {} failed: old_text was not found",
+                        index + 1
+                    )))
+                }
+                1 => updated = updated.replacen(&edit.old_text, &edit.new_text, 1),
+                n => {
+                    return Err(ToolError::Failed(format!(
+                        "edit {} failed: old_text matches {n} times",
+                        index + 1
+                    )))
+                }
+            }
+        }
+        let newline = detect_newline(&original);
+        atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
+        Ok(ToolOutput::ok(format!(
+            "applied {} edits to {}",
+            input.edits.len(),
+            path.display()
+        )))
+    }
+}
+
 // --- list_files -------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -304,6 +379,95 @@ impl Tool for ListFiles {
             ToolOutput::ok(text)
         })
     }
+}
+
+// --- find_files -------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FindFilesInput {
+    /// Glob-like filename pattern. Supports `*` and `?`.
+    pattern: String,
+    /// Directory to search, relative to the workspace. Defaults to the root.
+    #[serde(default)]
+    path: Option<String>,
+    /// Include hidden files. Defaults to false.
+    #[serde(default)]
+    hidden: bool,
+    /// Maximum number of paths to return.
+    #[serde(default)]
+    max_matches: Option<usize>,
+}
+
+pub struct FindFiles;
+
+#[async_trait]
+impl Tool for FindFiles {
+    fn name(&self) -> &'static str {
+        "find_files"
+    }
+    fn description(&self) -> &'static str {
+        "Find workspace files by filename pattern, respecting ignore files."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<FindFilesInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: FindFilesInput = parse_input(input)?;
+        let dir = input.path.unwrap_or_else(|| ".".to_string());
+        Ok(vec![read_path_effect(ctx, Path::new(&dir))])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: FindFilesInput = parse_input(&input)?;
+        let dir = ctx
+            .workspace
+            .normalize(Path::new(input.path.as_deref().unwrap_or(".")))?;
+        let root = ctx.workspace.root().to_path_buf();
+        let pattern = wildcard_regex(&input.pattern)?;
+        let limit = input.max_matches.unwrap_or(MAX_LIST).min(MAX_LIST);
+        let mut paths = Vec::new();
+        let mut truncated = false;
+        for result in ignore::WalkBuilder::new(&dir)
+            .hidden(!input.hidden)
+            .require_git(false)
+            .build()
+        {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if pattern.is_match(&name) {
+                let rel = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+                paths.push(rel.display().to_string());
+                if paths.len() >= limit {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        paths.sort();
+        Ok(if truncated {
+            ToolOutput::truncated(paths.join("\n"))
+        } else {
+            ToolOutput::ok(paths.join("\n"))
+        })
+    }
+}
+
+fn wildcard_regex(pattern: &str) -> Result<regex::Regex, ToolError> {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            _ => regex.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    regex.push('$');
+    regex::Regex::new(&regex).map_err(|e| ToolError::InvalidInput(e.to_string()))
 }
 
 // --- search_text ------------------------------------------------------------
@@ -472,7 +636,7 @@ impl Tool for RunShell {
     }
 }
 
-// --- git_status / git_commit ------------------------------------------------
+// --- git_status / git_diff / git_log / git_add / git_restore / git_commit ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GitStatusInput {}
@@ -496,6 +660,140 @@ impl Tool for GitStatus {
     async fn invoke(&self, _input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let output = run_git(ctx, &["status", "--porcelain"]).await?;
         Ok(cap(output))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitDiffInput {
+    /// Optional paths to limit the diff.
+    #[serde(default)]
+    paths: Vec<String>,
+    /// Show staged changes. Defaults to false.
+    #[serde(default)]
+    staged: bool,
+}
+
+pub struct GitDiff;
+
+#[async_trait]
+impl Tool for GitDiff {
+    fn name(&self) -> &'static str {
+        "git_diff"
+    }
+    fn description(&self) -> &'static str {
+        "Show unstaged or staged git diff output for optional paths."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<GitDiffInput>()
+    }
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::RunCommand(CommandClass::ReadOnly)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: GitDiffInput = parse_input(&input)?;
+        let mut args = vec!["diff"];
+        if input.staged {
+            args.push("--staged");
+        }
+        if !input.paths.is_empty() {
+            args.push("--");
+            args.extend(input.paths.iter().map(String::as_str));
+        }
+        Ok(cap(run_git(ctx, &args).await?))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitLogInput {
+    /// Maximum commits to show. Defaults to 10.
+    #[serde(default)]
+    max_count: Option<u32>,
+}
+
+pub struct GitLog;
+
+#[async_trait]
+impl Tool for GitLog {
+    fn name(&self) -> &'static str {
+        "git_log"
+    }
+    fn description(&self) -> &'static str {
+        "Show recent git commits in one-line form."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<GitLogInput>()
+    }
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::RunCommand(CommandClass::ReadOnly)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: GitLogInput = parse_input(&input)?;
+        let count = input.max_count.unwrap_or(10).min(100).to_string();
+        Ok(cap(run_git(ctx, &["log", "--oneline", "-n", &count]).await?))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitPathInput {
+    /// Paths to operate on.
+    paths: Vec<String>,
+}
+
+pub struct GitAdd;
+
+#[async_trait]
+impl Tool for GitAdd {
+    fn name(&self) -> &'static str {
+        "git_add"
+    }
+    fn description(&self) -> &'static str {
+        "Stage specific workspace paths with git add."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<GitPathInput>()
+    }
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::RunCommand(CommandClass::ProjectWrite)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: GitPathInput = parse_input(&input)?;
+        if input.paths.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "paths must contain at least one path".to_string(),
+            ));
+        }
+        let mut args = vec!["add", "--"];
+        args.extend(input.paths.iter().map(String::as_str));
+        Ok(cap(run_git(ctx, &args).await?))
+    }
+}
+
+pub struct GitRestore;
+
+#[async_trait]
+impl Tool for GitRestore {
+    fn name(&self) -> &'static str {
+        "git_restore"
+    }
+    fn description(&self) -> &'static str {
+        "Discard working-tree changes for specific paths with git restore; requires destructive-command approval."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<GitPathInput>()
+    }
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::RunCommand(CommandClass::Destructive)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: GitPathInput = parse_input(&input)?;
+        if input.paths.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "paths must contain at least one path".to_string(),
+            ));
+        }
+        let mut args = vec!["restore", "--"];
+        args.extend(input.paths.iter().map(String::as_str));
+        Ok(cap(run_git(ctx, &args).await?))
     }
 }
 

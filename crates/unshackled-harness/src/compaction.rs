@@ -31,8 +31,28 @@ fn message_chars(message: &Message) -> usize {
 /// pairing and leading system messages.
 #[must_use]
 pub fn compact(messages: Vec<Message>, token_limit: usize) -> Vec<Message> {
+    compact_with_summary(messages, token_limit).messages
+}
+
+/// Result of compacting a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionResult {
+    /// Messages to send to the provider.
+    pub messages: Vec<Message>,
+    /// Whether older messages were removed.
+    pub compacted: bool,
+}
+
+/// Compact `messages` and inject a bounded summary when old exchanges are
+/// removed. The summary is deterministic and intentionally factual: it keeps the
+/// task state visible without asking another model to summarize.
+#[must_use]
+pub fn compact_with_summary(messages: Vec<Message>, token_limit: usize) -> CompactionResult {
     if estimate_tokens(&messages) <= token_limit {
-        return messages;
+        return CompactionResult {
+            messages,
+            compacted: false,
+        };
     }
 
     let system_count = messages
@@ -54,6 +74,8 @@ pub fn compact(messages: Vec<Message>, token_limit: usize) -> Vec<Message> {
         }
     }
 
+    let mut dropped = Vec::new();
+
     // Drop oldest exchanges until under the limit, always keeping the last one.
     while exchanges.len() > 1 {
         let candidate: Vec<Message> = system
@@ -64,13 +86,83 @@ pub fn compact(messages: Vec<Message>, token_limit: usize) -> Vec<Message> {
         if estimate_tokens(&candidate) <= token_limit {
             break;
         }
-        exchanges.remove(0);
+        dropped.push(exchanges.remove(0));
     }
 
-    system
+    let mut out: Vec<Message> = system
         .into_iter()
+        .chain(summary_message(&dropped))
         .chain(exchanges.into_iter().flatten())
-        .collect()
+        .collect();
+
+    while estimate_tokens(&out) > token_limit && out.len() > 1 {
+        let removable = out
+            .iter()
+            .position(|message| message.role != Role::System)
+            .unwrap_or(1);
+        out.remove(removable);
+    }
+
+    CompactionResult {
+        messages: out,
+        compacted: true,
+    }
+}
+
+fn summary_message(dropped: &[Vec<Message>]) -> Option<Message> {
+    if dropped.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["Conversation summary for trimmed history:".to_string()];
+    for exchange in dropped.iter().rev().take(4).rev() {
+        if let Some(line) = summarize_exchange(exchange) {
+            lines.push(line);
+        }
+    }
+    Some(Message::text(Role::System, lines.join("\n")))
+}
+
+fn summarize_exchange(exchange: &[Message]) -> Option<String> {
+    let user = exchange
+        .iter()
+        .find(|message| message.role == Role::User)
+        .and_then(first_text)
+        .map(|text| truncate(text, 120));
+    let tools: Vec<String> = exchange
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse(call) => Some(call.name.clone()),
+            _ => None,
+        })
+        .collect();
+    match (user, tools.is_empty()) {
+        (Some(user), true) => Some(format!("- user asked: {user}")),
+        (Some(user), false) => Some(format!(
+            "- user asked: {user}; tools used: {}",
+            tools.join(", ")
+        )),
+        (None, false) => Some(format!("- tools used: {}", tools.join(", "))),
+        (None, true) => None,
+    }
+}
+
+fn first_text(message: &Message) -> Option<&str> {
+    message.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if text.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -139,5 +231,27 @@ mod tests {
         assert_eq!(compacted.first().map(|m| m.role), Some(Role::System));
         // It actually dropped something.
         assert!(call_ids.len() < 6);
+    }
+
+    #[test]
+    fn compaction_injects_a_bounded_summary() {
+        let mut messages = vec![Message::text(Role::System, "sys")];
+        for i in 0..8 {
+            messages.push(user(&format!("turn {i} {}", "x".repeat(80))));
+            messages.extend(tool_exchange(&format!("call_{i}")));
+        }
+
+        let result = compact_with_summary(messages, 160);
+        assert!(result.compacted);
+        let system_text: Vec<_> = result
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .filter_map(first_text)
+            .collect();
+        assert!(system_text
+            .iter()
+            .any(|text| text.contains("Conversation summary for trimmed history")));
+        assert!(estimate_tokens(&result.messages) <= 160);
     }
 }

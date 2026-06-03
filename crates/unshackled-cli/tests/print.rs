@@ -32,8 +32,7 @@ async fn print_mode_emits_an_answer_and_makes_no_workspace_writes() {
 
     let workdir = dir.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        Command::cargo_bin("unshackled")
-            .unwrap()
+        unshackled_cmd()
             .current_dir(&workdir)
             .args(["print", "--model", "m", "summarize"])
             .output()
@@ -58,4 +57,16 @@ async fn print_mode_emits_an_answer_and_makes_no_workspace_writes() {
         source_files.is_empty(),
         "unexpected writes: {source_files:?}"
     );
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

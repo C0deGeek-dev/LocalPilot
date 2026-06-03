@@ -177,6 +177,13 @@ impl AppState {
                 self.footer.tokens_out = tokens_out;
                 self.footer.tokens_per_sec = tokens_per_sec;
             }
+            UiEvent::ContextUsage {
+                context_used,
+                context_limit,
+            } => {
+                self.footer.context_used = context_used;
+                self.footer.context_limit = context_limit;
+            }
             UiEvent::QuotaPaused { reset } => self.footer.quota_reset = Some(reset),
             UiEvent::Notice(text) => self.transcript.push(TranscriptLine {
                 speaker: "system".to_string(),
@@ -201,6 +208,10 @@ pub enum UiEvent {
         tokens_in: u64,
         tokens_out: u64,
         tokens_per_sec: f64,
+    },
+    ContextUsage {
+        context_used: usize,
+        context_limit: usize,
     },
     TurnComplete,
     QuotaPaused {

@@ -20,9 +20,16 @@ base_url = "http://localhost:11434/v1"
 model = "your-local-model"
 # Optional, only if your gateway requires a key:
 api_key_env = "UNSHACKLED_LOCAL_API_KEY"
+# Optional for slow local inference:
+request_timeout_secs = 600
 ```
 
 TLS is not required for `localhost`.
+
+External launchers may also provide a local endpoint without editing
+`.unshackled.toml`: if an OpenAI-compatible provider has no `base_url`,
+`OPENAI_BASE_URL` is used as a fallback. If `api_key_env` is not set,
+OpenAI-compatible providers fall back to `OPENAI_API_KEY`.
 
 With a `model` set on the default provider, running `unshackled` with no
 subcommand launches the interactive REPL against it. Without a resolvable
@@ -37,7 +44,7 @@ Uses the documented OpenAI API and its API-key authentication.
 ```toml
 [providers.openai]
 kind = "openai"
-api_key_env = "OPENAI_API_KEY"
+# api_key_env defaults to OPENAI_API_KEY when omitted.
 ```
 
 Then set the key in your environment (never commit it):
@@ -61,7 +68,7 @@ required `max_tokens`).
 [providers.anthropic]
 kind = "anthropic"
 model = "claude-sonnet-4-6"
-api_key_env = "ANTHROPIC_API_KEY"
+# api_key_env defaults to ANTHROPIC_API_KEY when omitted.
 # max_tokens defaults to 4096; override per provider if you like:
 # max_tokens = 8192
 ```
@@ -73,6 +80,35 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."   # Windows PowerShell
 
 The credential is sent as the `x-api-key` header with the documented
 `anthropic-version`; it is wrapped so it never appears in logs or transcripts.
+
+If `base_url` is omitted, Anthropic providers use
+`ANTHROPIC_BASE_URL` before falling back to the official API URL. If the config
+does not set `model`, `ANTHROPIC_MODEL` can provide the default model for
+`chat` and the no-argument launcher path.
+
+## Runtime tuning
+
+`request_timeout_secs` can be set on any provider entry. It applies to the HTTP
+client used by that provider and is intended for slower local models or gateways.
+
+Provider options not modeled by Unshackled are passed through from the provider
+table into the request body. `suppress_thinking = true` is an Unshackled-owned
+switch: adapters avoid optional thinking output where the public request shape
+supports it, and the switch itself is not forwarded as a raw API field. Inline
+`<think>...</think>` text emitted by compatible local models is routed to the
+reasoning stream and is not treated as final answer text.
+
+## Evals
+
+The offline golden-task scorecard runs with the normal workspace test suite:
+
+```sh
+cargo test -p unshackled-harness --test evals
+```
+
+Live validation is opt-in and never commits credentials. Set
+`UNSHACKLED_LIVE_TESTS=1` only in a local shell that already has provider
+configuration and credentials.
 
 ## Verifying
 

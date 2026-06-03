@@ -181,6 +181,54 @@ fn resolve_model_is_none_without_a_configured_model() {
 }
 
 #[test]
+fn provider_env_fallbacks_resolve_public_env_names() {
+    Jail::expect_with(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[provider]\ndefault = \"anthropic\"\n\n[providers.anthropic]\nkind = \"anthropic\"\n",
+        )?;
+        jail.set_env("ANTHROPIC_API_KEY", "anthropic-secret");
+        jail.set_env("ANTHROPIC_MODEL", "claude-local");
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+        assert_eq!(
+            cfg.resolve_credential("anthropic")
+                .expect("credential present")
+                .expose(),
+            "anthropic-secret"
+        );
+        assert_eq!(cfg.resolve_model(None).as_deref(), Some("claude-local"));
+        Ok(())
+    });
+}
+
+#[test]
+fn provider_timeout_and_thinking_config_parse() {
+    Jail::expect_with(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"http://localhost:8080/v1\"\nrequest_timeout_secs = 600\nsuppress_thinking = true\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let local = cfg.providers.get("local").expect("provider present");
+        assert_eq!(local.request_timeout_secs, Some(600));
+        assert_eq!(local.suppress_thinking, Some(true));
+        Ok(())
+    });
+}
+
+#[test]
 fn unknown_keys_are_ignored_for_forward_compatibility() {
     Jail::expect_with(|jail| {
         // A config written for a newer version (unknown top-level table and an
@@ -272,6 +320,7 @@ proptest! {
         };
         let cfg = load(&paths, &cli_overrides).unwrap();
         let expected = cli
+            .or_else(|| std::env::var("UNSHACKLED_PROVIDER__DEFAULT").ok())
             .or(project)
             .or(user)
             .unwrap_or_else(|| "local".to_string());

@@ -36,8 +36,7 @@ async fn ask_streams_text_from_a_configured_local_provider() {
     // assert_cmd is blocking; run it off the async reactor so the mock server
     // keeps serving while the spawned binary connects to it.
     let output = tokio::task::spawn_blocking(move || {
-        Command::cargo_bin("unshackled")
-            .unwrap()
+        unshackled_cmd()
             .current_dir(&workdir)
             .args([
                 "ask",
@@ -56,4 +55,16 @@ async fn ask_streams_text_from_a_configured_local_provider() {
     assert!(output.status.success(), "ask failed: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Hi there"), "unexpected output: {stdout}");
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

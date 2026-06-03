@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use futures::StreamExt;
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use unshackled_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 
 use crate::error::{ProviderError, QuotaInfo};
-use crate::event::{ModelEvent, ModelEventStream};
+use crate::event::{split_inline_thinking, ModelEvent, ModelEventStream};
 use crate::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
@@ -31,7 +32,10 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<Secret>,
+    default_options: IndexMap<String, Value>,
 }
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl OpenAiProvider {
     /// Build a provider against `base_url` (without a trailing `/chat/completions`).
@@ -74,10 +78,26 @@ impl OpenAiProvider {
                 auth,
                 rate_limit_behavior: None,
             },
-            client: reqwest::Client::new(),
+            client: reqwest_client(None),
             base_url: base_url.into(),
             api_key,
+            default_options: IndexMap::new(),
         }
+    }
+
+    /// Override the HTTP request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.client = reqwest_client(timeout);
+        self
+    }
+
+    /// Provider-level request options merged into every request body before
+    /// request-specific options.
+    #[must_use]
+    pub fn with_default_options(mut self, options: IndexMap<String, Value>) -> Self {
+        self.default_options = options;
+        self
     }
 
     /// Build the JSON request body sent to `/chat/completions`.
@@ -92,8 +112,14 @@ impl OpenAiProvider {
         if !request.tools.is_empty() {
             body["tools"] = Value::Array(request.tools.iter().map(translate_tool).collect());
         }
+        if self.suppresses_thinking() && !self.has_option("reasoning_effort", request) {
+            body["reasoning_effort"] = json!("minimal");
+        }
         if let Value::Object(map) = &mut body {
-            for (k, v) in &request.options {
+            for (k, v) in self.default_options.iter().chain(request.options.iter()) {
+                if k == "suppress_thinking" {
+                    continue;
+                }
                 map.insert(k.clone(), v.clone());
             }
         }
@@ -102,6 +128,28 @@ impl OpenAiProvider {
 
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    fn suppresses_thinking(&self) -> bool {
+        self.default_options
+            .get("suppress_thinking")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn has_option(&self, key: &str, request: &ModelRequest) -> bool {
+        self.default_options.contains_key(key) || request.options.contains_key(key)
+    }
+}
+
+fn reqwest_client(timeout: Option<Duration>) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+    match builder.build() {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to build configured HTTP client");
+            reqwest::Client::new()
+        }
     }
 }
 
@@ -380,7 +428,9 @@ impl SseDecoder {
             let delta = &choice["delta"];
             if let Some(content) = delta["content"].as_str() {
                 if !content.is_empty() {
-                    out.push_back(Ok(ModelEvent::TextDelta(content.to_string())));
+                    for event in split_inline_thinking(content) {
+                        out.push_back(Ok(event));
+                    }
                 }
             }
             if let Some(reasoning) = delta["reasoning_content"]
@@ -516,6 +566,42 @@ mod tests {
             e,
             Ok(ModelEvent::Usage(u)) if u.input_tokens == 3 && u.output_tokens == 5
         )));
+    }
+
+    #[test]
+    fn routes_inline_think_tags_to_reasoning() {
+        let events = collect_sse(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer <think>hidden</think> done\"}}]}\n",
+            "data: [DONE]\n",
+        ]);
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(ModelEvent::TextDelta(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "answer  done");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Ok(ModelEvent::ReasoningDelta(r)) if r == "hidden")));
+    }
+
+    #[test]
+    fn suppress_thinking_shapes_openai_request() {
+        let mut options = IndexMap::new();
+        options.insert("suppress_thinking".to_string(), json!(true));
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_default_options(options);
+        let body = provider.build_body(&ModelRequest::new("m", Vec::new()));
+        assert_eq!(body["reasoning_effort"], "minimal");
+        assert!(body.get("suppress_thinking").is_none());
     }
 
     #[test]

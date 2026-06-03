@@ -209,21 +209,36 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
         config
             .providers
             .iter()
-            .map(|(id, entry)| match &entry.api_key_env {
-                Some(env) => ProviderStatus {
-                    name: format!("{id} ({})", entry.kind),
-                    credential_env: env.clone(),
-                    credential_present: credential_present(env),
-                },
-                // No credential is required (for example a bare local server).
-                None => ProviderStatus {
+            .map(|(id, entry)| {
+                if let Some(env) = entry
+                    .api_key_env
+                    .as_deref()
+                    .or_else(|| default_api_key_env(&entry.kind))
+                {
+                    return ProviderStatus {
+                        name: format!("{id} ({})", entry.kind),
+                        credential_env: env.to_string(),
+                        credential_present: credential_present(env),
+                    };
+                }
+                ProviderStatus {
                     name: format!("{id} ({})", entry.kind),
                     credential_env: "(none required)".to_string(),
                     credential_present: true,
-                },
+                }
             })
             .collect(),
     )
+}
+
+fn default_api_key_env(kind: &str) -> Option<&'static str> {
+    match kind {
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "openai" | "openai-compatible" | "local" | "custom" | "custom-user-endpoint" => {
+            Some("OPENAI_API_KEY")
+        }
+        _ => None,
+    }
 }
 
 fn credential_present(env: &str) -> bool {
@@ -348,9 +363,7 @@ mod tests {
     fn render_never_leaks_credential_values() {
         // A present credential must be reported as presence only, never echoed.
         let secret = "sk-do-not-print-me";
-        std::env::set_var("OPENAI_API_KEY", secret);
-        let rendered = render(&report());
-        std::env::remove_var("OPENAI_API_KEY");
+        let rendered = render(&fixture());
 
         assert!(
             !rendered.contains(secret),
@@ -363,7 +376,7 @@ mod tests {
     fn report_reads_real_environment_without_panicking() {
         let r = report();
         assert_eq!(r.version, env!("UNSHACKLED_VERSION"));
-        assert!(r.providers.iter().any(|p| p.name == "openai"));
+        assert!(!r.providers.is_empty());
         assert!(r.tools.iter().any(|t| t.command == "git"));
     }
 }

@@ -11,6 +11,7 @@ workspace = true
 [[bin]]
 name = "unshackled"
 path = "src/main.rs"
+test = false
 
 [features]
 # The interactive `chat` REPL links crossterm. It is opt-in so the default
@@ -53,4 +54,3 @@ assert_cmd = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
-

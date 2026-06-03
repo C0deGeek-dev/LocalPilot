@@ -6,8 +6,7 @@ use assert_cmd::Command;
 #[test]
 fn init_creates_config_and_gitignore_entry() {
     let dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("unshackled")
-        .unwrap()
+    unshackled_cmd()
         .current_dir(dir.path())
         .arg("init")
         .assert()
@@ -27,8 +26,7 @@ fn init_is_idempotent_and_preserves_existing_gitignore() {
     std::fs::write(dir.path().join(".gitignore"), "/target\n").unwrap();
 
     for _ in 0..2 {
-        Command::cargo_bin("unshackled")
-            .unwrap()
+        unshackled_cmd()
             .current_dir(dir.path())
             .arg("init")
             .assert()
@@ -45,4 +43,16 @@ fn init_is_idempotent_and_preserves_existing_gitignore() {
             .count(),
         1
     );
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

@@ -21,8 +21,7 @@ fn export_writes_a_redacted_bundle() {
         .unwrap();
 
     let out = dir.path().join("bundle.json");
-    Command::cargo_bin("unshackled")
-        .unwrap()
+    unshackled_cmd()
         .current_dir(dir.path())
         .args([
             "export",
@@ -45,8 +44,7 @@ fn export_writes_a_redacted_bundle() {
 #[test]
 fn export_rejects_an_invalid_session_id() {
     let dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("unshackled")
-        .unwrap()
+    unshackled_cmd()
         .current_dir(dir.path())
         .args([
             "export",
@@ -57,4 +55,16 @@ fn export_rejects_an_invalid_session_id() {
         ])
         .assert()
         .failure();
+}
+
+fn unshackled_cmd() -> Command {
+    let mut command = Command::new("cargo");
+    command.args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        "--",
+    ]);
+    command
 }

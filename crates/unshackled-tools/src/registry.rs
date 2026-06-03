@@ -6,8 +6,8 @@ use unshackled_core::{ToolCall, ToolResult};
 use unshackled_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest};
 
 use crate::builtins::{
-    EditFile, GitCommit, GitStatus, ListFiles, ReadFile, RunShell, SearchText, UpdatePlan,
-    WriteFile,
+    EditFile, FindFiles, GitAdd, GitCommit, GitDiff, GitLog, GitRestore, GitStatus, ListFiles,
+    MultiEdit, ReadFile, RunShell, SearchText, UpdatePlan, WriteFile,
 };
 use crate::tool::{Tool, ToolContext};
 
@@ -25,17 +25,23 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    /// A registry with all eight builtin tools.
+    /// A registry with all builtin tools.
     #[must_use]
     pub fn with_builtins() -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(ReadFile));
         registry.register(Box::new(WriteFile));
         registry.register(Box::new(EditFile));
+        registry.register(Box::new(MultiEdit));
         registry.register(Box::new(ListFiles));
+        registry.register(Box::new(FindFiles));
         registry.register(Box::new(SearchText));
         registry.register(Box::new(RunShell));
         registry.register(Box::new(GitStatus));
+        registry.register(Box::new(GitDiff));
+        registry.register(Box::new(GitLog));
+        registry.register(Box::new(GitAdd));
+        registry.register(Box::new(GitRestore));
         registry.register(Box::new(GitCommit));
         registry.register(Box::new(UpdatePlan));
         registry
@@ -87,12 +93,20 @@ impl ToolRegistry {
         approver: &dyn Approver,
     ) -> ToolResult {
         let Some(tool) = self.get(&call.name) else {
-            return ToolResult::error(call.id.clone(), format!("unknown tool: {}", call.name));
+            return ToolResult::error(
+                call.id.clone(),
+                format_tool_output(&call.name, &format!("unknown tool: {}", call.name), true),
+            );
         };
 
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
-            Err(err) => return ToolResult::error(call.id.clone(), err.to_string()),
+            Err(err) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    format_tool_output(tool.name(), &err.to_string(), true),
+                )
+            }
         };
 
         let detail = target_detail(&call.input);
@@ -112,7 +126,11 @@ impl ToolRegistry {
             if !allowed {
                 return ToolResult::error(
                     call.id.clone(),
-                    format!("permission denied for {}", tool.name()),
+                    format_tool_output(
+                        tool.name(),
+                        &format!("permission denied for {}", tool.name()),
+                        true,
+                    ),
                 );
             }
         }
@@ -121,10 +139,13 @@ impl ToolRegistry {
             // Redaction happens here, for every profile including bypass.
             Ok(output) => ToolResult {
                 id: call.id.clone(),
-                output: redact(&output.text),
+                output: format_tool_output(tool.name(), &redact(&output.text), output.is_error),
                 is_error: output.is_error,
             },
-            Err(err) => ToolResult::error(call.id.clone(), err.to_string()),
+            Err(err) => ToolResult::error(
+                call.id.clone(),
+                format_tool_output(tool.name(), &err.to_string(), true),
+            ),
         }
     }
 }
@@ -151,5 +172,21 @@ fn target_detail(input: &Value) -> String {
             }
         }
     }
+    if let Some(paths) = input.get("paths").and_then(Value::as_array) {
+        let joined = paths
+            .iter()
+            .filter_map(Value::as_str)
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
     String::new()
+}
+
+fn format_tool_output(tool: &str, output: &str, is_error: bool) -> String {
+    let status = if is_error { "error" } else { "success" };
+    format!("tool: {tool}\nstatus: {status}\noutput:\n{output}")
 }

@@ -78,6 +78,14 @@ pub struct ProviderConfig {
     /// (for example launching the interactive REPL with no `--model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// HTTP request timeout in seconds. Defaults are applied by provider
+    /// adapters; this override is useful for slow local inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
+    /// Ask adapters to avoid optional thinking/reasoning output where the
+    /// provider exposes a documented request shape for that behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppress_thinking: Option<bool>,
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,

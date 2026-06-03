@@ -36,3 +36,31 @@ pub enum ModelEvent {
 /// A boxed, pinned stream of model events. Boxing keeps [`ModelProvider`] object
 /// safe so providers can be stored as `Box<dyn ModelProvider>`.
 pub type ModelEventStream = Pin<Box<dyn Stream<Item = Result<ModelEvent, ProviderError>> + Send>>;
+
+pub(crate) fn split_inline_thinking(text: &str) -> Vec<ModelEvent> {
+    let mut events = Vec::new();
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find("<think>") else {
+            if !rest.is_empty() {
+                events.push(ModelEvent::TextDelta(rest.to_string()));
+            }
+            break;
+        };
+        let before = &rest[..start];
+        if !before.is_empty() {
+            events.push(ModelEvent::TextDelta(before.to_string()));
+        }
+        let after_start = &rest[start + "<think>".len()..];
+        let Some(end) = after_start.find("</think>") else {
+            events.push(ModelEvent::ReasoningDelta(after_start.to_string()));
+            break;
+        };
+        let thinking = &after_start[..end];
+        if !thinking.is_empty() {
+            events.push(ModelEvent::ReasoningDelta(thinking.to_string()));
+        }
+        rest = &after_start[end + "</think>".len()..];
+    }
+    events
+}
