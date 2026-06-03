@@ -3,8 +3,10 @@
 //! These wrap LocalMind's project store and return plain Unshackled-owned types
 //! so callers (the CLI) never name a LocalMind type directly.
 
-use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId};
-use localmind_store::{MemoryPersistence, ReviewQueue, ReviewQueueItem};
+use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
+use localmind_store::{
+    MemoryPersistence, ReviewQueue, ReviewQueueItem, SkillDraftRecord, SkillDraftStore,
+};
 
 use crate::LearningError;
 use std::path::Path;
@@ -194,6 +196,69 @@ pub fn audit(project_root: &Path) -> Result<Vec<AuditEntry>, LearningError> {
         .collect())
 }
 
+/// A generated skill draft, flattened for display.
+#[derive(Debug, Clone)]
+pub struct SkillDraftInfo {
+    pub id: String,
+    pub name: String,
+    pub disabled: bool,
+    pub description: String,
+    pub path: String,
+}
+
+fn draft_info(record: &SkillDraftRecord) -> SkillDraftInfo {
+    SkillDraftInfo {
+        id: record.draft.id.to_string(),
+        name: record.draft.name.clone(),
+        disabled: record.draft.disabled,
+        description: record.draft.description.clone(),
+        path: record.draft_path.display().to_string(),
+    }
+}
+
+/// Generate disabled skill drafts from accepted review items.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if generation fails.
+pub fn skills_generate(project_root: &Path) -> Result<Vec<SkillDraftInfo>, LearningError> {
+    let store = open_skills(project_root)?;
+    let records = store.generate_from_review_queue().map_err(skill_err)?;
+    Ok(records.iter().map(draft_info).collect())
+}
+
+/// List generated skill drafts.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if the drafts cannot be read.
+pub fn skills_list(project_root: &Path) -> Result<Vec<SkillDraftInfo>, LearningError> {
+    let store = open_skills(project_root)?;
+    let records = store.list().map_err(skill_err)?;
+    Ok(records.iter().map(draft_info).collect())
+}
+
+/// Inspect a single skill draft.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if the draft cannot be read.
+pub fn skill_show(
+    project_root: &Path,
+    draft_id: &str,
+) -> Result<Option<SkillDraftInfo>, LearningError> {
+    let store = open_skills(project_root)?;
+    let record = store.get(&SkillDraftId::new(draft_id)).map_err(skill_err)?;
+    Ok(record.as_ref().map(draft_info))
+}
+
+/// The Markdown body of a skill draft, for export.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if the draft cannot be read.
+pub fn skill_body(project_root: &Path, draft_id: &str) -> Result<Option<String>, LearningError> {
+    let store = open_skills(project_root)?;
+    let record = store.get(&SkillDraftId::new(draft_id)).map_err(skill_err)?;
+    Ok(record.map(|record| record.draft.body_markdown))
+}
+
 /// Open the review queue, ensuring the project has a LocalMind config first so a
 /// never-closed-out project opens an empty queue rather than erroring.
 fn open_queue(project_root: &Path) -> Result<ReviewQueue, LearningError> {
@@ -207,10 +272,20 @@ fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> 
     MemoryPersistence::open_project(project_root).map_err(memory_err)
 }
 
+/// Open the skill-draft store, ensuring the project is initialized first.
+fn open_skills(project_root: &Path) -> Result<SkillDraftStore, LearningError> {
+    crate::initialize(project_root)?;
+    SkillDraftStore::open_project(project_root).map_err(skill_err)
+}
+
 fn review_err(e: impl std::fmt::Display) -> LearningError {
     LearningError::Review(e.to_string())
 }
 
 fn memory_err(e: impl std::fmt::Display) -> LearningError {
     LearningError::Memory(e.to_string())
+}
+
+fn skill_err(e: impl std::fmt::Display) -> LearningError {
+    LearningError::Skill(e.to_string())
 }

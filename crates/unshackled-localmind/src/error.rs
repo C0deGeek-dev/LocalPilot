@@ -31,4 +31,8 @@ pub enum LearningError {
     /// A context export/retrieval operation failed.
     #[error("localmind context: {0}")]
     Context(String),
+
+    /// A skill-draft operation failed.
+    #[error("localmind skill: {0}")]
+    Skill(String),
 }

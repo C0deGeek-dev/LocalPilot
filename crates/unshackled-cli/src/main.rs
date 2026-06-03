@@ -150,8 +150,35 @@ enum LearningCommand {
         /// Search query.
         query: String,
     },
+    /// Skill drafts generated from accepted lessons.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Print the memory-change audit log.
     Audit,
+}
+
+#[cfg(feature = "learning")]
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// Generate disabled skill drafts from accepted review items.
+    Generate,
+    /// List generated skill drafts.
+    List,
+    /// Inspect a skill draft.
+    Show {
+        /// Skill draft id.
+        id: String,
+    },
+    /// Export a skill draft's Markdown body to a file or stdout.
+    Export {
+        /// Skill draft id.
+        id: String,
+        /// Destination file; prints to stdout when omitted.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[cfg(feature = "learning")]
@@ -427,6 +454,14 @@ async fn main() -> anyhow::Result<()> {
                 LearningCommand::Search { query } => {
                     learning_cmd::search(&cwd, &query, &mut stdout)?;
                 }
+                LearningCommand::Skills { command } => match command {
+                    SkillsCommand::Generate => learning_cmd::skills_generate(&cwd, &mut stdout)?,
+                    SkillsCommand::List => learning_cmd::skills_list(&cwd, &mut stdout)?,
+                    SkillsCommand::Show { id } => learning_cmd::skill_show(&cwd, &id, &mut stdout)?,
+                    SkillsCommand::Export { id, out } => {
+                        learning_cmd::skill_export(&cwd, &id, out, &mut stdout)?;
+                    }
+                },
                 LearningCommand::Audit => learning_cmd::audit(&cwd, &mut stdout)?,
             }
         }

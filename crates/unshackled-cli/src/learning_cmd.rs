@@ -117,6 +117,84 @@ pub fn search(cwd: &std::path::Path, query: &str, out: &mut dyn Write) -> anyhow
     Ok(())
 }
 
+/// Generate disabled skill drafts from accepted review items.
+///
+/// # Errors
+/// Returns an error if generation fails.
+pub fn skills_generate(cwd: &std::path::Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let drafts = learning::skills_generate(cwd)?;
+    if drafts.is_empty() {
+        writeln!(out, "no skill drafts generated")?;
+        return Ok(());
+    }
+    for draft in drafts {
+        writeln!(out, "{}\t{}", draft.id, draft.path)?;
+    }
+    Ok(())
+}
+
+/// List generated skill drafts.
+///
+/// # Errors
+/// Returns an error if the drafts cannot be read.
+pub fn skills_list(cwd: &std::path::Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let drafts = learning::skills_list(cwd)?;
+    if drafts.is_empty() {
+        writeln!(out, "no skill drafts")?;
+        return Ok(());
+    }
+    for draft in drafts {
+        let state = if draft.disabled {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        writeln!(out, "{}\t{}\t{}", draft.id, state, draft.name)?;
+    }
+    Ok(())
+}
+
+/// Inspect a skill draft.
+///
+/// # Errors
+/// Returns an error if the draft cannot be read.
+pub fn skill_show(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    match learning::skill_show(cwd, id)? {
+        Some(draft) => {
+            writeln!(out, "id: {}", draft.id)?;
+            writeln!(out, "name: {}", draft.name)?;
+            writeln!(out, "disabled: {}", draft.disabled)?;
+            writeln!(out, "description: {}", draft.description)?;
+            writeln!(out, "path: {}", draft.path)?;
+        }
+        None => writeln!(out, "skill draft not found")?,
+    }
+    Ok(())
+}
+
+/// Export a skill draft's Markdown body to a file or stdout.
+///
+/// # Errors
+/// Returns an error if the draft cannot be read or written.
+pub fn skill_export(
+    cwd: &std::path::Path,
+    id: &str,
+    output: Option<std::path::PathBuf>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    match learning::skill_body(cwd, id)? {
+        Some(body) => match output {
+            Some(path) => {
+                std::fs::write(&path, body)?;
+                writeln!(out, "{}", path.display())?;
+            }
+            None => writeln!(out, "{body}")?,
+        },
+        None => writeln!(out, "skill draft not found")?,
+    }
+    Ok(())
+}
+
 /// Print the memory-change audit log.
 ///
 /// # Errors

@@ -85,7 +85,8 @@ depends on LocalMind, never the reverse.
    extraction, and enqueues candidates for review.
 2. **Done — CLI surface.** `unshackled learning` (behind the `learning` feature)
    exposes the loop: `closeout`, `review {list,show,accept,reject,defer,edit}`,
-   `promote`, `search`, `audit`. State is project-local under `.localmind/`.
+   `promote`, `search`, `skills {generate,list,show,export}`, `audit`. State is
+   project-local under `.localmind/`.
 3. **Done — retrieval + closeout trigger.** Relevant accepted memory is injected
    as a system message before each turn (REPL, `print`, and each harness step);
    the interactive REPL closes the session out into LocalMind on exit. Both are
