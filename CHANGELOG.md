@@ -5,6 +5,17 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- Made the session context budget configurable with `[harness]
+  context_token_limit` (default 24000) so a model's full context window is used
+  for compaction instead of a fixed default.
+- Reworked the REPL input box: it grows with multi-line content up to a cap and
+  then scrolls; newlines now work across terminals (a trailing `\` before Enter,
+  plus Ctrl+J / Shift+Enter where the terminal reports enhanced keys); large
+  pastes collapse to a `[pasted #n · N lines]` placeholder and expand to full
+  text on submit.
+- Added a first-run trust gate: the REPL shows the workspace folder and asks
+  whether to trust it before acting, remembering the answer per folder (skipped
+  under `--bypass`).
 - Added the Anthropic Messages API provider (`kind = "anthropic"`), a second,
   protocol-distinct adapter implemented clean-room from the public API:
   top-level `system`, `tool_use`/`tool_result` blocks, required `max_tokens`,

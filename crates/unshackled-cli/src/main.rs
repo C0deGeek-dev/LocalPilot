@@ -19,6 +19,8 @@ mod memory_cmd;
 #[cfg(feature = "tui")]
 mod repl;
 mod session_cmd;
+#[cfg(feature = "tui")]
+mod trust;
 mod update;
 
 #[derive(Debug, Parser)]

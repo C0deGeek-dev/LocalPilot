@@ -14,8 +14,8 @@ mod state;
 pub use app::{handle_input, parse_slash, run, AppInput, Key, SlashAction};
 pub use render::render;
 pub use state::{
-    AppState, ApprovalRequest, FooterStats, Header, Mode, Picker, PlanItem, Profile, ThinkingPanel,
-    TranscriptLine, UiEvent,
+    AppState, ApprovalRequest, FooterStats, Header, Mode, Paste, Picker, PlanItem, Profile,
+    ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
 };
 
 /// The product name shown in the UI.
