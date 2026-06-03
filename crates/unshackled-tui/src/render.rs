@@ -153,7 +153,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             state.working_secs
         )
     } else {
-        "input  (Enter to send · Alt+Enter for newline)".to_string()
+        "input  (Enter to send · Ctrl+J for newline)".to_string()
     };
     frame.render_widget(
         Paragraph::new(state.input.clone())

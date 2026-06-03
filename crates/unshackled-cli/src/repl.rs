@@ -314,9 +314,9 @@ fn is_cancel(key: KeyEvent) -> bool {
 }
 
 fn is_submit(key: KeyEvent, input: &str) -> bool {
-    // Alt+Enter inserts a newline instead of submitting.
+    // Only a plain Enter submits; any modifier (or Ctrl+J) makes a newline.
     key.code == KeyCode::Enter
-        && !key.modifiers.contains(KeyModifiers::ALT)
+        && key.modifiers.is_empty()
         && !input.trim().is_empty()
         && !input.trim_start().starts_with('/')
 }
@@ -324,8 +324,13 @@ fn is_submit(key: KeyEvent, input: &str) -> bool {
 fn map_key(key: KeyEvent) -> Option<Key> {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlC),
-        // Alt+Enter is a literal newline in the input.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => Some(Key::Char('\n')),
+        // Newline in the input. Ctrl+J is the reliable binding — terminals often
+        // capture Alt+Enter (Windows Terminal toggles fullscreen) — but a
+        // modified Enter (Alt/Shift/Ctrl) is accepted too where it gets through.
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Key::Char('\n'))
+        }
+        KeyCode::Enter if !key.modifiers.is_empty() => Some(Key::Char('\n')),
         KeyCode::Char(c) => Some(Key::Char(c)),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
