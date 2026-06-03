@@ -4,13 +4,16 @@
 //! context compaction.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use unshackled_config::redact::redact;
 use unshackled_core::{ContentBlock, Message, Role, SessionId, TokenUsage, ToolCall, ToolUseId};
-use unshackled_llm::{ModelEvent, ModelProvider, ModelRequest, QuotaInfo, ToolSpec};
+use unshackled_llm::{
+    ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
+};
 use unshackled_recovery::{detect, ModelHealth, RecoveryEngine};
 use unshackled_sandbox::{Approver, Interactivity, PermissionEngine};
 use unshackled_store::Store;
@@ -69,6 +72,9 @@ pub struct SessionConfig {
     pub interactivity: Interactivity,
     pub trusted: bool,
     pub context_token_limit: usize,
+    /// How many times to retry a transient connection failure (network or
+    /// 5xx) before giving up, with exponential backoff between attempts.
+    pub max_stream_retries: u32,
 }
 
 impl Default for SessionConfig {
@@ -80,6 +86,7 @@ impl Default for SessionConfig {
             interactivity: Interactivity::Interactive,
             trusted: true,
             context_token_limit: 24_000,
+            max_stream_retries: 3,
         }
     }
 }
@@ -166,6 +173,48 @@ impl SessionRuntime {
         self.append(Message::new(Role::System, vec![ContentBlock::text(text)]));
     }
 
+    /// Open a provider stream, retrying a transient connection failure (network
+    /// or 5xx) up to `max_stream_retries` with exponential backoff. A rate-limit
+    /// or quota error is not retried here — it pauses the run instead.
+    async fn open_stream(
+        &mut self,
+        request: &ModelRequest,
+        events: &broadcast::Sender<RuntimeEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<ModelEventStream, StreamOpen> {
+        let max = self.config.max_stream_retries;
+        let mut attempt: u32 = 0;
+        loop {
+            match self.provider.stream(request.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    self.last_quota = err.quota().cloned();
+                    let transient = matches!(
+                        err,
+                        ProviderError::Network(_) | ProviderError::Server { .. }
+                    );
+                    if transient && attempt < max {
+                        attempt += 1;
+                        let secs = 1u64 << (attempt - 1).min(5);
+                        let _ = events.send(RuntimeEvent::Warning(format!(
+                            "provider unreachable ({err}); retry {attempt}/{max} in {secs}s"
+                        )));
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err(StreamOpen::Cancelled),
+                            _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
+                        }
+                    } else {
+                        if let Some(reset) = self.last_quota.as_ref().map(quota_reset_label) {
+                            let _ = events.send(RuntimeEvent::QuotaPaused { reset });
+                        }
+                        let _ = events.send(RuntimeEvent::Warning(err.to_string()));
+                        return Err(StreamOpen::Failed);
+                    }
+                }
+            }
+        }
+    }
+
     fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .specs()
@@ -211,16 +260,10 @@ impl SessionRuntime {
             )
             .with_tools(self.tool_specs());
 
-            let mut stream = match self.provider.stream(request).await {
+            let mut stream = match self.open_stream(&request, events, cancel).await {
                 Ok(stream) => stream,
-                Err(err) => {
-                    self.last_quota = err.quota().cloned();
-                    if let Some(reset) = self.last_quota.as_ref().map(quota_reset_label) {
-                        let _ = events.send(RuntimeEvent::QuotaPaused { reset });
-                    }
-                    let _ = events.send(RuntimeEvent::Warning(err.to_string()));
-                    return self.stop(events, StopReason::ProviderError);
-                }
+                Err(StreamOpen::Cancelled) => return self.stop(events, StopReason::Cancelled),
+                Err(StreamOpen::Failed) => return self.stop(events, StopReason::ProviderError),
             };
 
             let mut text = String::new();
@@ -358,6 +401,14 @@ impl SessionRuntime {
             let _ = self.store.put_tool_output(&key, &redact(&json));
         }
     }
+}
+
+/// The outcome of failing to open a provider stream after retries.
+enum StreamOpen {
+    /// The user cancelled during a retry backoff.
+    Cancelled,
+    /// The error was non-transient or retries were exhausted.
+    Failed,
 }
 
 /// A short, human-readable description of when a rate-limited request becomes

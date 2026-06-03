@@ -30,4 +30,4 @@ unshackled-tools = { path = "../unshackled-tools" }
 insta = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

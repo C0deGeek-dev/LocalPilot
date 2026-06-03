@@ -91,6 +91,33 @@ async fn loop_reads_a_file_then_produces_a_final_answer() {
     assert_eq!(transcript.len(), 4);
 }
 
+#[tokio::test(start_paused = true)]
+async fn retries_a_transient_connection_failure_then_succeeds() {
+    // Two connection failures, then a normal response: within the retry budget.
+    let provider = FakeProvider::new().fail_open(2).text("recovered");
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+}
+
+#[tokio::test(start_paused = true)]
+async fn gives_up_after_exhausting_connection_retries() {
+    // More failures than the retry budget: the turn ends as a provider error.
+    let provider = FakeProvider::new().fail_open(10).text("never reached");
+    let mut h = build(
+        provider,
+        &[],
+        SessionConfig {
+            max_stream_retries: 2,
+            ..SessionConfig::default()
+        },
+    );
+
+    let reason = h.runtime.run_turn("hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::ProviderError);
+}
+
 #[tokio::test]
 async fn reasoning_is_emitted_as_metadata_distinct_from_text() {
     let provider = FakeProvider::new().script(vec![

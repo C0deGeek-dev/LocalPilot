@@ -25,6 +25,7 @@ type Script = Vec<Result<ModelEvent, ProviderError>>;
 pub struct FakeProvider {
     declaration: ProviderDeclaration,
     scripts: Mutex<VecDeque<Script>>,
+    open_failures: Mutex<u32>,
 }
 
 impl FakeProvider {
@@ -34,7 +35,19 @@ impl FakeProvider {
         Self {
             declaration: default_declaration(),
             scripts: Mutex::new(VecDeque::new()),
+            open_failures: Mutex::new(0),
         }
+    }
+
+    /// Make the next `count` calls to [`ModelProvider::stream`] fail with a
+    /// transient network error before any scripted response is served, to
+    /// exercise connection-retry behavior.
+    #[must_use]
+    pub fn fail_open(self, count: u32) -> Self {
+        if let Ok(mut failures) = self.open_failures.lock() {
+            *failures = count;
+        }
+        self
     }
 
     /// Override the declaration (for capability-branching tests).
@@ -101,6 +114,14 @@ impl ModelProvider for FakeProvider {
     }
 
     async fn stream(&self, _request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        if let Ok(mut failures) = self.open_failures.lock() {
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(ProviderError::Network(
+                    "scripted connection failure".to_string(),
+                ));
+            }
+        }
         let script = self
             .scripts
             .lock()
