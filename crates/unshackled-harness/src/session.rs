@@ -14,7 +14,9 @@ use unshackled_core::{ContentBlock, Message, Role, SessionId, TokenUsage, ToolCa
 use unshackled_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
 };
-use unshackled_recovery::{detect, ModelHealth, RecoveryEngine};
+use unshackled_recovery::{
+    detect, is_repeated_token_loop, is_slash_flood, ModelHealth, RecoveryEngine,
+};
 use unshackled_sandbox::{Approver, Interactivity, PermissionEngine};
 use unshackled_store::Store;
 use unshackled_tools::{ToolContext, ToolRegistry};
@@ -279,6 +281,11 @@ impl SessionRuntime {
             let mut reasoning = String::new();
             let mut calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut stream_failed = false;
+            // Byte length at the last live degenerate-output check; re-checked
+            // every `FLOOD_CHECK_STRIDE` bytes so a runaway stream is aborted
+            // early instead of flooding the whole turn.
+            let mut last_flood_check = 0usize;
+            const FLOOD_CHECK_STRIDE: usize = 32;
 
             loop {
                 tokio::select! {
@@ -289,6 +296,19 @@ impl SessionRuntime {
                         Some(Ok(ModelEvent::TextDelta(delta))) => {
                             let _ = events.send(RuntimeEvent::Text(delta.clone()));
                             text.push_str(&delta);
+                            // Live guard: stop a degenerate punctuation flood or a
+                            // repeated-token loop early; the post-stream recovery
+                            // ladder then handles the bad turn.
+                            if text.len().saturating_sub(last_flood_check) >= FLOOD_CHECK_STRIDE {
+                                last_flood_check = text.len();
+                                if is_slash_flood(&text) || is_repeated_token_loop(&text) {
+                                    let _ = events.send(RuntimeEvent::Warning(
+                                        "degenerate output detected; stopping generation"
+                                            .to_string(),
+                                    ));
+                                    break;
+                                }
+                            }
                         }
                         Some(Ok(ModelEvent::ReasoningDelta(delta))) => {
                             let _ = events.send(RuntimeEvent::Reasoning(delta.clone()));

@@ -24,6 +24,8 @@ pub use progress::{Progress, Step};
 pub use resume::{resume_one_step, ResumeOutcome, QUOTA_PAUSE_KEY};
 pub use rules::{Rule, RuleContext, RuleEngine, Trigger, Verdict};
 pub use session::{PlanStep, RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
+// Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
+pub use unshackled_recovery::ModelHealth;
 pub use worker::{
     evaluate_completion, select_next_step, AttemptResult, CompletionDecision, CompletionInputs,
     StepDecision, StepLoop, StepTrace,

@@ -92,6 +92,41 @@ async fn loop_reads_a_file_then_produces_a_final_answer() {
 }
 
 #[tokio::test]
+async fn aborts_a_degenerate_output_flood_early() {
+    // A punctuation flood arriving as many small deltas (real streaming shape).
+    let mut script: Vec<_> = (0..300)
+        .map(|_| Ok(ModelEvent::TextDelta("/".to_string())))
+        .collect();
+    script.push(Ok(ModelEvent::Done));
+    let provider = FakeProvider::new().script(script);
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+    // A degenerate turn never completes as a clean answer.
+    assert_ne!(reason, StopReason::Done);
+
+    let events = drain(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::Warning(m) if m.contains("degenerate"))),
+        "the live guard should warn about degenerate output"
+    );
+    let streamed: usize = events
+        .iter()
+        .filter_map(|e| match e {
+            RuntimeEvent::Text(t) => Some(t.len()),
+            _ => None,
+        })
+        .sum();
+    assert!(
+        streamed < 300,
+        "the flood should be cut short, got {streamed} chars"
+    );
+}
+
+#[tokio::test]
 async fn update_plan_tool_emits_a_plan_event() {
     let provider = FakeProvider::new()
         .tool_call(

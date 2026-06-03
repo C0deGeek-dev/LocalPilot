@@ -21,7 +21,7 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use unshackled_config::{CliOverrides, ConfigPaths};
-use unshackled_harness::{RuntimeEvent, SessionConfig, SessionRuntime};
+use unshackled_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime};
 use unshackled_llm::ProviderRegistry;
 use unshackled_recovery::{RecoveryBudget, RecoveryEngine};
 use unshackled_sandbox::{
@@ -358,6 +358,16 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
         // Surface provider warnings/errors in the transcript so a failed turn is
         // visible instead of silently producing no response.
         RuntimeEvent::Warning(message) => Some(UiEvent::Notice(message)),
+        // Surface the recovery outcome after a bad turn.
+        RuntimeEvent::Recovery { health } => match health {
+            ModelHealth::Recovering => Some(UiEvent::Notice(
+                "recovering from a bad response…".to_string(),
+            )),
+            ModelHealth::Degraded => Some(UiEvent::Notice(
+                "model marked degraded after repeated bad output".to_string(),
+            )),
+            ModelHealth::Healthy => None,
+        },
         RuntimeEvent::Plan(steps) => Some(UiEvent::PlanUpdated(
             steps
                 .into_iter()
