@@ -66,8 +66,10 @@ unshackled chat                 # interactive REPL (release builds)
 unshackled                      # no args: launches the REPL, or doctor if unset
 ```
 
-See [`docs/providers.md`](docs/providers.md) for provider setup and
-[`docs/mcp.md`](docs/mcp.md) for connecting MCP tool servers.
+See [`docs/providers.md`](docs/providers.md) for provider setup,
+[`docs/configuration.md`](docs/configuration.md) for the full config reference
+and stability policy, [`docs/mcp.md`](docs/mcp.md) for MCP tool servers, and
+[`docs/extending.md`](docs/extending.md) for adding providers and tools.
 
 ## Commands
 

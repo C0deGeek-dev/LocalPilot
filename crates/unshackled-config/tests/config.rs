@@ -181,6 +181,27 @@ fn resolve_model_is_none_without_a_configured_model() {
 }
 
 #[test]
+fn unknown_keys_are_ignored_for_forward_compatibility() {
+    Jail::expect_with(|jail| {
+        // A config written for a newer version (unknown top-level table and an
+        // unknown key in a known table) must still load on this binary.
+        let project = write(
+            jail,
+            "project.toml",
+            "[provider]\ndefault = \"local\"\nfuture_field = true\n\n[future_section]\nanything = 1\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+        assert_eq!(cfg.provider.default, "local");
+        Ok(())
+    });
+}
+
+#[test]
 fn mcp_servers_parse_with_command_and_args() {
     Jail::expect_with(|jail| {
         let project = write(
