@@ -2,16 +2,91 @@
 //!
 //! These cover the required MVP config tests: default loads, project overrides
 //! user, env overrides project, CLI overrides env, and secrets stay out of debug
-//! output. `figment::Jail` isolates the environment and working directory so the
-//! tests never touch a real home or config directory.
+//! output. The local isolation helper keeps environment-variable tests from
+//! touching the real process environment outside each test body.
 
-use figment::Jail;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use proptest::prelude::*;
 use unshackled_config::{load, CliOverrides, ConfigPaths};
 
-fn write(jail: &Jail, name: &str, contents: &str) -> Result<std::path::PathBuf, figment::Error> {
-    let path = jail.directory().join(name);
-    std::fs::write(&path, contents).map_err(|e| figment::Error::from(e.to_string()))?;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "UNSHACKLED_PROVIDER__DEFAULT",
+];
+
+struct TestEnv {
+    _guard: MutexGuard<'static, ()>,
+    dir: tempfile::TempDir,
+    original_cwd: PathBuf,
+    saved_env: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl TestEnv {
+    fn new() -> TestResult<Self> {
+        let guard = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir()?;
+        let original_cwd = std::env::current_dir()?;
+        let saved_env = ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in ENV_KEYS {
+            std::env::remove_var(key);
+        }
+        std::env::set_current_dir(dir.path())?;
+        Ok(Self {
+            _guard: guard,
+            dir,
+            original_cwd,
+            saved_env,
+        })
+    }
+
+    fn directory(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn set_env(&self, key: &str, value: &str) {
+        std::env::set_var(key, value);
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original_cwd);
+        for (key, value) in &self.saved_env {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn isolated(test: impl FnOnce(&TestEnv) -> TestResult) {
+    let env = TestEnv::new().unwrap();
+    test(&env).unwrap();
+}
+
+fn write(env: &TestEnv, name: &str, contents: &str) -> TestResult<PathBuf> {
+    let path = env.directory().join(name);
+    std::fs::write(&path, contents)?;
     Ok(path)
 }
 
@@ -19,15 +94,14 @@ fn write(jail: &Jail, name: &str, contents: &str) -> Result<std::path::PathBuf, 
 fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() {
     // A launcher that exports the documented Anthropic env vars (and no config
     // file) should produce a usable default provider — the drop-in path.
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         jail.set_env("ANTHROPIC_BASE_URL", "http://127.0.0.1:11435");
         jail.set_env("ANTHROPIC_MODEL", "local-model");
         // Gateway auth via AUTH_TOKEN; API_KEY is empty.
         jail.set_env("ANTHROPIC_API_KEY", "");
         jail.set_env("ANTHROPIC_AUTH_TOKEN", "secret");
 
-        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())?;
 
         // The env provider is registered under the existing default id without
         // changing `provider.default`.
@@ -47,9 +121,8 @@ fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() {
 
 #[test]
 fn default_config_loads() {
-    Jail::expect_with(|_jail| {
-        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+    isolated(|_jail| {
+        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
         assert_eq!(cfg.harness.attempts_per_step, 3);
         assert!(cfg.harness.auto_commit);
@@ -60,15 +133,14 @@ fn default_config_loads() {
 
 #[test]
 fn project_overrides_user() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let user = write(jail, "user.toml", "[provider]\ndefault = \"openai\"\n")?;
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
         let paths = ConfigPaths {
             user: Some(user),
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
         Ok(())
     });
@@ -76,15 +148,14 @@ fn project_overrides_user() {
 
 #[test]
 fn env_overrides_project() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
         jail.set_env("UNSHACKLED_PROVIDER__DEFAULT", "envprovider");
         let paths = ConfigPaths {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "envprovider");
         Ok(())
     });
@@ -92,7 +163,7 @@ fn env_overrides_project() {
 
 #[test]
 fn cli_overrides_env() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
         jail.set_env("UNSHACKLED_PROVIDER__DEFAULT", "envprovider");
         let cli = CliOverrides {
@@ -103,7 +174,7 @@ fn cli_overrides_env() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &cli).map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &cli)?;
         assert_eq!(cfg.provider.default, "cliprovider");
         Ok(())
     });
@@ -111,7 +182,7 @@ fn cli_overrides_env() {
 
 #[test]
 fn secrets_never_appear_in_debug_output() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -122,8 +193,7 @@ fn secrets_never_appear_in_debug_output() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
 
         // The config never holds the credential, only the env-var name.
         let debug = format!("{cfg:?}");
@@ -142,7 +212,7 @@ fn secrets_never_appear_in_debug_output() {
 
 #[test]
 fn namespaced_provider_options_are_preserved() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -152,8 +222,7 @@ fn namespaced_provider_options_are_preserved() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         let local = cfg.providers.get("local").expect("provider present");
         assert_eq!(local.kind, "openai-compatible");
         assert_eq!(
@@ -169,7 +238,7 @@ fn namespaced_provider_options_are_preserved() {
 
 #[test]
 fn resolve_model_uses_the_default_provider_when_unspecified() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -179,8 +248,7 @@ fn resolve_model_uses_the_default_provider_when_unspecified() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.resolve_model(None).as_deref(), Some("local-coder"));
         assert_eq!(
             cfg.resolve_model(Some("local")).as_deref(),
@@ -193,7 +261,7 @@ fn resolve_model_uses_the_default_provider_when_unspecified() {
 
 #[test]
 fn resolve_model_is_none_without_a_configured_model() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -203,8 +271,7 @@ fn resolve_model_is_none_without_a_configured_model() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.resolve_model(None), None);
         Ok(())
     });
@@ -212,7 +279,7 @@ fn resolve_model_is_none_without_a_configured_model() {
 
 #[test]
 fn provider_env_fallbacks_resolve_public_env_names() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -224,8 +291,7 @@ fn provider_env_fallbacks_resolve_public_env_names() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(
             cfg.resolve_credential("anthropic")
                 .expect("credential present")
@@ -239,7 +305,7 @@ fn provider_env_fallbacks_resolve_public_env_names() {
 
 #[test]
 fn provider_timeout_and_thinking_config_parse() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -249,8 +315,7 @@ fn provider_timeout_and_thinking_config_parse() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         let local = cfg.providers.get("local").expect("provider present");
         assert_eq!(local.request_timeout_secs, Some(600));
         assert_eq!(local.suppress_thinking, Some(true));
@@ -260,7 +325,7 @@ fn provider_timeout_and_thinking_config_parse() {
 
 #[test]
 fn unknown_keys_are_ignored_for_forward_compatibility() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         // A config written for a newer version (unknown top-level table and an
         // unknown key in a known table) must still load on this binary.
         let project = write(
@@ -272,8 +337,7 @@ fn unknown_keys_are_ignored_for_forward_compatibility() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
         Ok(())
     });
@@ -281,7 +345,7 @@ fn unknown_keys_are_ignored_for_forward_compatibility() {
 
 #[test]
 fn mcp_servers_parse_with_command_and_args() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -291,8 +355,7 @@ fn mcp_servers_parse_with_command_and_args() {
             user: None,
             project: Some(project),
         };
-        let cfg = load(&paths, &CliOverrides::default())
-            .map_err(|e| figment::Error::from(e.to_string()))?;
+        let cfg = load(&paths, &CliOverrides::default())?;
         let server = cfg.mcp.servers.get("files").expect("server present");
         assert_eq!(server.command, "my-mcp-server");
         assert_eq!(server.args, vec!["--root".to_string(), ".".to_string()]);
@@ -302,7 +365,7 @@ fn mcp_servers_parse_with_command_and_args() {
 
 #[test]
 fn invalid_config_names_the_offending_key() {
-    Jail::expect_with(|jail| {
+    isolated(|jail| {
         let project = write(
             jail,
             "project.toml",
@@ -332,6 +395,7 @@ proptest! {
         project in proptest::option::of("[a-z]{1,8}"),
         cli in proptest::option::of("[a-z]{1,8}"),
     ) {
+        let _env = TestEnv::new().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut paths = ConfigPaths::default();
         if let Some(u) = &user {
@@ -350,7 +414,6 @@ proptest! {
         };
         let cfg = load(&paths, &cli_overrides).unwrap();
         let expected = cli
-            .or_else(|| std::env::var("UNSHACKLED_PROVIDER__DEFAULT").ok())
             .or(project)
             .or(user)
             .unwrap_or_else(|| "local".to_string());
