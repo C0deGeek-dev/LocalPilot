@@ -94,6 +94,22 @@ pub struct Picker {
     pub selected: usize,
 }
 
+/// A large pasted block collapsed to a short placeholder in the input line. The
+/// full content is restored before the prompt is sent to the model.
+#[derive(Debug, Clone)]
+pub struct Paste {
+    pub placeholder: String,
+    pub content: String,
+}
+
+/// The first-run gate asking whether the workspace folder is trusted. Until it
+/// is answered the rest of the input is blocked.
+#[derive(Debug, Clone)]
+pub struct TrustPrompt {
+    /// The folder being entered, shown in full so the user can verify it.
+    pub path: String,
+}
+
 /// One transcript entry.
 #[derive(Debug, Clone)]
 pub struct TranscriptLine {
@@ -114,6 +130,12 @@ pub struct AppState {
     pub profile: Profile,
     pub approval: Option<ApprovalRequest>,
     pub picker: Option<Picker>,
+    /// A blocking first-run trust gate, shown until the folder is trusted.
+    pub trust: Option<TrustPrompt>,
+    /// Whether the workspace folder has been trusted this session.
+    pub trusted: bool,
+    /// Large pastes collapsed to placeholders, expanded back on submit.
+    pub pastes: Vec<Paste>,
     pub search: Option<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
@@ -141,6 +163,9 @@ impl AppState {
             profile,
             approval: None,
             picker: None,
+            trust: None,
+            trusted: false,
+            pastes: Vec::new(),
             search: None,
             plan: Vec::new(),
             should_quit: false,
@@ -148,6 +173,36 @@ impl AppState {
             spinner: 0,
             working_secs: 0,
         }
+    }
+
+    /// Collapse a pasted block to a short placeholder, stashing the full text to
+    /// be restored on submit. Returns the placeholder to insert into the input.
+    pub fn register_paste(&mut self, content: String) -> String {
+        let lines = content.lines().count().max(1);
+        let placeholder = format!("[pasted #{} · {lines} lines]", self.pastes.len() + 1);
+        self.pastes.push(Paste {
+            placeholder: placeholder.clone(),
+            content,
+        });
+        placeholder
+    }
+
+    /// Restore any collapsed pastes in `text` to their full content.
+    #[must_use]
+    pub fn expand_pastes(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for paste in &self.pastes {
+            out = out.replace(&paste.placeholder, &paste.content);
+        }
+        out
+    }
+
+    /// Take the current input, restoring collapsed pastes, and clear the set.
+    pub fn take_input_expanded(&mut self) -> String {
+        let raw = std::mem::take(&mut self.input);
+        let expanded = self.expand_pastes(&raw);
+        self.pastes.clear();
+        expanded
     }
 
     /// Apply a mapped runtime/UI event to the state.
@@ -225,4 +280,49 @@ pub enum UiEvent {
     ApprovalResolved,
     ToggleThinking,
     Quit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> AppState {
+        AppState::new(
+            Header {
+                version: "0".into(),
+                provider: "p".into(),
+                model: "m".into(),
+                workspace: "w".into(),
+                session_id: "s".into(),
+                update: None,
+            },
+            Mode::Agent,
+            Profile::Default,
+        )
+    }
+
+    #[test]
+    fn a_registered_paste_round_trips_through_its_placeholder() {
+        let mut state = state();
+        let body = "line one\nline two\nline three\nline four".to_string();
+        let placeholder = state.register_paste(body.clone());
+        assert!(placeholder.contains("#1"));
+        assert!(placeholder.contains("4 lines"));
+
+        state.input = format!("see this {placeholder} please");
+        let expanded = state.take_input_expanded();
+        assert_eq!(expanded, format!("see this {body} please"));
+        // The set is cleared once consumed, and the input is taken.
+        assert!(state.pastes.is_empty());
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn placeholders_are_numbered_per_paste() {
+        let mut state = state();
+        let first = state.register_paste("a\nb".into());
+        let second = state.register_paste("c\nd".into());
+        assert!(first.contains("#1"));
+        assert!(second.contains("#2"));
+    }
 }

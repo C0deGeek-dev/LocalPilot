@@ -31,7 +31,7 @@ use unshackled_sandbox::{
 use unshackled_store::Store;
 use unshackled_tui::{
     handle_input, render, AppInput, AppState, ApprovalRequest, Header, Key, Mode, PlanItem,
-    Profile as UiProfile, UiEvent,
+    Profile as UiProfile, TrustPrompt, UiEvent,
 };
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
@@ -162,6 +162,15 @@ pub async fn run_chat(
         update: crate::update::cached_notice(&cwd).await,
     };
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
+    // Ask once per folder before doing anything in it; trust is remembered across
+    // sessions. Already-trusted folders (and bypass, which is explicit) skip it.
+    if profile != Profile::Bypass && !crate::trust::is_trusted(&cwd) {
+        state.trust = Some(TrustPrompt {
+            path: cwd.display().to_string(),
+        });
+    } else {
+        state.trusted = true;
+    }
 
     let session_id = runtime.session_id();
     let mut terminal = enter_terminal()?;
@@ -197,12 +206,27 @@ async fn event_loop(
                 // Only key *presses*: Windows consoles also emit Release/Repeat
                 // events, which would otherwise double every character.
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if is_submit(key, &state.input) {
-                        let prompt = std::mem::take(&mut state.input);
+                    if state.trust.is_some() {
+                        // While the trust gate is up, route keys to it and persist
+                        // the decision when the folder is trusted.
+                        if let Some(mapped) = map_key(key) {
+                            handle_input(state, AppInput::Key(mapped));
+                        }
+                        if state.trusted {
+                            crate::trust::remember(cwd);
+                        }
+                    } else if is_newline(key, &state.input) {
+                        insert_newline(&mut state.input);
+                    } else if is_submit(key, &state.input) {
+                        // Expand collapsed pastes for the model, but keep the
+                        // compact form in the transcript.
+                        let shown = std::mem::take(&mut state.input);
+                        let prompt = state.expand_pastes(&shown);
+                        state.pastes.clear();
                         // Seed relevant accepted memory for this prompt (no-op
                         // without the learning feature or when nothing matches).
                         crate::context_inject::seed(cwd, runtime, &prompt);
-                        state.apply(UiEvent::UserMessage(prompt.clone()));
+                        state.apply(UiEvent::UserMessage(shown));
                         state.busy = true;
                         let outcome =
                             run_turn(terminal, state, runtime, approval_rx, &prompt).await;
@@ -212,8 +236,16 @@ async fn event_loop(
                         handle_input(state, AppInput::Key(mapped));
                     }
                 }
-                // Bracketed paste: insert the pasted text into the input.
-                Event::Paste(text) => state.input.push_str(&text),
+                // Bracketed paste: insert small pastes inline, but collapse large
+                // ones to a placeholder so the input line stays readable.
+                Event::Paste(text) if state.trust.is_none() => {
+                    if text.lines().count() >= 4 || text.len() > 400 {
+                        let placeholder = state.register_paste(text);
+                        state.input.push_str(&placeholder);
+                    } else {
+                        state.input.push_str(&text);
+                    }
+                }
                 _ => {}
             }
         }
@@ -316,23 +348,44 @@ fn is_cancel(key: KeyEvent) -> bool {
 }
 
 fn is_submit(key: KeyEvent, input: &str) -> bool {
-    // Only a plain Enter submits; any modifier (or Ctrl+J) makes a newline.
+    // Only a plain Enter submits; a newline request (see `is_newline`) does not.
     key.code == KeyCode::Enter
         && key.modifiers.is_empty()
         && !input.trim().is_empty()
         && !input.trim_start().starts_with('/')
+        && !ends_with_continuation(input)
+}
+
+/// A keypress that inserts a newline rather than submitting. Two paths so it works
+/// regardless of terminal: a modified Enter / Ctrl+J reaches us when the terminal
+/// reports enhanced keys (the kitty protocol); a trailing backslash before a plain
+/// Enter always works, even on terminals that collapse Ctrl+J and Enter.
+fn is_newline(key: KeyEvent, input: &str) -> bool {
+    match key.code {
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Enter if !key.modifiers.is_empty() => true,
+        KeyCode::Enter => ends_with_continuation(input),
+        _ => false,
+    }
+}
+
+/// Whether the line ends with a `\` continuation marker (ignoring trailing spaces).
+fn ends_with_continuation(input: &str) -> bool {
+    input.trim_end_matches(' ').ends_with('\\')
+}
+
+/// Insert a newline, consuming a trailing `\` continuation marker if one is present.
+fn insert_newline(input: &mut String) {
+    let kept = input.trim_end_matches(' ').len();
+    if input[..kept].ends_with('\\') {
+        input.truncate(kept - 1);
+    }
+    input.push('\n');
 }
 
 fn map_key(key: KeyEvent) -> Option<Key> {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlC),
-        // Newline in the input. Ctrl+J is the reliable binding — terminals often
-        // capture Alt+Enter (Windows Terminal toggles fullscreen) — but a
-        // modified Enter (Alt/Shift/Ctrl) is accepted too where it gets through.
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Key::Char('\n'))
-        }
-        KeyCode::Enter if !key.modifiers.is_empty() => Some(Key::Char('\n')),
         KeyCode::Char(c) => Some(Key::Char(c)),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace => Some(Key::Backspace),
@@ -370,7 +423,9 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
                 "recovering from a bad response…".to_string(),
             )),
             ModelHealth::Degraded => Some(UiEvent::Notice(
-                "model marked degraded after repeated bad output".to_string(),
+                "model marked degraded after repeated bad output — try a stronger \
+                 model/quant or check the endpoint"
+                    .to_string(),
             )),
             ModelHealth::Healthy => None,
         },

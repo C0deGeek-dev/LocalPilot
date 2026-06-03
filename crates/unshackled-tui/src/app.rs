@@ -65,6 +65,22 @@ pub fn handle_input(state: &mut AppState, input: AppInput) {
 }
 
 fn handle_key(state: &mut AppState, key: Key) {
+    // The trust gate is the top-most modal: nothing else is reachable until the
+    // folder is trusted or the session is declined.
+    if state.trust.is_some() {
+        match key {
+            Key::Char('y' | 'Y') | Key::Enter => {
+                state.trust = None;
+                state.trusted = true;
+            }
+            Key::Char('n' | 'N') | Key::Esc | Key::CtrlC => {
+                state.trust = None;
+                state.should_quit = true;
+            }
+            _ => {}
+        }
+        return;
+    }
     // Modal dialogs capture keys first.
     if state.approval.is_some() {
         if matches!(key, Key::Char('y') | Key::Char('n') | Key::Esc) {
@@ -98,7 +114,7 @@ fn handle_key(state: &mut AppState, key: Key) {
 }
 
 fn submit_input(state: &mut AppState) {
-    let line = std::mem::take(&mut state.input);
+    let line = state.take_input_expanded();
     if line.trim().is_empty() {
         return;
     }
@@ -138,4 +154,56 @@ pub fn run<B: Backend>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Header, TrustPrompt};
+
+    fn state() -> AppState {
+        let mut state = AppState::new(
+            Header {
+                version: "0".into(),
+                provider: "p".into(),
+                model: "m".into(),
+                workspace: "w".into(),
+                session_id: "s".into(),
+                update: None,
+            },
+            Mode::Agent,
+            Profile::Default,
+        );
+        state.trust = Some(TrustPrompt {
+            path: "/some/folder".into(),
+        });
+        state
+    }
+
+    #[test]
+    fn trusting_the_folder_clears_the_gate_and_records_trust() {
+        let mut state = state();
+        handle_key(&mut state, Key::Char('y'));
+        assert!(state.trust.is_none());
+        assert!(state.trusted);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn declining_the_trust_gate_quits() {
+        let mut state = state();
+        handle_key(&mut state, Key::Char('n'));
+        assert!(state.trust.is_none());
+        assert!(!state.trusted);
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn the_trust_gate_swallows_unrelated_keys() {
+        let mut state = state();
+        handle_key(&mut state, Key::Char('x'));
+        // Still gated; the stray key did not leak into the input.
+        assert!(state.trust.is_some());
+        assert!(state.input.is_empty());
+    }
 }

@@ -8,21 +8,25 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::state::{AppState, ApprovalRequest, Picker, Profile};
+use crate::state::{AppState, ApprovalRequest, Picker, Profile, TrustPrompt};
 
 /// Below this width the optional side panel collapses; the footer stays visible.
 const NARROW_WIDTH: u16 = 80;
+
+/// Most text rows the input box grows to before it starts scrolling.
+const MAX_INPUT_TEXT_ROWS: u16 = 10;
 
 /// Draw the entire UI for the current state.
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
     let narrow = area.width < NARROW_WIDTH;
 
+    let input_height = input_box_height(state, area);
     let rows = Layout::vertical([
-        Constraint::Length(3), // header
-        Constraint::Min(3),    // body
-        Constraint::Length(3), // input
-        Constraint::Length(2), // footer (always visible)
+        Constraint::Length(3),            // header
+        Constraint::Min(3),               // body
+        Constraint::Length(input_height), // input (grows with content, then scrolls)
+        Constraint::Length(2),            // footer (always visible)
     ])
     .split(area);
 
@@ -37,6 +41,40 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(picker) = &state.picker {
         render_picker(frame, area, picker);
     }
+    // The trust gate draws on top of everything else.
+    if let Some(trust) = &state.trust {
+        render_trust(frame, area, trust);
+    }
+}
+
+/// The number of terminal rows a string occupies once wrapped to `width`.
+fn wrapped_rows(text: &str, width: u16) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let width = width.max(1) as usize;
+    text.split('\n')
+        .map(|line| {
+            let chars = line.chars().count();
+            if chars == 0 {
+                1
+            } else {
+                chars.div_ceil(width)
+            }
+        })
+        .sum()
+}
+
+/// Height of the bordered input box: it grows with the content up to a cap, then
+/// the content scrolls inside a fixed box, never starving the header/body/footer.
+fn input_box_height(state: &AppState, area: Rect) -> u16 {
+    let inner_width = area.width.saturating_sub(2);
+    let text_rows = wrapped_rows(&state.input, inner_width).max(1) as u16;
+    // Leave room for header (3), footer (2), the body minimum (3), and this box's
+    // own two border rows.
+    let room = area.height.saturating_sub(3 + 2 + 3 + 2);
+    let cap = room.clamp(1, MAX_INPUT_TEXT_ROWS);
+    text_rows.min(cap) + 2
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -153,13 +191,44 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             state.working_secs
         )
     } else {
-        "input  (Enter to send · Ctrl+J or Shift+Enter for newline)".to_string()
+        "input  (Enter sends · trailing \\, Ctrl+J, or Shift+Enter make a newline)".to_string()
     };
+    // Keep the end of the input visible: when the text is taller than the box,
+    // scroll so the most recently typed rows show.
+    let inner_width = area.width.saturating_sub(2);
+    let total_rows = wrapped_rows(&state.input, inner_width) as u16;
+    let visible_rows = area.height.saturating_sub(2).max(1);
+    let scroll = total_rows.saturating_sub(visible_rows);
     frame.render_widget(
         Paragraph::new(state.input.clone())
             .block(Block::bordered().title(title))
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         area,
+    );
+}
+
+fn render_trust(frame: &mut Frame, area: Rect, trust: &TrustPrompt) {
+    let popup = centered(area, 72, 11);
+    frame.render_widget(Clear, popup);
+    let text = Text::from(vec![
+        Line::raw("Starting a session in this folder:"),
+        Line::raw(""),
+        Line::styled(
+            trust.path.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::raw("Once trusted, Unshackled may read, edit, and run commands here"),
+        Line::raw("subject to the active permission profile."),
+        Line::raw(""),
+        Line::raw("[y] trust this folder    [n] exit"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::bordered().title("trust this folder?"))
+            .wrap(Wrap { trim: false }),
+        popup,
     );
 }
 
