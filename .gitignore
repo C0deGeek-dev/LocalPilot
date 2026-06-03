@@ -1,6 +1,8 @@
 /target/
 /.unshackled/
 /.harness/
+/.localmind/
+/.localmind.toml
 *.log
 *.tmp
 .env
