@@ -60,6 +60,7 @@ test_command = "cargo test"
 require_tests_before_impl = "warn"
 suite_green = "block"
 no_stale_uncommitted = "block"
+decision_logged = "warn"
 ```
 
 ### `brief.md`
@@ -102,6 +103,25 @@ Completed steps include metadata:
   - commit: abc1234
   - attempts: 1
 ```
+
+### `DECISIONS.md`
+
+Append-only log of deviations the loop makes from `brief.md` / `PROGRESS.md`
+during a run. A replan, a scope change, or any departure from a plan literal is
+recorded here — never left implicit in a step — so the reason survives a context
+reset and the next run reads why the plan changed.
+
+```markdown
+# Decisions: <name>
+
+- D001 · <date> · <title>
+  - decision: <what changed>
+  - rationale: <why>
+  - refs: <step number(s) / files>
+```
+
+Like `brief.md` and `PROGRESS.md`, this file is authoritative and user-editable
+(ADR-0003). It is optional for a clean run and created on first deviation.
 
 ## Commands
 
@@ -236,6 +256,13 @@ Before step completion, configured tests must pass.
 
 Before final commit, `PROGRESS.md` must reflect completed state.
 
+#### `decision_logged`
+
+Before a replan, or before completing a step that departed from a plan literal,
+require a matching `DECISIONS.md` entry. Keeps the reason for a deviation durable
+across context resets instead of vanishing into a step. Configurable
+`warn`/`block`.
+
 #### `commit_message_clean`
 
 Commit messages must not include secrets, vendor-internal references, or private
@@ -253,7 +280,8 @@ For each step:
 2. Try to complete the step.
 3. If rules return `retry`, keep context and feed back the reason.
 4. If rules return `discard`, save attempt log and restore committed state.
-5. After repeated discard/retry failures, replan the step with attempt logs.
+5. After repeated discard/retry failures, replan the step with attempt logs and
+   record the replan in `DECISIONS.md`.
 6. Cap replans to avoid runaway automation.
 
 ## Commit Policy
