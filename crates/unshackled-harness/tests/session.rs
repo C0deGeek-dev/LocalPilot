@@ -201,6 +201,28 @@ async fn aborts_a_degenerate_output_flood_early() {
 }
 
 #[tokio::test]
+async fn degenerate_output_retries_without_tool_schemas() {
+    let mut flood: Vec<_> = (0..64)
+        .map(|_| Ok(ModelEvent::TextDelta("/".to_string())))
+        .collect();
+    flood.push(Ok(ModelEvent::Done));
+    let provider = Arc::new(FakeProvider::new().script(flood).text("recovered"));
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+
+    let reason = h.runtime.run_turn("ping", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::Done);
+    let requests = provider.requests();
+    assert!(!requests[0].tools.is_empty());
+    assert!(requests[1].tools.is_empty());
+}
+
+#[tokio::test]
 async fn update_plan_tool_emits_a_plan_event() {
     let provider = FakeProvider::new()
         .tool_call(

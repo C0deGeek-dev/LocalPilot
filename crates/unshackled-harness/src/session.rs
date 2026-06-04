@@ -298,6 +298,7 @@ impl SessionRuntime {
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
         let mut tool_calls_used = 0u32;
+        let mut tools_enabled = true;
 
         for _ in 0..self.config.max_turns {
             if cancel.is_cancelled() {
@@ -311,8 +312,13 @@ impl SessionRuntime {
                 used,
                 limit: self.config.context_token_limit,
             });
-            let request = ModelRequest::new(self.config.model.clone(), compacted.messages)
-                .with_tools(self.tool_specs());
+            let tools = if tools_enabled {
+                self.tool_specs()
+            } else {
+                Vec::new()
+            };
+            let request =
+                ModelRequest::new(self.config.model.clone(), compacted.messages).with_tools(tools);
 
             let mut stream = match self.open_stream(&request, events, cancel).await {
                 Ok(stream) => stream,
@@ -400,6 +406,17 @@ impl SessionRuntime {
                 });
                 if self.recovery.health() == ModelHealth::Degraded {
                     return self.stop(events, StopReason::Degraded);
+                }
+                if matches!(
+                    kind,
+                    unshackled_recovery::BadOutputKind::SlashFlood
+                        | unshackled_recovery::BadOutputKind::RepeatedTokenLoop
+                ) && tools_enabled
+                {
+                    tools_enabled = false;
+                    let _ = events.send(RuntimeEvent::Warning(
+                        "retrying the degenerate response without tool schemas".to_string(),
+                    ));
                 }
                 self.messages.push(Message::text(Role::User, REPAIR_PROMPT));
                 continue;

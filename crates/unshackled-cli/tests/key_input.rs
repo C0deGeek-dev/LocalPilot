@@ -3,7 +3,7 @@
 #[path = "../src/key_input.rs"]
 mod key_input;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)
@@ -59,4 +59,20 @@ fn trailing_backslash_keeps_plain_enter_as_newline() {
     let input = "hello \\".to_string();
     assert!(key_input::is_newline(event, &input));
     assert!(!key_input::is_submit(event, &input));
+}
+
+#[test]
+fn only_press_events_are_actions() {
+    assert!(key_input::is_key_action(KeyEvent::new_with_kind(
+        KeyCode::Left,
+        KeyModifiers::empty(),
+        KeyEventKind::Press
+    )));
+    for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+        assert!(!key_input::is_key_action(KeyEvent::new_with_kind(
+            KeyCode::Left,
+            KeyModifiers::empty(),
+            kind
+        )));
+    }
 }

@@ -1,4 +1,8 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+pub(crate) fn is_key_action(key: KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+}
 
 pub(crate) fn is_cancel(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))

@@ -12,9 +12,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
@@ -34,7 +33,7 @@ use unshackled_tui::{
     Profile as UiProfile, TrustPrompt, UiEvent,
 };
 
-use crate::key_input::{is_cancel, is_newline, is_submit};
+use crate::key_input::{is_cancel, is_key_action, is_newline, is_submit};
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
@@ -205,9 +204,7 @@ async fn event_loop(
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                // Only key *presses*: Windows consoles also emit Release/Repeat
-                // events, which would otherwise double every character.
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key) if is_key_action(key) => {
                     if state.trust.is_some() {
                         // While the trust gate is up, route keys to it and persist
                         // the decision when the folder is trusted.
@@ -241,14 +238,7 @@ async fn event_loop(
                 }
                 // Bracketed paste: insert small pastes inline, but collapse large
                 // ones to a placeholder so the input line stays readable.
-                Event::Paste(text) if state.trust.is_none() => {
-                    if text.lines().count() >= 4 || text.len() > 400 {
-                        let placeholder = state.register_paste(text);
-                        state.insert_input(&placeholder);
-                    } else {
-                        state.insert_input(&text);
-                    }
-                }
+                Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
                 _ => {}
             }
         }
@@ -270,10 +260,25 @@ async fn run_turn(
 
     // The reply channel for an approval the user has not yet answered.
     let mut pending: Option<oneshot::Sender<bool>> = None;
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        terminal.draw(|frame| render(frame, state))?;
         tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                state.spinner = state.spinner.wrapping_add(1);
+                state.working_secs = started.elapsed().as_secs();
+                // Process a bounded batch so held keys and pasted text remain
+                // responsive without starving model events indefinitely.
+                for _ in 0..64 {
+                    if !event::poll(Duration::ZERO)? {
+                        break;
+                    }
+                    pending = resolve_event(state, pending, event::read()?, &cancel);
+                }
+                terminal.draw(|frame| render(frame, state))?;
+            }
             _ = &mut turn => {
                 // Drain any events still buffered so a fast response is not lost
                 // when the turn future completes in the same poll. Continue past
@@ -293,6 +298,10 @@ async fn run_turn(
                 state.apply(UiEvent::TurnComplete);
                 break;
             }
+            Some(call) = approval_rx.recv() => {
+                state.apply(UiEvent::ApprovalRequested(call.request));
+                pending = Some(call.reply);
+            }
             received = rx.recv() => {
                 match received {
                     Ok(event) => {
@@ -304,39 +313,34 @@ async fn run_turn(
                     Err(broadcast::error::RecvError::Closed) => {}
                 }
             }
-            Some(call) = approval_rx.recv() => {
-                state.apply(UiEvent::ApprovalRequested(call.request));
-                pending = Some(call.reply);
-            }
-            // Tick: advance the working indicator and poll the keyboard (answer an
-            // open modal, or cancel the turn with Ctrl-C).
-            _ = tokio::time::sleep(Duration::from_millis(80)) => {
-                state.spinner = state.spinner.wrapping_add(1);
-                state.working_secs = started.elapsed().as_secs();
-                if event::poll(Duration::ZERO)? {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
-                            pending = resolve_key(state, pending, key, &cancel);
-                        }
-                    }
-                }
-            }
         }
     }
     terminal.draw(|frame| render(frame, state))?;
     Ok(())
 }
 
-/// Apply a keypress received mid-turn. When a modal is open, `y`/Enter approves
-/// and `n`/Esc denies; other keys are ignored so a stray press cannot answer.
-/// With no modal open, Ctrl-C cancels the turn.
-fn resolve_key(
+/// Apply a terminal event received mid-turn. Approval dialogs capture their
+/// decision keys; otherwise Ctrl-C cancels while ordinary editing and paste
+/// events continue updating the next prompt.
+fn resolve_event(
     state: &mut AppState,
     pending: Option<oneshot::Sender<bool>>,
-    key: KeyEvent,
+    event: Event,
     cancel: &CancellationToken,
 ) -> Option<oneshot::Sender<bool>> {
     if let Some(reply) = pending {
+        let Event::Key(key) = event else {
+            return Some(reply);
+        };
+        if !is_key_action(key) {
+            return Some(reply);
+        }
+        if is_cancel(key) {
+            let _ = reply.send(false);
+            state.apply(UiEvent::ApprovalResolved);
+            cancel.cancel();
+            return None;
+        }
         let decision = match key.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(true),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(false),
@@ -351,10 +355,33 @@ fn resolve_key(
             None => Some(reply),
         }
     } else {
-        if is_cancel(key) {
-            cancel.cancel();
+        match event {
+            Event::Key(key) if is_key_action(key) => {
+                if is_cancel(key) {
+                    cancel.cancel();
+                } else if is_newline(key, &state.input) {
+                    state.insert_input_newline();
+                } else if !is_submit(key, &state.input)
+                    && !matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+                {
+                    if let Some(mapped) = map_key(key) {
+                        handle_input(state, AppInput::Key(mapped));
+                    }
+                }
+            }
+            Event::Paste(text) => insert_paste(state, text),
+            _ => {}
         }
         None
+    }
+}
+
+fn insert_paste(state: &mut AppState, text: String) {
+    if text.lines().count() >= 4 || text.len() > 400 {
+        let placeholder = state.register_paste(text);
+        state.insert_input(&placeholder);
+    } else {
+        state.insert_input(&text);
     }
 }
 

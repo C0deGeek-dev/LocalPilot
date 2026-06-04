@@ -214,3 +214,17 @@ fn input_cursor_is_visible_at_the_edit_position() {
         ratatui::layout::Position::new(3, 14)
     );
 }
+
+#[test]
+fn transcript_follows_the_latest_response_rows() {
+    let mut state = base();
+    state.transcript.clear();
+    state.streaming = (1..=20)
+        .map(|line| format!("response line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = render_string(&state, 60, 12);
+
+    assert!(rendered.contains("response line 20"));
+    assert!(!rendered.contains("response line 1 "));
+}

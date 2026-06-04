@@ -188,12 +188,24 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &AppState) {
         Some(q) if !q.is_empty() => format!("transcript [search: {q}]"),
         _ => "transcript".to_string(),
     };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(title))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let total_rows: usize = lines
+        .iter()
+        .map(|line| {
+            let width = line.width();
+            if width == 0 {
+                1
+            } else {
+                width.div_ceil(inner_width)
+            }
+        })
+        .sum();
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title(title))
+        .wrap(Wrap { trim: false });
+    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let scroll = u16::try_from(total_rows.saturating_sub(visible_rows)).unwrap_or(u16::MAX);
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
 fn render_thinking(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -229,7 +241,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             .scroll((scroll, 0)),
         area,
     );
-    if !state.busy && state.trust.is_none() && state.approval.is_none() && state.picker.is_none() {
+    if state.trust.is_none() && state.approval.is_none() && state.picker.is_none() {
         frame.set_cursor_position(Position::new(
             area.x.saturating_add(1).saturating_add(cursor_col),
             area.y
@@ -415,5 +427,18 @@ mod tests {
         let mut state = state_with_input("abcd\nef");
         state.input_cursor = state.input.len();
         assert_eq!(input_cursor_position(&state, 3), (2, 2));
+    }
+
+    #[test]
+    fn busy_input_keeps_the_cursor_visible() {
+        let mut state = state_with_input("next");
+        state.input_cursor = state.input.len();
+        state.busy = true;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &state))
+            .expect("render succeeds");
+        assert!(terminal.get_cursor_position().is_ok());
     }
 }

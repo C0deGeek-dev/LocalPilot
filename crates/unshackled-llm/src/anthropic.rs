@@ -11,7 +11,7 @@
 //! Anthropic API reference (<https://docs.anthropic.com/en/api/messages>). No
 //! vendor SDK code, prompts, or identifiers were copied.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -372,6 +372,9 @@ type EventQueue = VecDeque<Result<ModelEvent, ProviderError>>;
 struct SseDecoder {
     buf: String,
     tools: BTreeMap<u64, ToolAccum>,
+    open_blocks: BTreeSet<u64>,
+    closed_blocks: usize,
+    saw_content_delta: bool,
     input_tokens: u64,
     done: bool,
     warned_stop_reason: bool,
@@ -400,7 +403,8 @@ impl SseDecoder {
             self.process_line(line.trim(), out);
         }
         if !self.done {
-            if self.saw_stop_reason {
+            let content_complete = !self.saw_content_delta || self.closed_blocks > 0;
+            if self.saw_stop_reason && self.open_blocks.is_empty() && content_complete {
                 self.emit_done(out);
             } else {
                 self.done = true;
@@ -442,8 +446,9 @@ impl SseDecoder {
                     .unwrap_or(0);
             }
             Some("content_block_start") => {
+                let index = event["index"].as_u64().unwrap_or(0);
+                self.open_blocks.insert(index);
                 if event["content_block"]["type"].as_str() == Some("tool_use") {
-                    let index = event["index"].as_u64().unwrap_or(0);
                     let accum = self.tools.entry(index).or_default();
                     accum.id = event["content_block"]["id"]
                         .as_str()
@@ -455,9 +460,15 @@ impl SseDecoder {
                         .to_string();
                 }
             }
-            Some("content_block_delta") => self.handle_delta(event, out),
+            Some("content_block_delta") => {
+                self.saw_content_delta = true;
+                self.handle_delta(event, out);
+            }
             Some("content_block_stop") => {
                 let index = event["index"].as_u64().unwrap_or(0);
+                if self.open_blocks.remove(&index) {
+                    self.closed_blocks = self.closed_blocks.saturating_add(1);
+                }
                 self.flush_tool(index, out);
             }
             Some("message_delta") => {
@@ -472,7 +483,16 @@ impl SseDecoder {
                     self.warn_for_stop_reason(reason, out);
                 }
             }
-            Some("message_stop") => self.emit_done(out),
+            Some("message_stop") => {
+                if self.open_blocks.is_empty() {
+                    self.emit_done(out);
+                } else {
+                    self.done = true;
+                    out.push_back(Err(ProviderError::StreamDecode(
+                        "stream stopped before all content blocks completed".to_string(),
+                    )));
+                }
+            }
             Some("error") => {
                 let message = event["error"]["message"]
                     .as_str()
@@ -592,6 +612,7 @@ mod tests {
             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
             "data: {\"type\":\"message_stop\"}\n",
         ]);
@@ -715,9 +736,45 @@ mod tests {
     #[test]
     fn stop_reason_is_a_completion_marker_for_compatible_servers() {
         let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"complete\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
         ]);
         assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn stop_reason_does_not_complete_an_open_text_block() {
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut off mid wor\"}}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
+        ]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Err(ProviderError::StreamDecode(message))
+                if message.contains("completion marker")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn stop_reason_does_not_complete_unframed_text_deltas() {
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut off mid wor\"}}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
+        ]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Err(ProviderError::StreamDecode(message))
+                if message.contains("completion marker")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(ModelEvent::Done))));
     }
 
     #[test]

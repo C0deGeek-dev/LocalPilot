@@ -235,4 +235,20 @@ mod tests {
         assert_eq!(state.input, "bc");
         assert_eq!(state.input_cursor, state.input.len());
     }
+
+    #[test]
+    fn busy_state_does_not_block_input_editing() {
+        let mut state = state();
+        state.trust = None;
+        state.busy = true;
+        state.input = "ac".to_string();
+        state.input_cursor = 1;
+
+        handle_key(&mut state, Key::Char('b'));
+        handle_key(&mut state, Key::Left);
+        handle_key(&mut state, Key::Right);
+
+        assert_eq!(state.input, "abc");
+        assert_eq!(state.input_cursor, 2);
+    }
 }
