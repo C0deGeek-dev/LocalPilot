@@ -54,13 +54,50 @@ Project-local config.
 mode = "agent"
 attempts_per_step = 3
 auto_commit = true
-test_command = "cargo test"
+test_command = "cargo test"   # shorthand; equivalent to a single cadence="phase" check
 
 [harness.rules]
 require_tests_before_impl = "warn"
 suite_green = "block"
 no_stale_uncommitted = "block"
 decision_logged = "warn"
+quality_gate = "block"
+
+# Discovered, user-ratified quality gate. Each check is run through the
+# permission engine like any shell command. cadence: "step" | "phase".
+# auto_fix: true | "safe" | false. severity maps a check's findings to a verdict.
+[[harness.checks]]
+name = "fmt"
+command = "cargo fmt --check"
+fix_command = "cargo fmt"
+cadence = "step"
+auto_fix = true
+
+[[harness.checks]]
+name = "clippy"
+command = "cargo clippy --workspace --all-targets -- -D warnings"
+fix_command = "cargo clippy --fix --allow-dirty --allow-staged"
+cadence = "step"
+auto_fix = "safe"
+
+[[harness.checks]]
+name = "test"
+command = "cargo test --workspace"
+cadence = "phase"
+auto_fix = false
+
+[[harness.checks]]
+name = "deps"
+command = "cargo machete"
+cadence = "phase"
+auto_fix = false
+
+[[harness.checks]]
+name = "audit"
+command = "cargo audit"
+cadence = "phase"
+auto_fix = false
+severity = "block"   # advisory findings need a human/dependency decision
 ```
 
 ### `brief.md`
@@ -250,7 +287,16 @@ or block when implementation files are edited before tests.
 
 #### `suite_green`
 
-Before step completion, configured tests must pass.
+Before step completion, configured tests must pass. `suite_green` is the
+`test` check of the quality gate; it remains named for back-compat with a bare
+`test_command`.
+
+#### `quality_gate`
+
+At each check's cadence (`step` at `step_complete`, `phase` at a phase
+boundary), run the ratified `[[harness.checks]]` and act on findings per the
+Quality Gate section. Generalizes `suite_green` from one test command to the
+full discovered gate. Per-check `severity` overrides the rule's default verdict.
 
 #### `progress_updated`
 
@@ -271,6 +317,55 @@ implementation names.
 #### `attempt_limit`
 
 After `attempts_per_step` failures, stop or replan depending on config.
+
+## Quality Gate
+
+The quality gate is the discovered, language-specific set of inspection checks
+the harness runs and acts on as code is written (ADR-0009). It generalizes the
+single `test_command` into an ordered set of `[[harness.checks]]`.
+
+### Toolchain profiles
+
+Built-in profiles per stack (e.g. Rust, Node, Python, PowerShell, Go) declare
+the default checks, how to interpret each check's output into findings, and which
+findings are safely auto-fixable. Profiles are original code in this repository;
+they are the fixed abstraction. The specific commands, versions, and paths are
+*discovered*, not hardcoded into the engine.
+
+### Discovery and ratification
+
+During intake/plan setup, the harness detects the project's stack, selects the
+matching profile(s), and probes which tools are actually available. It then
+*proposes* a gate. Discovered commands are untrusted: nothing runs until the
+user ratifies the gate into committed `.unshackled.toml`. After ratification each
+check runs through the permission engine and sandbox like any other shell
+command (see [`docs/05`](05-tool-system.md), [`docs/07`](07-security-and-privacy.md)).
+A re-probe proposes additions when the toolchain changes; additions are
+ratified, never auto-adopted.
+
+### Cadence
+
+Each check declares a cadence. `step` checks (format, lint on changed files) run
+at `step_complete` for fast feedback. `phase` checks (whole-suite test,
+dependency hygiene, advisory audit, deep static analysis) run at phase
+boundaries to avoid paying full-suite cost on every step.
+
+### Acting on findings
+
+Findings map to verdicts:
+
+- A check with `auto_fix = true` (deterministic formatter) applies its
+  `fix_command` and re-runs. `auto_fix = "safe"` applies only the tool's own
+  safe-fix mode (e.g. a linter's `--fix`); anything left is a finding.
+- Remaining lint/test failures return `retry`: the failure is fed back to the
+  model, bounded by `attempt_limit`, then `replan` (recorded in `DECISIONS.md`).
+- Dependency and advisory findings (`audit`, license/ban) return `block`: they
+  need a human or dependency decision, not a code edit.
+- The harness never blind-edits logic to satisfy a check; it fixes via declared
+  fixers or feeds the failure back through the loop.
+
+Auto-fix edits are ordinary project-write side effects and are subject to the
+permission profile and commit policy like any other change.
 
 ## Anti-Sunk-Cost Loop
 

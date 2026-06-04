@@ -82,6 +82,15 @@ Rules:
 - capture stdout/stderr separately
 - never chain destructive commands generated from untrusted path lists
 
+### quality-gate checks
+
+The harness quality gate ([`docs/06`](06-harness-spec.md)) runs its ratified
+`[[harness.checks]]` commands through `run_shell` — not a side channel. A check
+command is classified, permission-checked, timed, and captured like any other
+shell command; ratification at setup records the command, it does not exempt it
+from the engine. Auto-fix invocations (`fix_command`) are project-write side
+effects and are mediated the same way.
+
 ### `git_status`
 
 Reads repository state.

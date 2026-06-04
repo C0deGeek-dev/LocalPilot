@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0009: Discovered Project Quality Gate
+
+Status: accepted
+
+The harness's single `test_command` is generalized into a quality gate: a set of
+language-specific inspection checks — format, lint, test, dependency hygiene,
+advisory audit, static analysis — drawn from the project's own toolchain rather
+than hardcoded into the engine. Built-in toolchain profiles per stack declare
+the default checks, how to interpret a check's findings, and which findings are
+safely auto-fixable; a discovery step detects the stack, probes which tools are
+actually available, and proposes a gate the user ratifies into committed
+`.unshackled.toml`. The rule engine runs checks at a per-check cadence (fast
+checks each step, full checks at phase boundaries) and acts on findings: safe
+deterministic fixers are applied and re-run, remaining failures feed the
+anti-sunk-cost loop (retry, bounded, then replan recorded in `DECISIONS.md`), and
+dependency/audit findings block for a human decision. Discovered commands are
+untrusted — discovery proposes, the user ratifies, and every check runs through
+the same permission engine and sandbox as any other shell command.
+
+Reason:
+
+- replaces a single test hook with real per-language cleanup and inspection
+  without baking tool lists into the engine
+- keeps the engine stack-neutral: the abstraction is built in, the instances are
+  discovered (the spirit of ADR-0002)
+- makes findings actionable inside the loop instead of advisory, with bounded
+  auto-fix and replan rather than runaway churn
+- preserves the security model: discovered commands are ratified once and always
+  mediated by the permission engine ([`docs/07`](07-security-and-privacy.md)),
+  never auto-trusted
+- per-check cadence keeps fast per-step feedback without paying full-suite cost
+  on every step
+
 ## ADR-0008: Anthropic Messages API as the Second Provider
 
 Status: accepted

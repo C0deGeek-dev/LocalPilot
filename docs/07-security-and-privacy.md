@@ -83,6 +83,25 @@ Default decisions:
 | privileged | ask with explicit warning | deny |
 | unknown | ask | deny |
 
+## Discovered Tooling
+
+The harness quality gate discovers language-specific check commands from the
+project toolchain (ADR-0009). Discovery is untrusted input and must not become
+execution by itself:
+
+- Discovery *proposes* a gate; the user *ratifies* it into committed
+  `.unshackled.toml`. Nothing discovered runs before ratification.
+- Ratified check and fix commands are still classified and mediated by the
+  permission engine and shell policy above — ratification records intent, it does
+  not grant a standing bypass.
+- A non-interactive harness run executes only the ratified gate; a newly
+  discovered tool is proposed for the next ratification, never auto-run.
+- Auto-fix commands are `project-write` (or higher) and follow the same default
+  decisions as any other write.
+- A discovered command that classifies as `destructive`, `privileged`, or
+  `network` is surfaced with its class at ratification time, not silently
+  accepted into the gate.
+
 ## Permission Profiles
 
 The permission engine is configurable so users can trade safety for speed
