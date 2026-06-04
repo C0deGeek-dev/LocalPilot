@@ -7,6 +7,8 @@
 
 mod discovery;
 mod profiles;
+mod runner;
 
 pub use discovery::{program_on_path, propose_gate, ProposedCheck};
 pub use profiles::ToolchainProfile;
+pub use runner::{CheckOutcome, CheckRunner, CheckStatus, QUALITY_CHECK_TOOL};
