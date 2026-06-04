@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use unshackled_config::redact;
-use unshackled_config::{AutoFix, CheckConfig};
+use unshackled_config::{AutoFix, CheckConfig, RuleSeverity};
 use unshackled_sandbox::{
     classify, Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest,
 };
@@ -51,6 +51,9 @@ pub struct CheckOutcome {
     pub detail: String,
     /// Whether a fixer ran and the check was re-run.
     pub fixed: bool,
+    /// The check's configured severity, carried so the `quality_gate` rule can
+    /// apply a per-check override (e.g. an advisory `audit` blocks).
+    pub severity: Option<RuleSeverity>,
 }
 
 impl CheckOutcome {
@@ -169,6 +172,7 @@ impl<'a> CheckRunner<'a> {
             status,
             detail,
             fixed,
+            severity: check.severity,
         }
     }
 
