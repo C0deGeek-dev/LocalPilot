@@ -7,7 +7,9 @@
 
 use indexmap::IndexMap;
 use unshackled_config::redact::contains_secret;
-use unshackled_config::RuleSeverity;
+use unshackled_config::{Cadence, RuleSeverity};
+
+use crate::quality::{CheckOutcome, CheckStatus};
 
 /// When a rule runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +25,7 @@ pub enum Trigger {
     PreCommit,
     PostTest,
     StepComplete,
+    PhaseComplete,
 }
 
 /// A rule's decision.
@@ -72,6 +75,9 @@ pub struct RuleContext {
     pub editing_impl_before_tests: bool,
     pub attempts: u32,
     pub max_attempts: u32,
+    /// Outcomes of the quality-gate checks that ran for this trigger, consumed by
+    /// the `quality_gate` rule.
+    pub gate_outcomes: Vec<CheckOutcome>,
 }
 
 /// A harness rule.
@@ -177,6 +183,13 @@ rule!(
     default = RuleSeverity::Block,
     triggers = [StepComplete]
 );
+rule!(
+    QualityGate,
+    "quality_gate",
+    critical = true,
+    default = RuleSeverity::Block,
+    triggers = [StepComplete, PhaseComplete]
+);
 
 const PROHIBITED_COMMIT_TERMS: &[&str] = &["leaked", "source-map", "private endpoint"];
 
@@ -276,6 +289,93 @@ impl AttemptLimit {
     }
 }
 
+impl QualityGate {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+        gate_verdict(&ctx.gate_outcomes, severity)
+    }
+}
+
+/// Reduce quality-gate outcomes to one verdict. A passing check contributes
+/// `Allow`; a denied or un-runnable check blocks; a failing check maps by its
+/// configured severity — explicit `block` (e.g. `audit`) blocks, `warn` warns,
+/// `off` is ignored, and the default (no override) is `retry`, the actionable
+/// path the loop feeds back to the model. The rule's own severity is a ceiling:
+/// `warn` softens everything to a warning, `off` disables the gate.
+fn gate_verdict(outcomes: &[CheckOutcome], rule_severity: RuleSeverity) -> Verdict {
+    if rule_severity == RuleSeverity::Off {
+        return Verdict::Allow;
+    }
+    let mut worst = Verdict::Allow;
+    for outcome in outcomes {
+        let verdict = outcome_verdict(outcome);
+        if rank(&verdict) > rank(&worst) {
+            worst = verdict;
+        }
+    }
+    apply_ceiling(worst, rule_severity)
+}
+
+fn outcome_verdict(outcome: &CheckOutcome) -> Verdict {
+    let name = &outcome.name;
+    match outcome.status {
+        CheckStatus::Passed => Verdict::Allow,
+        CheckStatus::Denied => Verdict::Block(format!(
+            "quality check `{name}` was denied by the permission engine"
+        )),
+        CheckStatus::Errored => Verdict::Block(format!("quality check `{name}` could not run")),
+        CheckStatus::Failed => match outcome.severity {
+            Some(RuleSeverity::Off) => Verdict::Allow,
+            Some(RuleSeverity::Warn) => {
+                Verdict::Warn(format!("quality check `{name}` reported findings"))
+            }
+            Some(RuleSeverity::Block) => {
+                Verdict::Block(format!("quality check `{name}` reported blocking findings"))
+            }
+            None => Verdict::Retry(format!(
+                "quality check `{name}` failed; fix the findings and retry"
+            )),
+        },
+    }
+}
+
+/// Severity ordering for reducing many outcomes to the most severe verdict.
+fn rank(verdict: &Verdict) -> u8 {
+    match verdict {
+        Verdict::Allow => 0,
+        Verdict::Warn(_) => 1,
+        Verdict::Retry(_) => 2,
+        Verdict::Discard(_) => 3,
+        Verdict::Block(_) => 4,
+    }
+}
+
+/// Apply the rule-level severity as a ceiling on the reduced verdict.
+fn apply_ceiling(verdict: Verdict, rule_severity: RuleSeverity) -> Verdict {
+    match rule_severity {
+        RuleSeverity::Block => verdict,
+        RuleSeverity::Off => Verdict::Allow,
+        RuleSeverity::Warn => match verdict {
+            Verdict::Allow => Verdict::Allow,
+            other => Verdict::Warn(
+                other
+                    .message()
+                    .unwrap_or("the quality gate reported findings")
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+/// The trigger a check of `cadence` evaluates on: step checks at step completion,
+/// phase checks at a phase boundary.
+#[must_use]
+pub fn trigger_for_cadence(cadence: Cadence) -> Trigger {
+    match cadence {
+        Cadence::Step => Trigger::StepComplete,
+        Cadence::Phase => Trigger::PhaseComplete,
+    }
+}
+
 /// The rule engine: the baseline rules plus configured severities.
 pub struct RuleEngine {
     rules: Vec<Box<dyn Rule>>,
@@ -295,6 +395,7 @@ impl RuleEngine {
             Box::new(ProgressUpdated),
             Box::new(CommitMessageClean),
             Box::new(AttemptLimit),
+            Box::new(QualityGate),
         ];
         Self {
             rules,
@@ -471,5 +572,102 @@ mod tests {
         assert!(outcomes
             .iter()
             .any(|(n, v)| *n == "suite_green" && v.is_blocking()));
+    }
+
+    fn gate_outcome(
+        name: &str,
+        status: CheckStatus,
+        severity: Option<RuleSeverity>,
+    ) -> CheckOutcome {
+        CheckOutcome {
+            name: name.to_string(),
+            status,
+            detail: String::new(),
+            fixed: false,
+            severity,
+        }
+    }
+
+    #[test]
+    fn quality_gate_allows_when_all_checks_pass() {
+        assert_eq!(
+            gate_verdict(
+                &[gate_outcome("fmt", CheckStatus::Passed, None)],
+                RuleSeverity::Block
+            ),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn quality_gate_retries_a_failed_actionable_check() {
+        let verdict = gate_verdict(
+            &[gate_outcome("clippy", CheckStatus::Failed, None)],
+            RuleSeverity::Block,
+        );
+        assert!(matches!(verdict, Verdict::Retry(_)));
+    }
+
+    #[test]
+    fn quality_gate_blocks_failed_block_denied_and_errored() {
+        for outcome in [
+            gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+            gate_outcome("fmt", CheckStatus::Denied, None),
+            gate_outcome("test", CheckStatus::Errored, None),
+        ] {
+            assert!(gate_verdict(&[outcome], RuleSeverity::Block).is_blocking());
+        }
+    }
+
+    #[test]
+    fn quality_gate_takes_the_most_severe_outcome() {
+        let verdict = gate_verdict(
+            &[
+                gate_outcome("clippy", CheckStatus::Failed, None),
+                gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+            ],
+            RuleSeverity::Block,
+        );
+        assert!(verdict.is_blocking());
+    }
+
+    #[test]
+    fn quality_gate_warn_ceiling_softens_failures() {
+        let verdict = gate_verdict(
+            &[gate_outcome("clippy", CheckStatus::Failed, None)],
+            RuleSeverity::Warn,
+        );
+        assert!(matches!(verdict, Verdict::Warn(_)));
+    }
+
+    #[test]
+    fn quality_gate_is_critical_and_cannot_be_disabled() {
+        let engine = engine(&[("quality_gate", RuleSeverity::Off)]);
+        assert_eq!(engine.effective_severity(&QualityGate), RuleSeverity::Block);
+        let ctx = RuleContext {
+            gate_outcomes: vec![gate_outcome(
+                "audit",
+                CheckStatus::Failed,
+                Some(RuleSeverity::Block),
+            )],
+            ..RuleContext::default()
+        };
+        let outcomes = engine.evaluate(Trigger::PhaseComplete, &ctx);
+        assert!(outcomes
+            .iter()
+            .any(|(n, v)| *n == "quality_gate" && v.is_blocking()));
+    }
+
+    #[test]
+    fn quality_gate_fires_on_step_and_phase_only() {
+        assert!(QualityGate.applies_to(Trigger::StepComplete));
+        assert!(QualityGate.applies_to(Trigger::PhaseComplete));
+        assert!(!QualityGate.applies_to(Trigger::PreCommit));
+    }
+
+    #[test]
+    fn cadence_maps_to_its_trigger() {
+        assert_eq!(trigger_for_cadence(Cadence::Step), Trigger::StepComplete);
+        assert_eq!(trigger_for_cadence(Cadence::Phase), Trigger::PhaseComplete);
     }
 }

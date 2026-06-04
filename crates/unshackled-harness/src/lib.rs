@@ -28,7 +28,7 @@ pub use quality::{
     ToolchainProfile, QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, ResumeOutcome, QUOTA_PAUSE_KEY};
-pub use rules::{Rule, RuleContext, RuleEngine, Trigger, Verdict};
+pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, Trigger, Verdict};
 pub use session::{PlanStep, RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 pub use system_prompt::agent_system_prompt;
 // Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
