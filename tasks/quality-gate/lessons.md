@@ -24,3 +24,13 @@
   `CommandClass` directly, not feed a POSIX command (`rm -rf`) and expect
   `Destructive` — on Windows that classifies `Unknown`. Bites subject 05's
   cross-platform act-on-findings box.
+- 2026-06-04 · `recovery::detect("", false)` flags an empty turn as
+  `BadOutputKind::EmptyTurn` → `REPAIR_PROMPT` → eventually `MaxTurns`. So a
+  multi-attempt resume test must script every attempt to emit **non-empty** text,
+  and a `tool_call` attempt needs a trailing `text(...)` to close the turn (the
+  post-tool stream would otherwise be the empty default `Done`). `FakeProvider`
+  scripts are a single FIFO across all `stream()` calls, not per `run_turn`.
+- 2026-06-04 · The live loop is `resume_one_step`, not `StepLoop` directly —
+  `StepLoop` existed but was test-only. Subject 05 made `resume_one_step` drive it.
+  The gate runs at `StepComplete` only; `PhaseComplete` has no driver yet (the
+  phase-boundary surface is subject 06).
