@@ -34,7 +34,11 @@ struct TestEnv {
 
 impl TestEnv {
     fn new() -> TestResult<Self> {
-        let guard = env_lock().lock().unwrap();
+        // Recover from a poisoned lock: the guard protects only `()`, so a prior
+        // test panicking while holding it must not cascade-fail unrelated tests.
+        let guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir()?;
         let original_cwd = std::env::current_dir()?;
         let saved_env = ENV_KEYS
@@ -79,9 +83,9 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn isolated(test: impl FnOnce(&TestEnv) -> TestResult) {
-    let env = TestEnv::new().unwrap();
-    test(&env).unwrap();
+fn isolated(test: impl FnOnce(&TestEnv) -> TestResult) -> TestResult {
+    let env = TestEnv::new()?;
+    test(&env)
 }
 
 fn write(env: &TestEnv, name: &str, contents: &str) -> TestResult<PathBuf> {
@@ -91,7 +95,7 @@ fn write(env: &TestEnv, name: &str, contents: &str) -> TestResult<PathBuf> {
 }
 
 #[test]
-fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() {
+fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() -> TestResult {
     // A launcher that exports the documented Anthropic env vars (and no config
     // file) should produce a usable default provider — the drop-in path.
     isolated(|jail| {
@@ -116,11 +120,11 @@ fn synthesizes_an_anthropic_provider_from_env_when_unconfigured() {
             Some("secret".to_string())
         );
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn default_config_loads() {
+fn default_config_loads() -> TestResult {
     isolated(|_jail| {
         let cfg = load(&ConfigPaths::default(), &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
@@ -128,11 +132,11 @@ fn default_config_loads() {
         assert!(cfg.harness.auto_commit);
         assert_eq!(cfg.quota.max_wait_minutes, 360);
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn project_overrides_user() {
+fn project_overrides_user() -> TestResult {
     isolated(|jail| {
         let user = write(jail, "user.toml", "[provider]\ndefault = \"openai\"\n")?;
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
@@ -143,11 +147,11 @@ fn project_overrides_user() {
         let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn env_overrides_project() {
+fn env_overrides_project() -> TestResult {
     isolated(|jail| {
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
         jail.set_env("UNSHACKLED_PROVIDER__DEFAULT", "envprovider");
@@ -158,11 +162,11 @@ fn env_overrides_project() {
         let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "envprovider");
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn cli_overrides_env() {
+fn cli_overrides_env() -> TestResult {
     isolated(|jail| {
         let project = write(jail, "project.toml", "[provider]\ndefault = \"local\"\n")?;
         jail.set_env("UNSHACKLED_PROVIDER__DEFAULT", "envprovider");
@@ -177,11 +181,11 @@ fn cli_overrides_env() {
         let cfg = load(&paths, &cli)?;
         assert_eq!(cfg.provider.default, "cliprovider");
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn secrets_never_appear_in_debug_output() {
+fn secrets_never_appear_in_debug_output() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -207,11 +211,11 @@ fn secrets_never_appear_in_debug_output() {
         assert_eq!(secret.expose(), "sk-super-secret-value");
         assert!(!format!("{secret:?}").contains("sk-super-secret-value"));
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn namespaced_provider_options_are_preserved() {
+fn namespaced_provider_options_are_preserved() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -233,11 +237,11 @@ fn namespaced_provider_options_are_preserved() {
             Some("high")
         );
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn resolve_model_uses_the_default_provider_when_unspecified() {
+fn resolve_model_uses_the_default_provider_when_unspecified() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -256,11 +260,11 @@ fn resolve_model_uses_the_default_provider_when_unspecified() {
         );
         assert_eq!(cfg.resolve_model(Some("absent")), None);
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn resolve_model_is_none_without_a_configured_model() {
+fn resolve_model_is_none_without_a_configured_model() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -274,11 +278,11 @@ fn resolve_model_is_none_without_a_configured_model() {
         let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.resolve_model(None), None);
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn provider_env_fallbacks_resolve_public_env_names() {
+fn provider_env_fallbacks_resolve_public_env_names() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -300,11 +304,11 @@ fn provider_env_fallbacks_resolve_public_env_names() {
         );
         assert_eq!(cfg.resolve_model(None).as_deref(), Some("claude-local"));
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn provider_timeout_and_thinking_config_parse() {
+fn provider_timeout_and_thinking_config_parse() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -320,11 +324,11 @@ fn provider_timeout_and_thinking_config_parse() {
         assert_eq!(local.request_timeout_secs, Some(600));
         assert_eq!(local.suppress_thinking, Some(true));
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn unknown_keys_are_ignored_for_forward_compatibility() {
+fn unknown_keys_are_ignored_for_forward_compatibility() -> TestResult {
     isolated(|jail| {
         // A config written for a newer version (unknown top-level table and an
         // unknown key in a known table) must still load on this binary.
@@ -340,11 +344,11 @@ fn unknown_keys_are_ignored_for_forward_compatibility() {
         let cfg = load(&paths, &CliOverrides::default())?;
         assert_eq!(cfg.provider.default, "local");
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn mcp_servers_parse_with_command_and_args() {
+fn mcp_servers_parse_with_command_and_args() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -360,11 +364,11 @@ fn mcp_servers_parse_with_command_and_args() {
         assert_eq!(server.command, "my-mcp-server");
         assert_eq!(server.args, vec!["--root".to_string(), ".".to_string()]);
         Ok(())
-    });
+    })
 }
 
 #[test]
-fn invalid_config_names_the_offending_key() {
+fn invalid_config_names_the_offending_key() -> TestResult {
     isolated(|jail| {
         let project = write(
             jail,
@@ -382,7 +386,7 @@ fn invalid_config_names_the_offending_key() {
             "diagnostic did not name the key: {message}"
         );
         Ok(())
-    });
+    })
 }
 
 proptest! {
