@@ -315,9 +315,10 @@ async fn act_on_findings_is_cross_platform() {
 
 #[test]
 fn ratification_allowance_lets_the_gate_run_headless_but_grants_nothing_else() {
-    // D005: ratifying the gate grants its tool identity a relaxed allowance, so a
-    // project-write check (e.g. `cargo fmt`) runs non-interactively. The allowance
-    // is keyed to the gate identity, so it never authorizes arbitrary shell.
+    // Ratifying the gate (ADR-0009) grants its tool identity a relaxed allowance,
+    // so a project-write check (e.g. `cargo fmt`) runs non-interactively. The
+    // allowance is keyed to the gate identity, so it never authorizes arbitrary
+    // shell.
     let request = |tool: &'static str| PermissionRequest {
         tool,
         effect: Effect::RunCommand(CommandClass::ProjectWrite),
