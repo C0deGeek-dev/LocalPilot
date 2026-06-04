@@ -289,6 +289,7 @@ pub async fn resume(
     let workspace = Workspace::new(root)?;
     let rules = RuleEngine::with_baseline(&config.harness.rules);
     let test_command = config.harness.test_command.clone();
+    let checks = config.harness.resolved_checks();
     let max_attempts = config.harness.attempts_per_step;
     // Connect MCP servers once; each step builds a fresh registry over them.
     let mcp = crate::mcp::McpTools::load(&config).await;
@@ -319,6 +320,7 @@ pub async fn resume(
             root,
             &rules,
             test_command.as_deref(),
+            &checks,
             max_attempts,
         )
         .await?;

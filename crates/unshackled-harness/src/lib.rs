@@ -8,6 +8,7 @@
 
 mod brief;
 mod compaction;
+mod decisions;
 mod error;
 mod planning;
 mod progress;
@@ -20,6 +21,7 @@ mod worker;
 
 pub use brief::Brief;
 pub use compaction::{compact, compact_with_summary, estimate_tokens};
+pub use decisions::{today, Decision, Decisions};
 pub use error::HarnessError;
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
@@ -34,6 +36,6 @@ pub use system_prompt::agent_system_prompt;
 // Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
 pub use unshackled_recovery::ModelHealth;
 pub use worker::{
-    evaluate_completion, select_next_step, AttemptResult, CompletionDecision, CompletionInputs,
-    StepDecision, StepLoop, StepTrace,
+    decide_step, evaluate_completion, select_next_step, AttemptResult, CompletionDecision,
+    CompletionInputs, StepAction, StepDecision, StepLoop, StepTrace,
 };

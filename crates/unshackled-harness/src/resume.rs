@@ -8,14 +8,18 @@ use std::process::Command;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use unshackled_config::CheckConfig;
 use unshackled_llm::QuotaInfo;
 use unshackled_quota::{estimate_window, PausedRun};
 
+use crate::decisions::{today, Decisions};
 use crate::error::HarnessError;
-use crate::progress::Progress;
-use crate::rules::RuleEngine;
+use crate::progress::{Progress, Step};
+use crate::rules::{RuleEngine, Trigger};
 use crate::session::{RuntimeEvent, SessionRuntime, StopReason};
-use crate::worker::{evaluate_completion, CompletionDecision, CompletionInputs};
+use crate::worker::{
+    decide_step, AttemptResult, CompletionInputs, StepAction, StepDecision, StepLoop,
+};
 
 const WORKER_PROMPT: &str = "\
 You are completing exactly one step of an implementation plan. Make the change \
@@ -37,8 +41,17 @@ pub struct ResumeOutcome {
     pub paused: bool,
 }
 
-/// Run the next incomplete step: work it, test it, gate it through the rules,
-/// then commit the step and the progress update.
+/// Cap on automated replans within a single step, so the act-on-findings loop
+/// records the deviation and halts instead of looping the planner forever
+/// (anti-sunk-cost §6). One replan is enough to surface a stuck step to the
+/// human or the next `plan --replan` run.
+const MAX_REPLANS: u32 = 1;
+
+/// Run the next incomplete step: work it, test it, run the quality gate, and act
+/// on the findings — auto-fixes already ran inside the gate, remaining failures
+/// feed the reason back to the model bounded by `max_attempts`, then a replan is
+/// recorded to `DECISIONS.md`. On a clean pass, commit the step and the progress
+/// update.
 ///
 /// # Errors
 /// Returns [`HarnessError`] if the project files cannot be read/written or git
@@ -48,6 +61,7 @@ pub async fn resume_one_step(
     root: &Path,
     rule_engine: &RuleEngine,
     test_command: Option<&str>,
+    checks: &[CheckConfig],
     max_attempts: u32,
 ) -> Result<ResumeOutcome, HarnessError> {
     let progress_path = root.join("PROGRESS.md");
@@ -60,66 +74,113 @@ pub async fn resume_one_step(
         })?
         .clone();
 
-    // Work the step through the session loop.
     let (events, _rx) = broadcast::channel::<RuntimeEvent>(256);
     let cancel = CancellationToken::new();
-    let prompt = format!("{WORKER_PROMPT}{}. {}", step.number, step.description);
-    let reason = runtime.run_turn(&prompt, &events, &cancel).await;
-
-    // A provider quota/rate error pauses the run cleanly at this step boundary:
-    // persist an inspectable PausedRun and stop without committing.
-    if reason == StopReason::ProviderError {
-        // Prefer the provider's own quota metadata (retry-after, limit kind) so
-        // the pause window is precise; fall back to a conservative retryable
-        // default when the error carried none.
-        let quota = runtime.last_quota().cloned().unwrap_or(QuotaInfo {
-            retryable: true,
-            ..QuotaInfo::default()
-        });
-        let window = estimate_window(&quota, 1);
-        let paused = PausedRun::new(step.number, "provider", &window);
-        if let Ok(json) = serde_json::to_string(&paused) {
-            let _ = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes());
-        }
-        return Ok(ResumeOutcome {
-            step_number: step.number,
-            committed: false,
-            blocked_reason: Some(format!("paused on provider limit: {}", window.reason)),
-            paused: true,
-        });
-    }
-    // Any other non-completing turn must not commit the step.
-    if reason != StopReason::Done {
-        return Ok(ResumeOutcome {
-            step_number: step.number,
-            committed: false,
-            blocked_reason: Some(format!("turn did not complete ({reason:?})")),
-            paused: false,
-        });
-    }
-
-    // Run configured tests.
-    let tests_passed = test_command.map(|cmd| run_test_command(root, cmd));
-
-    // Gate completion through the rules.
     let commit_message = format!("harness: {}", step.description);
-    let decision = evaluate_completion(
-        rule_engine,
-        &CompletionInputs {
-            tests_passed,
-            progress_reflects_completion: true,
-            commit_message: commit_message.clone(),
-            attempts: 1,
-            max_attempts,
-        },
-    );
-    if let CompletionDecision::Blocked(reason) = decision {
-        return Ok(ResumeOutcome {
-            step_number: step.number,
-            committed: false,
-            blocked_reason: Some(reason),
-            paused: false,
-        });
+
+    // The anti-sunk-cost loop owns the attempt/replan budget; each pass works the
+    // step, runs the step-cadence gate, and turns the findings into a verdict.
+    let mut step_loop = StepLoop::new(max_attempts.max(1), MAX_REPLANS);
+    let mut prompt = format!("{WORKER_PROMPT}{}. {}", step.number, step.description);
+
+    loop {
+        let reason = runtime.run_turn(&prompt, &events, &cancel).await;
+
+        // A provider quota/rate error pauses the run cleanly at this step
+        // boundary: persist an inspectable PausedRun and stop without committing.
+        if reason == StopReason::ProviderError {
+            // Prefer the provider's own quota metadata (retry-after, limit kind)
+            // so the pause window is precise; fall back to a conservative
+            // retryable default when the error carried none.
+            let quota = runtime.last_quota().cloned().unwrap_or(QuotaInfo {
+                retryable: true,
+                ..QuotaInfo::default()
+            });
+            let window = estimate_window(&quota, 1);
+            let paused = PausedRun::new(step.number, "provider", &window);
+            if let Ok(json) = serde_json::to_string(&paused) {
+                let _ = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes());
+            }
+            return Ok(ResumeOutcome {
+                step_number: step.number,
+                committed: false,
+                blocked_reason: Some(format!("paused on provider limit: {}", window.reason)),
+                paused: true,
+            });
+        }
+        // Any other non-completing turn must not commit the step.
+        if reason != StopReason::Done {
+            return Ok(ResumeOutcome {
+                step_number: step.number,
+                committed: false,
+                blocked_reason: Some(format!("turn did not complete ({reason:?})")),
+                paused: false,
+            });
+        }
+
+        // Run configured tests (`suite_green`) and the step-cadence quality gate,
+        // then reduce both to a single action.
+        let tests_passed = test_command.map(|cmd| run_test_command(root, cmd));
+        let gate_outcomes = runtime
+            .run_gate_checks(checks, Trigger::StepComplete, root)
+            .await;
+        let action = decide_step(
+            rule_engine,
+            &CompletionInputs {
+                tests_passed,
+                progress_reflects_completion: true,
+                commit_message: commit_message.clone(),
+                attempts: 1,
+                max_attempts,
+            },
+            gate_outcomes,
+        );
+
+        match action {
+            StepAction::Commit => break,
+            // A blocking finding (audit/dependency, a failing test, a dirty commit
+            // message) needs a human or dependency decision — never a retry.
+            StepAction::Block(blocked_reason) => {
+                return Ok(ResumeOutcome {
+                    step_number: step.number,
+                    committed: false,
+                    blocked_reason: Some(blocked_reason),
+                    paused: false,
+                });
+            }
+            // An actionable finding: feed it back through the anti-sunk-cost loop.
+            StepAction::Retry(reason) => match step_loop.on_attempt(AttemptResult::Retry(reason)) {
+                StepDecision::RetrySameContext(feedback)
+                | StepDecision::DiscardAndReset(feedback) => {
+                    prompt = retry_prompt(&step, &feedback);
+                }
+                StepDecision::Replan(logs) => {
+                    record_replan(root, &progress.name, step.number, &logs)?;
+                    return Ok(ResumeOutcome {
+                        step_number: step.number,
+                        committed: false,
+                        blocked_reason: Some(format!(
+                            "replanned after {} failed attempts; recorded in DECISIONS.md",
+                            logs.len()
+                        )),
+                        paused: false,
+                    });
+                }
+                StepDecision::GiveUp => {
+                    return Ok(ResumeOutcome {
+                        step_number: step.number,
+                        committed: false,
+                        blocked_reason: Some(
+                            "gave up: the replan cap was reached for this step".to_string(),
+                        ),
+                        paused: false,
+                    });
+                }
+                // `on_attempt` only returns `Commit` for a `Success` result, which
+                // this loop never feeds; treat it as a pass for completeness.
+                StepDecision::Commit => break,
+            },
+        }
     }
 
     // Commit the step.
@@ -130,7 +191,7 @@ pub async fn resume_one_step(
         .to_string();
 
     // Update and commit progress.
-    progress.mark_complete(step.number, Some(hash), 1);
+    progress.mark_complete(step.number, Some(hash), step_loop.replans() + 1);
     write(&progress_path, &progress.render())?;
     git(root, &["add", "PROGRESS.md"])?;
     git(root, &["commit", "-m", "harness: update progress"])?;
@@ -141,6 +202,45 @@ pub async fn resume_one_step(
         blocked_reason: None,
         paused: false,
     })
+}
+
+/// Re-issue the step prompt with the gate's feedback appended, so the next
+/// attempt sees exactly what to fix. The runtime keeps the prior conversation,
+/// so this is the keep-context retry the anti-sunk-cost loop intends.
+fn retry_prompt(step: &Step, feedback: &str) -> String {
+    format!(
+        "{WORKER_PROMPT}{}. {}\n\nThe previous attempt did not pass the quality gate: {feedback}. \
+         Address the findings and complete the step.",
+        step.number, step.description
+    )
+}
+
+/// Append a replan entry to `DECISIONS.md` (creating it on first deviation), so
+/// the reason a step was abandoned survives a context reset.
+fn record_replan(
+    root: &Path,
+    name: &str,
+    step_number: usize,
+    logs: &[String],
+) -> Result<(), HarnessError> {
+    let path = root.join("DECISIONS.md");
+    let mut decisions = match std::fs::read_to_string(&path) {
+        Ok(text) => Decisions::parse(&text)?,
+        Err(_) => Decisions::new(name),
+    };
+    let rationale = if logs.is_empty() {
+        "the per-step attempt budget was exhausted".to_string()
+    } else {
+        format!("attempts failed: {}", logs.join("; "))
+    };
+    decisions.append(
+        today(),
+        format!("Replan step {step_number}"),
+        "the automated attempt budget was exhausted; the step is queued for replanning",
+        rationale,
+        format!("step {step_number}"),
+    );
+    write(&path, &decisions.render())
 }
 
 fn run_test_command(root: &Path, command: &str) -> bool {

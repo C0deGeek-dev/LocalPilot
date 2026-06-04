@@ -106,7 +106,7 @@ fn run_task(task: &GoldenTask) -> TaskScore {
     let rules = RuleEngine::with_baseline(&Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let outcome = rt
-        .block_on(resume_one_step(&mut runtime, root, &rules, None, 3))
+        .block_on(resume_one_step(&mut runtime, root, &rules, None, &[], 3))
         .unwrap();
 
     TaskScore {

@@ -3,6 +3,7 @@
 //! engine, persists the transcript, and supports cancellation, loop limits, and
 //! context compaction.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use unshackled_config::redact::redact;
+use unshackled_config::CheckConfig;
 use unshackled_core::{ContentBlock, Message, Role, SessionId, TokenUsage, ToolCall, ToolUseId};
 use unshackled_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
@@ -22,6 +24,8 @@ use unshackled_store::Store;
 use unshackled_tools::{ToolContext, ToolRegistry};
 
 use crate::compaction::{compact_with_summary, estimate_tokens};
+use crate::quality::{CheckOutcome, CheckRunner};
+use crate::rules::{trigger_for_cadence, Trigger};
 
 /// Why a turn loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +188,32 @@ impl SessionRuntime {
     #[must_use]
     pub fn last_quota(&self) -> Option<&QuotaInfo> {
         self.last_quota.as_ref()
+    }
+
+    /// Run the quality-gate checks whose cadence maps to `trigger`, through this
+    /// session's own permission engine and approver — the same path tool calls
+    /// take, so a check never bypasses a permission decision. Returns one outcome
+    /// per matching check, in declaration order.
+    pub async fn run_gate_checks(
+        &self,
+        checks: &[CheckConfig],
+        trigger: Trigger,
+        root: &Path,
+    ) -> Vec<CheckOutcome> {
+        let runner = CheckRunner::new(
+            &self.engine,
+            self.approver.as_ref(),
+            self.config.interactivity,
+            self.config.trusted,
+            root,
+        );
+        let mut outcomes = Vec::new();
+        for check in checks {
+            if trigger_for_cadence(check.cadence) == trigger {
+                outcomes.push(runner.run(check).await);
+            }
+        }
+        outcomes
     }
 
     /// Seed a system message into the conversation — for example retrieved

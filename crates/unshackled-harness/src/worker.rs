@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::progress::{Progress, Step};
+use crate::quality::CheckOutcome;
 use crate::rules::{RuleContext, RuleEngine, Trigger, Verdict};
 
 /// Select the next step to work on: the first incomplete step.
@@ -118,28 +119,76 @@ pub enum CompletionDecision {
     Blocked(String),
 }
 
-/// Run the post-step rules in order (tests, progress, commit message, attempts)
-/// and decide whether the step may be committed. This is where `suite_green`
-/// gates a commit on passing tests.
+/// The action the act-on-findings loop takes after evaluating a completed step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepAction {
+    /// All post-step rules passed; commit the step.
+    Commit,
+    /// A check returned an actionable finding; feed the reason back and retry.
+    Retry(String),
+    /// A blocking rule fired (a failing test, a dirty commit message, an `audit`
+    /// finding). No retry will clear it; surface the reason to model and user.
+    Block(String),
+}
+
+/// Evaluate the post-step rules — including the `quality_gate` rule fed the
+/// `gate_outcomes` for this step — and reduce them to one [`StepAction`]. A
+/// `block` verdict wins over a `retry`, which wins over a clean commit; a
+/// warning does not stop the step. A `discard` verdict is treated as a retry:
+/// resetting context requires a fresh runtime, which the gate never demands
+/// (its actionable findings are always `retry`).
 #[must_use]
-pub fn evaluate_completion(engine: &RuleEngine, inputs: &CompletionInputs) -> CompletionDecision {
+pub fn decide_step(
+    engine: &RuleEngine,
+    inputs: &CompletionInputs,
+    gate_outcomes: Vec<CheckOutcome>,
+) -> StepAction {
     let ctx = RuleContext {
         tests_passed: inputs.tests_passed,
         progress_reflects_completion: Some(inputs.progress_reflects_completion),
         commit_message: Some(inputs.commit_message.clone()),
         attempts: inputs.attempts,
         max_attempts: inputs.max_attempts,
+        gate_outcomes,
         ..RuleContext::default()
     };
 
+    let mut action = StepAction::Commit;
     for trigger in [Trigger::PostTest, Trigger::PreCommit, Trigger::StepComplete] {
         for (name, verdict) in engine.evaluate(trigger, &ctx) {
-            if let Verdict::Block(reason) = verdict {
-                return CompletionDecision::Blocked(format!("{name}: {reason}"));
+            let candidate = match verdict {
+                Verdict::Allow | Verdict::Warn(_) => continue,
+                Verdict::Retry(reason) | Verdict::Discard(reason) => StepAction::Retry(reason),
+                Verdict::Block(reason) => StepAction::Block(format!("{name}: {reason}")),
+            };
+            if action_rank(&candidate) > action_rank(&action) {
+                action = candidate;
             }
         }
     }
-    CompletionDecision::Commit
+    action
+}
+
+fn action_rank(action: &StepAction) -> u8 {
+    match action {
+        StepAction::Commit => 0,
+        StepAction::Retry(_) => 1,
+        StepAction::Block(_) => 2,
+    }
+}
+
+/// Run the post-step rules in order (tests, progress, commit message, attempts)
+/// and decide whether the step may be committed. This is where `suite_green`
+/// gates a commit on passing tests. A convenience wrapper over [`decide_step`]
+/// for callers that gate on commit-or-block without the quality gate.
+#[must_use]
+pub fn evaluate_completion(engine: &RuleEngine, inputs: &CompletionInputs) -> CompletionDecision {
+    match decide_step(engine, inputs, Vec::new()) {
+        StepAction::Commit => CompletionDecision::Commit,
+        StepAction::Retry(reason) | StepAction::Block(reason) => {
+            CompletionDecision::Blocked(reason)
+        }
+    }
 }
 
 /// A trace event emitted during a worker step, instrumented via `tracing`. The
@@ -293,5 +342,82 @@ mod tests {
             evaluate_completion(&engine(), &inputs),
             CompletionDecision::Blocked(_)
         ));
+    }
+
+    fn clean_inputs() -> CompletionInputs {
+        CompletionInputs {
+            tests_passed: Some(true),
+            progress_reflects_completion: true,
+            commit_message: "harness: step 1".to_string(),
+            attempts: 1,
+            max_attempts: 3,
+        }
+    }
+
+    fn gate_outcome(
+        name: &str,
+        status: crate::quality::CheckStatus,
+        severity: Option<unshackled_config::RuleSeverity>,
+    ) -> CheckOutcome {
+        CheckOutcome {
+            name: name.to_string(),
+            status,
+            detail: String::new(),
+            fixed: false,
+            severity,
+        }
+    }
+
+    #[test]
+    fn decide_step_commits_when_tests_and_gate_pass() {
+        use crate::quality::CheckStatus;
+        let action = decide_step(
+            &engine(),
+            &clean_inputs(),
+            vec![gate_outcome("fmt", CheckStatus::Passed, None)],
+        );
+        assert_eq!(action, StepAction::Commit);
+    }
+
+    #[test]
+    fn decide_step_retries_an_actionable_gate_failure() {
+        use crate::quality::CheckStatus;
+        let action = decide_step(
+            &engine(),
+            &clean_inputs(),
+            vec![gate_outcome("clippy", CheckStatus::Failed, None)],
+        );
+        assert!(matches!(action, StepAction::Retry(_)));
+    }
+
+    #[test]
+    fn decide_step_blocks_an_audit_finding_over_a_lint_retry() {
+        use crate::quality::CheckStatus;
+        use unshackled_config::RuleSeverity;
+        // A blocking audit finding wins over an actionable lint retry.
+        let action = decide_step(
+            &engine(),
+            &clean_inputs(),
+            vec![
+                gate_outcome("clippy", CheckStatus::Failed, None),
+                gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+            ],
+        );
+        assert!(matches!(action, StepAction::Block(reason) if reason.contains("audit")));
+    }
+
+    #[test]
+    fn decide_step_blocks_when_tests_fail_even_if_gate_is_clean() {
+        use crate::quality::CheckStatus;
+        let inputs = CompletionInputs {
+            tests_passed: Some(false),
+            ..clean_inputs()
+        };
+        let action = decide_step(
+            &engine(),
+            &inputs,
+            vec![gate_outcome("fmt", CheckStatus::Passed, None)],
+        );
+        assert!(matches!(action, StepAction::Block(_)));
     }
 }
