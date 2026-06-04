@@ -138,21 +138,24 @@ beyond the two built here (later profiles are follow-on work, not this plan).
 
 ## 7. Gate review (run last; tick everything)
 
-- [ ] All §5 subjects done (or `ABANDONED` with a §4 row)
-- [ ] Subject 00 completed
-- [ ] `cargo fmt --check` clean
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo check --workspace` clean
-- [ ] `cargo machete` clean (deps changed); `cargo deny check` + `cargo audit`
-      clean (release milestone)
-- [ ] §6 principles reviewed; cross-platform check classification tests hold
-- [ ] Every non-abandoned subject has a Captain Hindsight checkpoint `CLOSE`
-- [ ] Durable decisions promoted to ADRs in `docs/10-decisions.md`
-- [ ] Shipped code/tests/commits are plan-agnostic (grep excluding `tasks/`)
-- [ ] `tasks/quality-gate/manual-actions.md` resolved or deferred
-- [ ] `tasks/quality-gate/lessons.md` reconciled; lasting lessons migrated to
-      `tasks/lessons.md` before the folder is deleted
+- [x] All §5 subjects done (or `ABANDONED` with a §4 row)
+- [x] Subject 00 completed
+- [x] `cargo fmt --check` clean
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [x] `cargo test --workspace` passes (44 suites green)
+- [x] `cargo check --workspace` clean
+- [x] `cargo machete` clean (no deps changed by this plan); `cargo deny check` +
+      `cargo audit` deferred to the release milestone (ADR-0009 ships pre-release)
+- [x] §6 principles reviewed; cross-platform check classification tests hold
+      (`act_on_findings_is_cross_platform`, native-per-OS gate builders)
+- [x] Every non-abandoned subject has a Captain Hindsight checkpoint `CLOSE`
+- [x] Durable decisions promoted to ADRs: ADR-0009 owns the gate; D002/D007/D008/
+      D009 are implementation refinements recorded in §4 (no new architecture)
+- [x] Shipped code/tests/commits are plan-agnostic (grep excluding `tasks/`; one
+      `// D005` test comment found and fixed to cite ADR-0009 — `845da20`)
+- [x] `tasks/quality-gate/manual-actions.md` resolved or deferred (06.4 deferred)
+- [x] `tasks/quality-gate/lessons.md` reconciled; lasting lessons migrate to
+      `tasks/lessons.md` at folder deletion (pre-v1)
 - [ ] Plan handed to reviewer for §8 sign-off
 
 ---
