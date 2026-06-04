@@ -16,4 +16,9 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    /// A `[[harness.checks]]` entry is invalid (empty name/program or a duplicate
+    /// name).
+    #[error("invalid quality-gate check: {0}")]
+    InvalidCheck(String),
 }

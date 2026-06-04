@@ -13,7 +13,7 @@ use figment::Figment;
 use unshackled_core::Secret;
 
 use crate::error::ConfigError;
-use crate::schema::{Config, Mode, PermissionProfile};
+use crate::schema::{CheckConfig, Config, Mode, PermissionProfile};
 
 /// The file locations a load should consider. Either may be `None` (absent).
 #[derive(Debug, Clone, Default)]
@@ -76,7 +76,34 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 
     let mut config: Config = figment.extract().map_err(ConfigError::from)?;
     synthesize_env_providers(&mut config);
+    validate_checks(&config.harness.checks)?;
     Ok(config)
+}
+
+/// Validate the ratified quality-gate checks: each needs a non-empty name and
+/// program, and names must be unique (a name is also a per-check override key).
+fn validate_checks(checks: &[CheckConfig]) -> Result<(), ConfigError> {
+    let mut seen = std::collections::HashSet::new();
+    for check in checks {
+        if check.name.trim().is_empty() {
+            return Err(ConfigError::InvalidCheck(
+                "a check has an empty name".to_string(),
+            ));
+        }
+        if check.program.trim().is_empty() {
+            return Err(ConfigError::InvalidCheck(format!(
+                "check {:?} has an empty program",
+                check.name
+            )));
+        }
+        if !seen.insert(check.name.as_str()) {
+            return Err(ConfigError::InvalidCheck(format!(
+                "duplicate check name {:?}",
+                check.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// When no providers are configured, derive a default one from the documented
@@ -203,5 +230,43 @@ fn default_model_env(kind: &str) -> Option<&'static str> {
     match kind {
         "anthropic" => Some("ANTHROPIC_MODEL"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{AutoFix, Cadence};
+
+    fn check(name: &str, program: &str) -> CheckConfig {
+        CheckConfig {
+            name: name.to_string(),
+            program: program.to_string(),
+            args: Vec::new(),
+            fix_program: None,
+            fix_args: Vec::new(),
+            cadence: Cadence::Step,
+            auto_fix: AutoFix::No,
+            severity: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_unique_named_checks() {
+        let checks = [check("fmt", "cargo"), check("clippy", "cargo")];
+        assert!(validate_checks(&checks).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_names() {
+        let checks = [check("fmt", "cargo"), check("fmt", "cargo")];
+        let err = validate_checks(&checks).expect_err("duplicate name should fail");
+        assert!(err.to_string().contains("duplicate check name"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_name_or_program() {
+        assert!(validate_checks(&[check("", "cargo")]).is_err());
+        assert!(validate_checks(&[check("fmt", "  ")]).is_err());
     }
 }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use proptest::prelude::*;
-use unshackled_config::{load, CliOverrides, ConfigPaths};
+use unshackled_config::{load, AutoFix, Cadence, CliOverrides, ConfigPaths};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -384,6 +384,57 @@ fn invalid_config_names_the_offending_key() -> TestResult {
         assert!(
             message.contains("attempts_per_step"),
             "diagnostic did not name the key: {message}"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn harness_checks_parse_from_toml() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[[harness.checks]]\nname = \"fmt\"\nprogram = \"cargo\"\nargs = [\"fmt\", \"--check\"]\nauto_fix = true\n\n[[harness.checks]]\nname = \"test\"\nprogram = \"cargo\"\nargs = [\"test\"]\ncadence = \"phase\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert_eq!(cfg.harness.checks.len(), 2);
+
+        let fmt = &cfg.harness.checks[0];
+        assert_eq!(fmt.name, "fmt");
+        assert_eq!(fmt.program, "cargo");
+        assert_eq!(fmt.args, vec!["fmt".to_string(), "--check".to_string()]);
+        assert_eq!(fmt.auto_fix, AutoFix::Full);
+        assert_eq!(fmt.cadence, Cadence::Step);
+
+        let test = &cfg.harness.checks[1];
+        assert_eq!(test.cadence, Cadence::Phase);
+        assert_eq!(test.auto_fix, AutoFix::No);
+        Ok(())
+    })
+}
+
+#[test]
+fn duplicate_check_names_are_rejected() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[[harness.checks]]\nname = \"fmt\"\nprogram = \"cargo\"\n\n[[harness.checks]]\nname = \"fmt\"\nprogram = \"cargo\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let err =
+            load(&paths, &CliOverrides::default()).expect_err("duplicate check name should fail");
+        assert!(
+            err.to_string().contains("duplicate check name"),
+            "unexpected error: {err}"
         );
         Ok(())
     })

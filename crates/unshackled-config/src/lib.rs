@@ -15,6 +15,7 @@ mod schema;
 pub use error::ConfigError;
 pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
 pub use schema::{
-    Config, HarnessConfig, McpConfig, McpServerConfig, Mode, PermissionProfile, PermissionsConfig,
-    ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RuleSeverity,
+    AutoFix, Cadence, CheckConfig, Config, HarnessConfig, McpConfig, McpServerConfig, Mode,
+    PermissionProfile, PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume,
+    QuotaConfig, RuleSeverity,
 };
