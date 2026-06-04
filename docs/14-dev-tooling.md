@@ -197,6 +197,7 @@ Recommended skills to author (each maps to an existing spec):
 | `write-golden-eval` | [08-testing.md](08-testing.md) §Golden-Task Evals | Evals are required; this prevents ad hoc benchmark tasks and copied fixtures, and records the per-task scorecard fields. |
 | `add-tui-view` *(opt)* | ADR-0006, [02-architecture.md](02-architecture.md) §`unshackled-tui` | Ratatui/crossterm view with `TestBackend` snapshot expectations and cross-platform terminal constraints. |
 | `author-adr` *(opt)* | [10-decisions.md](10-decisions.md) | Append an ADR in the exact house format (newest on top, status, reason bullets). |
+| `plan-large-task` | §7 below | Tier the planning ceremony: in-session `EnterPlanMode` for small tasks; a bundled multi-slice plan template (`tasks/<Name>-Plan.md`) with decision log, resume-safe checkpoints, and Captain Hindsight for large ones. Present in the repo. |
 
 Keep skill bodies short and link out to the spec rather than restating it. The
 skill's job is to route the agent to the contract and list the must-pass tests,
@@ -222,3 +223,47 @@ cargo machete
 # Snapshot review after a render/prompt change
 cargo insta review
 ```
+
+## 7. Build-process planning (tiered)
+
+How an assistant plans *its own work on this repo* — distinct from the product's
+`unshackled harness plan` command, which emits the runtime `brief.md` /
+`PROGRESS.md` ([06-harness-spec.md](06-harness-spec.md)). Never name a
+build-plan file `PROGRESS.md` or `brief.md`; those names belong to the product
+runtime.
+
+The `plan-large-task` skill encodes the trigger and bundles the template; this
+section is its durable, always-loaded summary.
+
+**Tier S (small)** — 1-2 files, single session, no new crate. Plan in-session
+with `EnterPlanMode`, implement, then `/code-review` + `/simplify`. No `tasks/`
+files. This is the default; when unsure, it is Tier S.
+
+**Tier L (large)** — use the bundled
+[`plan-large-task` template](../.agents/skills/plan-large-task/plan-template.md),
+copied to `tasks/<Name>-Plan.md`, if **any** hold:
+
+- spans 3+ crates, or needs a new crate;
+- likely to outlast one session / survive a context-window reset;
+- touches a non-negotiable surface (sandbox, permission engine, secret
+  redaction, provider trait, tool trait);
+- needs a new ADR in [10-decisions.md](10-decisions.md).
+
+Tier L mechanics: subjects (5-8) with stable box IDs, an append-only decision
+log, resume-safe checkpoints (update plan → run gate → commit → push), and a
+**Captain Hindsight** review at each subject close (not per box; for Tier S the
+`/code-review` + `/simplify` pass is the lighter equivalent).
+
+Gate per checkpoint is the four-command gate in §6 (fmt/clippy/test/check);
+hygiene (`machete` on dep change, `deny`/`audit` before a release milestone) is
+not per-checkpoint.
+
+Two rules keep `tasks/` from leaking into the product: the folder is
+**disposable** (deleted before v1) so shipped code, commits, and identifiers
+must be plan-agnostic — no box/decision IDs or plan filenames; and a decision
+that is a durable architecture call is **promoted to an ADR** in
+[10-decisions.md](10-decisions.md), since the decision-log row dies with the
+folder. Commit `tasks/` while live (resume-safety needs it pushed); the
+template and its Captain Hindsight prompt are the author's own original work, so
+no third-party provenance attaches — but everything the plan produces stays
+clean-room compliant ([00-clean-room.md](00-clean-room.md)).

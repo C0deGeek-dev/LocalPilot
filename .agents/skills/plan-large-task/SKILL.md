@@ -1,0 +1,68 @@
+---
+name: plan-large-task
+description: >-
+  Choose and run the right planning ceremony for a build task in this repo.
+  Small tasks plan in-session with EnterPlanMode; large multi-slice tasks copy
+  the bundled plan-template into tasks/<Name>-Plan.md with subjects, a decision
+  log, resume-safe checkpoints, and a Captain Hindsight review at each subject
+  close. Use when starting any multi-step build effort and you must decide how
+  heavy the plan should be.
+---
+
+# plan a large task
+
+This skill routes a build effort to the right *planning weight*. It is
+developer-process tooling, not product behaviour — keep it separate from the
+product harness's own `unshackled harness plan` (`brief.md` / `PROGRESS.md`),
+which is spec'd in
+[`docs/06-harness-spec.md`](../../../docs/06-harness-spec.md).
+
+## Tier trigger — pick S or L
+
+**Tier L (use the bundled template)** if **any** of these hold:
+
+- spans 3+ crates, or needs a new crate
+- likely to outlast one session / survive a context-window reset
+- touches a non-negotiable surface: sandbox, permission engine, secret
+  redaction, the provider trait, or the tool trait
+- needs a new ADR in [`docs/10-decisions.md`](../../../docs/10-decisions.md)
+
+**Tier S (no template)** otherwise — 1-2 files, single session, no new crate.
+Plan in-session with `EnterPlanMode`, implement, then review with `/code-review`
+and `/simplify`. Do not create `tasks/` files for Tier S.
+
+When unsure, it is Tier S. Don't manufacture ceremony.
+
+## Tier L procedure
+
+1. Copy [`plan-template.md`](plan-template.md) to `tasks/<Name>-Plan.md` and
+   follow its "How to use" steps. The template embeds the subject/box/slice
+   shape, decision log, master tracker, gate, and the Captain Hindsight prompt.
+2. Start in `solo` collaboration mode unless multiple workers are known now.
+3. Subject `00` (tooling research) runs first unless waived by a §4 decision.
+4. Keep checkpoints resume-safe: update plan files, run the gate, commit, push.
+
+## Repo-specific rules baked into the template
+
+- **Gate per checkpoint** = `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check
+  --workspace`. Hygiene (`cargo machete` on dep change; `cargo deny check` /
+  `cargo audit` before a release milestone) is not per-checkpoint.
+- **ADR promotion.** A decision-log row dies with the plan folder. Durable
+  architecture decisions graduate to a real ADR in docs/10 and are cited by
+  number. Transient build-sequencing choices stay in §4.
+- **Plan-agnostic output (§6.11).** Commits, identifiers, comments, and tests
+  must not reference box IDs, decision IDs, `slice`, or the plan file — the
+  `tasks/` folder is deleted before v1. Put the *why* in the comment or an ADR.
+- **Name clash.** Never name a build-plan file `PROGRESS.md` or `brief.md` —
+  reserved for the product harness runtime.
+- **Clean-room still applies** ([[clean-room-guard]]): the template and its
+  Hindsight prompt are the author's own original work, but everything the plan
+  produces must stay clean-room compliant.
+
+## Captain Hindsight
+
+Run the embedded prompt (template Appendix) at each subject close (§6.12), not
+per box. Record Keep / Fix before closing / Record / Risk / Verdict. A
+`DO NOT CLOSE` verdict is a blocker. For Tier S, `/code-review` + `/simplify`
+is the lighter equivalent.
