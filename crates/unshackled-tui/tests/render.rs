@@ -227,4 +227,25 @@ fn transcript_follows_the_latest_response_rows() {
 
     assert!(rendered.contains("response line 20"));
     assert!(!rendered.contains("response line 1 "));
+    assert!(rendered.contains("[* bottom]"));
+}
+
+#[test]
+fn transcript_page_keys_scroll_the_output_viewport() {
+    let mut state = base();
+    state.transcript.clear();
+    state.streaming = (1..=20)
+        .map(|line| format!("response line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    handle_input(&mut state, AppInput::Key(Key::PageUp));
+    let scrolled = render_string(&state, 60, 12);
+    assert!(!scrolled.contains("response line 20"));
+    assert!(scrolled.contains("[* 50%]"));
+
+    handle_input(&mut state, AppInput::Key(Key::PageDown));
+    let bottom = render_string(&state, 60, 12);
+    assert!(bottom.contains("response line 20"));
+    assert!(bottom.contains("[* bottom]"));
 }

@@ -12,8 +12,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
@@ -239,6 +240,11 @@ async fn event_loop(
                 // Bracketed paste: insert small pastes inline, but collapse large
                 // ones to a placeholder so the input line stays readable.
                 Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
+                Event::Mouse(mouse) if state.trust.is_none() => {
+                    if let Some(mapped) = map_mouse(mouse.kind) {
+                        handle_input(state, AppInput::Key(mapped));
+                    }
+                }
                 _ => {}
             }
         }
@@ -370,6 +376,11 @@ fn resolve_event(
                 }
             }
             Event::Paste(text) => insert_paste(state, text),
+            Event::Mouse(mouse) => {
+                if let Some(mapped) = map_mouse(mouse.kind) {
+                    handle_input(state, AppInput::Key(mapped));
+                }
+            }
             _ => {}
         }
         None
@@ -399,6 +410,16 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Right => Some(Key::Right),
         KeyCode::Home => Some(Key::Home),
         KeyCode::End => Some(Key::End),
+        KeyCode::PageUp => Some(Key::PageUp),
+        KeyCode::PageDown => Some(Key::PageDown),
+        _ => None,
+    }
+}
+
+fn map_mouse(kind: MouseEventKind) -> Option<Key> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(Key::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Key::ScrollDown),
         _ => None,
     }
 }
@@ -460,7 +481,12 @@ fn ui_profile(profile: Profile) -> UiProfile {
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
     // Pushed unconditionally (as Codex does): a terminal that doesn't support it
@@ -485,6 +511,7 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableMouseCapture,
         DisableBracketedPaste,
         terminal::LeaveAlternateScreen
     )?;

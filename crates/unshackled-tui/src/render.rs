@@ -184,10 +184,6 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &AppState) {
             }
         }
     }
-    let title = match &state.search {
-        Some(q) if !q.is_empty() => format!("transcript [search: {q}]"),
-        _ => "transcript".to_string(),
-    };
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let total_rows: usize = lines
         .iter()
@@ -200,12 +196,42 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &AppState) {
             }
         })
         .sum();
+    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let max_scroll = total_rows.saturating_sub(visible_rows);
+    let scroll_back = state.transcript_scroll.min(max_scroll);
+    let scroll_rows = max_scroll.saturating_sub(scroll_back);
+    let title = transcript_title(state, total_rows, visible_rows, scroll_rows, max_scroll);
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::bordered().title(title))
         .wrap(Wrap { trim: false });
-    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
-    let scroll = u16::try_from(total_rows.saturating_sub(visible_rows)).unwrap_or(u16::MAX);
+    let scroll = u16::try_from(scroll_rows).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
+}
+
+fn transcript_title(
+    state: &AppState,
+    total_rows: usize,
+    visible_rows: usize,
+    scroll_rows: usize,
+    max_scroll: usize,
+) -> String {
+    let mut title = match &state.search {
+        Some(q) if !q.is_empty() => format!("transcript [search: {q}]"),
+        _ => "transcript".to_string(),
+    };
+    if total_rows > visible_rows {
+        let position = if scroll_rows == 0 {
+            "top".to_string()
+        } else if scroll_rows >= max_scroll {
+            "bottom".to_string()
+        } else {
+            let bottom_row = scroll_rows.saturating_add(visible_rows).min(total_rows);
+            let percent = (bottom_row * 100).div_ceil(total_rows);
+            format!("{percent}%")
+        };
+        title.push_str(&format!(" [* {position}]"));
+    }
+    title
 }
 
 fn render_thinking(frame: &mut Frame, area: Rect, state: &AppState) {

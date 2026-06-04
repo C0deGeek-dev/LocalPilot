@@ -123,6 +123,8 @@ pub struct AppState {
     pub header: Header,
     pub transcript: Vec<TranscriptLine>,
     pub streaming: String,
+    /// Visual rows to keep above the latest transcript output.
+    pub transcript_scroll: usize,
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
     pub input_cursor: usize,
@@ -158,6 +160,7 @@ impl AppState {
             header,
             transcript: Vec::new(),
             streaming: String::new(),
+            transcript_scroll: 0,
             input: String::new(),
             input_cursor: 0,
             footer: FooterStats::default(),
@@ -329,6 +332,36 @@ impl AppState {
         let expanded = self.expand_pastes(&raw);
         self.pastes.clear();
         expanded
+    }
+
+    /// Scroll the transcript upward by rendered rows.
+    pub fn scroll_transcript_up(&mut self, rows: usize) {
+        let max_scroll = self.transcript_logical_rows().saturating_sub(1);
+        self.transcript_scroll = self.transcript_scroll.saturating_add(rows).min(max_scroll);
+    }
+
+    /// Scroll the transcript downward by rendered rows.
+    pub fn scroll_transcript_down(&mut self, rows: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_sub(rows);
+    }
+
+    /// Resume following the latest transcript output.
+    pub fn scroll_transcript_to_bottom(&mut self) {
+        self.transcript_scroll = 0;
+    }
+
+    fn transcript_logical_rows(&self) -> usize {
+        let transcript_rows = self
+            .transcript
+            .iter()
+            .map(|line| line.text.trim_start_matches('\n').split('\n').count())
+            .sum::<usize>();
+        let streaming_rows = if self.streaming.is_empty() {
+            0
+        } else {
+            self.streaming.trim_start_matches('\n').split('\n').count()
+        };
+        transcript_rows + streaming_rows
     }
 
     /// Apply a mapped runtime/UI event to the state.
