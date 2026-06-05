@@ -3,9 +3,10 @@
 //! These wrap LocalMind's project store and return plain Unshackled-owned types
 //! so callers (the CLI) never name a LocalMind type directly.
 
-use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
+use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
 use localmind_store::{
-    MemoryPersistence, ReviewQueue, ReviewQueueItem, SkillDraftRecord, SkillDraftStore,
+    MemoryPersistence, MemoryRecord, ReviewQueue, ReviewQueueItem, SkillDraftRecord,
+    SkillDraftStore,
 };
 
 use crate::LearningError;
@@ -40,6 +41,28 @@ pub struct SearchHit {
     pub score: i64,
     pub path: String,
     pub snippet: String,
+}
+
+/// An accepted LocalMind memory entry, flattened for display.
+#[derive(Debug, Clone)]
+pub struct MemorySummary {
+    pub id: String,
+    pub scope: String,
+    pub category: String,
+    pub status: String,
+    pub path: String,
+    pub body: String,
+}
+
+fn memory_summary(record: MemoryRecord) -> MemorySummary {
+    MemorySummary {
+        id: record.memory_id.to_string(),
+        scope: record.scope,
+        category: record.category,
+        status: record.status,
+        path: record.path.display().to_string(),
+        body: record.body,
+    }
 }
 
 /// An audit-log entry for a memory change.
@@ -155,6 +178,48 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, Learni
         .collect())
 }
 
+/// List accepted LocalMind memory.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the memory index cannot be read.
+pub fn memory_list(project_root: &Path) -> Result<Vec<MemorySummary>, LearningError> {
+    let persistence = open_memory(project_root)?;
+    let records = persistence.list_memory().map_err(memory_err)?;
+    Ok(records.into_iter().map(memory_summary).collect())
+}
+
+/// Delete accepted LocalMind memory by id.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if deletion fails.
+pub fn memory_delete(project_root: &Path, id: &str) -> Result<bool, LearningError> {
+    let persistence = open_memory(project_root)?;
+    persistence
+        .delete_memory(&MemoryEntryId::new(id), "unshackled")
+        .map_err(memory_err)
+}
+
+/// Whether LocalMind context injection is enabled for this project.
+#[must_use]
+pub fn memory_injection_enabled(project_root: &Path) -> bool {
+    !injection_disabled_path(project_root).exists()
+}
+
+/// Disable LocalMind context injection for this project without disabling the
+/// review/promotion store itself.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the flag cannot be written.
+pub fn memory_disable_injection(project_root: &Path) -> Result<(), LearningError> {
+    let state_dir = project_root.join(".localmind");
+    std::fs::create_dir_all(&state_dir).map_err(memory_err)?;
+    std::fs::write(
+        injection_disabled_path(project_root),
+        b"context injection disabled\n",
+    )
+    .map_err(memory_err)
+}
+
 /// Retrieve relevant accepted memory for `query`, formatted as a compact context
 /// block to seed into an agent turn. Returns `None` when nothing matches, so the
 /// caller injects nothing rather than noise.
@@ -163,7 +228,13 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, Learni
 /// Returns [`LearningError::Context`] if memory cannot be searched.
 pub fn context_for(project_root: &Path, query: &str) -> Result<Option<String>, LearningError> {
     use std::fmt::Write as _;
-    let persistence = open_memory(project_root)?;
+    if !memory_injection_enabled(project_root) {
+        return Ok(None);
+    }
+    let persistence = match MemoryPersistence::open_project(project_root) {
+        Ok(persistence) => persistence,
+        Err(_) => return Ok(None),
+    };
     let hits = persistence
         .search(query)
         .map_err(|e| LearningError::Context(e.to_string()))?;
@@ -288,4 +359,10 @@ fn memory_err(e: impl std::fmt::Display) -> LearningError {
 
 fn skill_err(e: impl std::fmt::Display) -> LearningError {
     LearningError::Skill(e.to_string())
+}
+
+fn injection_disabled_path(project_root: &Path) -> std::path::PathBuf {
+    project_root
+        .join(".localmind")
+        .join("context-injection-disabled")
 }

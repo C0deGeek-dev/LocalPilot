@@ -2,8 +2,8 @@
 # Build and install the Unshackled CLI from source on Linux or macOS.
 #
 # Usage:
-#   ./install/install.sh                       # full build (tui + learning)
-#   UNSHACKLED_FEATURES=learning ./install/install.sh   # no interactive TUI
+#   ./install/install.sh                       # full build (tui + LocalMind)
+#   UNSHACKLED_FEATURES= ./install/install.sh  # no interactive TUI
 set -eu
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -12,18 +12,22 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-features="${UNSHACKLED_FEATURES:-tui,learning}"
+features="${UNSHACKLED_FEATURES-tui}"
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# The LocalMind learning engine is a git submodule; the `learning` feature needs
-# it checked out.
+# The LocalMind learning engine is a git submodule and is always linked into the
+# CLI.
 if [ -f "$root/.gitmodules" ] && command -v git >/dev/null 2>&1; then
     echo "updating submodules ..."
     git -C "$root" submodule update --init --recursive
 fi
 
 echo "building and installing the unshackled CLI (features: $features) ..."
-cargo install --path "$root/crates/unshackled-cli" --features "$features" --locked
+if [ -n "$features" ]; then
+    cargo install --path "$root/crates/unshackled-cli" --features "$features" --locked
+else
+    cargo install --path "$root/crates/unshackled-cli" --locked
+fi
 
 echo
 echo "installed 'unshackled'. verify with:"

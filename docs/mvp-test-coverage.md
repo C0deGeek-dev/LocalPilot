@@ -58,14 +58,14 @@ behind `UNSHACKLED_LIVE_TESTS`.
 | malformed tool calls trigger recovery | `engine::tests::malformed_tool_call_triggers_a_repair_attempt` |
 | exhausted recovery cannot complete a step | `engine::tests::exhausted_recovery_marks_degraded_and_blocks_steps` |
 
-## Context (`unshackled-harness`, `unshackled-memory`)
+## Context (`unshackled-harness`, `unshackled-localmind`)
 
 | Required | Test |
 | --- | --- |
 | compaction preserves tool-result pairing | `compaction::tests::compaction_preserves_tool_result_pairing` |
 | compaction preserves step contract | covered by `resume` e2e (step survives a turn) |
-| memory injection respects token caps | `unshackled-memory::tests::retrieval_respects_the_token_cap` |
-| stale memory not injected below threshold | `unshackled-memory::tests::stale_memory_below_threshold_is_not_injected` |
+| accepted memory can be searched and deleted | `localmind_store::tests::accepted_memory_can_be_listed_and_deleted`, `crates/unshackled-cli/tests/memory.rs::memory_inspect_delete_and_disable` |
+| stale memory not injected when disabled | `crates/unshackled-cli/tests/memory.rs::memory_inspect_delete_and_disable` |
 
 ## Store (`unshackled-store`)
 

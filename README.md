@@ -11,7 +11,7 @@
 Unshackled is a Rust-native, provider-neutral coding-agent harness.
 
 Maintained by C0deGeek.dev (David, Bram).
-Repository: <https://github.com/David-c0degeek/Unshackled-Rust>
+Repository: <https://github.com/David-c0degeek/Unshackled>
 Runs on Windows, Linux, and macOS — all first-class, tier-1 platforms.
 
 It is not a fork, clone, port, or redistribution of any vendor CLI. The project
@@ -40,7 +40,7 @@ It contains no implementation copied from any closed-source or leaked codebase.
 Clone with submodules (the LocalMind learning engine is vendored as one):
 
 ```sh
-git clone --recurse-submodules https://github.com/David-c0degeek/Unshackled-Rust
+git clone --recurse-submodules https://github.com/David-c0degeek/Unshackled.git
 # or, in an existing clone:
 git submodule update --init --recursive
 ```
@@ -96,15 +96,12 @@ and stability policy, [`docs/mcp.md`](docs/mcp.md) for MCP tool servers, and
 
 ## Build features
 
-The default binary is lean and links no terminal backend. Two opt-in features
-(enabled in CI and release builds):
-
-- `tui` — the interactive `chat` REPL (links a terminal backend).
-- `learning` — the LocalMind learning subsystem (links the vendored crates and
-  SQLite).
+The default binary links the LocalMind learning subsystem. The `tui` feature
+adds the interactive `chat` REPL; `learning` remains accepted as a compatibility
+alias for older build commands.
 
 ```sh
-cargo build -p unshackled --features tui,learning
+cargo build -p unshackled --features tui
 ```
 
 ## Repository layout
@@ -121,7 +118,6 @@ crates/
   unshackled-store/      Redacted session persistence and export
   unshackled-sandbox/    Permission engine and execution policy
   unshackled-mcp/        Model Context Protocol client and stdio transport
-  unshackled-memory/     Local project memory (alpha bridge surface)
   unshackled-skills/     Skill manifests and drafts (alpha bridge surface)
   unshackled-recovery/   Bad-output detection and recovery ladder
   unshackled-quota/      Quota window tracking and wait/resume policy
@@ -149,8 +145,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check --workspace
-cargo build -p unshackled --features tui,learning
-cargo clippy -p unshackled --features tui,learning --all-targets -- -D warnings
+cargo build -p unshackled --features tui
+cargo clippy -p unshackled --features tui --all-targets -- -D warnings
 cargo machete
 cargo deny check
 cargo audit

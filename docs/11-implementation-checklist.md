@@ -141,8 +141,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check --workspace
-cargo clippy -p unshackled --features tui,learning --all-targets -- -D warnings
-cargo build -p unshackled --features tui,learning
+cargo clippy -p unshackled --features tui --all-targets -- -D warnings
+cargo build -p unshackled --features tui
 cargo deny check
 cargo audit
 cargo machete

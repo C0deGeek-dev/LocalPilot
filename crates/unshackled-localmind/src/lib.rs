@@ -15,9 +15,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub use ops::{
-    audit, context_for, promote, review_decide, review_list, review_show, search, skill_body,
-    skill_show, skills_generate, skills_list, AuditEntry, ReviewSummary, ReviewVerdict, SearchHit,
-    SkillDraftInfo,
+    audit, context_for, memory_delete, memory_disable_injection, memory_injection_enabled,
+    memory_list, promote, review_decide, review_list, review_show, search, skill_body, skill_show,
+    skills_generate, skills_list, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict,
+    SearchHit, SkillDraftInfo,
 };
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
@@ -191,6 +192,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(initialize(dir.path()).unwrap());
         assert!(!initialize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn context_lookup_does_not_initialize_a_fresh_project() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let context = context_for(dir.path(), "parser").unwrap();
+
+        assert!(context.is_none());
+        assert!(!dir.path().join(CONFIG_FILE).exists());
+        assert!(!dir.path().join(".localmind").exists());
     }
 
     #[test]

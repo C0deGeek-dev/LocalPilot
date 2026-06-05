@@ -2,7 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use assert_cmd::Command;
-use unshackled_memory::{MemoryKind, MemoryStore};
+use unshackled_core::{Message, Role, SessionId};
+use unshackled_localmind::ReviewVerdict;
+use unshackled_store::Store;
 
 fn run(dir: &std::path::Path, args: &[&str]) -> String {
     let output = unshackled_cmd()
@@ -17,15 +19,7 @@ fn run(dir: &std::path::Path, args: &[&str]) -> String {
 #[test]
 fn memory_inspect_delete_and_disable() {
     let dir = tempfile::tempdir().unwrap();
-    let store = MemoryStore::open(dir.path());
-    let id = store
-        .add(
-            MemoryKind::ProjectFact,
-            "the parser handles errors",
-            vec![],
-            true,
-        )
-        .unwrap();
+    let id = promoted_memory(dir.path(), "the parser handles errors");
 
     // Inspect lists the entry.
     let listed = run(dir.path(), &["memory", "inspect"]);
@@ -40,11 +34,36 @@ fn memory_inspect_delete_and_disable() {
     // Delete removes it.
     let deleted = run(dir.path(), &["memory", "delete", &id]);
     assert!(deleted.contains("deleted"));
-    assert!(store.all().unwrap().is_empty());
+    assert!(unshackled_localmind::memory_list(dir.path())
+        .unwrap()
+        .is_empty());
 
     // Disable stops injection.
     run(dir.path(), &["memory", "disable"]);
-    assert!(!store.is_enabled());
+    assert!(!unshackled_localmind::memory_injection_enabled(dir.path()));
+    assert!(unshackled_localmind::context_for(dir.path(), "parser")
+        .unwrap()
+        .is_none());
+}
+
+fn promoted_memory(dir: &std::path::Path, lesson: &str) -> String {
+    let store = Store::open(dir);
+    let session = SessionId::new();
+    store
+        .append_message(
+            session,
+            &Message::text(Role::User, format!("Lesson: {lesson}")),
+        )
+        .unwrap();
+    unshackled_localmind::closeout_session(dir, &store, session).unwrap();
+    let item = unshackled_localmind::review_list(dir)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.summary == lesson)
+        .unwrap();
+    unshackled_localmind::review_decide(dir, &item.id, ReviewVerdict::Accept, "test", None)
+        .unwrap();
+    unshackled_localmind::promote(dir, &item.id).unwrap()
 }
 
 fn unshackled_cmd() -> Command {

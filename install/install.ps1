@@ -1,13 +1,13 @@
 # Build and install the Unshackled CLI from source on Windows.
 #
 # Usage:
-#   ./install/install.ps1                         # full build (tui + learning)
-#   ./install/install.ps1 -Features learning      # no interactive TUI
+#   ./install/install.ps1                         # full build (tui + LocalMind)
+#   ./install/install.ps1 -Features ''            # no interactive TUI
 #   ./install/install.ps1 -Toolchain stable       # force a toolchain
 #   ./install/install.ps1 -Target x86_64-pc-windows-gnu   # force a target
 #requires -Version 5
 param(
-    [string]$Features = 'tui,learning',
+    [string]$Features = 'tui',
     [string]$Toolchain = '',
     [string]$Target = ''
 )
@@ -20,8 +20,8 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 $root = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $root 'crates/unshackled-cli'
 
-# The LocalMind learning engine is a git submodule; the `learning` feature needs
-# it checked out.
+# The LocalMind learning engine is a git submodule and is always linked into the
+# CLI.
 if ((Test-Path (Join-Path $root '.gitmodules')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "updating submodules ..."
     git -C $root submodule update --init --recursive
@@ -40,20 +40,21 @@ if (-not $Toolchain -and ($Features -match 'tui') -and (Get-Command rustup -Erro
     } else {
         Write-Warning "the 'tui' feature (chat) is unstable on the windows-gnu toolchain."
         Write-Warning "install MSVC for a working 'chat':  rustup toolchain install stable-x86_64-pc-windows-msvc"
-        Write-Warning "or skip it:  ./install/install.ps1 -Features learning"
+        Write-Warning "or skip it:  ./install/install.ps1 -Features ''"
     }
 }
 
 Write-Host "building and installing the unshackled CLI (features: $Features) ..."
 $cargoArgs = @()
 if ($Toolchain) { $cargoArgs += "+$Toolchain" }
-$cargoArgs += @('install', '--path', $cli, '--features', $Features, '--locked', '--force')
+$cargoArgs += @('install', '--path', $cli, '--locked', '--force')
+if ($Features) { $cargoArgs += @('--features', $Features) }
 if ($Target) { $cargoArgs += @('--target', $Target) }
 cargo @cargoArgs
 # A native command failure does not trip $ErrorActionPreference; check explicitly
 # so a failed build never reports success.
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "cargo install failed (exit $LASTEXITCODE). See the build error above. If it is a missing C compiler (SQLite/rusqlite for the learning feature), install the Visual Studio Build Tools 'Desktop development with C++' workload, or re-run with -Features tui."
+    Write-Error "cargo install failed (exit $LASTEXITCODE). See the build error above. If it is a missing C compiler (SQLite/rusqlite for LocalMind), install the Visual Studio Build Tools 'Desktop development with C++' workload."
 }
 
 Write-Host ""

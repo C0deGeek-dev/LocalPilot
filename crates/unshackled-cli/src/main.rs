@@ -14,7 +14,6 @@ mod doctor;
 mod harness_cmd;
 #[cfg(feature = "tui")]
 mod key_input;
-#[cfg(feature = "learning")]
 mod learning_cmd;
 mod logging;
 mod mcp;
@@ -60,8 +59,7 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
-    /// LocalMind learning: closeout, review queue, memory. Requires the `learning` feature.
-    #[cfg(feature = "learning")]
+    /// LocalMind learning: closeout, review queue, memory.
     Learning {
         #[command(subcommand)]
         command: LearningCommand,
@@ -138,7 +136,6 @@ enum MemoryCommand {
     Disable,
 }
 
-#[cfg(feature = "learning")]
 #[derive(Debug, Subcommand)]
 enum LearningCommand {
     /// Close out a session: extract candidate lessons and enqueue them for review.
@@ -171,7 +168,6 @@ enum LearningCommand {
     Audit,
 }
 
-#[cfg(feature = "learning")]
 #[derive(Debug, Subcommand)]
 enum SkillsCommand {
     /// Generate disabled skill drafts from accepted review items.
@@ -193,7 +189,6 @@ enum SkillsCommand {
     },
 }
 
-#[cfg(feature = "learning")]
 #[derive(Debug, Subcommand)]
 enum ReviewCommand {
     /// List the review queue.
@@ -432,7 +427,6 @@ async fn main() -> anyhow::Result<()> {
                 MemoryCommand::Disable => memory_cmd::disable(&cwd, &mut stdout)?,
             }
         }
-        #[cfg(feature = "learning")]
         Command::Learning { command } => {
             use unshackled_localmind::ReviewVerdict;
             let cwd = std::env::current_dir()?;

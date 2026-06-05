@@ -16,7 +16,7 @@ Session Runtime
   +-- Store
   +-- Permission Engine
   +-- Recovery Engine
-  +-- Memory Engine
+  +-- LocalMind Adapter
   +-- Skills Engine
   +-- Quota Scheduler
 ```
@@ -171,22 +171,28 @@ Owns:
 - file-backed cache
 - attempt logs
 - redaction before persistence
-- local memory store files
 - skill manifests
 - quota wait records
 
 Storage must be inspectable plain files where possible.
 
-### `unshackled-memory`
+### `unshackled-localmind`
 
 Owns:
 
-- local project memory store
-- optional entity/relation extraction after the flat store proves useful
-- retrieval ranking
-- opt-out and deletion controls
+- adapter between Unshackled session records and LocalMind contracts
+- session closeout into LocalMind
+- accepted-memory retrieval for context injection
+- CLI-friendly wrappers around LocalMind review, memory, audit, and skill APIs
+- host-owned context-injection controls
 
-Memory must be local-only by design.
+Must not own:
+
+- a second durable memory implementation
+- LocalMind core learning rules
+- SQLite schema details beyond calling LocalMind APIs
+
+Memory and learning must remain local-only by design.
 
 ### `unshackled-skills`
 

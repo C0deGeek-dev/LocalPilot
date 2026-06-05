@@ -10,7 +10,6 @@ members = [
     "crates/unshackled-store",
     "crates/unshackled-sandbox",
     "crates/unshackled-mcp",
-    "crates/unshackled-memory",
     "crates/unshackled-skills",
     "crates/unshackled-recovery",
     "crates/unshackled-quota",
@@ -26,8 +25,8 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
-repository = "https://github.com/David-c0degeek/Unshackled-Rust"
-homepage = "https://github.com/David-c0degeek/Unshackled-Rust"
+repository = "https://github.com/David-c0degeek/Unshackled"
+homepage = "https://github.com/David-c0degeek/Unshackled"
 rust-version = "1.82"
 
 [workspace.dependencies]
@@ -48,6 +47,7 @@ futures = "=0.3.31"
 ignore = "=0.4.23"
 indexmap = { version = "=2.7.0", features = ["serde"] }
 insta = "=1.47.2"
+parking_lot = "=0.12.3"
 proptest = "=1.5.0"
 regex = "=1.11.1"
 tempfile = "=3.14.0"

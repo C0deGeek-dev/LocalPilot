@@ -201,7 +201,8 @@ pub async fn run_chat(
     )
     .await;
     leave_terminal(&mut terminal)?;
-    // Learn from the finished session (no-op without the learning feature).
+    // Learn from the finished session. This is best-effort so terminal teardown
+    // is never held hostage by the learning subsystem.
     crate::context_inject::close_out(&cwd, session_id);
     result
 }
@@ -244,8 +245,8 @@ async fn event_loop(
                             run_slash(terminal, state, runtime, approval_rx, &host, action).await?;
                         } else {
                             state.apply(UiEvent::UserMessage(shown));
-                            // Seed relevant accepted memory for this prompt (no-op
-                            // without the learning feature or when nothing matches).
+                            // Seed relevant accepted memory for this prompt when
+                            // LocalMind has a match.
                             crate::context_inject::seed(host.cwd, runtime, &prompt);
                             state.busy = true;
                             let outcome =

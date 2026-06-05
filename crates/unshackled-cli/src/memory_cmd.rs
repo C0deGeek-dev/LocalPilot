@@ -1,21 +1,15 @@
-//! `unshackled memory` subcommands: inspect, search, delete, and disable the
-//! local project memory store. Memory is project-local by default; a global
-//! (user-level) memory would require explicit first-run consent, which is not
-//! enabled here.
+//! `unshackled memory` subcommands over LocalMind accepted memory.
 
 use std::io::Write;
 use std::path::Path;
-
-use unshackled_memory::MemoryStore;
 
 /// Print a one-line status: entry count and whether injection is enabled.
 ///
 /// # Errors
 /// Returns an error if the store cannot be read or output written.
 pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
-    let store = MemoryStore::open(root);
-    let count = store.all()?.len();
-    let state = if store.is_enabled() {
+    let count = unshackled_localmind::memory_list(root)?.len();
+    let state = if unshackled_localmind::memory_injection_enabled(root) {
         "enabled"
     } else {
         "disabled"
@@ -29,8 +23,12 @@ pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
 /// # Errors
 /// Returns an error if the store cannot be read or output written.
 pub fn inspect(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
-    for entry in MemoryStore::open(root).all()? {
-        writeln!(out, "{}  [{:?}]  {}", entry.id, entry.kind, entry.text)?;
+    for entry in unshackled_localmind::memory_list(root)? {
+        writeln!(
+            out,
+            "{}  [{}:{}:{}]  {}",
+            entry.id, entry.scope, entry.category, entry.status, entry.body
+        )?;
     }
     Ok(())
 }
@@ -40,8 +38,8 @@ pub fn inspect(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
 /// # Errors
 /// Returns an error if the store cannot be read or output written.
 pub fn search(root: &Path, query: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    for entry in MemoryStore::open(root).search(query)? {
-        writeln!(out, "{}  {}", entry.id, entry.text)?;
+    for entry in unshackled_localmind::search(root, query)? {
+        writeln!(out, "{}  {}", entry.memory_id, entry.snippet)?;
     }
     Ok(())
 }
@@ -51,7 +49,7 @@ pub fn search(root: &Path, query: &str, out: &mut dyn Write) -> anyhow::Result<(
 /// # Errors
 /// Returns an error if the store cannot be written or output written.
 pub fn delete(root: &Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    if MemoryStore::open(root).delete(id)? {
+    if unshackled_localmind::memory_delete(root, id)? {
         writeln!(out, "deleted {id}")?;
     } else {
         writeln!(out, "no entry with id {id}")?;
@@ -64,7 +62,7 @@ pub fn delete(root: &Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> 
 /// # Errors
 /// Returns an error if the flag cannot be written.
 pub fn disable(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
-    MemoryStore::open(root).disable()?;
+    unshackled_localmind::memory_disable_injection(root)?;
     writeln!(out, "memory injection disabled for this project")?;
     Ok(())
 }

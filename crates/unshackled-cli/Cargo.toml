@@ -18,17 +18,19 @@ test = false
 # binary (doctor/ask/print/harness/memory/export) links no terminal backend and
 # runs on every toolchain. Release and CI builds enable it.
 default = []
-tui = ["dep:crossterm", "dep:ratatui", "dep:unshackled-tui"]
-# The LocalMind learning subsystem (session closeout, review queue, memory).
-# Opt-in: it links the vendored LocalMind crates (and SQLite). Release builds
-# enable it.
-learning = ["dep:unshackled-localmind"]
+tui = ["dep:crossterm", "dep:parking_lot", "dep:ratatui", "dep:unshackled-tui"]
+# LocalMind is always linked; this feature remains as a compatibility alias for
+# existing build commands.
+learning = []
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 crossterm = { workspace = true, optional = true }
 futures.workspace = true
+# Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:
+# parking_lot_core 0.9.12 crashes before main on rustc 1.82 x86_64-pc-windows-gnu.
+parking_lot = { workspace = true, optional = true }
 ratatui = { workspace = true, features = ["crossterm"], optional = true }
 reqwest.workspace = true
 serde_json.workspace = true
@@ -39,9 +41,8 @@ unshackled-config = { path = "../unshackled-config" }
 unshackled-core = { path = "../unshackled-core" }
 unshackled-harness = { path = "../unshackled-harness" }
 unshackled-llm = { path = "../unshackled-llm" }
-unshackled-localmind = { path = "../unshackled-localmind", optional = true }
+unshackled-localmind = { path = "../unshackled-localmind" }
 unshackled-mcp = { path = "../unshackled-mcp" }
-unshackled-memory = { path = "../unshackled-memory" }
 unshackled-quota = { path = "../unshackled-quota" }
 unshackled-recovery = { path = "../unshackled-recovery" }
 unshackled-sandbox = { path = "../unshackled-sandbox" }

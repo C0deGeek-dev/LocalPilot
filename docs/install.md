@@ -7,13 +7,13 @@ Linux, and macOS (all tier-1).
 
 - The Rust toolchain (`cargo`, MSRV 1.82) from <https://rustup.rs>.
 - `git` (the LocalMind learning engine is a submodule).
-- A C compiler for the `learning` feature, which builds SQLite: `cc`/`clang` on
+- A C compiler for the bundled LocalMind SQLite store: `cc`/`clang` on
   Linux/macOS, the MSVC C++ build tools on Windows.
 
 Clone with submodules (or initialize them after cloning):
 
 ```sh
-git clone --recurse-submodules https://github.com/David-c0degeek/Unshackled-Rust
+git clone --recurse-submodules https://github.com/David-c0degeek/Unshackled.git
 # or, in an existing clone:
 git submodule update --init --recursive
 ```
@@ -28,8 +28,8 @@ git submodule update --init --recursive
 ./install/install.ps1
 ```
 
-Both build a full binary (`--features tui,learning`) and run
-`cargo install --path crates/unshackled-cli --locked`. After install:
+Both build a full binary with the interactive TUI and run `cargo install --path
+crates/unshackled-cli --locked`. After install:
 
 ```sh
 unshackled doctor
@@ -41,20 +41,19 @@ trust state.
 
 ### Build features
 
-The default binary is lean. The installers enable two opt-in features:
+The default binary includes LocalMind-backed learning and memory. The installers
+enable the interactive TUI feature by default:
 
 - `tui` — the interactive `chat` REPL.
-- `learning` — the LocalMind learning subsystem (links the vendored crates and
-  SQLite).
 
 Pick a different set when you don't want one:
 
 ```sh
 # Linux / macOS — skip the interactive TUI:
-UNSHACKLED_FEATURES=learning ./install/install.sh
+UNSHACKLED_FEATURES= ./install/install.sh
 
-# Windows — skip learning (no SQLite/C-compiler requirement):
-./install/install.ps1 -Features tui
+# Windows — skip the interactive TUI:
+./install/install.ps1 -Features ''
 ```
 
 ### Windows: use the MSVC toolchain for `chat`
@@ -68,7 +67,7 @@ rustup toolchain install stable-x86_64-pc-windows-msvc
 ```
 
 If you only need non-interactive commands (`ask`, `print`, `harness`, `memory`,
-`learning`), the gnu toolchain is fine — run with `-Features learning`.
+`learning`), the gnu toolchain is fine.
 
 ## Updating
 

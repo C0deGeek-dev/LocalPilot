@@ -18,7 +18,7 @@ The product is not a general chatbot. It is an engineering workflow controller.
 ## Maintainers
 
 Unshackled is developed and maintained by C0deGeek.dev (David, Bram). The
-canonical repository is <https://github.com/David-c0degeek/Unshackled-Rust>.
+canonical repository is <https://github.com/David-c0degeek/Unshackled>.
 
 ## Supported Platforms
 

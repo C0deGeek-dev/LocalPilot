@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use unshackled_store::Store;
 
-const REPO_URL: &str = "https://github.com/David-c0degeek/Unshackled-Rust";
-const TAGS_API: &str = "https://api.github.com/repos/David-c0degeek/Unshackled-Rust/tags";
+const REPO_URL: &str = "https://github.com/David-c0degeek/Unshackled.git";
+const TAGS_API: &str = "https://api.github.com/repos/David-c0degeek/Unshackled/tags";
 const CACHE_KEY: &str = "update-check.json";
 const CHECK_INTERVAL_SECS: u64 = 86_400;
 
@@ -184,9 +184,6 @@ fn reinstall(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     let mut features: Vec<&str> = Vec::new();
     if cfg!(feature = "tui") {
         features.push("tui");
-    }
-    if cfg!(feature = "learning") {
-        features.push("learning");
     }
 
     let mut command = std::process::Command::new("cargo");
