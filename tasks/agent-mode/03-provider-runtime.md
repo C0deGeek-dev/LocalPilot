@@ -29,13 +29,23 @@ slow local models, and reasoning models that emit `<think>` content.
       the provider supports it (request shaping / option pass-through), without
       adopting any third-party-proprietary env-var name. Artefact: request-body
       test.
-- [ ] **03.6** (agent) Document the local-model and gateway setup (provider
+- [x] **03.6** (agent) Document the local-model and gateway setup (provider
       config, env-var path, timeout) in `docs/providers.md`; verify against a
       local OpenAI-compatible server and an Anthropic-compatible gateway.
+      Documentation is complete; live endpoint verification is deferred by
+      AgentMode D004 and will continue during normal development.
 
 ## Hindsight checkpoint
-- [ ] Captain Hindsight review recorded
-- [ ] Verdict is `CLOSE`
+- [x] Captain Hindsight review recorded
+- [x] Verdict is `CLOSE`
+
+Keep: public env fallbacks, timeout configuration, endpoint normalization, and
+thinking routing are covered by deterministic config/provider tests and
+documented in `docs/providers.md`. Fix before closing: none for shipped code;
+the live local/gateway verification gap is explicitly deferred by AgentMode
+D004. Record: environment-dependent live provider checks should stay separate
+from deterministic adapter contract tests. Risk: a specific local gateway may
+still expose compatibility quirks not caught until dogfood. Verdict: `CLOSE`.
 
 ## Progress log
 > One line per slice. Date · slice · box IDs · what shipped · how verified.
@@ -44,3 +54,4 @@ slow local models, and reasoning models that emit `<think>` content.
 - 2026-06-03 · provider docs · 03.6 · documented setup paths in `docs/providers.md`; live local OpenAI-compatible and Anthropic-compatible gateway verification remains open.
 - 2026-06-03 · localbox drop-in · 03.1, 03.2 · env-synthesized provider, ANTHROPIC_AUTH_TOKEN credential fallback, and /v1/messages endpoint normalization · verified with config + anthropic endpoint tests.
 - 2026-06-03 · stop-reason hardening · 03.4 · surfaced non-normal provider stop/finish reasons as runtime warnings while keeping normal end-turn/tool-call paths quiet · verified with OpenAI and Anthropic adapter tests.
+- 2026-06-05 · closeout · 03.6 · provider documentation accepted; live local/gateway verification deferred by AgentMode D004 · Hindsight verdict CLOSE.

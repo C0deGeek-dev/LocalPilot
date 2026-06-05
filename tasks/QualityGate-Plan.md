@@ -156,7 +156,7 @@ beyond the two built here (later profiles are follow-on work, not this plan).
 - [x] `tasks/quality-gate/manual-actions.md` resolved or deferred (06.4 deferred)
 - [x] `tasks/quality-gate/lessons.md` reconciled; lasting lessons migrate to
       `tasks/lessons.md` at folder deletion (pre-v1)
-- [ ] Plan handed to reviewer for §8 sign-off
+- [x] Plan handed to reviewer for §8 sign-off
 
 ---
 
@@ -164,4 +164,4 @@ beyond the two built here (later profiles are follow-on work, not this plan).
 
 | Date | Reviewer | Result | Notes |
 |---|---|---|---|
-| | | | |
+| 2026-06-05 | David | Accepted | Quality gate plan accepted; §7 gate passed with product-owner UX wording deferred before v1. |

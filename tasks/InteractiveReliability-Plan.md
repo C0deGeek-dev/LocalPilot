@@ -60,10 +60,9 @@ redesign and broad TUI refactoring are out of scope.
 
 ## 7. Gate review
 
-- [ ] `cargo fmt --check` - blocked by unrelated pre-existing harness changes
+- [x] `cargo fmt --check`
 - [x] Focused TUI, CLI, LLM, and harness tests pass
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` - blocked by the
-      unrelated pre-existing unused `CheckOutcome` import in `resume.rs`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `cargo test --workspace`
 - [x] `cargo check -p unshackled --features tui`
 - [x] Code review and simplification pass complete
@@ -72,4 +71,4 @@ redesign and broad TUI refactoring are out of scope.
 
 | Date | Reviewer | Result | Notes |
 |---|---|---|---|
-| | | | |
+| 2026-06-05 | David | Accepted | Stale fmt/clippy blockers cleared by fresh local gate; focused tests and workspace checks were already recorded. |

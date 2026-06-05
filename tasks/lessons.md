@@ -74,3 +74,13 @@ On Windows, a path like `/tmp/x` is **not** absolute (no drive prefix), so it
 resolves *inside* the workspace. "Outside-workspace" boundary tests must use a
 real second `tempdir()` absolute path, not a hardcoded POSIX path, to be correct
 on all three tier-1 platforms.
+
+## Live validation versus contract tests
+
+Provider adapter tests and offline golden tasks prove deterministic contracts:
+request shaping, parsing, recovery, permission handling, and pass/fail checks.
+They do not prove that a real hosted model, local model, or gateway completes
+representative dogfood tasks. If live validation is blocked by credentials,
+budget, or model availability, record it as an explicit accepted limitation and
+keep the live run as ongoing development validation rather than leaving a plan
+box vaguely open.
