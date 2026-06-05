@@ -1,6 +1,7 @@
 //! Smoke tests for the installed binary shape.
 #![allow(clippy::unwrap_used)]
 
+#[cfg(feature = "tui")]
 use assert_cmd::Command;
 
 #[test]

@@ -23,7 +23,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +46,7 @@ jobs:
           Copy-Item target/release/unshackled.exe dist/unshackled/
           Copy-Item LICENSE-MIT, README.md, CHANGELOG.md dist/unshackled/
           Compress-Archive -Path dist/unshackled/* -DestinationPath unshackled-${{ matrix.target }}.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: unshackled-${{ matrix.target }}
           path: unshackled-${{ matrix.target }}.${{ matrix.ext }}

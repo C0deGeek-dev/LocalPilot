@@ -15,7 +15,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     # Blocking before the v1 release (docs/14 §4, docs/09 release checklist).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
