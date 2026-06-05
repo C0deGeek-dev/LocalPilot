@@ -411,8 +411,7 @@ impl SseDecoder {
             self.process_line(line.trim(), out);
         }
         if !self.done {
-            let content_complete = !self.saw_content_delta || self.closed_blocks > 0;
-            if self.saw_stop_reason && self.open_blocks.is_empty() && content_complete {
+            if self.saw_stop_reason && self.open_blocks.is_empty() && self.content_complete() {
                 self.emit_done(out);
             } else {
                 self.done = true;
@@ -421,6 +420,10 @@ impl SseDecoder {
                 )));
             }
         }
+    }
+
+    fn content_complete(&self) -> bool {
+        !self.saw_content_delta || self.closed_blocks > 0
     }
 
     fn emit_done(&mut self, out: &mut EventQueue) {
@@ -492,12 +495,12 @@ impl SseDecoder {
                 }
             }
             Some("message_stop") => {
-                if self.open_blocks.is_empty() {
+                if self.open_blocks.is_empty() && self.content_complete() {
                     self.emit_done(out);
                 } else {
                     self.done = true;
                     out.push_back(Err(ProviderError::StreamDecode(
-                        "stream stopped before all content blocks completed".to_string(),
+                        "stream stopped before content lifecycle completed".to_string(),
                     )));
                 }
             }
@@ -780,6 +783,20 @@ mod tests {
             Err(ProviderError::StreamDecode(message))
                 if message.contains("completion marker")
         )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn message_stop_does_not_complete_unframed_text_deltas() {
+        let events = collect_sse(&[
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cut off mid wor\"}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Err(ProviderError::StreamDecode(_)))));
         assert!(!events
             .iter()
             .any(|event| matches!(event, Ok(ModelEvent::Done))));
