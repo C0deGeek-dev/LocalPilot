@@ -49,7 +49,7 @@ mod tests {
         for name in tools.names() {
             assert!(prompt.contains(name), "prompt omitted {name}");
         }
-        assert!(!prompt.contains("AgentMode-Plan.md"));
-        assert!(!prompt.contains("tasks/agent-mode"));
+        assert!(!prompt.contains("-Plan.md"));
+        assert!(!prompt.contains("tasks/"));
     }
 }
