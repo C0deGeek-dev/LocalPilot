@@ -1,4 +1,4 @@
-name: ci
+﻿name: ci
 
 on:
   push:
@@ -35,8 +35,8 @@ jobs:
       - run: cargo check --workspace
       # The interactive TUI (`chat`) is behind an opt-in feature; lint and build
       # it here so the terminal driver is covered on every OS.
-      - run: cargo clippy -p unshackled --features tui,learning --all-targets -- -D warnings
-      - run: cargo build -p unshackled --features tui,learning
+      - run: cargo clippy -p localpilot --features tui,learning --all-targets -- -D warnings
+      - run: cargo build -p localpilot --features tui,learning
 
   supply-chain:
     name: supply-chain (advisories, licenses, bans, unused deps)

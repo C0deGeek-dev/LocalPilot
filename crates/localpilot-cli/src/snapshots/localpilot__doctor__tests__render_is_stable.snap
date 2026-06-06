@@ -1,0 +1,24 @@
+﻿---
+source: crates/localpilot-cli/src/doctor.rs
+assertion_line: 344
+expression: render(&fixture())
+---
+LocalPilot 0.0.0-test
+
+platform:
+  os:   testos
+  arch: testarch
+
+config search paths:
+  user: /config/localpilot/config.toml (missing)
+  project: /work/.localpilot.toml (present)
+
+providers:
+  local: credential LOCALPILOT_LOCAL_API_KEY not set
+  openai: credential OPENAI_API_KEY set
+
+tools:
+  git (git): available
+  ripgrep (rg): not found (optional)
+
+workspace trust: unknown (evaluated when a session starts)

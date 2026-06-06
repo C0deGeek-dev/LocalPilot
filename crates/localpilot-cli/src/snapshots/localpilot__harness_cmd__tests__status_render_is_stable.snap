@@ -1,0 +1,11 @@
+﻿---
+source: crates/localpilot-cli/src/harness_cmd.rs
+expression: report.render()
+---
+branch: feature/parser-errors
+progress: 1/3 steps complete
+next step: 2. Implement parser errors
+working tree: clean
+test command: cargo test
+quality gate: fmt (step), test (phase)
+provider: local (credential not set)

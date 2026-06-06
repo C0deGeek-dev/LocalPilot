@@ -1,7 +1,7 @@
-# Plan-Template.md — Skeleton For A Multi-Slice Build Plan In This Repo
+﻿# Plan-Template.md — Skeleton For A Multi-Slice Build Plan In This Repo
 
 > **Purpose.** Reusable shape for an autonomous-agent-driven, multi-slice
-> *build-process* plan for Unshackled. This is developer-process tooling, not a
+> *build-process* plan for LocalPilot. This is developer-process tooling, not a
 > shipped product artefact — keep it separate from the product harness's own
 > `brief.md` / `PROGRESS.md` (those are runtime files spec'd in
 > `docs/06-harness-spec.md`).

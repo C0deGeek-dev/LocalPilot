@@ -1,4 +1,4 @@
-# Implementation Plan
+﻿# Implementation Plan
 
 ## Phase 0: Repository Foundation
 
@@ -28,7 +28,7 @@ Tasks:
 
 - define `Message`, `ContentBlock`, `ToolCall`, `ToolResult`
 - define `SessionId`, `TurnId`, `ToolUseId`
-- implement `.unshackled.toml` parser
+- implement `.localpilot.toml` parser
 - implement user config directory resolution
 - implement env var overrides
 - implement secret redaction
@@ -57,7 +57,7 @@ Tasks:
 
 Done when:
 
-- text-only `unshackled ask "..."` works
+- text-only `localpilot ask "..."` works
 - provider tests use recorded local fixtures or mock HTTP
 - no private endpoint is present in code or tests
 
@@ -117,8 +117,8 @@ Tasks:
 - define `PROGRESS.md` schema
 - implement lossless parser/renderer where possible
 - implement validation rules
-- implement `unshackled init`
-- implement `unshackled harness status`
+- implement `localpilot init`
+- implement `localpilot harness status`
 
 Done when:
 
@@ -132,8 +132,8 @@ Goal: create brief and plan through model calls.
 
 Tasks:
 
-- write original Unshackled intake prompt
-- write original Unshackled planner prompt
+- write original LocalPilot intake prompt
+- write original LocalPilot planner prompt
 - create prompt fixtures and snapshot tests
 - iterate prompts against golden tasks
 - implement `harness intake`
@@ -255,7 +255,7 @@ Goal: support local skills and user-approved skill generation.
 
 Tasks:
 
-- define Unshackled skill manifest
+- define LocalPilot skill manifest
 - load local project skills
 - load local user skills
 - expose skill instructions to the agent
@@ -302,7 +302,7 @@ Tasks:
 - parse `retry-after` and provider reset metadata when available
 - estimate reset windows when provider only returns prose
 - persist paused run state
-- implement `unshackled harness wait-resume`
+- implement `localpilot harness wait-resume`
 - implement per-run auto-resume flag
 - implement global unattended-resume setting
 - resume only at harness step boundaries

@@ -1,4 +1,4 @@
-# Clean-Room Development Policy
+﻿# Clean-Room Development Policy
 
 ## Purpose
 
@@ -69,7 +69,7 @@ For any feature inspired by an existing product category:
 3. A reviewer checks for provenance, not just correctness.
 
 One person may fill all roles for features that are obviously generic, such as
-`unshackled --help`, TOML config loading, or a local `git status` wrapper. Use
+`localpilot --help`, TOML config loading, or a local `git status` wrapper. Use
 separation when implementing workflows that resemble proprietary coding-agent
 products.
 
@@ -109,8 +109,8 @@ Every PR must answer:
 - Did the author cite public documentation for external APIs?
 - Does this use only official APIs or local servers?
 - Does this avoid vendor branding and private implementation names?
-- Are prompts authored for Unshackled rather than copied from a product?
-- Are tests derived from Unshackled's spec, not another implementation?
+- Are prompts authored for LocalPilot rather than copied from a product?
+- Are tests derived from LocalPilot's spec, not another implementation?
 
 ## Repository Hygiene
 

@@ -1,4 +1,4 @@
-# Build and install the Unshackled CLI from source on Windows.
+﻿# Build and install the LocalPilot CLI from source on Windows.
 #
 # Usage:
 #   ./install/install.ps1                         # full build (tui + LocalMind)
@@ -18,7 +18,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 $root = Split-Path -Parent $PSScriptRoot
-$cli = Join-Path $root 'crates/unshackled-cli'
+$cli = Join-Path $root 'crates/localpilot-cli'
 
 # The LocalMind learning engine is a git submodule and is always linked into the
 # CLI.
@@ -44,7 +44,7 @@ if (-not $Toolchain -and ($Features -match 'tui') -and (Get-Command rustup -Erro
     }
 }
 
-Write-Host "building and installing the unshackled CLI (features: $Features) ..."
+Write-Host "building and installing the localpilot CLI (features: $Features) ..."
 $cargoArgs = @()
 if ($Toolchain) { $cargoArgs += "+$Toolchain" }
 $cargoArgs += @('install', '--path', $cli, '--locked', '--force')
@@ -58,5 +58,5 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "installed 'unshackled'. verify with:"
-Write-Host "    unshackled doctor"
+Write-Host "installed 'localpilot'. verify with:"
+Write-Host "    localpilot doctor"

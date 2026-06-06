@@ -1,4 +1,4 @@
----
+﻿---
 name: plan-large-task
 description: >-
   Choose and run the right planning ceremony for a build task in this repo.
@@ -13,7 +13,7 @@ description: >-
 
 This skill routes a build effort to the right *planning weight*. It is
 developer-process tooling, not product behaviour — keep it separate from the
-product harness's own `unshackled harness plan` (`brief.md` / `PROGRESS.md`),
+product harness's own `localpilot harness plan` (`brief.md` / `PROGRESS.md`),
 which is spec'd in
 [`docs/06-harness-spec.md`](../../../docs/06-harness-spec.md).
 

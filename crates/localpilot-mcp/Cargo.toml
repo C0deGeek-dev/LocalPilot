@@ -1,0 +1,23 @@
+﻿[package]
+name = "localpilot-mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-tools = { path = "../localpilot-tools" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+localpilot-core = { path = "../localpilot-core" }

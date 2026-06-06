@@ -1,8 +1,8 @@
-# Product Specification
+﻿# Product Specification
 
 ## Product Definition
 
-Unshackled is a terminal-based coding-agent harness. It helps a developer turn
+LocalPilot is a terminal-based coding-agent harness. It helps a developer turn
 an idea into an explicit brief, turn the brief into a stepwise plan, and execute
 that plan through an LLM plus local tools under rules that preserve reviewability.
 
@@ -17,8 +17,8 @@ The product is not a general chatbot. It is an engineering workflow controller.
 
 ## Maintainers
 
-Unshackled is developed and maintained by C0deGeek.dev (David, Bram). The
-canonical repository is <https://github.com/David-c0degeek/Unshackled>.
+LocalPilot is developed and maintained by C0deGeek.dev (David, Bram). The
+canonical repository is <https://github.com/David-c0degeek/LocalPilot>.
 
 ## Supported Platforms
 
@@ -113,7 +113,7 @@ digging.
 
 ### Job 5: Recover from Bad Model Status
 
-When a provider or local model enters a visibly bad state, Unshackled should
+When a provider or local model enters a visibly bad state, LocalPilot should
 detect it and recover without corrupting the session.
 
 Examples:
@@ -131,7 +131,7 @@ is exhausted.
 
 ### Job 6: Preserve Useful Local Context
 
-Unshackled should help the user retain useful project knowledge locally:
+LocalPilot should help the user retain useful project knowledge locally:
 
 - project facts
 - recurring workflows
@@ -145,7 +145,7 @@ controls. Global/personal memory requires explicit consent.
 ### Job 7: Continue After Provider Quota Resets
 
 Some hosted providers expose session, message, token, or time-window limits.
-Unshackled should understand quota reset windows and optionally resume a paused
+LocalPilot should understand quota reset windows and optionally resume a paused
 harness run when the provider becomes usable again.
 
 This must be configurable per run and globally. Global unattended resume is
@@ -153,7 +153,7 @@ allowed only when the user explicitly enables it.
 
 ## Operating Modes
 
-Unshackled has two operating modes. The operating mode decides how much control
+LocalPilot has two operating modes. The operating mode decides how much control
 the harness exerts. It is independent of the interface (REPL, CLI, print). Mode
 and permission profile are selectable per launch via flags (`--mode`,
 `--permission`/`--bypass`) or config; see the harness spec.
@@ -172,7 +172,7 @@ configurable per project and globally:
   reads). Least privilege.
 - `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
   still prompt.
-- `bypass`: allow-all launch mode, no prompts, like running fully unshackled.
+- `bypass`: allow-all launch mode, no prompts, like running fully localpilot.
   Explicit opt-in, surfaced in the footer.
 
 The default is least privilege. Bypass is never the default and must be set by
@@ -226,13 +226,13 @@ Interactive slash commands are REPL-scoped:
 
 Scriptable commands:
 
-- `unshackled init`
-- `unshackled harness intake`
-- `unshackled harness plan`
-- `unshackled harness resume`
-- `unshackled harness status`
-- `unshackled harness feature`
-- `unshackled harness wait-resume`
+- `localpilot init`
+- `localpilot harness intake`
+- `localpilot harness plan`
+- `localpilot harness resume`
+- `localpilot harness status`
+- `localpilot harness feature`
+- `localpilot harness wait-resume`
 
 ### Print Mode
 
@@ -253,7 +253,7 @@ Optional mode for long-running harness work:
 
 ## User-Facing Files
 
-### `.unshackled.toml`
+### `.localpilot.toml`
 
 Project-local config.
 
@@ -265,7 +265,7 @@ Problem statement and contract.
 
 Plan and execution state.
 
-### `.unshackled/`
+### `.localpilot/`
 
 Ignored runtime state:
 

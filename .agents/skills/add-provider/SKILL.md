@@ -1,7 +1,7 @@
----
+﻿---
 name: add-provider
 description: >-
-  Add or change a model provider — implement the provider trait in unshackled-llm
+  Add or change a model provider — implement the provider trait in localpilot-llm
   behind the registry, map the stream-event model, declare capabilities and quota
   metadata, handle the error taxonomy, and write the required provider tests. Use
   for provider/adapter work.
@@ -15,8 +15,8 @@ the field-level detail.
 
 ## Rules
 
-- Provider code lives ONLY in `unshackled-llm`, behind the one provider trait and
-  the registry. `unshackled-core` stays provider-neutral (ADR-0002).
+- Provider code lives ONLY in `localpilot-llm`, behind the one provider trait and
+  the registry. `localpilot-core` stays provider-neutral (ADR-0002).
 - Official public API surfaces or local OpenAI-compatible servers only — no
   private or undocumented endpoint adapters (ADR-0004). Cite the public API docs
   in the PR provenance note (see [[clean-room-guard]]).
@@ -30,4 +30,4 @@ the field-level detail.
 
 Text completion, tool call, streaming, malformed/garbage response, and quota
 exhaustion — each against a hand-written fake transport, deterministic and
-offline. Live tests are opt-in behind `UNSHACKLED_LIVE_TESTS`.
+offline. Live tests are opt-in behind `LOCALPILOT_LIVE_TESTS`.

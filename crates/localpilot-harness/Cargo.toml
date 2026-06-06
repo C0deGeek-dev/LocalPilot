@@ -1,0 +1,33 @@
+﻿[package]
+name = "localpilot-harness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+futures = { workspace = true }
+indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+localpilot-config = { path = "../localpilot-config" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-quota = { path = "../localpilot-quota" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-store = { path = "../localpilot-store" }
+localpilot-tools = { path = "../localpilot-tools" }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

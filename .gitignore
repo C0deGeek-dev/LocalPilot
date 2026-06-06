@@ -1,5 +1,5 @@
-/target/
-/.unshackled/
+﻿/target/
+/.localpilot/
 /.harness/
 /.localmind/
 /.localmind.toml
@@ -9,7 +9,7 @@
 .env.*
 !.env.example
 
-.unshackled/
+.localpilot/
 
 # Local launch-generated provider config (LocalBox writes this in cwd)
-/.unshackled.toml
+/.localpilot.toml

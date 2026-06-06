@@ -1,4 +1,4 @@
-name: nightly
+﻿name: nightly
 
 # Post-alpha iteration pipeline: builds main on a schedule with no stability
 # guarantee (docs/09 Release Channels). Artifacts are retained briefly for
@@ -24,12 +24,12 @@ jobs:
         with:
           toolchain: "1.82"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p unshackled --features tui,learning
+      - run: cargo build --release --locked -p localpilot --features tui,learning
       - uses: actions/upload-artifact@v7
         with:
-          name: unshackled-nightly-${{ matrix.os }}
+          name: localpilot-nightly-${{ matrix.os }}
           path: |
-            target/release/unshackled
-            target/release/unshackled.exe
+            target/release/localpilot
+            target/release/localpilot.exe
           if-no-files-found: ignore
           retention-days: 7

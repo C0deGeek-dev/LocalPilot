@@ -1,4 +1,4 @@
-# Harness Specification
+﻿# Harness Specification
 
 ## Definition
 
@@ -13,12 +13,12 @@ conversational loop with no rule engine. See the product spec for the split.
 
 Harness mode is entered three ways:
 
-- ground-up: `unshackled harness intake` then `unshackled harness plan` on a new
+- ground-up: `localpilot harness intake` then `localpilot harness plan` on a new
   project
 - single task: wrap one bounded task in the rule engine without a full project
   plan
 - adopt existing: summarize an existing repo, generate or import
-  `brief.md`/`PROGRESS.md`, then `unshackled harness resume`
+  `brief.md`/`PROGRESS.md`, then `localpilot harness resume`
 
 ## Mode and Permission Flags
 
@@ -30,8 +30,8 @@ config overrides built-in defaults.
 - `--bypass`: shorthand for `--permission bypass`. Allow-all, no prompts. Must be
   set explicitly; the active profile is shown in the footer/status.
 
-These flags apply to the interactive REPL, print mode, and every `unshackled
-harness` subcommand. The `unshackled harness` subcommands imply `--mode harness`.
+These flags apply to the interactive REPL, print mode, and every `localpilot
+harness` subcommand. The `localpilot harness` subcommands imply `--mode harness`.
 
 Config equivalents:
 
@@ -45,7 +45,7 @@ profile = "default"
 
 ## Files
 
-### `.unshackled.toml`
+### `.localpilot.toml`
 
 Project-local config.
 
@@ -171,16 +171,16 @@ Like `brief.md` and `PROGRESS.md`, this file is authoritative and user-editable
 
 ## Commands
 
-### `unshackled init`
+### `localpilot init`
 
 Creates:
 
-- `.unshackled.toml`
-- `.gitignore` entry for `.unshackled/`
+- `.localpilot.toml`
+- `.gitignore` entry for `.localpilot/`
 
 Initializes git if requested.
 
-### `unshackled harness intake`
+### `localpilot harness intake`
 
 Inputs:
 
@@ -192,9 +192,9 @@ Inputs:
 Output:
 
 - `brief.md`
-- `.unshackled/intake.jsonl`
+- `.localpilot/intake.jsonl`
 
-### `unshackled harness plan`
+### `localpilot harness plan`
 
 Inputs:
 
@@ -206,7 +206,7 @@ Output:
 
 - `PROGRESS.md`
 
-### `unshackled harness resume`
+### `localpilot harness resume`
 
 Inputs:
 
@@ -221,7 +221,7 @@ Output:
 - progress commit
 - attempt logs when needed
 
-### `unshackled harness feature`
+### `localpilot harness feature`
 
 Adds a new feature to an existing brief and plan.
 
@@ -234,20 +234,20 @@ Output:
 - appended brief notes
 - appended or inserted progress steps
 
-### `unshackled harness gate`
+### `localpilot harness gate`
 
 Inspect or ratify the discovered quality gate (no provider needed).
 
 - `gate propose` — read-only. Detects the stack, probes which tools are on
   `PATH`, and prints the proposed checks with each command's risk class and an
   explicit warning for a destructive/privileged/network command. Writes nothing.
-- `gate ratify` — writes the proposed checks into `.unshackled.toml` as
+- `gate ratify` — writes the proposed checks into `.localpilot.toml` as
   `[[harness.checks]]`, adding only checks not already ratified and preserving
   the rest of the config. Ratification is the trust boundary: a discovered check
   does not run until it is committed here. A re-probe proposes additions; it
   never auto-adopts them.
 
-### `unshackled harness status`
+### `localpilot harness status`
 
 Read-only summary:
 
@@ -360,7 +360,7 @@ they are the fixed abstraction. The specific commands, versions, and paths are
 During intake/plan setup, the harness detects the project's stack, selects the
 matching profile(s), and probes which tools are actually available. It then
 *proposes* a gate. Discovered commands are untrusted: nothing runs until the
-user ratifies the gate into committed `.unshackled.toml`. After ratification each
+user ratifies the gate into committed `.localpilot.toml`. After ratification each
 check runs through the permission engine and sandbox like any other shell
 command (see [`docs/05`](05-tool-system.md), [`docs/07`](07-security-and-privacy.md)).
 A re-probe proposes additions when the toolchain changes; additions are

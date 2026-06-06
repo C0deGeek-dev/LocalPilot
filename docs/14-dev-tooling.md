@@ -1,6 +1,6 @@
-# Development Tooling
+﻿# Development Tooling
 
-What to use while building Unshackled: AI-assistant capabilities already in the
+What to use while building LocalPilot: AI-assistant capabilities already in the
 loop, optional MCP servers, cargo tooling worth installing, and repo
 conveniences. This is a developer-environment doc — none of it ships in the
 product, and none of it is a clean-room source (these are generic dev tools).
@@ -40,10 +40,10 @@ Slash-invoked skills that map cleanly onto this project's workflow:
 - **`/simplify`** — quality-only pass for reuse/simplification/efficiency on the
   changed code. Good after a feature lands and before review.
 - **`/security-review`** — security pass on pending branch changes. Run it on
-  anything touching `unshackled-sandbox`, `run_shell`, path handling, or secret
+  anything touching `localpilot-sandbox`, `run_shell`, path handling, or secret
   redaction.
 - **`/verify`** and **`/run`** — actually launch the CLI and observe behavior
-  (e.g. `unshackled doctor`, the Milestone-1 harness commands) rather than
+  (e.g. `localpilot doctor`, the Milestone-1 harness commands) rather than
   trusting that tests imply the binary works.
 - **`/init`** — (re)generate a `CLAUDE.md` of codebase conventions if/when we add
   one for the assistant.
@@ -143,7 +143,7 @@ PRs:
 ## 5. Project skills (portable across Claude and Codex)
 
 §1 lists the assistant's *built-in* skills. This section is about **skills we
-author into the repo** to encode Unshackled's own procedures.
+author into the repo** to encode LocalPilot's own procedures.
 
 **The format is shared.** A skill is a directory with a `SKILL.md` file whose
 frontmatter has `name` and `description`; the body (and optional scripts /
@@ -192,10 +192,10 @@ Recommended skills to author (each maps to an existing spec):
 | `clean-room-guard` | [00-clean-room.md](00-clean-room.md), ADR-0004/0005 | How to use the documented read-only reference (see `AGENTS.md`) without copying; when a provenance note is required; what is prohibited (prompts, identifiers, structure, UI copy, branding). Easy to get wrong, unique to this project. |
 | `implement-harness-step` | [06-harness-spec.md](06-harness-spec.md), [03-implementation-plan.md](03-implementation-plan.md) | The core product loop: `brief.md` / `PROGRESS.md` contracts, rule verdicts, attempt limits, progress update, commit policy. Central and easy to do ad hoc. |
 | `add-tool` | [05-tool-system.md](05-tool-system.md) | Implement the `Tool` trait, generate JSON schema, register, route through the permission engine (never bypass), sandbox policy, required allow/deny tests. |
-| `add-provider` | [04-provider-contract.md](04-provider-contract.md) | Where a provider impl lives (`unshackled-llm` module, behind the trait), quota metadata, stream-event model, required tests (text/tool/stream/malformed/quota), provenance note from public API docs. |
-| `add-mcp-integration` | [02-architecture.md](02-architecture.md) §`unshackled-mcp` | MCP is v1 scope. Forces MCP tools/resources through the *same* permission and redaction pipeline as builtin tools — not a side channel. |
+| `add-provider` | [04-provider-contract.md](04-provider-contract.md) | Where a provider impl lives (`localpilot-llm` module, behind the trait), quota metadata, stream-event model, required tests (text/tool/stream/malformed/quota), provenance note from public API docs. |
+| `add-mcp-integration` | [02-architecture.md](02-architecture.md) §`localpilot-mcp` | MCP is v1 scope. Forces MCP tools/resources through the *same* permission and redaction pipeline as builtin tools — not a side channel. |
 | `write-golden-eval` | [08-testing.md](08-testing.md) §Golden-Task Evals | Evals are required; this prevents ad hoc benchmark tasks and copied fixtures, and records the per-task scorecard fields. |
-| `add-tui-view` *(opt)* | ADR-0006, [02-architecture.md](02-architecture.md) §`unshackled-tui` | Ratatui/crossterm view with `TestBackend` snapshot expectations and cross-platform terminal constraints. |
+| `add-tui-view` *(opt)* | ADR-0006, [02-architecture.md](02-architecture.md) §`localpilot-tui` | Ratatui/crossterm view with `TestBackend` snapshot expectations and cross-platform terminal constraints. |
 | `author-adr` *(opt)* | [10-decisions.md](10-decisions.md) | Append an ADR in the exact house format (newest on top, status, reason bullets). |
 | `plan-large-task` | §7 below | Tier the planning ceremony: in-session `EnterPlanMode` for small tasks; a bundled multi-slice plan template (`tasks/<Name>-Plan.md`) with decision log, resume-safe checkpoints, and Captain Hindsight for large ones. Present in the repo. |
 
@@ -214,8 +214,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace      # or: cargo test --workspace
 cargo check --workspace
-cargo build -p unshackled --features tui
-cargo clippy -p unshackled --features tui --all-targets -- -D warnings
+cargo build -p localpilot --features tui
+cargo clippy -p localpilot --features tui --all-targets -- -D warnings
 
 # Hygiene (pre-release)
 cargo deny check
@@ -229,7 +229,7 @@ cargo insta review
 ## 7. Build-process planning (tiered)
 
 How an assistant plans *its own work on this repo* — distinct from the product's
-`unshackled harness plan` command, which emits the runtime `brief.md` /
+`localpilot harness plan` command, which emits the runtime `brief.md` /
 `PROGRESS.md` ([06-harness-spec.md](06-harness-spec.md)). Never name a
 build-plan file `PROGRESS.md` or `brief.md`; those names belong to the product
 runtime.

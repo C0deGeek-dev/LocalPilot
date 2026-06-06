@@ -1,6 +1,6 @@
-# Agent Notes
+﻿# Agent Notes
 
-When working in this repository, `D:\repos\unshackled` may be inspected as a
+When working in this repository, `D:\repos\localpilot` may be inspected as a
 read-only behavior reference when local docs are incomplete.
 
 Use it only to understand workflows, command behavior, configuration shape,

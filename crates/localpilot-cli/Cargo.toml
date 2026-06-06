@@ -1,0 +1,61 @@
+﻿[package]
+name = "localpilot"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["parking_lot"]
+
+[[bin]]
+name = "localpilot"
+path = "src/main.rs"
+test = false
+
+[features]
+# The interactive `chat` REPL links crossterm. It is opt-in so the default
+# binary (doctor/ask/print/harness/memory/export) links no terminal backend and
+# runs on every toolchain. Release and CI builds enable it.
+default = []
+tui = ["dep:crossterm", "dep:parking_lot", "dep:ratatui", "dep:localpilot-tui"]
+# LocalMind is always linked; this feature remains as a compatibility alias for
+# existing build commands.
+learning = []
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm = { workspace = true, optional = true }
+futures.workspace = true
+# Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:
+# parking_lot_core 0.9.12 crashes before main on rustc 1.82 x86_64-pc-windows-gnu.
+parking_lot = { workspace = true, optional = true }
+ratatui = { workspace = true, features = ["crossterm"], optional = true }
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing-subscriber.workspace = true
+localpilot-config = { path = "../localpilot-config" }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-localmind = { path = "../localpilot-localmind" }
+localpilot-mcp = { path = "../localpilot-mcp" }
+localpilot-quota = { path = "../localpilot-quota" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-store = { path = "../localpilot-store" }
+localpilot-tools = { path = "../localpilot-tools" }
+localpilot-tui = { path = "../localpilot-tui", optional = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+crossterm = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

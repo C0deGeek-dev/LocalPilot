@@ -1,4 +1,4 @@
-# Architecture Decision Records
+﻿# Architecture Decision Records
 
 This file starts the decision log. Add new records at the top.
 
@@ -13,7 +13,7 @@ than hardcoded into the engine. Built-in toolchain profiles per stack declare
 the default checks, how to interpret a check's findings, and which findings are
 safely auto-fixable; a discovery step detects the stack, probes which tools are
 actually available, and proposes a gate the user ratifies into committed
-`.unshackled.toml`. The rule engine runs checks at a per-check cadence (fast
+`.localpilot.toml`. The rule engine runs checks at a per-check cadence (fast
 checks each step, full checks at phase boundaries) and acts on findings: safe
 deterministic fixers are applied and re-run, remaining failures feed the
 anti-sunk-cost loop (retry, bounded, then replan recorded in `DECISIONS.md`), and
@@ -57,7 +57,7 @@ Reason:
 
 Status: accepted
 
-Unshackled targets Windows, Linux, and macOS as equal first-class platforms. No
+LocalPilot targets Windows, Linux, and macOS as equal first-class platforms. No
 platform is a second-class port. Behavior parity is a release requirement, CI
 builds and tests on all three, and installers ship for all three.
 
@@ -108,7 +108,7 @@ Reason:
 
 Status: accepted
 
-Unshackled will not implement adapters for private, undocumented, or
+LocalPilot will not implement adapters for private, undocumented, or
 consumer-product endpoints. Provider integrations must use official APIs, local
 servers, or explicit user-owned custom endpoints.
 
@@ -148,7 +148,7 @@ Reason:
 
 Status: accepted
 
-Unshackled is split into narrow crates rather than one large binary crate.
+LocalPilot is split into narrow crates rather than one large binary crate.
 
 Reason:
 

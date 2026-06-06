@@ -1,4 +1,4 @@
-name: release
+﻿name: release
 
 on:
   push:
@@ -30,23 +30,23 @@ jobs:
         with:
           toolchain: "1.82"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p unshackled --features tui,learning
+      - run: cargo build --release --locked -p localpilot --features tui,learning
       # Stage the binary alongside the license files so every archive ships them.
       - name: stage (unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p dist/unshackled
-          cp target/release/unshackled dist/unshackled/
-          cp LICENSE-MIT README.md CHANGELOG.md dist/unshackled/
-          tar -C dist -czf unshackled-${{ matrix.target }}.tar.gz unshackled
+          mkdir -p dist/localpilot
+          cp target/release/localpilot dist/localpilot/
+          cp LICENSE-MIT README.md CHANGELOG.md dist/localpilot/
+          tar -C dist -czf localpilot-${{ matrix.target }}.tar.gz localpilot
       - name: stage (windows)
         if: runner.os == 'Windows'
         run: |
-          New-Item -ItemType Directory -Force dist/unshackled | Out-Null
-          Copy-Item target/release/unshackled.exe dist/unshackled/
-          Copy-Item LICENSE-MIT, README.md, CHANGELOG.md dist/unshackled/
-          Compress-Archive -Path dist/unshackled/* -DestinationPath unshackled-${{ matrix.target }}.zip
+          New-Item -ItemType Directory -Force dist/localpilot | Out-Null
+          Copy-Item target/release/localpilot.exe dist/localpilot/
+          Copy-Item LICENSE-MIT, README.md, CHANGELOG.md dist/localpilot/
+          Compress-Archive -Path dist/localpilot/* -DestinationPath localpilot-${{ matrix.target }}.zip
       - uses: actions/upload-artifact@v7
         with:
-          name: unshackled-${{ matrix.target }}
-          path: unshackled-${{ matrix.target }}.${{ matrix.ext }}
+          name: localpilot-${{ matrix.target }}
+          path: localpilot-${{ matrix.target }}.${{ matrix.ext }}

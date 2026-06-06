@@ -1,8 +1,8 @@
-# Configuring a provider
+﻿# Configuring a provider
 
-Unshackled is provider-neutral. It talks to models through official public APIs
+LocalPilot is provider-neutral. It talks to models through official public APIs
 and local OpenAI-compatible servers; it never uses private or undocumented
-endpoints. Providers are configured in `.unshackled.toml`.
+endpoints. Providers are configured in `.localpilot.toml`.
 
 ## A local OpenAI-compatible server
 
@@ -19,7 +19,7 @@ base_url = "http://localhost:11434/v1"
 # Default model, used when a command does not pass --model (and by the REPL):
 model = "your-local-model"
 # Optional, only if your gateway requires a key:
-api_key_env = "UNSHACKLED_LOCAL_API_KEY"
+api_key_env = "LOCALPILOT_LOCAL_API_KEY"
 # Optional for slow local inference:
 request_timeout_secs = 600
 ```
@@ -27,11 +27,11 @@ request_timeout_secs = 600
 TLS is not required for `localhost`.
 
 External launchers may also provide a local endpoint without editing
-`.unshackled.toml`: if an OpenAI-compatible provider has no `base_url`,
+`.localpilot.toml`: if an OpenAI-compatible provider has no `base_url`,
 `OPENAI_BASE_URL` is used as a fallback. If `api_key_env` is not set,
 OpenAI-compatible providers fall back to `OPENAI_API_KEY`.
 
-With a `model` set on the default provider, running `unshackled` with no
+With a `model` set on the default provider, running `localpilot` with no
 subcommand launches the interactive REPL against it. Without a resolvable
 provider and model it prints the doctor report instead, so a fresh or headless
 checkout still gives a useful result. (The REPL is in release builds; the
@@ -91,8 +91,8 @@ does not set `model`, `ANTHROPIC_MODEL` can provide the default model for
 `request_timeout_secs` can be set on any provider entry. It applies to the HTTP
 client used by that provider and is intended for slower local models or gateways.
 
-Provider options not modeled by Unshackled are passed through from the provider
-table into the request body. `suppress_thinking = true` is an Unshackled-owned
+Provider options not modeled by LocalPilot are passed through from the provider
+table into the request body. `suppress_thinking = true` is an LocalPilot-owned
 switch: adapters avoid optional thinking output where the public request shape
 supports it, and the switch itself is not forwarded as a raw API field. Inline
 `<think>...</think>` text emitted by compatible local models is routed to the
@@ -103,21 +103,21 @@ reasoning stream and is not treated as final answer text.
 The offline golden-task scorecard runs with the normal workspace test suite:
 
 ```sh
-cargo test -p unshackled-harness --test evals
+cargo test -p localpilot-harness --test evals
 ```
 
 Live validation is opt-in and never commits credentials. Set
-`UNSHACKLED_LIVE_TESTS=1` only in a local shell that already has provider
+`LOCALPILOT_LIVE_TESTS=1` only in a local shell that already has provider
 configuration and credentials. The live runner uses the default configured
-provider and model. If no model is configured, set `UNSHACKLED_LIVE_MODEL` in
+provider and model. If no model is configured, set `LOCALPILOT_LIVE_MODEL` in
 that same local shell.
 
 ## Verifying
 
 ```sh
-unshackled doctor                       # shows which credentials are present
-unshackled ask --model <name> "hello"   # one-shot streamed completion
+localpilot doctor                       # shows which credentials are present
+localpilot ask --model <name> "hello"   # one-shot streamed completion
 ```
 
-Provider names appear here only as compatibility statements. Unshackled is a
+Provider names appear here only as compatibility statements. LocalPilot is a
 provider-neutral harness, not a vendor product.

@@ -1,10 +1,10 @@
----
+﻿---
 name: implement-harness-step
 description: >-
   Implement or modify the harness execution loop — reading brief.md / PROGRESS.md,
   running a step, applying rule verdicts, respecting attempt limits, updating
   progress, and committing per the commit policy. Use when touching
-  unshackled-harness or any init/status/intake/plan/feature/resume command.
+  localpilot-harness or any init/status/intake/plan/feature/resume command.
 ---
 
 # implement a harness step

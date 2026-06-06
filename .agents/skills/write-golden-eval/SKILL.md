@@ -1,4 +1,4 @@
----
+﻿---
 name: write-golden-eval
 description: >-
   Author a golden-task eval — a deterministic, original task fixture with the
@@ -20,7 +20,7 @@ Authoritative contract: [`docs/08-testing.md`](../../../docs/08-testing.md)
   observable and deterministic.
 - Fixtures use `tempfile` / in-repo sample workspaces — never the real
   home/config. Default-offline; anything live is opt-in behind
-  `UNSHACKLED_LIVE_TESTS`.
+  `LOCALPILOT_LIVE_TESTS`.
 
 ## Must-pass
 

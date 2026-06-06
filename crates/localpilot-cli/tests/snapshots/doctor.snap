@@ -1,0 +1,20 @@
+﻿LocalPilot <version>
+
+platform:
+  os:   <os>
+  arch: <arch>
+
+config search paths:
+  user: <config-home>/localpilot/config.toml (missing)
+  project: <workspace>/.localpilot.toml (present)
+
+providers:
+  local: credential LOCALPILOT_LOCAL_API_KEY not set
+  openai: credential OPENAI_API_KEY not set
+  anthropic: credential ANTHROPIC_API_KEY not set
+
+tools:
+  git (git): available
+  ripgrep (rg): available
+
+workspace trust: unknown (evaluated when a session starts)

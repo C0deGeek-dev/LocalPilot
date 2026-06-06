@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
@@ -24,10 +24,10 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   protocol-distinct adapter implemented clean-room from the public API:
   top-level `system`, `tool_use`/`tool_result` blocks, required `max_tokens`,
   `x-api-key` + `anthropic-version`, and a typed SSE stream (ADR-0008).
-- Added `unshackled update [--check]`: checks the repository for a newer release
+- Added `localpilot update [--check]`: checks the repository for a newer release
   tag and, on confirmation, reinstalls from source with the same feature set
   (MSVC toolchain on Windows for the TUI). The REPL and bare launch also do a
-  cached, once-a-day check; disable with `UNSHACKLED_NO_UPDATE_CHECK`. The
+  cached, once-a-day check; disable with `LOCALPILOT_NO_UPDATE_CHECK`. The
   binary now embeds a real version via `build.rs`.
 - Fixed the installers to build `--features tui,learning`, initialize the
   LocalMind submodule, and prefer the MSVC toolchain on Windows for the TUI.
@@ -52,7 +52,7 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   the opt-in `learning` feature: session closeout, the review queue, memory
   promotion and search, skill drafts, an audit log, retrieved-context injection
   before turns, and automatic closeout on REPL exit — one-way edge, bundled into
-  the binary, all state local under `.localmind/`. New `unshackled learning`
+  the binary, all state local under `.localmind/`. New `localpilot learning`
   commands.
 
 ## 0.1.0-alpha.4
@@ -67,13 +67,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## 0.1.0-alpha.3
 
-- Added `unshackled harness wait-resume` to continue a run paused on a provider
+- Added `localpilot harness wait-resume` to continue a run paused on a provider
   quota/rate limit once it is safe.
 
 ## 0.1.0-alpha.2
 
 - Made the `chat` REPL launchable and bundled the `tui` feature into release
-  builds; the bare `unshackled` command launches the REPL when a provider and
+  builds; the bare `localpilot` command launches the REPL when a provider and
   model are configured.
 
 ## 0.1.0-alpha.1
@@ -81,7 +81,7 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 - Created the clean-room Rust workspace and the product/architecture/harness/
   provider/security/testing/release specifications, with two operating modes
   (agent and enforced harness) and configurable permission profiles.
-- Added the full crate roster (`unshackled-memory`, `-skills`, `-recovery`,
+- Added the full crate roster (`localpilot-memory`, `-skills`, `-recovery`,
   `-quota`, and the rest) and centralized the lint policy in `[workspace.lints]`
   (`unsafe_code` forbidden; `unwrap`/`expect`/`todo`/`dbg!` denied on library
   runtime paths, relaxed in tests).
@@ -91,7 +91,7 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   capabilities, a stable error taxonomy, and quota metadata behind one streaming
   contract. The OpenAI-compatible adapter serves local servers and the official
   OpenAI API, with streaming, tool calls, reasoning round-trip, and a
-  config-driven registry. Added `unshackled ask`.
+  config-driven registry. Added `localpilot ask`.
 - Added the sandbox: a workspace path boundary, per-OS command risk
   classification, and a permission engine with `default`/`relaxed`/`bypass`
   profiles, a secret-file guard, and a workspace-trust floor.
@@ -101,7 +101,7 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   and output redaction on every profile.
 - Added the shared agent-mode session runtime (cancellable streaming loop, tool
   execution, transcript persistence, context compaction, loop limits) with
-  bad-output detection and a budgeted recovery ladder, plus `unshackled print`
+  bad-output detection and a budgeted recovery ladder, plus `localpilot print`
   and the `chat` REPL behind the opt-in `tui` feature.
 - Added the harness core: lossless `brief.md` / `PROGRESS.md` documents; the
   `init`, `harness status`, `intake`, `plan`, `feature`, and `resume` commands;

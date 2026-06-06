@@ -1,4 +1,4 @@
-# Feature Specs
+﻿# Feature Specs
 
 ## UI Direction
 
@@ -32,7 +32,7 @@ Footer stats should be compact:
 
 ## Bad-Output Recovery
 
-Unshackled should detect visibly bad model/backend states and recover before the
+LocalPilot should detect visibly bad model/backend states and recover before the
 bad output corrupts the session.
 
 Detected states:
@@ -119,7 +119,7 @@ permissions, and triggers.
 
 ## Skill Suggestions
 
-Unshackled can suggest skill creation when repeated usage patterns appear.
+LocalPilot can suggest skill creation when repeated usage patterns appear.
 
 Skill suggestions depend on a local usage log or memory store. They should not
 ship before the local store exists.
@@ -177,15 +177,15 @@ users can correct memory mistakes.
 
 Required commands:
 
-- `unshackled memory status`
-- `unshackled memory search`
-- `unshackled memory inspect`
-- `unshackled memory delete`
-- `unshackled memory disable`
+- `localpilot memory status`
+- `localpilot memory search`
+- `localpilot memory inspect`
+- `localpilot memory delete`
+- `localpilot memory disable`
 
 ## Quota Wait/Resume
 
-Some providers enforce token, message, session, or time-window limits. Unshackled
+Some providers enforce token, message, session, or time-window limits. LocalPilot
 should pause cleanly and resume after the reset window when the user allows it.
 
 Modes:
@@ -222,7 +222,7 @@ CLI:
 
 - a run that hits a provider quota/rate limit pauses cleanly at the step
   boundary and writes an inspectable paused-run record under the project store
-- `unshackled harness wait-resume --model <m>` re-evaluates every safety gate and
+- `localpilot harness wait-resume --model <m>` re-evaluates every safety gate and
   either continues the run, reports the remaining wait, or explains what blocks it
 
 UI:

@@ -1182,6 +1182,210 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "crossterm",
+ "futures",
+ "insta",
+ "localpilot-config",
+ "localpilot-core",
+ "localpilot-harness",
+ "localpilot-llm",
+ "localpilot-localmind",
+ "localpilot-mcp",
+ "localpilot-quota",
+ "localpilot-recovery",
+ "localpilot-sandbox",
+ "localpilot-store",
+ "localpilot-tools",
+ "localpilot-tui",
+ "parking_lot",
+ "ratatui",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "localpilot-config"
+version = "0.1.0"
+dependencies = [
+ "figment",
+ "indexmap",
+ "insta",
+ "localpilot-core",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "localpilot-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "localpilot-harness"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "indexmap",
+ "insta",
+ "localpilot-config",
+ "localpilot-core",
+ "localpilot-llm",
+ "localpilot-quota",
+ "localpilot-recovery",
+ "localpilot-sandbox",
+ "localpilot-store",
+ "localpilot-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "localpilot-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "localpilot-config",
+ "localpilot-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "localpilot-localmind"
+version = "0.1.0"
+dependencies = [
+ "localmind-core",
+ "localmind-store",
+ "localpilot-core",
+ "localpilot-store",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "localpilot-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "localpilot-core",
+ "localpilot-sandbox",
+ "localpilot-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "localpilot-quota"
+version = "0.1.0"
+dependencies = [
+ "localpilot-config",
+ "localpilot-llm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "localpilot-recovery"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "localpilot-sandbox"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "proptest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "localpilot-skills"
+version = "0.1.0"
+dependencies = [
+ "figment",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "localpilot-store"
+version = "0.1.0"
+dependencies = [
+ "localpilot-config",
+ "localpilot-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "localpilot-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ignore",
+ "insta",
+ "localpilot-config",
+ "localpilot-core",
+ "localpilot-sandbox",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "localpilot-tui"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "ratatui",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2450,210 +2654,6 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-
-[[package]]
-name = "unshackled"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "crossterm",
- "futures",
- "insta",
- "parking_lot",
- "ratatui",
- "reqwest",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing-subscriber",
- "unshackled-config",
- "unshackled-core",
- "unshackled-harness",
- "unshackled-llm",
- "unshackled-localmind",
- "unshackled-mcp",
- "unshackled-quota",
- "unshackled-recovery",
- "unshackled-sandbox",
- "unshackled-store",
- "unshackled-tools",
- "unshackled-tui",
- "wiremock",
-]
-
-[[package]]
-name = "unshackled-config"
-version = "0.1.0"
-dependencies = [
- "figment",
- "indexmap",
- "insta",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "unshackled-core",
-]
-
-[[package]]
-name = "unshackled-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "unshackled-harness"
-version = "0.1.0"
-dependencies = [
- "futures",
- "indexmap",
- "insta",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "unshackled-config",
- "unshackled-core",
- "unshackled-llm",
- "unshackled-quota",
- "unshackled-recovery",
- "unshackled-sandbox",
- "unshackled-store",
- "unshackled-tools",
-]
-
-[[package]]
-name = "unshackled-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "indexmap",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "unshackled-config",
- "unshackled-core",
- "wiremock",
-]
-
-[[package]]
-name = "unshackled-localmind"
-version = "0.1.0"
-dependencies = [
- "localmind-core",
- "localmind-store",
- "tempfile",
- "thiserror",
- "unshackled-core",
- "unshackled-store",
-]
-
-[[package]]
-name = "unshackled-mcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "unshackled-core",
- "unshackled-sandbox",
- "unshackled-tools",
-]
-
-[[package]]
-name = "unshackled-quota"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "unshackled-config",
- "unshackled-llm",
-]
-
-[[package]]
-name = "unshackled-recovery"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "unshackled-sandbox"
-version = "0.1.0"
-dependencies = [
- "futures",
- "proptest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "unshackled-skills"
-version = "0.1.0"
-dependencies = [
- "figment",
- "serde",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "unshackled-store"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "unshackled-config",
- "unshackled-core",
-]
-
-[[package]]
-name = "unshackled-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ignore",
- "insta",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "unshackled-config",
- "unshackled-core",
- "unshackled-sandbox",
-]
-
-[[package]]
-name = "unshackled-tui"
-version = "0.1.0"
-dependencies = [
- "insta",
- "ratatui",
-]
 
 [[package]]
 name = "untrusted"

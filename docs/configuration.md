@@ -1,8 +1,8 @@
-# Configuration
+﻿# Configuration
 
-Unshackled reads `.unshackled.toml` from the user config directory and the
+LocalPilot reads `.localpilot.toml` from the user config directory and the
 project root (project overrides user), with environment variables and CLI flags
-layered on top. `unshackled init` writes a starter file; `unshackled doctor`
+layered on top. `localpilot init` writes a starter file; `localpilot doctor`
 shows the resolved search paths.
 
 ## Stability

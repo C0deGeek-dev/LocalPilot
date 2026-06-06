@@ -1,9 +1,9 @@
----
+﻿---
 name: add-tool
 description: >-
   Add or change a builtin tool — Tool trait, schema gen, registration, permission
   routing, sandbox/path policy, allow/deny tests. Use when working in
-  unshackled-tools.
+  localpilot-tools.
 ---
 
 # add a tool (stub)

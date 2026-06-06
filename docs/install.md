@@ -1,6 +1,6 @@
-# Installing Unshackled (alpha)
+﻿# Installing LocalPilot (alpha)
 
-Unshackled is a Rust-native, provider-neutral coding-agent harness for Windows,
+LocalPilot is a Rust-native, provider-neutral coding-agent harness for Windows,
 Linux, and macOS (all tier-1).
 
 ## Requirements
@@ -13,7 +13,7 @@ Linux, and macOS (all tier-1).
 Clone with submodules (or initialize them after cloning):
 
 ```sh
-git clone --recurse-submodules https://github.com/David-c0degeek/Unshackled.git
+git clone --recurse-submodules https://github.com/David-c0degeek/LocalPilot.git
 # or, in an existing clone:
 git submodule update --init --recursive
 ```
@@ -29,10 +29,10 @@ git submodule update --init --recursive
 ```
 
 Both build a full binary with the interactive TUI and run `cargo install --path
-crates/unshackled-cli --locked`. After install:
+crates/localpilot-cli --locked`. After install:
 
 ```sh
-unshackled doctor
+localpilot doctor
 ```
 
 `doctor` reports your platform, the config search paths, which provider
@@ -50,7 +50,7 @@ Pick a different set when you don't want one:
 
 ```sh
 # Linux / macOS — skip the interactive TUI:
-UNSHACKLED_FEATURES= ./install/install.sh
+LOCALPILOT_FEATURES= ./install/install.sh
 
 # Windows — skip the interactive TUI:
 ./install/install.ps1 -Features ''
@@ -72,8 +72,8 @@ If you only need non-interactive commands (`ask`, `print`, `harness`, `memory`,
 ## Updating
 
 ```sh
-unshackled update          # check the repo and, on confirmation, reinstall
-unshackled update --check   # only report whether a newer release exists
+localpilot update          # check the repo and, on confirmation, reinstall
+localpilot update --check   # only report whether a newer release exists
 ```
 
 `update` queries the project repository for the newest release tag, compares it
@@ -81,22 +81,22 @@ to the running binary's embedded version, and on your confirmation reinstalls
 from source with the same feature set (`cargo install --git … --tag …`), using
 the MSVC toolchain on Windows when the TUI is built.
 
-The interactive REPL and the bare `unshackled` launch also do a best-effort,
+The interactive REPL and the bare `localpilot` launch also do a best-effort,
 cached check (at most once a day) and show a notice when an update is available.
-Disable it with `UNSHACKLED_NO_UPDATE_CHECK=1`. The automatic check is off on the
-`windows-gnu` toolchain (its TLS stack is unstable); `unshackled update` still
+Disable it with `LOCALPILOT_NO_UPDATE_CHECK=1`. The automatic check is off on the
+`windows-gnu` toolchain (its TLS stack is unstable); `localpilot update` still
 works there.
 
 ## From a release archive
 
 Each tagged release publishes per-platform archives that contain the
-`unshackled` binary plus `LICENSE-MIT`. Download the archive for your platform,
+`localpilot` binary plus `LICENSE-MIT`. Download the archive for your platform,
 extract it, and put the binary on your `PATH`.
 
 ## From crates.io
 
 ```sh
-cargo install unshackled
+cargo install localpilot
 ```
 
 (Available once the crate is published; the source build above always works.)

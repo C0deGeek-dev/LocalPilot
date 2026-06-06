@@ -1,0 +1,22 @@
+﻿---
+source: crates/localpilot-tui/tests/render.rs
+assertion_line: 95
+expression: "render_string(&state, 90, 18)"
+---
+┌LocalPilot──────────────────────────────────────────────────────────────────────────────┐
+│LocalPilot v0.1.0 | local/test-model | ws:demo | session:ab12cd                         │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+┌transcript──────────────────────────────────────────────────────────────────────────────┐
+│ you: summarize the parser                                                              │
+│ assistant: Th┌approve tool?─────────────────────────────────────────────┐              │
+│              │tool: run_shell                                           │              │
+│              │target: rm -rf build                                      │              │
+│              │risk: destructive                                         │              │
+│              │profile: default                                          │              │
+│              │                                                          │              │
+│              │[y] approve   [n] deny                                    │              │
+└──────────────└──────────────────────────────────────────────────────────┘──────────────┘
+┌input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)──────────────────┐
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:1200/8000

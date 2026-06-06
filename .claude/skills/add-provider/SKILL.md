@@ -1,7 +1,7 @@
----
+﻿---
 name: add-provider
 description: >-
-  Add or change a model provider — provider trait in unshackled-llm, stream-event
+  Add or change a model provider — provider trait in localpilot-llm, stream-event
   model, capabilities, quota metadata, error taxonomy, required tests. Use for
   provider/adapter work.
 ---

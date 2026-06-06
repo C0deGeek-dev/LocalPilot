@@ -1,4 +1,4 @@
-# Test Plan
+﻿# Test Plan
 
 ## Test Layers
 
@@ -70,7 +70,7 @@ Useful for:
 Live provider tests must be opt-in:
 
 ```powershell
-$env:UNSHACKLED_LIVE_TESTS = "1"
+$env:LOCALPILOT_LIVE_TESTS = "1"
 cargo test --test live_provider
 ```
 

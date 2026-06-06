@@ -1,9 +1,9 @@
-#!/bin/sh
-# Build and install the Unshackled CLI from source on Linux or macOS.
+﻿#!/bin/sh
+# Build and install the LocalPilot CLI from source on Linux or macOS.
 #
 # Usage:
 #   ./install/install.sh                       # full build (tui + LocalMind)
-#   UNSHACKLED_FEATURES= ./install/install.sh  # no interactive TUI
+#   LOCALPILOT_FEATURES= ./install/install.sh  # no interactive TUI
 set -eu
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -12,7 +12,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-features="${UNSHACKLED_FEATURES-tui}"
+features="${LOCALPILOT_FEATURES-tui}"
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # The LocalMind learning engine is a git submodule and is always linked into the
@@ -22,13 +22,13 @@ if [ -f "$root/.gitmodules" ] && command -v git >/dev/null 2>&1; then
     git -C "$root" submodule update --init --recursive
 fi
 
-echo "building and installing the unshackled CLI (features: $features) ..."
+echo "building and installing the localpilot CLI (features: $features) ..."
 if [ -n "$features" ]; then
-    cargo install --path "$root/crates/unshackled-cli" --features "$features" --locked
+    cargo install --path "$root/crates/localpilot-cli" --features "$features" --locked
 else
-    cargo install --path "$root/crates/unshackled-cli" --locked
+    cargo install --path "$root/crates/localpilot-cli" --locked
 fi
 
 echo
-echo "installed 'unshackled'. verify with:"
-echo "    unshackled doctor"
+echo "installed 'localpilot'. verify with:"
+echo "    localpilot doctor"

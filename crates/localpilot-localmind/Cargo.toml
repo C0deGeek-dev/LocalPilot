@@ -1,0 +1,19 @@
+﻿[package]
+name = "localpilot-localmind"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+localmind-core = { path = "../../external/localmind/crates/localmind-core" }
+localmind-store = { path = "../../external/localmind/crates/localmind-store" }
+thiserror = { workspace = true }
+localpilot-core = { path = "../localpilot-core" }
+localpilot-store = { path = "../localpilot-store" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

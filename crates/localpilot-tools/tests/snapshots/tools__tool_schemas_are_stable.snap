@@ -1,0 +1,438 @@
+﻿---
+source: crates/localpilot-tools/tests/tools.rs
+assertion_line: 98
+expression: "serde_json::to_string_pretty(&schemas).unwrap()"
+---
+[
+  [
+    "read_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "end_line": {
+          "default": null,
+          "description": "Last line to include (1-based, inclusive).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Workspace-relative or absolute path to read.",
+          "type": "string"
+        },
+        "start_line": {
+          "default": null,
+          "description": "First line to include (1-based, inclusive).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ReadFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "write_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "content": {
+          "description": "File contents.",
+          "type": "string"
+        },
+        "overwrite": {
+          "default": null,
+          "description": "Allow replacing an existing file. Defaults to true (overwrite is gated by the permission engine).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path to write within the workspace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "path"
+      ],
+      "title": "WriteFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "edit_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "new_text": {
+          "description": "Replacement text.",
+          "type": "string"
+        },
+        "old_text": {
+          "description": "Exact text to replace; must match exactly once.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "new_text",
+        "old_text",
+        "path"
+      ],
+      "title": "EditFileInput",
+      "type": "object"
+    }
+  ],
+  [
+    "multi_edit",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "TextEditInput": {
+          "properties": {
+            "new_text": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old_text": {
+              "description": "Exact text to replace.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "new_text",
+            "old_text"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "edits": {
+          "description": "Ordered exact-text replacements. Each `old_text` must match exactly once at the point that edit is applied.",
+          "items": {
+            "$ref": "#/definitions/TextEditInput"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "edits",
+        "path"
+      ],
+      "title": "MultiEditInput",
+      "type": "object"
+    }
+  ],
+  [
+    "list_files",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Include hidden files. Defaults to false.",
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to list, relative to the workspace. Defaults to the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "ListFilesInput",
+      "type": "object"
+    }
+  ],
+  [
+    "find_files",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "hidden": {
+          "default": false,
+          "description": "Include hidden files. Defaults to false.",
+          "type": "boolean"
+        },
+        "max_matches": {
+          "default": null,
+          "description": "Maximum number of paths to return.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to search, relative to the workspace. Defaults to the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pattern": {
+          "description": "Glob-like filename pattern. Supports `*` and `?`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "title": "FindFilesInput",
+      "type": "object"
+    }
+  ],
+  [
+    "search_text",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "is_regex": {
+          "default": false,
+          "description": "Treat `query` as a regular expression. Defaults to false (literal).",
+          "type": "boolean"
+        },
+        "max_matches": {
+          "default": null,
+          "description": "Maximum number of matches to return.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "description": "Directory to search, relative to the workspace. Defaults to the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Text or regular expression to search for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "SearchTextInput",
+      "type": "object"
+    }
+  ],
+  [
+    "run_shell",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments passed as a list, not a shell string.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "program": {
+          "description": "The program to execute (no shell interpretation).",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "description": "Timeout in seconds. Defaults to 60.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "program"
+      ],
+      "title": "RunShellInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_status",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "GitStatusInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_diff",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "default": [],
+          "description": "Optional paths to limit the diff.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "staged": {
+          "default": false,
+          "description": "Show staged changes. Defaults to false.",
+          "type": "boolean"
+        }
+      },
+      "title": "GitDiffInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_log",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "max_count": {
+          "default": null,
+          "description": "Maximum commits to show. Defaults to 10.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "GitLogInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_add",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "description": "Paths to operate on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "title": "GitPathInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_restore",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "paths": {
+          "description": "Paths to operate on.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "title": "GitPathInput",
+      "type": "object"
+    }
+  ],
+  [
+    "git_commit",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "message": {
+          "description": "Commit message. Must not contain secrets.",
+          "type": "string"
+        },
+        "paths": {
+          "default": [],
+          "description": "Specific paths to stage and commit. Empty commits already-staged changes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "GitCommitInput",
+      "type": "object"
+    }
+  ],
+  [
+    "update_plan",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "PlanStepInput": {
+          "properties": {
+            "status": {
+              "description": "One of: `pending`, `in_progress`, `done`.",
+              "type": "string"
+            },
+            "title": {
+              "description": "Short imperative description of the task.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "steps": {
+          "description": "The ordered task list shown to the user.",
+          "items": {
+            "$ref": "#/definitions/PlanStepInput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "title": "UpdatePlanInput",
+      "type": "object"
+    }
+  ]
+]

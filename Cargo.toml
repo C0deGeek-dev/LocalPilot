@@ -1,22 +1,22 @@
-[workspace]
+﻿[workspace]
 members = [
-    "crates/unshackled-cli",
-    "crates/unshackled-core",
-    "crates/unshackled-config",
-    "crates/unshackled-llm",
-    "crates/unshackled-tools",
-    "crates/unshackled-harness",
-    "crates/unshackled-tui",
-    "crates/unshackled-store",
-    "crates/unshackled-sandbox",
-    "crates/unshackled-mcp",
-    "crates/unshackled-skills",
-    "crates/unshackled-recovery",
-    "crates/unshackled-quota",
-    "crates/unshackled-localmind",
+    "crates/localpilot-cli",
+    "crates/localpilot-core",
+    "crates/localpilot-config",
+    "crates/localpilot-llm",
+    "crates/localpilot-tools",
+    "crates/localpilot-harness",
+    "crates/localpilot-tui",
+    "crates/localpilot-store",
+    "crates/localpilot-sandbox",
+    "crates/localpilot-mcp",
+    "crates/localpilot-skills",
+    "crates/localpilot-recovery",
+    "crates/localpilot-quota",
+    "crates/localpilot-localmind",
 ]
 # The LocalMind engine is vendored as a git submodule and consumed by
-# unshackled-localmind via path dependencies. It is its own workspace, so it is
+# localpilot-localmind via path dependencies. It is its own workspace, so it is
 # excluded from this one.
 exclude = ["external/localmind"]
 resolver = "2"
@@ -25,8 +25,8 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 authors = ["David <David@c0degeek.dev>", "Bram (C0deGeek.dev)"]
-repository = "https://github.com/David-c0degeek/Unshackled"
-homepage = "https://github.com/David-c0degeek/Unshackled"
+repository = "https://github.com/David-c0degeek/LocalPilot"
+homepage = "https://github.com/David-c0degeek/LocalPilot"
 rust-version = "1.82"
 
 [workspace.dependencies]

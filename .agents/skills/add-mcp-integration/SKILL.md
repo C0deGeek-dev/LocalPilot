@@ -1,15 +1,15 @@
----
+﻿---
 name: add-mcp-integration
 description: >-
   Wire an MCP client integration — exposing MCP tools/resources through the SAME
   permission and redaction pipeline as builtin tools, never a side channel. Use
-  when working in unshackled-mcp.
+  when working in localpilot-mcp.
 ---
 
 # add an MCP integration
 
 Authoritative shape: [`docs/02-architecture.md`](../../../docs/02-architecture.md)
-§`unshackled-mcp`. MCP is v1 scope.
+§`localpilot-mcp`. MCP is v1 scope.
 
 ## The one rule that matters
 
@@ -23,7 +23,7 @@ otherwise gate.
 - Speak the published MCP protocol; treat the server as untrusted third-party
   code (it runs against this workspace).
 - Map MCP tool descriptors into the same typed tool/permission model the builtin
-  tools use; route every call through `unshackled-sandbox`.
+  tools use; route every call through `localpilot-sandbox`.
 - Redact secrets before logging or persisting any MCP payload, not after.
 
 ## Must-pass tests

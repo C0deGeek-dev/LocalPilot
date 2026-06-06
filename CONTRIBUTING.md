@@ -1,8 +1,8 @@
-# Contributing
+﻿# Contributing
 
 ## Ground Rules
 
-Unshackled is original Rust software. Contributions must follow
+LocalPilot is original Rust software. Contributions must follow
 [docs/00-clean-room.md](docs/00-clean-room.md).
 
 Do not submit code, prompts, tests, endpoint adapters, docs, or UI copy copied

@@ -1,6 +1,6 @@
-# Rust Best Practices
+﻿# Rust Best Practices
 
-This is the engineering style guide for Unshackled. It is opinionated and
+This is the engineering style guide for LocalPilot. It is opinionated and
 project-specific. It assumes the architecture in
 [02-architecture.md](02-architecture.md) and the rules in
 [../CONTRIBUTING.md](../CONTRIBUTING.md) and does not repeat them.
@@ -31,14 +31,14 @@ default; deviating requires a one-line justification in the PR or an
 ## 2. Workspace and crate hygiene
 
 - Crates stay narrow and single-purpose (ADR-0001). If a type needs HTTP, it
-  does not belong in `unshackled-core`.
+  does not belong in `localpilot-core`.
 - **Dependency direction is one-way.** `core` depends on nothing internal.
   Everything may depend on `core`. The CLI sits at the top and may depend on
   many crates; nothing depends on the CLI. There MUST be no dependency cycles —
   `cargo` will reject them, but design so the question never comes up.
-- Provider-specific code lives only in `unshackled-llm` provider modules.
-  Local side effects live only in `unshackled-tools`. Permission decisions live
-  only in `unshackled-sandbox`. Do not leak these concerns across boundaries.
+- Provider-specific code lives only in `localpilot-llm` provider modules.
+  Local side effects live only in `localpilot-tools`. Permission decisions live
+  only in `localpilot-sandbox`. Do not leak these concerns across boundaries.
 - Keep crate public APIs small. Default to private; export only what another
   crate needs. A `pub` item is a maintenance contract.
 - Enable feature unification awareness: a feature turned on for a dependency in
@@ -62,7 +62,7 @@ Prefer making illegal states unrepresentable over validating them at runtime.
 - **Generate tool/provider JSON schemas from typed structs, not by hand.** When
   tools are implemented, define a typed input struct per tool and derive its
   JSON Schema (e.g. `schemars`) instead of maintaining hand-written JSON. The
-  schema and the deserialized type then cannot drift, and `unshackled-tools`
+  schema and the deserialized type then cannot drift, and `localpilot-tools`
   owns one generation path.
 
 ## 4. Error handling
@@ -210,7 +210,7 @@ Aligns with [08-testing.md](08-testing.md); this is the how.
   (fixtures authored for this repo, never copied).
 - Tests MUST be deterministic and offline by default. Use `tempfile` for the
   filesystem; never touch the user's real config or home dir. Live provider
-  tests are opt-in behind `UNSHACKLED_LIVE_TESTS` and skip without credentials.
+  tests are opt-in behind `LOCALPILOT_LIVE_TESTS` and skip without credentials.
 - Use **snapshot tests** (`insta`) for CLI help, error rendering, TUI output,
   and generated prompts — anything where the assertion is "the output text".
   Review snapshot diffs deliberately; do not blind-accept.
@@ -230,7 +230,7 @@ Test toolbox (add as dev-dependencies when the relevant layer lands; see
   than enumerating cases by hand.
 - **`wiremock`** (or a local mock server) — test provider HTTP adapters against a
   scripted server for status codes, malformed bodies, and quota headers. Keeps
-  adapter tests offline; live tests stay opt-in behind `UNSHACKLED_LIVE_TESTS`.
+  adapter tests offline; live tests stay opt-in behind `LOCALPILOT_LIVE_TESTS`.
 - **`tokio-test`** — for time/IO control in async unit tests. Reach for **`loom`**
   only on genuinely tricky shared-state synchronization; it is slow and scoped to
   the specific concurrent type under test, not general use.

@@ -1,4 +1,4 @@
-# LocalMind Integration Contract
+﻿# LocalMind Integration Contract
 
 ## Why
 
@@ -8,26 +8,26 @@ that should not be re-implemented inside every coding agent. LocalMind owns that
 core as a standalone engine usable by native hosts and generic transcript
 workflows.
 
-Unshackled is LocalMind's first native host. The LocalMind crates are bundled
-into the Unshackled binary through `unshackled-localmind`; users do not install
+LocalPilot is LocalMind's first native host. The LocalMind crates are bundled
+into the LocalPilot binary through `localpilot-localmind`; users do not install
 LocalMind separately.
 
 ## Ownership Boundary
 
-- **LocalMind core is host-neutral and must not depend on Unshackled.** It owns
+- **LocalMind core is host-neutral and must not depend on LocalPilot.** It owns
   session closeout, redaction-on-import, summarization, candidate-lesson
   extraction, the review queue, accepted-lesson persistence, Markdown-backed
   memory with a SQLite audit/search index, agent-ready context export, and
   `SKILL.md` draft emission.
-- **Unshackled owns the native host role.** It captures session evidence,
+- **LocalPilot owns the native host role.** It captures session evidence,
   enforces permissions and redaction before persistence, drives TUI/CLI
-  surfaces, and adapts Unshackled session records into LocalMind contracts.
+  surfaces, and adapts LocalPilot session records into LocalMind contracts.
 
 ## Bundling
 
 LocalMind is vendored as a git submodule at `external/localmind` and excluded
-from the Unshackled workspace because it is its own workspace. The
-`unshackled-localmind` adapter depends on `localmind-core` and `localmind-store`
+from the LocalPilot workspace because it is its own workspace. The
+`localpilot-localmind` adapter depends on `localmind-core` and `localmind-store`
 by path.
 
 ```sh
@@ -35,16 +35,16 @@ git clone --recurse-submodules <repo>
 git submodule update --init --recursive
 ```
 
-CI checks out submodules recursively. The adapter is a one-way edge: Unshackled
+CI checks out submodules recursively. The adapter is a one-way edge: LocalPilot
 depends on LocalMind, never the reverse.
 
 ## Current Surfaces
 
-- `unshackled-localmind::closeout_session` imports an Unshackled transcript into
+- `localpilot-localmind::closeout_session` imports an LocalPilot transcript into
   LocalMind, extracts candidate lessons, and enqueues them for review.
-- `unshackled learning` exposes the rich LocalMind loop: `closeout`, `review`,
+- `localpilot learning` exposes the rich LocalMind loop: `closeout`, `review`,
   `promote`, `search`, `skills`, and `audit`.
-- `unshackled memory` uses LocalMind accepted memory for status, inspect, search,
+- `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
 - Agent turns seed relevant accepted LocalMind memory as best-effort context.
 - Interactive sessions close out into LocalMind on exit.
@@ -54,7 +54,7 @@ queue, audit, and search index state live in SQLite.
 
 ## Signal Mapping
 
-| Unshackled signal | LocalMind use |
+| LocalPilot signal | LocalMind use |
 | --- | --- |
 | Session transcript bundle | imported, redacted session for summarization |
 | Tool events in transcript | evidence for lesson extraction |
@@ -70,13 +70,13 @@ LocalMind never bypasses either.
 ## Commands
 
 ```sh
-unshackled learning closeout --session <id>
-unshackled learning review list
-unshackled learning review accept <item-id>
-unshackled learning promote <item-id>
-unshackled learning search "<query>"
-unshackled memory inspect
-unshackled memory delete <memory-id>
+localpilot learning closeout --session <id>
+localpilot learning review list
+localpilot learning review accept <item-id>
+localpilot learning promote <item-id>
+localpilot learning search "<query>"
+localpilot memory inspect
+localpilot memory delete <memory-id>
 ```
 
 New rich-learning behavior lands in LocalMind, not by expanding host-local memory

@@ -1,4 +1,4 @@
-# Security and Privacy
+﻿# Security and Privacy
 
 ## Security Model
 
@@ -22,7 +22,7 @@ engine.
 
 ## Workspace Trust
 
-When opening a directory for the first time, Unshackled should ask whether the
+When opening a directory for the first time, LocalPilot should ask whether the
 workspace is trusted.
 
 Trusted means:
@@ -90,7 +90,7 @@ project toolchain (ADR-0009). Discovery is untrusted input and must not become
 execution by itself:
 
 - Discovery *proposes* a gate; the user *ratifies* it into committed
-  `.unshackled.toml`. Nothing discovered runs before ratification.
+  `.localpilot.toml`. Nothing discovered runs before ratification.
 - Ratified check and fix commands are still classified and mediated by the
   permission engine and shell policy above — ratification records intent, it does
   not grant a standing bypass.
@@ -112,7 +112,7 @@ deliberately. Profiles apply in both agent mode and harness mode.
 - `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
   still prompt.
 - `bypass`: a launch mode that approves everything with no prompts, equivalent to
-  running fully unshackled.
+  running fully localpilot.
 
 Rules:
 
@@ -207,7 +207,7 @@ Required before public release:
 
 ## Abuse Resistance
 
-Unshackled is a coding tool. It should not ship prompts or affordances aimed at:
+LocalPilot is a coding tool. It should not ship prompts or affordances aimed at:
 
 - malware creation
 - credential theft

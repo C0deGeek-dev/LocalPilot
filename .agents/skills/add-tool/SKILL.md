@@ -1,10 +1,10 @@
----
+﻿---
 name: add-tool
 description: >-
   Add or change a builtin tool — implement the Tool trait, generate its JSON
   schema from typed structs, register it, route every call through the permission
   engine, apply the sandbox/path policy, and write the required allow/deny tests.
-  Use when working in unshackled-tools.
+  Use when working in localpilot-tools.
 ---
 
 # add a tool
@@ -15,10 +15,10 @@ rules.
 
 ## Steps
 
-1. Implement the `Tool` trait in `unshackled-tools`. Inputs/outputs are typed
+1. Implement the `Tool` trait in `localpilot-tools`. Inputs/outputs are typed
    structs; derive the JSON schema with `schemars` — never hand-write schema.
 2. Register the tool in the tool registry.
-3. Route execution through the permission engine in `unshackled-sandbox`. The
+3. Route execution through the permission engine in `localpilot-sandbox`. The
    tool MUST NOT decide its own permission or bypass the engine.
 4. Apply path containment: canonicalize and check normalized `starts_with`
    against the workspace root (mind Windows `\\?\`, case-insensitivity, 8.3, ADS).

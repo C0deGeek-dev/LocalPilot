@@ -1,8 +1,8 @@
-# Architecture
+﻿# Architecture
 
 ## System Shape
 
-Unshackled is a set of Rust crates with a thin CLI binary.
+LocalPilot is a set of Rust crates with a thin CLI binary.
 
 ```text
 CLI/TUI
@@ -33,7 +33,7 @@ mode does not change which profile is active.
 
 ## Crate Responsibilities
 
-### `unshackled-cli`
+### `localpilot-cli`
 
 Owns:
 
@@ -48,7 +48,7 @@ Must not own:
 - provider payload construction
 - tool execution policy
 
-### `unshackled-core`
+### `localpilot-core`
 
 Owns:
 
@@ -64,7 +64,7 @@ Must remain:
 - free of terminal UI code
 - free of provider-specific names except generic enum variants
 
-### `unshackled-config`
+### `localpilot-config`
 
 Owns:
 
@@ -77,11 +77,11 @@ Config precedence:
 
 1. command-line flags
 2. environment variables
-3. project `.unshackled.toml`
+3. project `.localpilot.toml`
 4. user config
 5. built-in defaults
 
-### `unshackled-llm`
+### `localpilot-llm`
 
 Owns:
 
@@ -101,7 +101,7 @@ Provider implementations also expose quota metadata when available:
 - whether automatic resume is safe
 - provider-visible error code/category
 
-### `unshackled-tools`
+### `localpilot-tools`
 
 Owns:
 
@@ -122,7 +122,7 @@ Builtin v1 tools:
 - `git_status`
 - `git_commit`
 
-### `unshackled-harness`
+### `localpilot-harness`
 
 Owns:
 
@@ -141,7 +141,7 @@ The harness coordinates with the quota scheduler. If a step pauses due to a
 provider quota window, the current committed state and plan remain authoritative;
 the scheduler only resumes the next safe turn.
 
-### `unshackled-tui`
+### `localpilot-tui`
 
 Owns:
 
@@ -162,7 +162,7 @@ UI stack (chosen; see ADR-0006):
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.
 
-### `unshackled-store`
+### `localpilot-store`
 
 Owns:
 
@@ -176,11 +176,11 @@ Owns:
 
 Storage must be inspectable plain files where possible.
 
-### `unshackled-localmind`
+### `localpilot-localmind`
 
 Owns:
 
-- adapter between Unshackled session records and LocalMind contracts
+- adapter between LocalPilot session records and LocalMind contracts
 - session closeout into LocalMind
 - accepted-memory retrieval for context injection
 - CLI-friendly wrappers around LocalMind review, memory, audit, and skill APIs
@@ -194,7 +194,7 @@ Must not own:
 
 Memory and learning must remain local-only by design.
 
-### `unshackled-skills`
+### `localpilot-skills`
 
 Owns:
 
@@ -206,7 +206,7 @@ Owns:
 
 Auto-generated skills are suggestions until the user reviews and accepts them.
 
-### `unshackled-recovery`
+### `localpilot-recovery`
 
 Owns:
 
@@ -218,7 +218,7 @@ Owns:
 
 Recovery must prefer stopping safely over continuing with corrupted context.
 
-### `unshackled-quota`
+### `localpilot-quota`
 
 Owns:
 
@@ -228,7 +228,7 @@ Owns:
 - unattended-resume policy checks
 - persistence of paused harness runs
 
-### `unshackled-sandbox`
+### `localpilot-sandbox`
 
 Owns:
 
@@ -247,9 +247,9 @@ V1 should implement conservative policy without relying on OS sandboxing:
 
 The default profile enforces these. The relaxed profile auto-approves a
 user-defined allowlist. The bypass profile is a launch mode that disables
-prompting entirely, like running fully unshackled, and is never the default.
+prompting entirely, like running fully localpilot, and is never the default.
 
-### `unshackled-mcp`
+### `localpilot-mcp`
 
 Owns:
 

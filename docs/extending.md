@@ -1,4 +1,4 @@
-# Extending Unshackled
+﻿# Extending LocalPilot
 
 Three extension points: providers (models), tools (capabilities), and MCP
 servers (external tools). All run through the same permission engine and
@@ -6,7 +6,7 @@ redaction — an extension is never a side channel.
 
 ## Connect an MCP server (no code)
 
-The simplest extension: point Unshackled at a Model Context Protocol server. Its
+The simplest extension: point LocalPilot at a Model Context Protocol server. Its
 tools are discovered at startup and dispatched like builtins, gated as a network
 effect.
 
@@ -32,7 +32,7 @@ A provider adapts a model API to the internal streaming contract. Two ways:
    ```
 
 2. **A new adapter** — for a different wire protocol. Implement the
-   `ModelProvider` trait in `unshackled-llm` and register a `kind` for it.
+   `ModelProvider` trait in `localpilot-llm` and register a `kind` for it.
 
    - `declaration()` returns a `ProviderDeclaration` whose `Capabilities` the
      runtime branches on — never the provider's name.
@@ -54,7 +54,7 @@ A provider adapts a model API to the internal streaming contract. Two ways:
 ## Add a tool
 
 A tool is a capability the model can call. Implement the `Tool` trait in
-`unshackled-tools` and register it in `ToolRegistry::with_builtins` (or add it to
+`localpilot-tools` and register it in `ToolRegistry::with_builtins` (or add it to
 a session's registry).
 
 - `name()` / `description()` / `schema()` — the model discovers the tool from

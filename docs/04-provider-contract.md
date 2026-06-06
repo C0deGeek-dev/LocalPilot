@@ -1,8 +1,8 @@
-# Provider Contract
+﻿# Provider Contract
 
 ## Goals
 
-Providers connect Unshackled to models. They must hide API differences behind a
+Providers connect LocalPilot to models. They must hide API differences behind a
 single internal stream contract while preserving provider capabilities.
 
 ## Requirements
@@ -149,7 +149,7 @@ Quota wait/resume honors provider contracts. A provider adapter may expose:
 - `retryable`
 - `raw_provider_code`
 
-When a provider gives no machine-readable reset time, Unshackled should use
+When a provider gives no machine-readable reset time, LocalPilot should use
 bounded backoff with jitter and re-probe before resuming. It must not frame this
 as bypassing limits or retry against a provider's documented policy.
 
@@ -179,7 +179,7 @@ default = "local"
 [providers.local]
 kind = "openai-compatible"
 base_url = "http://localhost:11434/v1"
-api_key_env = "UNSHACKLED_LOCAL_API_KEY"
+api_key_env = "LOCALPILOT_LOCAL_API_KEY"
 
 [providers.openai]
 kind = "openai"

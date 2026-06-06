@@ -1,6 +1,6 @@
-# Connecting MCP servers
+﻿# Connecting MCP servers
 
-Unshackled can expose tools from [Model Context Protocol](https://modelcontextprotocol.io)
+LocalPilot can expose tools from [Model Context Protocol](https://modelcontextprotocol.io)
 servers to the model. Each server is launched as a local subprocess that speaks
 JSON-RPC over stdio. Its tools are registered alongside the builtins and run
 through the **same** permission engine and output redaction — an MCP tool call
@@ -8,7 +8,7 @@ prompts (or is denied) exactly like a builtin, and is never a side channel.
 
 ## Configuration
 
-Declare servers in `.unshackled.toml`:
+Declare servers in `.localpilot.toml`:
 
 ```toml
 [mcp.servers.files]
@@ -20,7 +20,7 @@ command = "uvx"
 args = ["some-mcp-search-server"]
 ```
 
-Each entry is one server: `command` plus optional `args`. On startup Unshackled
+Each entry is one server: `command` plus optional `args`. On startup LocalPilot
 spawns the process, performs the MCP handshake, and discovers its tools. A server
 that fails to start is skipped with a note on stderr — it never aborts the
 session.

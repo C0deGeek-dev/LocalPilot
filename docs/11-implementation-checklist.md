@@ -1,4 +1,4 @@
-# Implementation Checklist
+﻿# Implementation Checklist
 
 Status as of 2026-06-05. Checked items mean the implementation exists and has
 local automated coverage unless the note says it still needs live validation.
@@ -73,7 +73,7 @@ local automated coverage unless the note says it still needs live validation.
 - [x] Resume session-start preflight blocks unrelated dirty work before provider
       work.
 - [x] Harness step commits stage only intended project paths, excluding local
-      `.unshackled/` runtime state.
+      `.localpilot/` runtime state.
 - [x] Worker-loop trace events.
 - [x] Quota wait/resume records and safety gates.
 - [x] Mid-stream quota/rate-limit errors pause cleanly instead of entering
@@ -141,12 +141,12 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check --workspace
-cargo clippy -p unshackled --features tui --all-targets -- -D warnings
-cargo build -p unshackled --features tui
+cargo clippy -p localpilot --features tui --all-targets -- -D warnings
+cargo build -p localpilot --features tui
 cargo deny check
 cargo audit
 cargo machete
-cargo run -p unshackled -- doctor
+cargo run -p localpilot -- doctor
 ```
 
 Also complete the clean-room audit from `docs/00-clean-room.md`, review all
