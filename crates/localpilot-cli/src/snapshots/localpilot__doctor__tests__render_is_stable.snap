@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-cli/src/doctor.rs
 assertion_line: 344
 expression: render(&fixture())

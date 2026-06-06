@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-tui/tests/render.rs
 assertion_line: 81
 expression: rendered

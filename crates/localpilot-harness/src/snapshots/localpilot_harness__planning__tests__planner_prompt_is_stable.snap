@@ -1,5 +1,6 @@
-﻿---
+---
 source: crates/localpilot-harness/src/planning.rs
+assertion_line: 169
 expression: PLANNER_PROMPT
 ---
 You are the planning assistant for a software project. Given a project brief and a short repository summary, produce an ordered, test-first implementation plan.

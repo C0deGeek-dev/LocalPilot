@@ -1,5 +1,6 @@
-﻿---
+---
 source: crates/localpilot-harness/src/planning.rs
+assertion_line: 164
 expression: INTAKE_PROMPT
 ---
 You are the intake assistant for a software project. Turn the user's rough idea into a precise project brief.

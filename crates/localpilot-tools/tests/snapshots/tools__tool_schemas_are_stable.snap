@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-tools/tests/tools.rs
 assertion_line: 98
 expression: "serde_json::to_string_pretty(&schemas).unwrap()"

@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-cli/src/harness_cmd.rs
 expression: report.render()
 ---

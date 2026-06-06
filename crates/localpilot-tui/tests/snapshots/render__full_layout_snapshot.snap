@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-tui/tests/render.rs
 assertion_line: 63
 expression: "render_string(&base(), 90, 18)"

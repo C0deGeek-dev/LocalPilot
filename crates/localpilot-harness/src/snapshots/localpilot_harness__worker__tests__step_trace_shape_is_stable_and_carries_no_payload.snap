@@ -1,4 +1,4 @@
-﻿---
+---
 source: crates/localpilot-harness/src/worker.rs
 expression: "serde_json::to_string_pretty(&trace).unwrap()"
 ---
