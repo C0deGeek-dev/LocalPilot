@@ -1,4 +1,4 @@
-﻿/target/
+/target/
 /.localpilot/
 /.harness/
 /.localmind/
@@ -13,3 +13,6 @@
 
 # Local launch-generated provider config (LocalBox writes this in cwd)
 /.localpilot.toml
+
+# JetBrains IDE project config (Rider/CLion/IntelliJ)
+/.idea/
