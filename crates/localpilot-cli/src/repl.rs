@@ -12,8 +12,9 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, KeyCode,
+    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
@@ -685,7 +686,8 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     execute!(
         stdout,
         terminal::EnterAlternateScreen,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        DisableMouseCapture
         // Mouse capture is intentionally disabled: remote sessions (RustDesk/RDP)
         // flood the event stream with mouse-movement bytes that corrupt the TUI.
         // Scroll is handled by keyboard keys (PageUp/PageDown/Shift+Scroll) instead.
@@ -717,6 +719,8 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
         DisableBracketedPaste,
         terminal::LeaveAlternateScreen
     )?;
+    // Ensure mouse capture is disabled on exit as well.
+    let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
     terminal.show_cursor()?;
     Ok(())
 }
