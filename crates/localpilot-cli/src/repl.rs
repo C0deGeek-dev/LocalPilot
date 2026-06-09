@@ -12,9 +12,8 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
@@ -262,11 +261,6 @@ async fn event_loop(
                 // Bracketed paste: insert small pastes inline, but collapse large
                 // ones to a placeholder so the input line stays readable.
                 Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
-                Event::Mouse(mouse) if state.trust.is_none() => {
-                    if let Some(mapped) = map_mouse(mouse.kind) {
-                        handle_input(state, AppInput::Key(mapped));
-                    }
-                }
                 _ => {}
             }
         }
@@ -576,11 +570,6 @@ fn resolve_event(
                 }
             }
             Event::Paste(text) => insert_paste(state, text),
-            Event::Mouse(mouse) => {
-                if let Some(mapped) = map_mouse(mouse.kind) {
-                    handle_input(state, AppInput::Key(mapped));
-                }
-            }
             _ => {}
         }
         None
@@ -612,14 +601,6 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::End => Some(Key::End),
         KeyCode::PageUp => Some(Key::PageUp),
         KeyCode::PageDown => Some(Key::PageDown),
-        _ => None,
-    }
-}
-
-fn map_mouse(kind: MouseEventKind) -> Option<Key> {
-    match kind {
-        MouseEventKind::ScrollUp => Some(Key::ScrollUp),
-        MouseEventKind::ScrollDown => Some(Key::ScrollDown),
         _ => None,
     }
 }
@@ -704,8 +685,10 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     execute!(
         stdout,
         terminal::EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
+        EnableBracketedPaste
+        // Mouse capture is intentionally disabled: remote sessions (RustDesk/RDP)
+        // flood the event stream with mouse-movement bytes that corrupt the TUI.
+        // Scroll is handled by keyboard keys (PageUp/PageDown/Shift+Scroll) instead.
     )?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
@@ -731,7 +714,6 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        DisableMouseCapture,
         DisableBracketedPaste,
         terminal::LeaveAlternateScreen
     )?;
