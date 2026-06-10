@@ -1,4 +1,4 @@
-﻿---
+---
 name: plan-large-task
 description: >-
   Choose and run the right planning ceremony for a build task in this repo.
@@ -44,10 +44,16 @@ When unsure, it is Tier S. Don't manufacture ceremony.
 
 ## Repo-specific rules baked into the template
 
-- **Gate per checkpoint** = `cargo fmt --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check
-  --workspace`. Hygiene (`cargo machete` on dep change; `cargo deny check` /
-  `cargo audit` before a release milestone) is not per-checkpoint.
+- **Gate per checkpoint** comes from the plan's §2 Verification-commands
+  table — the single source for checkpoint and §7 gate commands. Repo defaults
+  (mirroring CI): `cargo check --workspace`, `cargo test --workspace`,
+  `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D
+  warnings`. Hygiene (`cargo machete` on dep change; `cargo deny check` /
+  `cargo audit` before a release milestone) is not per-checkpoint. Subject
+  00.3 confirms the table against the real repo.
+- **Risks-and-rollback table (§1) and Depends-on column (§3) are mandatory**
+  at plan creation; `n/a` risks need a one-line reason, and the dependency
+  graph must stay acyclic.
 - **ADR promotion.** A decision-log row dies with the plan folder. Durable
   architecture decisions graduate to a real ADR in docs/10 and are cited by
   number. Transient build-sequencing choices stay in §4.

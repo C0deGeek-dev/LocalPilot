@@ -1,4 +1,4 @@
-﻿# Plan-Template.md — Skeleton For A Multi-Slice Build Plan In This Repo
+# Plan-Template.md — Skeleton For A Multi-Slice Build Plan In This Repo
 
 > **Purpose.** Reusable shape for an autonomous-agent-driven, multi-slice
 > *build-process* plan for LocalPilot. This is developer-process tooling, not a
@@ -7,7 +7,7 @@
 > `docs/06-harness-spec.md`).
 >
 > Adapted for this repo from the author's own original multi-slice plan
-> template; no third-party provenance.
+> template (canonical revision 2026-06-09); no third-party provenance.
 >
 > Copy this file to `tasks/<Name>-Plan.md` and replace placeholders.
 >
@@ -25,9 +25,12 @@
 > - **Subject** — one file under `tasks/<name>/` (`NN-<slug>.md`). 5-8 per plan.
 >   Subject `00` is reserved for tooling research and readiness.
 > - **Box** — one `[ ]` checklist item inside a subject file, ID
->   `<subject-id>.<box-number>`. Stable; never renumbered.
+>   `<subject-id>.<box-number>`, where `<subject-id>` is the §3 `#` / `NN`
+>   filename prefix (e.g. `01`) and `<box-number>` is the box ordinal in that
+>   file. Stable; never renumbered.
 > - **Slice** — one agent work-session, recorded as one line in a subject's
->   Progress log. A box may span several slices; a slice may tick several boxes.
+>   Progress log. A box may span several slices; a slice may tick several
+>   boxes. Slice numbers count per subject, starting at 1.
 > - **Checkpoint** — a durable handoff point after one or more boxes complete:
 >   plan files updated, verification recorded, commit created, branch pushed.
 > - **Collaboration mode** — `solo`, `coordinated`, or `parallel`. All modes are
@@ -51,7 +54,10 @@
    If it is Tier S, do not use this template — use in-session `EnterPlanMode`.
 2. Copy this file to `tasks/<Name>-Plan.md`.
 3. Create a sibling folder `tasks/<name>/` to hold subject files.
-4. Fill §1 (Subject), Collaboration model, §2 (Inputs), §3 (Subject index).
+4. Fill §1 (Subject and its Risks-and-rollback table), "Collaboration model",
+   §2 (Inputs and the Verification-commands table — `TBD` rows allowed until
+   subject 00 confirms them), and §3 (Subject index with the Depends-on
+   column).
 5. Set Collaboration mode to `solo` unless coordination/parallelism is known up
    front.
 6. Create `tasks/<name>/00-tooling-research-and-readiness.md` from the "00
@@ -62,21 +68,22 @@
 10. Leave §7 (Gate review) as-is; the agent ticks it last.
 11. Leave §8 (Acceptance / sign-off) empty for the user or reviewer.
 12. Create `tasks/<name>/manual-actions.md` from the start — split agent-owned
-    boxes from human-owned boxes.
+    boxes from human-owned boxes. (Do this on day 1, not day 60.)
 13. Create `tasks/<name>/lessons.md` empty. Append *during* the run, the moment
     a slice teaches something. Durable lessons migrate to the permanent
     `tasks/lessons.md` at §7.
-14. Run the Captain Hindsight checkpoint in each subject file before marking that
-    subject `DONE` in §5. A `DO NOT CLOSE` verdict keeps the subject open until
-    the required fixes, decisions, or lessons are resolved.
+14. Run the Captain Hindsight checkpoint in each subject file before marking
+    that subject `DONE` in §5. A `DO NOT CLOSE` verdict keeps the subject open
+    until the required fixes, decisions, or lessons are resolved.
 
 ---
 
 ## Collaboration model
 
-> One plan shape supports solo, coordinated, and parallel work. Start in `solo`
-> unless multiple active workers are expected now. Upgrade by a §4 Decision-log
-> row when the need appears; do not fork the plan or switch templates.
+> One plan shape supports solo, coordinated, and parallel work. Keep the plan
+> low-noise by starting in `solo` unless multiple active workers are expected
+> now. Upgrade by a §4 Decision-log row when the need appears; do not fork the
+> plan or switch templates.
 
 | Field | Value |
 |---|---|
@@ -90,14 +97,14 @@
 Mode rules:
 
 - `solo` — one active worker owns the plan at a time. Checkpoint commits/pushes
-  are still required so another worker (or the same one after a context reset)
-  can resume.
+  are still required so another worker can resume after a session, account,
+  machine, or context-window limit.
 - `coordinated` — one primary worker owns the plan, with explicit non-agent
-  boxes for release, product, security, or review sign-off. Use
+  boxes for release, product, security, infra, review, or domain sign-off. Use
   `manual-actions.md`; no parallel branch table required.
-- `parallel` — multiple workers may work concurrently on separate subjects. Each
-  active subject records owner, branch, dependencies, conflict-risk files,
-  status, and handoff notes before work starts.
+- `parallel` — multiple workers may work concurrently on separate subjects.
+  Each active subject records owner, branch, dependencies, conflict-risk
+  files, status, and handoff notes before work starts.
 
 If Mode changes, append a §4 Decision-log row with the previous mode, new mode,
 rationale, affected subjects, and branch/ownership impact.
@@ -113,20 +120,23 @@ rationale, affected subjects, and branch/ownership impact.
 
 ### Checkpoint gate
 
-> A box is not done until the work can be resumed by someone else. A single
-> checkpoint may cover several related boxes.
+> A box is not truly done until the work can be resumed by someone else. A
+> single checkpoint may cover several related boxes.
 
 Before considering a box done:
 
 - Update the box, subject Progress log, §5 tracker, and any affected §4
   decisions / lessons / manual actions.
-- Run the relevant verification command (see §7 gate), or record the exact
-  blocker and reproduction command.
-- Commit the coherent checkpoint and push the branch.
-- Keep commit messages, branch names, and PR titles/descriptions plan-agnostic:
-  no box IDs, decision IDs, plan filenames, `tasks/<name>/`, or `slice`/`slices`
-  (see §6.11). Repo commit style still applies.
+- Run the relevant verification command from the §2 Verification-commands
+  table, or record the exact blocker and reproduction command.
+- Commit the coherent checkpoint and push the branch. If the repo has no
+  remote, record that once in the Collaboration model Notes and treat the
+  local commit as the checkpoint.
+- Keep commit messages, branch names, and PR titles/descriptions
+  plan-agnostic: no box IDs, decision IDs, plan filenames, `tasks/<name>/`, or
+  `slice`/`slices` (see §6.11). Repo commit style still applies.
 
+Checkpoint names describe durable project work, not plan administration.
 Example commit message shape: `Add provider retry policy tests`, not
 `Complete 03.2`.
 
@@ -135,20 +145,47 @@ Example commit message shape: `Add provider retry policy tests`, not
 ## 1. Subject
 
 > One paragraph. What is being built. What is explicitly out of scope. The "out
-> of scope" half is as important as the "in scope" half — it stops the plan from
-> sprawling.
+> of scope" half is as important as the "in scope" half — it stops the plan
+> from sprawling.
+
+### Risks and rollback
+
+> Fill at plan creation; `n/a` requires a one-line reason. What can go wrong
+> once this ships, and how the change is undone or disabled — revert, feature
+> flag, config switch, migration down-script. Data and compatibility hazards
+> belong here too. Revisited at the §7 gate.
+
+| Risk | Impact | Mitigation / rollback |
+|---|---|---|
+| TBD | TBD | TBD |
 
 ---
 
 ## 2. Authoritative inputs
 
-> Table. One row per input doc / branch / spec. Contribution column says exactly
-> what each input gives. For this repo, the relevant specs are in `docs/` —
-> name the exact doc(s) the plan implements.
+> Table. One row per input doc / branch / spec / archived plan. Contribution
+> column says exactly what each input gives. For this repo, the relevant specs
+> are in `docs/` — name the exact doc(s) the plan implements.
 
 | Source | Contribution |
 |---|---|
 | | |
+
+### Verification commands
+
+> Single source for "the relevant verification command" used by the Checkpoint
+> gate and the §7 gates. Fill what is known at plan creation (`TBD` allowed);
+> subject 00.3 confirms or corrects the rows against the real repo, and 00.8
+> bakes in any additions. Repo defaults below mirror CI (`CLAUDE.md`).
+
+| Purpose | Command | Notes |
+|---|---|---|
+| Build | `cargo check --workspace` | |
+| Test | `cargo test --workspace` | or `cargo nextest run --workspace` |
+| Lint/format | `cargo fmt --check` then `cargo clippy --workspace --all-targets -- -D warnings` | both must be clean |
+| Dep hygiene | `cargo machete` | on dependency change only |
+| Release hygiene | `cargo deny check` and `cargo audit` | before a release milestone only |
+| Plan-specific gate | TBD | optional; add rows as needed |
 
 ---
 
@@ -156,13 +193,18 @@ Example commit message shape: `Add provider retry policy tests`, not
 
 > One row per subject file. **Aim for 5-8 subjects, not 15.** If you need more,
 > the work is probably two plans.
+>
+> **Depends-on orders subjects in every mode.** Solo runs pick the next subject
+> by this column; `parallel` runs copy it into the Parallel work tracker before
+> concurrent work starts. `—` means no dependency beyond subject 00. Keep the
+> graph acyclic.
 
-| # | File | Subject |
-|---|---|---|
-| 00 | `tasks/<name>/00-tooling-research-and-readiness.md` | Tooling research and readiness |
-| 01 | `tasks/<name>/01-<slug>.md` | |
-| 02 | `tasks/<name>/02-<slug>.md` | |
-| TBD | TBD | TBD |
+| # | File | Subject | Depends on |
+|---|---|---|---|
+| 00 | `tasks/<name>/00-tooling-research-and-readiness.md` | Tooling research and readiness | — |
+| 01 | `tasks/<name>/01-<slug>.md` | | 00 |
+| 02 | `tasks/<name>/02-<slug>.md` | | TBD |
+| TBD | TBD | TBD | TBD |
 
 ---
 
@@ -174,19 +216,22 @@ Example commit message shape: `Add provider retry policy tests`, not
 > plan survive a context-window reset.
 >
 > **Cite the box.** The Refs column names the box ID(s)
-> (`<subject-id>.<box-number>`) and/or file(s) the decision touches.
+> (`<subject-id>.<box-number>`) and/or file(s) the decision touches. A decision
+> that can't name what it amends is too vague — sharpen it.
 >
-> **ADR promotion (this repo).** A decision-log row dies when the plan folder is
-> deleted. If a decision is a *durable architecture* call — anything a future
-> contributor would need to understand the design — promote it to a real ADR in
-> `docs/10-decisions.md` in the house format, and cite the ADR number in the
-> Refs column. Transient build-sequencing choices
-> stay here; durable architecture choices graduate to docs/10.
+> **ADR promotion (this repo).** A decision-log row dies when the plan folder
+> is deleted. If a decision is a *durable architecture* call — anything a
+> future contributor would need to understand the design — promote it to a
+> real ADR in `docs/10-decisions.md` in the house format, and cite the ADR
+> number in the Refs column. Transient build-sequencing choices stay here;
+> durable architecture choices graduate to docs/10.
 >
 > **Retiring a subject or box.** If a subject or box proves wrong mid-run, do
 > **not** delete it. Mark it done and struck
 > (`- [x] ~~<box-id> <box text>~~ ABANDONED; see D###`), mark the subject
-> `ABANDONED` in §5, and add a Decision-log row with the rationale.
+> `ABANDONED` in §5, and add a Decision-log row with the rationale. History
+> must survive a reset; a silently deleted box looks like unfinished work
+> after compaction.
 >
 > **Collaboration changes.** Mode changes are decisions. Record previous mode,
 > new mode, rationale, affected subjects, and branch/ownership impact.
@@ -199,18 +244,20 @@ Example commit message shape: `Add provider retry policy tests`, not
 
 ## 5. Master progress tracker
 
-> One row per subject file. A subject is `DONE` when **every** box in its file is
-> `[x]` and its Hindsight checkpoint verdict is `CLOSE`. Abandoned boxes use the
-> struck-and-done format from §4. Mark a retired subject `ABANDONED`; an
+> One row per subject file. A subject is `DONE` when **every** box in its file
+> is `[x]` and its Hindsight checkpoint verdict is `CLOSE`. Abandoned boxes use
+> the struck-and-done format from §4. Mark a retired subject `ABANDONED`; an
 > abandoned subject still gets its Done cell `[x]` (abandoned counts as
-> resolved). §5 is "fully ticked" when every Done cell is `[x]` and every Status
-> is `DONE` or `ABANDONED`.
+> resolved). §5 is "fully ticked" when every Done cell is `[x]` and every
+> Status is `DONE` or `ABANDONED`.
 >
-> **Owner labels.** Every box MUST have an owner from the enum: `agent`,
-> `release-engineer`, `product-owner`, `tech-lead`, `domain-sme`. In a solo repo
-> most boxes are `agent`; reserve human roles for sign-off boxes. The
-> Owner-summary column names the specific roles present (e.g. `agent: 4;
-> tech-lead: 1`), never a generic `human`.
+> **Owner labels and summary.** Every box in every subject file MUST have an
+> owner from the enum: `agent`, `release-engineer`, `product-owner`,
+> `tech-lead`, `domain-sme`. In a solo repo most boxes are `agent`; reserve
+> human roles for sign-off boxes. The Owner-summary column names the specific
+> roles present (e.g. `agent: 4; tech-lead: 1`), never a generic `human`.
+> (Lesson from a prior 61-slice run: without owner labels the tracker stalls
+> at "almost done" with human-owned residue confused for agent-owned.)
 >
 > **Human-owned boxes** are mirrored into `tasks/<name>/manual-actions.md` so
 > they don't get lost between agent-owned boxes. Keep the two in sync.
@@ -225,79 +272,85 @@ Example commit message shape: `Add provider retry policy tests`, not
 
 ## 6. Cross-cutting principles
 
-> These apply to every subject file. Violations are blockers, not nits. Lift any
-> repo-specific rules from `AGENTS.md`, `CLAUDE.md`, and
+> These apply to every subject file. Violations are blockers, not nits. Lift
+> any repo-specific rules from `AGENTS.md`, `CLAUDE.md`, and
 > `docs/13-rust-best-practices.md`.
 
 1. KISS · YAGNI · CLEAN · SOLID · DRY (in that order when conflicting).
-2. **Clean-room provenance is blocking.** All code, prompts, tests, identifiers,
-   and UI copy original to this repo; official public APIs or local servers
-   only. See the `clean-room-guard` skill and `docs/00-clean-room.md`.
-3. **Rust engineering rules hold** (docs/13): MSRV 1.82, exact-pinned workspace
-   deps, typed errors per crate, `#![forbid(unsafe_code)]`, no
+2. **Clean-room provenance is blocking.** All code, prompts, tests,
+   identifiers, and UI copy original to this repo; official public APIs or
+   local servers only. See the `clean-room-guard` skill and
+   `docs/00-clean-room.md`.
+3. **Rust engineering rules hold** (docs/13): MSRV 1.82, exact-pinned
+   workspace deps, typed errors per crate, `#![forbid(unsafe_code)]`, no
    `unwrap`/`expect`/`panic!` on library runtime paths, cross-platform
    path/shell discipline.
 4. **Tier-1 parity.** Windows, Linux, and macOS are equal tier-1 (ADR-0007). A
    box that only works on one OS is not done.
-5. **Keep code modular and locally understandable.** Small, cohesive crates and
-   modules with explicit boundaries. Split files before they become dumping
-   grounds; split functions when branching/nesting/mixed responsibility make
-   them hard to scan. If a file or function must be large, record why and pin
-   the behaviour with tests.
+5. **Keep code modular and locally understandable.** Small, cohesive crates
+   and modules with explicit boundaries. Split files before they become
+   dumping grounds; split functions when branching/nesting/mixed
+   responsibility make them hard to scan. If a file or function must be large,
+   record why and pin the behaviour with tests.
 6. **Cyclomatic complexity stays low.** Branch-heavy functions are blockers
-   unless the branching is inherent to the domain and covered by focused tests.
-   Prefer guard clauses, extracted decision helpers, table-driven cases, or enum
-   dispatch over deep `if`/`else` or nested `match` on booleans.
+   unless the branching is inherent to the domain and covered by focused
+   tests. Prefer guard clauses, extracted decision helpers, table-driven
+   cases, or enum dispatch over deep `if`/`else` or nested `match` on
+   booleans.
 7. **Spec at the contract level, not the SDK level.** State requirements as
    testable contracts on observable behaviour. Do not prescribe specific crate
-   call shapes — that's the implementer's choice. State *what* must be true, not
-   *how* to call it.
+   call shapes — that's the implementer's choice. State *what* must be true,
+   not *how* to call it.
 8. **Coverage % is a smell-detector, not a goal.** A test pins observable
-   behaviour, not a number. If you can't say "this test prevents future-X bug",
-   delete it. Coverage gaps provoke "why is this path untested?", not "add a
-   test that touches it".
+   behaviour, not a number. If you can't say "this test prevents future-X
+   bug", delete it. Coverage gaps provoke "why is this path untested?", not
+   "add a test that touches it".
 9. **Every plan box has an owner and a stable ID.** Owner from the §5 enum; ID
    `<subject-id>.<box-number>`. See §5.
 10. **Lessons land in `tasks/<name>/lessons.md` as they happen**, not at the
-    gate — per-plan run-notes that die with the folder. Durable lessons migrate
-    to the permanent `tasks/lessons.md` at §7.
-11. **Code and public metadata are plan-agnostic.** Comments, test names, commit
-    messages, branch names, PR titles, and identifiers must read as permanent
-    project artefacts. Never reference the plan, slices, box IDs, decision-log
-    entries (`D###`), or this file — they vanish when the plan folder is deleted.
-    Put the *why* directly in the comment. (A durable design rationale belongs in
-    an ADR, not a plan ref — see §4 ADR promotion.)
-12. **Captain Hindsight review before subject close.** Before marking a subject
-    `DONE`, run the subject's Hindsight checkpoint (Appendix). Record Keep / Fix
-    before closing / Record / Risk / Verdict. A `DO NOT CLOSE` verdict is a
-    blocker.
+    gate — per-plan run-notes that die with the folder. Durable lessons
+    migrate to the permanent `tasks/lessons.md` at §7.
+11. **Code and public metadata are plan-agnostic.** Comments, test names,
+    commit messages, branch names, PR titles, and identifiers must read as
+    permanent project artefacts. Never reference the plan, slices, box IDs,
+    decision-log entries (`D###`), or this file — they vanish when the plan
+    folder is deleted. A dangling `// see 03.2` becomes a broken reference in
+    production. Put the *why* directly in the comment. (A durable design
+    rationale belongs in an ADR, not a plan ref — see §4 ADR promotion.)
+12. **Captain Hindsight review before subject close.** Before marking a
+    subject `DONE`, run the subject's Hindsight checkpoint (Appendix). Record
+    Keep / Fix before closing / Record / Risk / Verdict. A `DO NOT CLOSE`
+    verdict is a blocker.
 13. **Tooling research before implementation.** Every plan starts with subject
-    `00` unless explicitly waived in §4. No implementation subject starts until
-    subject 00 records repo context, baseline verification, stack best practices,
-    official sources, and any approved skills/MCP/tooling.
+    `00` unless explicitly waived in §4. No implementation subject starts
+    until subject 00 records repo context, baseline verification, stack best
+    practices, official sources, and any approved skills/MCP/tooling. A waiver
+    must explain why the research step is unnecessary or unsafe for this plan.
 14. **All plans are resume-safe.** A checked box is backed by a durable
-    checkpoint: plan updates, verification note or blocker, commit, and push. No
-    box is ticked merely because work exists in an unpushed workspace.
-15. **Parallelism is opt-in.** Start in `solo` unless multiple workers are known
-    up front. Changing to `parallel` needs a §4 decision and a filled Parallel
-    work tracker before concurrent subject work starts.
+    checkpoint: plan updates, verification note or blocker, commit, and push
+    (no-remote exception per the Checkpoint gate). No box is ticked merely
+    because work exists in an unpushed workspace.
+15. **Parallelism is opt-in.** Start in `solo` unless multiple workers are
+    known now. Changing to `parallel` needs a §4 decision and a filled
+    Parallel work tracker before concurrent subject work starts.
 16. *(plan-specific principles below)*
 
 ---
 
 ## 7. Gate review (run last; tick everything)
 
-> Run only when §5 is fully ticked. §7 is the engineering gate the agent ticks;
-> §8 is human acceptance that follows it.
+> Run only when §5 is fully ticked. §7 is the engineering gate the agent
+> ticks; §8 is human acceptance that follows it.
 
 - [ ] All §5 subjects done (or explicitly `ABANDONED` with a §4 row)
 - [ ] Subject 00 completed, or explicitly waived/abandoned with a §4 row
-- [ ] `cargo fmt --check` clean
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace` passes (or `cargo nextest run --workspace`)
-- [ ] `cargo check --workspace` clean
-- [ ] If deps changed: `cargo machete` clean. Before a release milestone:
-      `cargo deny check` and `cargo audit` clean
+- [ ] Build command from the §2 Verification-commands table passes with 0
+      errors and 0 new warnings
+- [ ] Test command from the §2 Verification-commands table passes
+- [ ] Remaining §2 Verification-commands rows (lint/format, dep/release
+      hygiene, plan-specific gates) pass or are recorded `n/a`
+- [ ] §1 Risks-and-rollback table reviewed; rollback steps still accurate for
+      what actually shipped
 - [ ] Cross-cutting principles from §6 reviewed; any plan-specific tests/rules
       hold
 - [ ] Every non-abandoned subject has a recorded Captain Hindsight checkpoint
@@ -306,17 +359,22 @@ Example commit message shape: `Add provider retry policy tests`, not
       checkpoint commit
 - [ ] Durable architecture decisions promoted to ADRs in
       `docs/10-decisions.md` (see §4)
-- [ ] Current plan/integration branch is pushed; `git status --short` has no
-      uncommitted plan/code changes except explicitly deferred artefacts
-- [ ] If Collaboration mode is `parallel`, the Parallel work tracker has no stale
-      active owners, unmerged subject branches, or unresolved handoff notes
-- [ ] Shipped code/tests/comments/identifiers are plan-agnostic — grep the repo
-      **excluding `tasks/`** for box IDs (`\b\d\d\.\d+\b`), decision IDs
+- [ ] Current plan/integration branch is pushed (or the no-remote note from
+      the Checkpoint gate applies); `git status --short` has no uncommitted
+      plan/code changes except explicitly deferred artefacts
+- [ ] If Collaboration mode is `parallel`, the Parallel work tracker has no
+      stale active owners, unmerged subject branches, or unresolved handoff
+      notes
+- [ ] Shipped code/tests/comments/identifiers are plan-agnostic — grep the
+      repo **excluding `tasks/`** for box IDs (`\b\d\d\.\d+\b`), decision IDs
       (`\bD\d{3}\b`), the literal `tasks/<name>/`, the plan filename
       `<Name>-Plan.md`, and `\bslices?\b`; zero hits after triaging false
-      positives (version strings can match the box-ID pattern)
-- [ ] Commit messages are plan-agnostic — `git log <base>..HEAD` mentions no box
-      IDs, decision IDs, `tasks/<name>/`, `<Name>-Plan.md`, or `slice`/`slices`
+      positives (version strings can match the box-ID pattern; "slice" may be
+      a legit domain term)
+- [ ] Commit messages are plan-agnostic — `git log <base>..HEAD` mentions no
+      box IDs, decision IDs, `tasks/<name>/`, `<Name>-Plan.md`, or
+      `slice`/`slices` (same false-positive triage; file grep does not cover
+      commit messages)
 - [ ] Branch names and public PR titles/descriptions are plan-agnostic if used
 - [ ] `tasks/<name>/manual-actions.md` — every human-owned box resolved or
       explicitly deferred
@@ -330,8 +388,8 @@ Example commit message shape: `Add provider retry policy tests`, not
 
 ## 8. Acceptance / sign-off
 
-> Filled by the user or reviewer after §7 passes. Intentionally separate from §4:
-> sign-off is acceptance, not a spec amendment.
+> Filled by the user or reviewer after §7 passes. Intentionally separate from
+> §4: sign-off is acceptance, not a spec amendment.
 
 | Date | Reviewer | Result | Notes |
 |---|---|---|---|
@@ -360,38 +418,48 @@ later subjects execute with the right context already in place.
       clean-room/provenance rules, and existing conventions.
 - [ ] **00.2** (agent) Inventory the crate graph, workspace deps, CI, existing
       commands, and the implementation surfaces this plan will touch.
-- [ ] **00.3** (agent) Run the baseline gate (fmt/clippy/test/check), or record
-      exact blockers and the command output needed to reproduce them.
-- [ ] **00.4** (agent) Research current Rust best practices for the surfaces this
-      plan touches using official or primary sources; record only findings that
-      affect this plan.
+- [ ] **00.3** (agent) Run the baseline gate and confirm or correct the plan's
+      §2 Verification-commands table against the real repo, or record exact
+      blockers and the command output needed to reproduce them.
+- [ ] **00.4** (agent) Research current Rust best practices for the surfaces
+      this plan touches using official or primary sources; record only
+      findings that affect this plan.
 - [ ] **00.5** (agent) Research APIs, crates, providers, or standards this plan
-      depends on using official or primary sources; record links, versions, and
-      date-sensitive notes (provider work needs official-docs provenance).
+      depends on using official or primary sources; record links, versions,
+      licenses, and date-sensitive notes (provider work needs official-docs
+      provenance).
 - [ ] **00.6** (agent) Review applicable repo skills and any candidate MCP
       servers/tools; classify each `adopt`/`defer`/`reject` with rationale,
       trust notes, source URL, permissions, and setup cost.
 - [ ] **00.7** (agent) Set up only approved local tooling/config needed before
-      coding; keep security-sensitive permissions out of repo config unless
-      narrowly justified.
-- [ ] **00.8** (agent) Bake adopted findings into the plan: update §6, §7 gates,
-      subject boxes, §4 decisions, and `tasks/<name>/lessons.md`. Research that
-      changes no plan artefact is not complete; bake in the finding or record why
-      it was rejected/deferred. End with an implementation-readiness summary.
+      coding; record install/config/provenance and keep security-sensitive
+      permissions out of repo config unless narrowly justified.
+- [ ] **00.8** (agent) Bake adopted findings into the plan: update the §2
+      Verification-commands table, §6 principles, §7 gates, subject boxes, §4
+      decisions, and `tasks/<name>/lessons.md`. Research that changes no plan
+      artefact is not complete; bake in the finding or record why it was
+      rejected/deferred. End with an implementation-readiness summary.
 
 ## Hindsight checkpoint
-> Run after all boxes complete and before marking the subject `DONE` in §5. Use
-> the embedded prompt in "Appendix: Captain Hindsight Prompt". Record the result.
-> Required sections: Keep; Fix before closing; Record; Risk; Verdict (`CLOSE` or
-> `DO NOT CLOSE`). A `DO NOT CLOSE` verdict keeps the subject open.
+> Run after all boxes in this subject are complete and before marking the
+> subject `DONE` in §5. Use the embedded prompt in "Appendix: Captain
+> Hindsight Prompt". Record the review result here. An interim run after a
+> large or risky box is allowed and recorded the same way; it does not replace
+> the closing run.
+>
+> Required output sections: Keep; Fix before closing; Record; Risk; Verdict
+> (`CLOSE` or `DO NOT CLOSE`). If the verdict is `DO NOT CLOSE`, leave the
+> subject open, add/reopen boxes or update decisions/lessons, and rerun this
+> checkpoint after the fixes.
 
 - [ ] Captain Hindsight review recorded
 - [ ] Verdict is `CLOSE`
 
 ## Progress log
-> One line per slice. Date · slice number · box IDs touched · what shipped · how
-> verified · checkpoint commit/push status. Append a `lessons.md` line here too
-> whenever the slice taught something.
+> One line per slice. Date · slice number (per-subject, starting at 1) · box
+> IDs touched · what shipped · how verified · checkpoint commit/push status.
+> Append a `tasks/<name>/lessons.md` line here too whenever the slice taught
+> something.
 ```
 
 ---
@@ -405,10 +473,12 @@ later subjects execute with the right context already in place.
 > One paragraph. What this subject delivers.
 
 ## Boxes
-> ID = `<subject-id>.<box-number>`. Stable — never renumber; mark retired boxes
-> done and struck with `ABANDONED; see D###` (see §4), don't delete.
+> ID = `<subject-id>.<box-number>` (subject index ID · box ordinal). Stable —
+> never renumber; mark retired boxes done and struck with
+> `ABANDONED; see D###` (see §4), don't delete.
 > Owner MUST be one of the §5 enum:
 > agent · release-engineer · product-owner · tech-lead · domain-sme.
+> Examples below use `01`; replace it with this file's `<subject-id>`.
 
 - [ ] **01.1** (agent) Box description — outcome wording. Include the smallest
       verifiable artefact (test name, file path, log line).
@@ -417,18 +487,25 @@ later subjects execute with the right context already in place.
       `tasks/<name>/manual-actions.md`.
 
 ## Hindsight checkpoint
-> Run after all boxes complete and before marking the subject `DONE` in §5. Use
-> the embedded prompt in "Appendix: Captain Hindsight Prompt". Record the result.
-> Required sections: Keep; Fix before closing; Record; Risk; Verdict (`CLOSE` or
-> `DO NOT CLOSE`). A `DO NOT CLOSE` verdict keeps the subject open.
+> Run after all boxes in this subject are complete and before marking the
+> subject `DONE` in §5. Use the embedded prompt in "Appendix: Captain
+> Hindsight Prompt". Record the review result here. An interim run after a
+> large or risky box is allowed and recorded the same way; it does not replace
+> the closing run.
+>
+> Required output sections: Keep; Fix before closing; Record; Risk; Verdict
+> (`CLOSE` or `DO NOT CLOSE`). If the verdict is `DO NOT CLOSE`, leave the
+> subject open, add/reopen boxes or update decisions/lessons, and rerun this
+> checkpoint after the fixes.
 
 - [ ] Captain Hindsight review recorded
 - [ ] Verdict is `CLOSE`
 
 ## Progress log
-> One line per slice. Date · slice number · box IDs touched · what shipped · how
-> verified · checkpoint commit/push status. Append a `lessons.md` line here too
-> whenever the slice taught something.
+> One line per slice. Date · slice number (per-subject, starting at 1) · box
+> IDs touched · what shipped · how verified · checkpoint commit/push status.
+> Append a `tasks/<name>/lessons.md` line here too whenever the slice taught
+> something.
 ```
 
 ---
@@ -449,7 +526,9 @@ later subjects execute with the right context already in place.
 ## Appendix: Captain Hindsight Prompt
 
 > Embedded so copied plans are self-standing and do not depend on machine-local
-> prompt files. Run at each subject close (§6.12).
+> prompt files. Run at each subject close (§6.12). The clean-room,
+> cross-platform, and ADR lines are repo-specific additions to the canonical
+> prompt.
 
 ```text
 You are now Captain Hindsight.
