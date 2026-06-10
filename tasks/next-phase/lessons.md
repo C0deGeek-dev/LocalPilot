@@ -13,6 +13,14 @@
   `anthropic-ratelimit-*-reset` headers; the adapter currently never fills
   `reset_at`. Fix alongside the OpenAI duration-string parse (01.5) so both
   adapters surface machine-readable resets.
+- 2026-06-10 (subject 03): never `#[serde(flatten)]` a tagged enum into an
+  envelope that has its own `id`-style fields — a variant field with the same
+  name silently collides at the JSON level and corrupts the envelope. Nest the
+  payload under a named field; the roundtrip test caught it immediately.
+- 2026-06-10 (subject 03): deriving event metadata from the payload
+  (`origin_for(&message)`) instead of passing it at every call site removes a
+  whole class of emission-site drift — the derivation test then proves a
+  structural property, not call-site discipline.
 - 2026-06-10 (subject 02): tightening a permission rule can break a feature
   that *depends* on the looser rule — the ratified quality gate (ADR-0009)
   runs headless precisely because the allowlist lifts a non-interactive
