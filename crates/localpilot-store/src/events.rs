@@ -39,6 +39,8 @@ pub struct SessionEvent {
 pub enum OpenReason {
     New,
     Resumed,
+    /// Opened as a fork of another session's history.
+    Forked,
 }
 
 /// Where a transcript message came from. Derivable from the message itself so

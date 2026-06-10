@@ -18,7 +18,7 @@ use localpilot_llm::{
 };
 use localpilot_recovery::{detect, ModelHealth, RecoveryEngine, StreamMonitor};
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
-use localpilot_store::{origin_for, OpenReason, SessionEventKind, Store};
+use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
 use localpilot_tools::{ToolContext, ToolRegistry};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -277,6 +277,81 @@ impl SessionRuntime {
     /// Record that this session is closing.
     pub fn close(&mut self) {
         self.record_event(SessionEventKind::SessionClosed);
+    }
+
+    /// Start a fresh session: a new id, a clean conversation (the setup
+    /// system prompt is kept), and a new durable event chain.
+    pub fn start_new_session(&mut self) {
+        self.clear_conversation();
+        self.session_id = SessionId::new();
+        self.last_event = None;
+        self.record_event(SessionEventKind::SessionOpened {
+            reason: OpenReason::New,
+        });
+    }
+
+    /// Resume `session` from its durable event log: the conversation is
+    /// rebuilt from the log (resume, replay, and audit are one mechanism) and
+    /// new events chain onto its tail. The runtime's *current* permission
+    /// profile and trust state stay in force — nothing from the resumed log
+    /// can carry over stale elevated permissions.
+    ///
+    /// # Errors
+    /// Returns the store error if the session's event log cannot be read.
+    pub fn load_session(&mut self, session: SessionId) -> Result<(), localpilot_store::StoreError> {
+        let events = self.store.read_events(session)?;
+        let transcript = transcript_from_events(&events);
+        // Keep the current setup prompt; the transcript never contains it.
+        let setup = self
+            .messages
+            .first()
+            .filter(|message| message.role == Role::System)
+            .cloned();
+        self.session_id = session;
+        self.last_event = events.last().map(|event| event.id);
+        self.messages = setup.into_iter().chain(transcript).collect();
+        self.last_quota = None;
+        self.history_generation += 1;
+        self.compaction_cache = None;
+        self.record_event(SessionEventKind::SessionOpened {
+            reason: OpenReason::Resumed,
+        });
+        Ok(())
+    }
+
+    /// Branch the current conversation into a new session. The new session's
+    /// log is self-contained (the history is re-recorded into it); with
+    /// `mark_fork` it also records where it branched from, distinguishing a
+    /// fork (a divergence point) from a plain clone.
+    ///
+    /// # Errors
+    /// Returns the store error if the new session's log cannot be written.
+    pub fn fork_session(
+        &mut self,
+        mark_fork: bool,
+    ) -> Result<SessionId, localpilot_store::StoreError> {
+        let fork_point = self.last_event;
+        let history: Vec<Message> = self.messages.iter().skip(1).cloned().collect();
+        self.session_id = SessionId::new();
+        self.last_event = None;
+        self.record_event(SessionEventKind::SessionOpened {
+            reason: OpenReason::Forked,
+        });
+        if mark_fork {
+            if let Some(from) = fork_point {
+                self.record_event(SessionEventKind::BranchForked { from });
+            }
+        }
+        for message in &history {
+            self.store.append_message(self.session_id, message)?;
+            self.record_event(SessionEventKind::Message {
+                origin: origin_for(message),
+                message: message.clone(),
+            });
+        }
+        self.history_generation += 1;
+        self.compaction_cache = None;
+        Ok(self.session_id)
     }
 
     /// Run a user-initiated shell command through the permission engine. The

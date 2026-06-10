@@ -157,6 +157,54 @@ enum Command {
         /// Allow the run to write to the workspace (off by default).
         #[arg(long)]
         allow_writes: bool,
+        /// Continue the most recent session in this workspace.
+        #[arg(long = "continue", conflicts_with = "resume")]
+        continue_latest: bool,
+        /// Resume the given session id.
+        #[arg(long)]
+        resume: Option<String>,
+    },
+    /// Inspect, resume, or export durable sessions in this workspace.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// List this workspace's sessions, most recent first.
+    List,
+    /// Export a session as an inspectable, redacted JSON bundle.
+    Export {
+        /// The session id (see `session list`).
+        id: String,
+        /// Output file path.
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+    /// Resume a session and run one prompt against it (print mode).
+    Resume {
+        /// The session id (see `session list`).
+        id: String,
+        /// The prompt text.
+        #[arg(long)]
+        prompt: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+        /// Allow the run to write to the workspace (off by default).
+        #[arg(long)]
+        allow_writes: bool,
     },
 }
 
@@ -604,11 +652,53 @@ async fn main() -> anyhow::Result<()> {
             permission,
             bypass,
             allow_writes,
+            continue_latest,
+            resume,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
-            session_cmd::print_mode(&prompt, &model, provider.as_deref(), profile, allow_writes)
-                .await?;
+            let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
+            session_cmd::print_mode(
+                &prompt,
+                &model,
+                provider.as_deref(),
+                profile,
+                allow_writes,
+                resume,
+            )
+            .await?;
         }
+        Command::Session { command } => match command {
+            SessionCommand::List => {
+                let mut stdout = io::stdout().lock();
+                session_cmd::list_sessions(&mut stdout)?;
+                stdout.flush()?;
+            }
+            SessionCommand::Export { id, output } => {
+                session_cmd::export_session(&id, &output)?;
+                println!("exported {id} to {}", output.display());
+            }
+            SessionCommand::Resume {
+                id,
+                prompt,
+                model,
+                provider,
+                permission,
+                bypass,
+                allow_writes,
+            } => {
+                let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                let session = id.parse::<SessionId>()?;
+                session_cmd::print_mode(
+                    &prompt,
+                    &model,
+                    provider.as_deref(),
+                    profile,
+                    allow_writes,
+                    Some(session),
+                )
+                .await?;
+            }
+        },
     }
 
     Ok(())

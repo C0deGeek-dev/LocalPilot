@@ -50,6 +50,18 @@ pub enum SlashAction {
     Search(Option<String>),
     /// Set the reasoning-effort level (validated by the host).
     SetEffort(String),
+    /// Start a fresh session.
+    NewSession,
+    /// Branch the conversation into a new session (with a fork marker).
+    Fork,
+    /// Copy the conversation into a new session (no fork marker).
+    CloneSession,
+    /// Render the session's event tree.
+    Tree,
+    /// List this workspace's sessions.
+    Sessions,
+    /// Switch to (resume) the given session id.
+    LoadSession(String),
     Resume,
     WaitResume,
     Quit,
@@ -75,6 +87,16 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         _ if name == "bypass" && args.is_empty() => SlashAction::SetProfile(Profile::Bypass),
         _ if matches!(name, "think" | "thinking") && args.is_empty() => SlashAction::ToggleThinking,
         _ if name == "effort" && !args.is_empty() => SlashAction::SetEffort(args.to_string()),
+        _ if name == "new" && args.is_empty() => SlashAction::NewSession,
+        _ if name == "fork" && args.is_empty() => SlashAction::Fork,
+        _ if name == "clone" && args.is_empty() => SlashAction::CloneSession,
+        _ if name == "tree" && args.is_empty() => SlashAction::Tree,
+        _ if name == "sessions" && args.is_empty() => SlashAction::Sessions,
+        _ if name == "session" && !args.is_empty() => SlashAction::LoadSession(args.to_string()),
+        _ if name == "session" => SlashAction::Invalid {
+            command: "session".to_string(),
+            reason: "usage: /session <id> (see /sessions)".to_string(),
+        },
         _ if name == "effort" => SlashAction::Invalid {
             command: "effort".to_string(),
             reason: "usage: /effort minimal|low|medium|high".to_string(),
@@ -205,6 +227,16 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::ToggleThinking => state.thinking.visible = !state.thinking.visible,
         SlashAction::SetEffort(level) => {
             state.apply(UiEvent::Notice(format!("reasoning effort: {level}")));
+        }
+        SlashAction::NewSession
+        | SlashAction::Fork
+        | SlashAction::CloneSession
+        | SlashAction::Tree
+        | SlashAction::Sessions
+        | SlashAction::LoadSession(_) => {
+            state.apply(UiEvent::Notice(
+                "session lifecycle commands are handled by the host".to_string(),
+            ));
         }
         SlashAction::Clear => {
             state.clear_conversation_view();

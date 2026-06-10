@@ -298,6 +298,79 @@ async fn run_slash(
             runtime.set_permission_profile(sandbox_profile(profile), Vec::new());
         }
         SlashAction::ToggleThinking => state.thinking.visible = !state.thinking.visible,
+        SlashAction::NewSession => {
+            runtime.start_new_session();
+            state.clear_conversation_view();
+            state.header.session_id = runtime.session_id().to_string();
+            state.apply(UiEvent::Notice(format!(
+                "started new session {}",
+                runtime.session_id()
+            )));
+        }
+        action @ (SlashAction::Fork | SlashAction::CloneSession) => {
+            let mark_fork = matches!(action, SlashAction::Fork);
+            match runtime.fork_session(mark_fork) {
+                Ok(id) => {
+                    state.header.session_id = id.to_string();
+                    let verb = if mark_fork { "forked" } else { "cloned" };
+                    state.apply(UiEvent::Notice(format!("{verb} into session {id}")));
+                }
+                Err(error) => {
+                    state.apply(UiEvent::Notice(format!("branch failed: {error}")));
+                }
+            }
+        }
+        SlashAction::Tree => match runtime.store().read_events(runtime.session_id()) {
+            Ok(events) => {
+                for line in render_session_tree(&events) {
+                    state.apply(UiEvent::Notice(line));
+                }
+            }
+            Err(error) => {
+                state.apply(UiEvent::Notice(format!("event log unreadable: {error}")));
+            }
+        },
+        SlashAction::Sessions => match runtime.store().list_sessions() {
+            Ok(mut sessions) => {
+                sessions.sort_by(|a, b| b.updated_unix.cmp(&a.updated_unix));
+                if sessions.is_empty() {
+                    state.apply(UiEvent::Notice("no sessions in this workspace".to_string()));
+                }
+                for entry in sessions.into_iter().take(10) {
+                    let current = if entry.id == runtime.session_id() {
+                        " (current)"
+                    } else {
+                        ""
+                    };
+                    state.apply(UiEvent::Notice(format!(
+                        "{} — {} message(s){current}",
+                        entry.id, entry.message_count
+                    )));
+                }
+            }
+            Err(error) => {
+                state.apply(UiEvent::Notice(format!(
+                    "session index unreadable: {error}"
+                )));
+            }
+        },
+        SlashAction::LoadSession(id) => match id.parse::<localpilot_core::SessionId>() {
+            Ok(session) => match runtime.load_session(session) {
+                Ok(()) => {
+                    state.clear_conversation_view();
+                    state.header.session_id = session.to_string();
+                    state.apply(UiEvent::Notice(format!(
+                        "resumed session {session}; current profile and trust apply"
+                    )));
+                }
+                Err(error) => {
+                    state.apply(UiEvent::Notice(format!("resume failed: {error}")));
+                }
+            },
+            Err(_) => {
+                state.apply(UiEvent::Notice(format!("not a session id: {id}")));
+            }
+        },
         SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
             Some(effort) => {
                 runtime.set_reasoning_effort(Some(effort));
@@ -717,6 +790,51 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
         )),
         _ => None,
     }
+}
+
+/// Render the session's durable event log as an indented tree of lifecycle
+/// landmarks: opens, turns, steps, branch closures, and forks.
+fn render_session_tree(events: &[localpilot_store::SessionEvent]) -> Vec<String> {
+    use localpilot_store::SessionEventKind as Kind;
+    let mut lines = Vec::new();
+    let mut in_step = false;
+    for event in events {
+        match &event.kind {
+            Kind::SessionOpened { reason } => {
+                in_step = false;
+                lines.push(format!("* session opened ({reason:?})").to_lowercase());
+            }
+            Kind::StepStarted {
+                number,
+                description,
+            } => {
+                in_step = true;
+                lines.push(format!("* step {number}: {description}"));
+            }
+            Kind::StepCompleted {
+                number, attempts, ..
+            } => {
+                in_step = false;
+                lines.push(format!("* step {number} completed ({attempts} attempt(s))"));
+            }
+            Kind::BranchClosed { summary } => {
+                lines.push(format!("  x branch closed: {}", summary.title));
+            }
+            Kind::BranchForked { .. } => {
+                lines.push("  > forked from an earlier point".to_string());
+            }
+            Kind::TurnStarted { model } => {
+                let indent = if in_step { "    " } else { "  " };
+                lines.push(format!("{indent}- turn ({model})"));
+            }
+            Kind::Cancelled => lines.push("  ! cancelled".to_string()),
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        lines.push("event log is empty".to_string());
+    }
+    lines
 }
 
 fn ui_profile(profile: Profile) -> UiProfile {

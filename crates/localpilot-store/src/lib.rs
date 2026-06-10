@@ -192,6 +192,18 @@ impl Store {
         Ok(self.load_index()?.sessions)
     }
 
+    /// The most recently updated session in this workspace, if any.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the index exists but cannot be read or parsed.
+    pub fn latest_session(&self) -> Result<Option<SessionIndexEntry>, StoreError> {
+        Ok(self
+            .load_index()?
+            .sessions
+            .into_iter()
+            .max_by_key(|entry| entry.updated_unix))
+    }
+
     fn load_index(&self) -> Result<SessionIndex, StoreError> {
         match read_to_string_opt(&self.index_path())? {
             Some(content) if !content.trim().is_empty() => Ok(serde_json::from_str(&content)?),

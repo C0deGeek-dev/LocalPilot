@@ -12,7 +12,7 @@ use localpilot_harness::{
 };
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_sandbox::{PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_store::Store;
 use localpilot_tools::{GateVerdict, ToolGate, ToolRegistry};
 use serde_json::json;
