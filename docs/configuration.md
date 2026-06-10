@@ -1,4 +1,4 @@
-﻿# Configuration
+# Configuration
 
 LocalPilot reads `.localpilot.toml` from the user config directory and the
 project root (project overrides user), with environment variables and CLI flags
@@ -40,9 +40,12 @@ and `--provider`.
 | `base_url` | string | per kind | API base URL (required for local/custom) |
 | `api_key_env` | string | none | Name of the env var holding the credential (never the value) |
 | `model` | string | none | Default model when a command does not pass `--model` |
+| `request_timeout_secs` | int | per adapter | HTTP timeout; useful for slow local inference |
+| `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
 
 Any other keys under a provider table are preserved and passed through as
-provider options (for example `max_tokens` for `anthropic`). See
+provider options (for example `max_tokens` for `anthropic`, or the
+LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 [providers.md](providers.md).
 
 ### `[harness]`

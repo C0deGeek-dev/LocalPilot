@@ -76,6 +76,33 @@ Rules:
 - cap matches
 - never traverse outside workspace without approval
 
+### `multi_edit`
+
+Applies several exact-text replacements to one file atomically; rejects
+missing or ambiguous context before writing anything.
+
+### `apply_patch`
+
+Applies a structured multi-file patch: create, update (exact-match hunks), and
+delete operations, expressed as typed JSON generated from the input schema.
+
+Rules:
+
+- the whole patch is validated against the current tree before any write;
+  a rejected hunk fails the call with an operation- and hunk-named error
+- every touched path passes the same workspace containment as `write_file`
+- the approval prompt previews the operation list
+
+### `find_files`
+
+Finds files by name pattern, respecting ignore files; capped results.
+
+### `read_tool_output`
+
+Reads back the full retained output of an earlier tool call that was truncated
+in context, by its retention id, optionally a line range. No new side effect:
+the output was captured under the permission decision that produced it.
+
 ### `run_shell`
 
 Runs a shell command.
@@ -143,10 +170,26 @@ Tool result text must be:
 - explicit about truncation
 - free of secrets where redaction is possible
 
+Oversized output is bounded at the dispatch chokepoint after redaction: the
+head and tail stay in context with an explicit truncation note, and the full
+redacted output spills to the retention store under the call id, where
+`read_tool_output` can fetch it.
+
+## Tool Gates
+
+Dispatch accepts an ordered chain of tighten-only gates consulted *after* the
+permission engine. A gate may block a call with a model-visible reason; it can
+never grant what the engine refused. The permission engine is the always-on
+first link of the chain and is not removable. Hosts register gates through the
+session runtime's hook fabric (see [`docs/extending.md`](extending.md)).
+
 ## Safety Invariants
 
 - The model cannot execute a tool outside the registry.
 - The model cannot bypass permission policy.
 - The harness cannot bypass permission policy.
+- A gate can only tighten, never loosen, a permission outcome.
 - Tool outputs are stored only after redaction.
 - A failed tool call is represented as data, not a process crash.
+- A cancelled tool execution is aborted (child processes killed), answered
+  with a synthesized error result, and recorded in the session event log.

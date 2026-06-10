@@ -1,4 +1,4 @@
-﻿# Architecture
+# Architecture
 
 ## System Shape
 
@@ -227,6 +227,21 @@ Owns:
 - wait/resume scheduling
 - unattended-resume policy checks
 - persistence of paused harness runs
+
+### `localpilot-rpc`
+
+Owns:
+
+- the headless-drive wire protocol: newline-delimited JSON over stdio
+  (versioned commands in, streamed session events out)
+- the ACP (Agent Client Protocol) adapter over the same runtime
+- permission asks over the wire: the engine decides, the client only answers;
+  an unanswered ask is denied like non-interactive mode
+- the byte-level LF framing contract shared by both stdio protocols
+
+Must not own: any HTTP server, permission decisions, or a product SDK — the
+supported embedding surface stays the in-process session runtime
+([`docs/embedding.md`](embedding.md)).
 
 ### `localpilot-sandbox`
 
