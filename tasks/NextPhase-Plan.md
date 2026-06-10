@@ -244,7 +244,7 @@ must not re-enter via any box (D002).
 | [ ] | 04 | `tasks/next-phase/04-model-catalog-and-budgets.md` | TODO (slimmed per D009) | agent: 5; abandoned: 2 | yes |
 | [ ] | 05 | `tasks/next-phase/05-headless-drive-rpc-acp.md` | TODO | agent: 5 | n/a |
 | [ ] | 06 | `tasks/next-phase/06-hook-fabric-and-lifecycle.md` | TODO | agent: 5 | n/a |
-| [ ] | 07 | `tasks/next-phase/07-tools-skills-supply-chain.md` | TODO | agent: 6 | n/a |
+| [x] | 07 | `tasks/next-phase/07-tools-skills-supply-chain.md` | DONE | agent: 6 | n/a |
 
 ---
 
