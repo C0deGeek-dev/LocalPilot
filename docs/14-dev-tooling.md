@@ -251,16 +251,18 @@ How an assistant plans *its own work on this repo* — distinct from the product
 build-plan file `PROGRESS.md` or `brief.md`; those names belong to the product
 runtime.
 
-The `plan-large-task` skill encodes the trigger and bundles the template; this
-section is its durable, always-loaded summary.
+The `plan-large-task` skill encodes the trigger and names the template source;
+this section is its durable, always-loaded summary.
 
 **Tier S (small)** — 1-2 files, single session, no new crate. Plan in-session
 with `EnterPlanMode`, implement, then `/code-review` + `/simplify`. No `tasks/`
 files. This is the default; when unsure, it is Tier S.
 
-**Tier L (large)** — use the bundled
-[`plan-large-task` template](../.agents/skills/plan-large-task/plan-template.md),
-copied to `tasks/<Name>-Plan.md`, if **any** hold:
+**Tier L (large)** — use the canonical plan template (the `plan-from-template`
+skill in the c0degeek-ai plugin/repo), copied to `tasks/<Name>-Plan.md` with
+the repo
+[overrides file](../.agents/skills/plan-large-task/plan-template-overrides.md)
+spliced in, if **any** hold:
 
 - spans 3+ crates, or needs a new crate;
 - likely to outlast one session / survive a context-window reset;

@@ -3,10 +3,11 @@ name: plan-large-task
 description: >-
   Choose and run the right planning ceremony for a build task in this repo.
   Small tasks plan in-session with EnterPlanMode; large multi-slice tasks copy
-  the bundled plan-template into tasks/<Name>-Plan.md with subjects, a decision
-  log, resume-safe checkpoints, and a Captain Hindsight review at each subject
-  close. Use when starting any multi-step build effort and you must decide how
-  heavy the plan should be.
+  the canonical plan template (c0degeek-ai plan-from-template skill) into
+  tasks/<Name>-Plan.md, splice in the repo overrides file, and run with
+  subjects, a decision log, resume-safe checkpoints, and a Captain Hindsight
+  review at each subject close. Use when starting any multi-step build effort
+  and you must decide how heavy the plan should be.
 ---
 
 # plan a large task
@@ -19,7 +20,7 @@ which is spec'd in
 
 ## Tier trigger — pick S or L
 
-**Tier L (use the bundled template)** if **any** of these hold:
+**Tier L (use the canonical template)** if **any** of these hold:
 
 - spans 3+ crates, or needs a new crate
 - likely to outlast one session / survive a context-window reset
@@ -33,16 +34,33 @@ and `/simplify`. Do not create `tasks/` files for Tier S.
 
 When unsure, it is Tier S. Don't manufacture ceremony.
 
+## Template source
+
+The plan template is **not** bundled in this repo. The canonical copy lives in
+the c0degeek-ai repository at `skills/plan-from-template/plan-template.md`
+(github.com/David-c0degeek/c0degeek-ai). In Claude Code it is available via
+the installed `c0degeek` plugin's `plan-from-template` skill; other tools read
+it from a local checkout of that repo. If neither is reachable, the
+`plan-from-template` skill's standalone required shape is the fallback.
+
+Repo-specific content is spliced from
+[`plan-template-overrides.md`](plan-template-overrides.md) (next to this
+file) — never by editing or forking the canonical template. Generic
+improvements go upstream to c0degeek-ai.
+
 ## Tier L procedure
 
-1. Copy [`plan-template.md`](plan-template.md) to `tasks/<Name>-Plan.md` and
-   follow its "How to use" steps. The template embeds the subject/box/slice
-   shape, decision log, master tracker, gate, and the Captain Hindsight prompt.
-2. Start in `solo` collaboration mode unless multiple workers are known now.
-3. Subject `00` (tooling research) runs first unless waived by a §4 decision.
-4. Keep checkpoints resume-safe: update plan files, run the gate, commit, push.
+1. Copy the canonical template to `tasks/<Name>-Plan.md` and follow its "How
+   to use" steps. The template embeds the subject/box/slice shape, decision
+   log, master tracker, gate, and the Captain Hindsight prompt.
+2. Splice [`plan-template-overrides.md`](plan-template-overrides.md) into the
+   copy at the extension points it names (purpose notes, §2 verification
+   rows, §6 principles, §7 gates, Hindsight prompt lines).
+3. Start in `solo` collaboration mode unless multiple workers are known now.
+4. Subject `00` (tooling research) runs first unless waived by a §4 decision.
+5. Keep checkpoints resume-safe: update plan files, run the gate, commit, push.
 
-## Repo-specific rules baked into the template
+## Repo-specific rules (also in the overrides file)
 
 - **Gate per checkpoint** comes from the plan's §2 Verification-commands
   table — the single source for checkpoint and §7 gate commands. Repo defaults
@@ -62,13 +80,12 @@ When unsure, it is Tier S. Don't manufacture ceremony.
   `tasks/` folder is deleted before v1. Put the *why* in the comment or an ADR.
 - **Name clash.** Never name a build-plan file `PROGRESS.md` or `brief.md` —
   reserved for the product harness runtime.
-- **Clean-room still applies** ([[clean-room-guard]]): the template and its
-  Hindsight prompt are the author's own original work, but everything the plan
+- **Clean-room still applies** ([[clean-room-guard]]): everything the plan
   produces must stay clean-room compliant.
 
 ## Captain Hindsight
 
-Run the embedded prompt (template Appendix) at each subject close (§6.12), not
-per box. Record Keep / Fix before closing / Record / Risk / Verdict. A
-`DO NOT CLOSE` verdict is a blocker. For Tier S, `/code-review` + `/simplify`
-is the lighter equivalent.
+Run the embedded prompt (template Appendix, plus the overrides-file extra
+lines) at each subject close (§6.12), not per box. Record Keep / Fix before
+closing / Record / Risk / Verdict. A `DO NOT CLOSE` verdict is a blocker. For
+Tier S, `/code-review` + `/simplify` is the lighter equivalent.
