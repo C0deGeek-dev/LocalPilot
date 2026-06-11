@@ -1,4 +1,4 @@
-﻿//! Review-queue, memory, and audit operations over the LocalMind store.
+//! Review-queue, memory, and audit operations over the LocalMind store.
 //!
 //! These wrap LocalMind's project store and return plain LocalPilot-owned types
 //! so callers (the CLI) never name a LocalMind type directly.
@@ -157,6 +157,17 @@ pub fn promote(project_root: &Path, item_id: &str) -> Result<String, LearningErr
     let entry = persistence
         .promote_review_item(&ReviewItemId::new(item_id))
         .map_err(memory_err)?;
+
+    // Anchor the accepted memory to the code nodes its hints resolve to, so
+    // graph retrieval can pull it in by structure. Best-effort: a memory that
+    // anchors nowhere is still promoted.
+    let mut hints = entry.related_entities.clone();
+    hints.extend(entry.related_files.clone());
+    if !hints.is_empty() {
+        if let Ok(store) = localmind_store::GraphStore::open_project(project_root) {
+            let _ = localmind_codegraph::anchor_memory(&store, &entry.id, &hints);
+        }
+    }
     Ok(entry.id.to_string())
 }
 
