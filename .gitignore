@@ -1,5 +1,5 @@
 /target/
-/.localpilot/
+.localpilot/
 /.harness/
 /.localmind/
 /.localmind.toml
@@ -8,8 +8,6 @@
 .env
 .env.*
 !.env.example
-
-.localpilot/
 
 # Local launch-generated provider config (LocalBox writes this in cwd)
 /.localpilot.toml

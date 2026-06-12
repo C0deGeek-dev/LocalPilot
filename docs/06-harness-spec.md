@@ -47,7 +47,9 @@ profile = "default"
 
 ### `.localpilot.toml`
 
-Project-local config.
+Project-local config. Local-only: it is git-ignored, never committed —
+external launchers generate machine-local provider config into it, and the
+ratified gate below shares the file (ADR-0012).
 
 ```toml
 [harness]
@@ -244,8 +246,10 @@ Inspect or ratify the discovered quality gate (no provider needed).
 - `gate ratify` — writes the proposed checks into `.localpilot.toml` as
   `[[harness.checks]]`, adding only checks not already ratified and preserving
   the rest of the config. Ratification is the trust boundary: a discovered check
-  does not run until it is committed here. A re-probe proposes additions; it
-  never auto-adopts them.
+  does not run until the user has explicitly written it here. The file is
+  local-only (ADR-0012); a fresh clone re-establishes its gate with
+  `gate propose` / `gate ratify`. A re-probe proposes additions; it never
+  auto-adopts them.
 
 ### `localpilot harness status`
 
@@ -360,7 +364,8 @@ they are the fixed abstraction. The specific commands, versions, and paths are
 During intake/plan setup, the harness detects the project's stack, selects the
 matching profile(s), and probes which tools are actually available. It then
 *proposes* a gate. Discovered commands are untrusted: nothing runs until the
-user ratifies the gate into committed `.localpilot.toml`. After ratification each
+user ratifies the gate into the project's local `.localpilot.toml`
+(local-only, ADR-0012). After ratification each
 check runs through the permission engine and sandbox like any other shell
 command (see [`docs/05`](05-tool-system.md), [`docs/07`](07-security-and-privacy.md)).
 A re-probe proposes additions when the toolchain changes; additions are

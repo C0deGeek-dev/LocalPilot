@@ -100,8 +100,9 @@ The harness quality gate discovers language-specific check commands from the
 project toolchain (ADR-0009). Discovery is untrusted input and must not become
 execution by itself:
 
-- Discovery *proposes* a gate; the user *ratifies* it into committed
-  `.localpilot.toml`. Nothing discovered runs before ratification.
+- Discovery *proposes* a gate; the user *ratifies* it into the project's
+  local `.localpilot.toml` (local-only, ADR-0012). Nothing discovered runs
+  before ratification.
 - Ratified check and fix commands are still classified and mediated by the
   permission engine and shell policy above — ratification records intent, it does
   not grant a standing bypass.

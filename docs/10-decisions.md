@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0012: Project `.localpilot.toml` Is Local-Only, Never Committed
+
+Status: accepted. Amends the "committed `.localpilot.toml`" wording in
+ADR-0009.
+
+The project-local `.localpilot.toml` is a machine-local file: it is listed in
+`.gitignore` and is not committed. External launchers generate provider
+config into it in the project directory (base URL, model, key env-var name),
+and those values are inherently machine-local. The ratified quality gate
+(`[[harness.checks]]`, ADR-0009) lives in the same file and is therefore also
+local-only.
+
+Consequences:
+
+- The ratification trust boundary is the explicit user action that writes
+  checks into the local file — not version control. Wording in
+  [`docs/06`](06-harness-spec.md) and [`docs/07`](07-security-and-privacy.md)
+  says "ratified into the project's local `.localpilot.toml`" rather than
+  "committed".
+- A fresh clone has no ratified gate; `gate propose` / `gate ratify` is the
+  supported way to re-establish one. A team that wants a shared, reviewed
+  gate definition can keep one in its own committed docs and ratify from it,
+  but the harness never reads checks from a committed file.
+
+Reason:
+
+- committing the file would leak machine-local endpoints and invite config
+  drift between what a launcher generates and what the repo pins
+- one file with one clear lifecycle (generated/edited locally, ignored) beats
+  splitting harness config across a committed and an ignored file
+- ratification was always defined as the user's explicit act; tying trust to
+  VCS state added nothing and contradicted the launcher workflow
+
 ## ADR-0011: Store Convergence — Execution Record vs Memory
 
 Status: accepted
