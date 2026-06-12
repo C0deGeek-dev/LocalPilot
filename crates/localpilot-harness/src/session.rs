@@ -33,10 +33,6 @@ use crate::rules::{trigger_for_cadence, Trigger};
 pub enum StopReason {
     /// The model produced a final answer.
     Done,
-    /// The turn cap was reached.
-    MaxTurns,
-    /// The tool-call cap was reached.
-    MaxToolCalls,
     /// The user cancelled.
     Cancelled,
     /// The provider/model was marked degraded by recovery.
@@ -101,8 +97,6 @@ pub struct ManualCompaction {
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub model: String,
-    pub max_turns: u32,
-    pub max_tool_calls: u32,
     pub interactivity: Interactivity,
     pub trusted: bool,
     pub context_token_limit: usize,
@@ -118,8 +112,6 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             model: "default".to_string(),
-            max_turns: 12,
-            max_tool_calls: 24,
             interactivity: Interactivity::Interactive,
             trusted: true,
             context_token_limit: 24_000,
@@ -646,10 +638,9 @@ impl SessionRuntime {
         }
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
-        let mut tool_calls_used = 0u32;
         let mut tools_enabled = true;
 
-        for _ in 0..self.config.max_turns {
+        loop {
             if cancel.is_cancelled() {
                 return self.stop(events, StopReason::Cancelled);
             }
@@ -876,22 +867,7 @@ impl SessionRuntime {
             }
 
             // Execute tool calls through the permission-gated registry.
-            for index in 0..calls.len() {
-                if tool_calls_used >= self.config.max_tool_calls {
-                    // The remaining calls are already persisted as tool_use
-                    // blocks; answer each before stopping so no request built
-                    // from this history violates the pairing contract.
-                    for (id, _, _) in &calls[index..] {
-                        self.append(tool_error_message(
-                            id,
-                            "tool budget exhausted; the call was not executed",
-                        ));
-                    }
-                    return self.stop(events, StopReason::MaxToolCalls);
-                }
-                tool_calls_used += 1;
-                let (id, name, input) = &calls[index];
-
+            for (id, name, input) in &calls {
                 // Surface the task plan to the UI as the model updates it.
                 if name == "update_plan" {
                     if let Some(steps) = parse_plan(input) {
@@ -980,8 +956,6 @@ impl SessionRuntime {
                 ));
             }
         }
-
-        self.stop(events, StopReason::MaxTurns)
     }
 
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {
@@ -1007,8 +981,8 @@ impl SessionRuntime {
 }
 
 /// A synthesized error `tool_result` answering a persisted `tool_use` that was
-/// never executed (rejected batch or exhausted tool budget), keeping the
-/// tool-pairing contract intact on every exit path.
+/// never executed (a rejected batch), keeping the tool-pairing contract intact
+/// on every exit path.
 fn tool_error_message(id: &str, output: &str) -> Message {
     Message::new(
         Role::Tool,

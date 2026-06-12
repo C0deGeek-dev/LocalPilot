@@ -419,8 +419,6 @@ fn map_event(event: RuntimeEvent) -> ServerEvent {
 fn stop_reason_label(reason: StopReason) -> &'static str {
     match reason {
         StopReason::Done => "done",
-        StopReason::MaxTurns => "max_turns",
-        StopReason::MaxToolCalls => "max_tool_calls",
         StopReason::Cancelled => "cancelled",
         StopReason::Degraded => "degraded",
         StopReason::ProviderError => "provider_error",

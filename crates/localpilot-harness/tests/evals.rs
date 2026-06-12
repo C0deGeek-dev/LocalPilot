@@ -444,8 +444,6 @@ async fn run_live_task(
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             model,
-            max_turns: 8,
-            max_tool_calls: 16,
             ..SessionConfig::default()
         },
         Vec::new(),

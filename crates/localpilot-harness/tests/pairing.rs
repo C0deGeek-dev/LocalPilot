@@ -133,49 +133,6 @@ async fn rejected_batch_with_non_object_input_leaves_no_orphan() {
 }
 
 #[tokio::test]
-async fn budget_exhaustion_answers_the_unexecuted_calls() {
-    // One turn carrying three calls against a budget of one: the first
-    // executes, the remaining two must still be answered.
-    let provider = FakeProvider::new().script(vec![
-        Ok(ModelEvent::ToolCall {
-            id: "c1".to_string(),
-            name: "git_status".to_string(),
-            input_json: json!({}),
-        }),
-        Ok(ModelEvent::ToolCall {
-            id: "c2".to_string(),
-            name: "git_status".to_string(),
-            input_json: json!({}),
-        }),
-        Ok(ModelEvent::ToolCall {
-            id: "c3".to_string(),
-            name: "git_status".to_string(),
-            input_json: json!({}),
-        }),
-        Ok(ModelEvent::Done),
-    ]);
-    let config = SessionConfig {
-        max_tool_calls: 1,
-        ..SessionConfig::default()
-    };
-    let mut h = build(provider, config);
-    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
-    assert_eq!(reason, StopReason::MaxToolCalls);
-
-    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
-    assert_pairing(&transcript);
-    let exhausted: Vec<_> = transcript
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult(r) if r.output.contains("tool budget exhausted") => Some(r),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(exhausted.len(), 2, "both unexecuted calls are answered");
-}
-
-#[tokio::test]
 async fn cancellation_leaves_no_orphan() {
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "a.txt" }))
@@ -274,12 +231,10 @@ mod property {
         #![proptest_config(ProptestConfig::with_cases(48))]
 
         // The pairing invariant holds for arbitrary interleavings of clean
-        // turns, valid/invalid tool batches, stream errors, and budget
-        // pressure.
+        // turns, valid/invalid tool batches, and stream errors.
         #[test]
         fn pairing_invariant_holds_for_arbitrary_scripts(
             turns in proptest::collection::vec(turn_shape(), 0..5),
-            max_tool_calls in 1u32..4,
         ) {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -287,7 +242,7 @@ mod property {
                 .unwrap();
             runtime.block_on(async {
                 let provider = provider_for(&turns);
-                let config = SessionConfig { max_tool_calls, ..SessionConfig::default() };
+                let config = SessionConfig::default();
                 let mut h = build(provider, config);
                 let _ = h.runtime.run_turn("go", &h.events, &h.cancel).await;
                 let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();

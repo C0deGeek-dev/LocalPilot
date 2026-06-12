@@ -308,8 +308,7 @@ fn prompt_text(params: &Value) -> String {
 /// Map the loop's stop reason onto the ACP stop-reason vocabulary.
 fn stop_reason(reason: StopReason) -> &'static str {
     match reason {
-        // Bounded turn/tool caps end the turn from the client's perspective.
-        StopReason::Done | StopReason::MaxTurns | StopReason::MaxToolCalls => "end_turn",
+        StopReason::Done => "end_turn",
         StopReason::Cancelled => "cancelled",
         StopReason::Degraded | StopReason::ProviderError => "error",
     }

@@ -820,42 +820,6 @@ async fn cancellation_leaves_a_consistent_transcript() {
 }
 
 #[tokio::test]
-async fn loop_stops_at_the_turn_cap() {
-    // A provider that always asks for a tool never produces a final answer.
-    let provider = FakeProvider::new()
-        .tool_call("c1", "git_status", json!({}))
-        .tool_call("c2", "git_status", json!({}))
-        .tool_call("c3", "git_status", json!({}));
-    let config = SessionConfig {
-        max_turns: 2,
-        ..SessionConfig::default()
-    };
-    let mut h = build_with(provider, &[], config, Profile::Bypass);
-
-    let reason = h
-        .runtime
-        .run_turn("loop forever", &h.events, &h.cancel)
-        .await;
-    assert_eq!(reason, StopReason::MaxTurns);
-}
-
-#[tokio::test]
-async fn loop_stops_at_the_tool_call_cap() {
-    let provider = FakeProvider::new()
-        .tool_call("c1", "git_status", json!({}))
-        .tool_call("c2", "git_status", json!({}));
-    let config = SessionConfig {
-        max_turns: 10,
-        max_tool_calls: 1,
-        ..SessionConfig::default()
-    };
-    let mut h = build_with(provider, &[], config, Profile::Bypass);
-
-    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
-    assert_eq!(reason, StopReason::MaxToolCalls);
-}
-
-#[tokio::test]
 async fn transcript_is_derivable_from_the_event_log() {
     // A representative session: a denied destructive tool call, a malformed
     // stream that triggers recovery (and a synthetic repair prompt), context
