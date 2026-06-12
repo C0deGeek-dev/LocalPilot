@@ -196,8 +196,20 @@ fn handle_key(state: &mut AppState, key: Key) {
         Key::Delete => state.delete_input(),
         Key::Left => state.move_input_left(),
         Key::Right => state.move_input_right(),
-        Key::Up => state.move_input_up(),
-        Key::Down => state.move_input_down(),
+        Key::Up => {
+            if state.input_cursor_is_on_first_line() {
+                let _ = state.recall_previous_input();
+            } else {
+                state.move_input_up();
+            }
+        }
+        Key::Down => {
+            if state.input_cursor_is_on_last_line() {
+                let _ = state.recall_next_input();
+            } else {
+                state.move_input_down();
+            }
+        }
         Key::Home => state.move_input_home(),
         Key::End => state.move_input_end(),
         Key::PageUp => state.scroll_transcript_up(10),
@@ -209,14 +221,14 @@ fn handle_key(state: &mut AppState, key: Key) {
 }
 
 fn submit_input(state: &mut AppState) {
-    let line = state.take_input_expanded();
-    if line.trim().is_empty() {
+    let (shown, expanded) = state.take_input_for_submit();
+    if expanded.trim().is_empty() {
         return;
     }
-    if let Some(action) = parse_slash(&line) {
+    if let Some(action) = parse_slash(&expanded) {
         apply_slash(state, action);
     } else {
-        state.apply(UiEvent::UserMessage(line));
+        state.apply(UiEvent::UserMessage(shown));
     }
 }
 
@@ -366,6 +378,31 @@ mod tests {
         handle_key(&mut state, Key::Down);
         handle_key(&mut state, Key::Down);
         assert_eq!(&state.input[..state.input_cursor], "one\ntwo\nth");
+    }
+
+    #[test]
+    fn up_and_down_recall_previous_inputs_shell_style() {
+        let mut state = state();
+        state.trust = None;
+
+        state.insert_input("first prompt");
+        handle_key(&mut state, Key::Enter);
+        state.insert_input("second prompt");
+        handle_key(&mut state, Key::Enter);
+
+        state.insert_input("draft");
+        handle_key(&mut state, Key::Up);
+        assert_eq!(state.input, "second prompt");
+        assert_eq!(state.input_cursor, state.input.len());
+
+        handle_key(&mut state, Key::Up);
+        assert_eq!(state.input, "first prompt");
+
+        handle_key(&mut state, Key::Down);
+        assert_eq!(state.input, "second prompt");
+
+        handle_key(&mut state, Key::Down);
+        assert_eq!(state.input, "draft");
     }
 
     #[test]

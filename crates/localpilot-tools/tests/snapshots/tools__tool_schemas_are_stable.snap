@@ -1,5 +1,6 @@
 ---
 source: crates/localpilot-tools/tests/tools.rs
+assertion_line: 99
 expression: "serde_json::to_string_pretty(&schemas).unwrap()"
 ---
 [
@@ -363,15 +364,27 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
       "properties": {
         "args": {
           "default": [],
-          "description": "Arguments passed as a list, not a shell string.",
+          "description": "Arguments passed to `program` for direct execution.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
+        "command": {
+          "default": null,
+          "description": "Shell command line to execute through the platform shell.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "program": {
-          "description": "The program to execute (no shell interpretation).",
-          "type": "string"
+          "default": null,
+          "description": "Program to execute directly when `args` is provided; otherwise treated as a shell command line.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "timeout_secs": {
           "default": null,
@@ -384,9 +397,6 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           ]
         }
       },
-      "required": [
-        "program"
-      ],
       "title": "RunShellInput",
       "type": "object"
     }

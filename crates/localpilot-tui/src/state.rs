@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+const MAX_INPUT_HISTORY: usize = 100;
+
 /// Operating mode shown in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -132,6 +134,9 @@ pub struct AppState {
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
     pub input_cursor: usize,
+    input_history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_draft: String,
     pub footer: FooterStats,
     pub thinking: ThinkingPanel,
     pub mode: Mode,
@@ -169,6 +174,9 @@ impl AppState {
             transcript_scroll: 0,
             input: String::new(),
             input_cursor: 0,
+            input_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
             footer: FooterStats::default(),
             thinking: ThinkingPanel::default(),
             mode,
@@ -202,6 +210,7 @@ impl AppState {
 
     /// Insert text at the current input cursor and advance past it.
     pub fn insert_input(&mut self, text: &str) {
+        self.leave_history_navigation();
         self.normalize_input_cursor();
         self.input.insert_str(self.input_cursor, text);
         self.input_cursor += text.len();
@@ -210,6 +219,7 @@ impl AppState {
     /// Insert a newline at the cursor. At the end of the input, a trailing
     /// continuation marker and spaces are consumed first.
     pub fn insert_input_newline(&mut self) {
+        self.leave_history_navigation();
         self.normalize_input_cursor();
         if self.input_cursor == self.input.len() {
             let kept = self.input.trim_end_matches(' ').len();
@@ -292,6 +302,7 @@ impl AppState {
 
     /// Delete the character immediately before the cursor.
     pub fn backspace_input(&mut self) {
+        self.leave_history_navigation();
         self.normalize_input_cursor();
         if let Some((offset, _)) = self.input[..self.input_cursor].char_indices().next_back() {
             self.input.drain(offset..self.input_cursor);
@@ -301,6 +312,7 @@ impl AppState {
 
     /// Delete the character under the cursor.
     pub fn delete_input(&mut self) {
+        self.leave_history_navigation();
         self.normalize_input_cursor();
         if let Some(ch) = self.input[self.input_cursor..].chars().next() {
             self.input
@@ -334,11 +346,93 @@ impl AppState {
 
     /// Take the current input, restoring collapsed pastes, and clear the set.
     pub fn take_input_expanded(&mut self) -> String {
+        self.take_input_for_submit().1
+    }
+
+    /// Take the visible and expanded input for submission, recording the visible
+    /// form in prompt history.
+    pub fn take_input_for_submit(&mut self) -> (String, String) {
         let raw = std::mem::take(&mut self.input);
         self.input_cursor = 0;
         let expanded = self.expand_pastes(&raw);
         self.pastes.clear();
-        expanded
+        self.record_input_history(&raw);
+        (raw, expanded)
+    }
+
+    /// Whether the cursor is on the first logical input line.
+    #[must_use]
+    pub fn input_cursor_is_on_first_line(&self) -> bool {
+        let cursor = self.normalized_input_cursor();
+        !self.input[..cursor].contains('\n')
+    }
+
+    /// Whether the cursor is on the last logical input line.
+    #[must_use]
+    pub fn input_cursor_is_on_last_line(&self) -> bool {
+        let cursor = self.normalized_input_cursor();
+        !self.input[cursor..].contains('\n')
+    }
+
+    /// Replace the input with the previous submitted prompt, shell-style.
+    pub fn recall_previous_input(&mut self) -> bool {
+        if self.input_history.is_empty() {
+            return false;
+        }
+        let index = match self.history_cursor {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = self.input.clone();
+                self.input_history.len() - 1
+            }
+        };
+        self.set_history_input(index);
+        true
+    }
+
+    /// Replace the input with the next submitted prompt, restoring the draft
+    /// after the newest history entry.
+    pub fn recall_next_input(&mut self) -> bool {
+        let Some(index) = self.history_cursor else {
+            return false;
+        };
+        if index + 1 < self.input_history.len() {
+            self.set_history_input(index + 1);
+        } else {
+            self.input = std::mem::take(&mut self.history_draft);
+            self.input_cursor = self.input.len();
+            self.history_cursor = None;
+        }
+        true
+    }
+
+    fn record_input_history(&mut self, input: &str) {
+        self.history_cursor = None;
+        self.history_draft.clear();
+        if input.trim().is_empty() {
+            return;
+        }
+        if self.input_history.last().is_some_and(|last| last == input) {
+            return;
+        }
+        self.input_history.push(input.to_string());
+        if self.input_history.len() > MAX_INPUT_HISTORY {
+            self.input_history.remove(0);
+        }
+    }
+
+    fn set_history_input(&mut self, index: usize) {
+        self.input = self.input_history[index].clone();
+        self.input_cursor = self.input.len();
+        self.history_cursor = Some(index);
+        self.pastes.clear();
+    }
+
+    fn leave_history_navigation(&mut self) {
+        if self.history_cursor.is_some() {
+            self.history_cursor = None;
+            self.history_draft.clear();
+        }
     }
 
     /// Clear the visible conversation while preserving session identity,

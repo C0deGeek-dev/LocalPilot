@@ -12,9 +12,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
@@ -251,10 +251,7 @@ async fn event_loop(
                     } else if is_submit(key, &state.input) {
                         // Expand collapsed pastes for the model, but keep the
                         // compact form in the transcript.
-                        let shown = std::mem::take(&mut state.input);
-                        state.input_cursor = 0;
-                        let prompt = state.expand_pastes(&shown);
-                        state.pastes.clear();
+                        let (shown, prompt) = state.take_input_for_submit();
                         if let Some(action) = parse_slash(&prompt) {
                             run_slash(terminal, state, runtime, approval_rx, &host, action).await?;
                         } else {
@@ -668,10 +665,7 @@ fn resolve_event(
                     // admitted at the next safe provider-turn boundary.
                     if let Some(steer) = steer {
                         if !state.input.trim().is_empty() {
-                            let shown = std::mem::take(&mut state.input);
-                            state.input_cursor = 0;
-                            let prompt = state.expand_pastes(&shown);
-                            state.pastes.clear();
+                            let (shown, prompt) = state.take_input_for_submit();
                             steer.push(prompt);
                             state.apply(UiEvent::UserMessage(shown));
                             state.apply(UiEvent::Notice(
@@ -884,12 +878,7 @@ async fn discovered_window(
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
+    execute!(stdout, terminal::EnterAlternateScreen, EnableBracketedPaste)?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
     // Pushed unconditionally (as Codex does): a terminal that doesn't support it
@@ -914,7 +903,6 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        DisableMouseCapture,
         DisableBracketedPaste,
         terminal::LeaveAlternateScreen
     )?;

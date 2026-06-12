@@ -386,6 +386,98 @@ async fn run_shell_allows_read_only_and_denies_destructive_non_interactive() {
 }
 
 #[tokio::test]
+async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let cwd = ws.root().display().to_string();
+
+    let pwd = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "program": "pwd" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!pwd.is_error, "{}", pwd.output);
+    assert!(pwd.output.contains(&cwd));
+
+    let echo_pwd = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": "echo $PWD" }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!echo_pwd.is_error, "{}", echo_pwd.output);
+    assert!(echo_pwd.output.contains(&cwd));
+
+    let quoted = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "program": "echo \"hello world\"" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!quoted.is_error, "{}", quoted.output);
+    assert!(quoted.output.contains("hello world"));
+}
+
+#[tokio::test]
+async fn run_shell_command_field_uses_the_platform_shell() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    #[cfg(windows)]
+    let command = "Write-Output hello | Select-String hello";
+    #[cfg(not(windows))]
+    let command = "printf hello | cat";
+
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": command }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    assert!(result.output.contains("hello"));
+}
+
+#[tokio::test]
+async fn run_shell_classifies_normalized_command_strings_before_running() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    #[cfg(windows)]
+    let command = "cmd /c del x";
+    #[cfg(not(windows))]
+    let command = "rm -rf x";
+
+    let denied = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "program": command }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(denied.is_error);
+    assert!(denied.output.contains("permission denied"));
+}
+
+#[tokio::test]
 async fn git_commit_rejects_a_secret_bearing_message() {
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
