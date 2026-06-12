@@ -54,8 +54,25 @@ fn patterns() -> &'static [Pattern] {
                 SecretKind::ConnectionString,
                 r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s]+",
             ),
-            // AWS access key id.
-            build(SecretKind::CloudCredential, r"AKIA[0-9A-Z]{16}"),
+            // AWS access key ids, all documented prefixes.
+            build(
+                SecretKind::CloudCredential,
+                r"\b(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b",
+            ),
+            // AWS secret access key in assignment context.
+            build(
+                SecretKind::CloudCredential,
+                r#"(?i)\baws[_\-]?(?:secret[_\-]?(?:access[_\-]?)?key|sk)["']?\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}\b"#,
+            ),
+            // Slack tokens.
+            build(SecretKind::ApiKey, r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"),
+            // GitHub tokens.
+            build(SecretKind::ApiKey, r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+            // JWTs (three base64url segments, the first always starting `eyJ`).
+            build(
+                SecretKind::BearerToken,
+                r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}\b",
+            ),
             // `Authorization: Bearer <token>` and bare bearer tokens.
             build(SecretKind::BearerToken, r"(?i)bearer\s+[A-Za-z0-9._\-]{8,}"),
             // OpenAI-style and Google-style API keys.
@@ -69,6 +86,11 @@ fn patterns() -> &'static [Pattern] {
             build(
                 SecretKind::ApiKey,
                 r#"(?i)(api[_\-]?key|secret|token)\s*[:=]\s*["']?[A-Za-z0-9_\-]{12,}"#,
+            ),
+            // `.env`-style assignments: MY_SERVICE_API_KEY=..., FOO_SECRET=...
+            build(
+                SecretKind::ApiKey,
+                r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD)\s*=\s*\S{6,}",
             ),
         ]
     })
@@ -139,5 +161,71 @@ mod tests {
     fn detect_lists_classes() {
         let kinds = detect("Bearer abcdefgh12345678");
         assert!(kinds.contains(&SecretKind::BearerToken));
+    }
+
+    /// Parity pin against the memory engine's redaction families (ADR-0011:
+    /// this host stack is the canonical redactor; the engine's import-time
+    /// redaction is defense in depth). Every credential family the engine
+    /// catches must be caught here too, so the two sets cannot diverge
+    /// silently. The engine's entropy backstop is deliberately NOT ported:
+    /// over transcripts and tool output it would eat hashes and base64 blobs;
+    /// it stays an engine-internal second line.
+    #[test]
+    fn covers_every_memory_engine_redaction_family() {
+        let slack = format!(
+            "xoxb-{}-{}-{}",
+            "2444333222111", "0123456789012", "AbCdEfGhIjKlMnOpQr"
+        );
+        let corpus: Vec<(String, &str)> = vec![
+            ("id AKIAIOSFODNN7EXAMPLE here".into(), "AKIAIOSFODNN7"),
+            ("session key ASIAIOSFODNN7EXAMPLE".into(), "ASIAIOSFODNN7"),
+            (
+                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+                "wJalrXUtnFEMI",
+            ),
+            (format!("slack bot {slack}"), "xoxb-2444333222111"),
+            (
+                "github ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".into(),
+                "ghp_AbCdEf",
+            ),
+            (
+                "jwt eyJhbGciOiJIUzI1NiIs.eyJzdWIiOiIxMjM0NTY3.dozjgNryP4J3".into(),
+                "eyJhbGciOiJIUzI1NiIs",
+            ),
+            ("openai sk-proj-abcdefghijklmnopqrstuvwx".into(), "sk-proj-"),
+            (
+                "Authorization: Bearer abc123def456ghi789".into(),
+                "abc123def456",
+            ),
+            ("password = hunter2hunter2".into(), "hunter2"),
+            ("MY_SERVICE_API_KEY=abc123def456".into(), "abc123def456"),
+            (
+                "postgres://app:s3cretpw@db.internal:5432/app".into(),
+                "s3cretpw",
+            ),
+            (
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----".into(),
+                "MIIEow",
+            ),
+        ];
+
+        for (input, must_be_gone) in corpus {
+            let out = redact(&input);
+            assert!(
+                !out.contains(must_be_gone),
+                "family not covered: {input:?} -> {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_misses_survive() {
+        for clean in [
+            "commit 2fd4e1c67a2d28fced849ee1bb76e7391b93eb12 fixed it",
+            "the password policy requires rotation",
+            "use sklearn for the model",
+        ] {
+            assert_eq!(redact(clean), clean, "near-miss was redacted");
+        }
     }
 }

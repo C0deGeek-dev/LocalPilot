@@ -193,6 +193,46 @@ mod tests {
         assert!(summary.enqueued_count <= summary.candidate_count);
     }
 
+    /// Boundary fixture: a realistic LocalPilot session bundle (user ask, tool
+    /// failure, fix, explicit lesson, repeated commands) must map across the
+    /// adapter into reviewable LocalMind candidates — this pins the
+    /// host-to-engine contract end to end, not just "nothing crashed".
+    #[test]
+    fn realistic_session_bundle_maps_to_reviewable_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = Store::open(root);
+        let session = SessionId::new();
+        for (role, text) in [
+            (Role::User, "the exporter test is failing again"),
+            (
+                Role::Assistant,
+                "error: assertion failed at writer.rs:88, the batch flush ordering is wrong",
+            ),
+            (
+                Role::Assistant,
+                "Fixed: flushing before the clear; the suite is passing now.",
+            ),
+            (
+                Role::User,
+                "Lesson: exporter changes need the integration suite, not just unit tests.",
+            ),
+        ] {
+            store
+                .append_message(session, &Message::text(role, text))
+                .unwrap();
+        }
+
+        let summary = closeout_session(root, &store, session).unwrap();
+
+        assert!(
+            summary.enqueued_count >= 2,
+            "expected the lesson marker and the failure/fix pair to enqueue, got {summary:?}"
+        );
+        let items = review_list(root).unwrap();
+        assert_eq!(items.len(), summary.enqueued_count);
+    }
+
     #[test]
     fn initialize_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-﻿//! HTTP-adapter tests against a local mock server. No real credentials or
+//! HTTP-adapter tests against a local mock server. No real credentials or
 //! network access; every response is scripted by `wiremock`.
 
 use std::time::Duration;
@@ -143,4 +143,58 @@ async fn malformed_stream_body_yields_a_typed_decode_error() {
     assert!(events
         .iter()
         .any(|e| matches!(e, Err(ProviderError::StreamDecode(_)))));
+}
+
+/// Boundary fixture: the exact stream shape LocalBox's gateway proxy emits
+/// for an Anthropic-format session (its own test suite pins the producer
+/// side). Characteristics the adapter must tolerate: think-stripped deltas
+/// that arrive empty, a synthetic `content_block_delta` the proxy injects
+/// ahead of `content_block_stop` to flush held-back text, and the proxy's
+/// `[no output]` fallback marker for all-reasoning blocks.
+#[tokio::test]
+async fn anthropic_adapter_consumes_a_localbox_proxy_shaped_stream() {
+    use localpilot_llm::AnthropicProvider;
+
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&server)
+        .await;
+
+    let provider =
+        AnthropicProvider::new("localbox", "LocalBox", format!("{}/v1", server.uri()), None);
+    let events: Vec<_> = provider.stream(request()).await.unwrap().collect().await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Ok(ModelEvent::TextDelta(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello world");
+    assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
 }
