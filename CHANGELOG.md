@@ -1,9 +1,9 @@
-﻿# Changelog
+# Changelog
 
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
-## Unreleased
+## 0.2.0-beta.1 - 2026-06-12
 
 - Fixed interactive input editing: the caret is visible, and Left/Right,
   Home/End, Backspace, Delete, newlines, and pastes edit at the cursor. Provider
@@ -34,6 +34,9 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 - Documented the configuration reference and stability policy
   (`docs/configuration.md`) and consolidated the extension points into
   `docs/extending.md`.
+- Updated the vendored LocalMind engine to the coordinated LocalX
+  `v0.2.0-beta.1` release train and exposed active LocalMind skills through
+  the adapter.
 
 ## 0.1.0-alpha.6
 
