@@ -1346,9 +1346,11 @@ dependencies = [
  "localpilot-config",
  "localpilot-core",
  "localpilot-store",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

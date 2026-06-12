@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0013: Folder Ingestion Uses Disposable Project-Local Artifacts
+
+Status: accepted
+
+Project folder ingestion writes derived state under `.localmind/ingest/`:
+manifests, redacted chunks, job state, skipped-file reports, review candidates,
+and context packs. These artifacts are rebuildable from the trusted project
+folder and may be deleted without touching accepted memory.
+
+Accepted memory remains owned by LocalMind's reviewed memory path. Ingestion may
+enqueue review candidates through LocalMind, but it must not write accepted
+memory directly.
+
+Consequences:
+
+- `.localmind/ingest/` is disposable derived state. Rebuild and forget commands
+  remove only ingestion artifacts.
+- Persisted ingestion content is redacted by the LocalPilot redaction stack
+  before it is written.
+- The first implementation keeps deterministic JSON artifacts and Rust-side
+  ranking. SQLite-backed search can be added later if the derived corpus needs
+  FTS behavior, but that would remain rebuildable ingestion state.
+- Context packs are persisted as the latest derived pack for inspection and
+  staleness handling; they are not durable memory.
+
+Reason:
+
+- ADR-0011 already reserves `.localpilot/` for execution records and LocalMind
+  for memory/learning. Folder ingestion is broad mechanical project knowledge,
+  so it belongs beside LocalMind state but outside accepted memory.
+- Keeping the v1 artifacts rebuildable avoids migration risk while the schema is
+  still young.
+- Review-queue promotion preserves the curated-memory boundary and gives users
+  an explicit approval point before broad file observations become durable
+  knowledge.
+
 ## ADR-0012: Project `.localpilot.toml` Is Local-Only, Never Committed
 
 Status: accepted. Amends the "committed `.localpilot.toml`" wording in
@@ -255,4 +291,3 @@ Reason:
 - easier clean-room review
 - smaller test surfaces
 - easier future embedding
-

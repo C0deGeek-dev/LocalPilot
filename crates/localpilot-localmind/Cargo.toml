@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-store = { path = "../localpilot-store" }
+serde = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

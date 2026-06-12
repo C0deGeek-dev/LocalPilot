@@ -368,6 +368,65 @@ fn mcp_servers_parse_with_command_and_args() -> TestResult {
 }
 
 #[test]
+fn ingest_config_defaults_are_conservative() -> TestResult {
+    isolated(|_jail| {
+        let cfg = load(&ConfigPaths::default(), &CliOverrides::default())?;
+
+        assert!(!cfg.ingest.enabled);
+        assert!(cfg.ingest.default_skip_dirs.contains(&"target".to_string()));
+        assert!(cfg
+            .ingest
+            .default_skip_dirs
+            .contains(&".localmind".to_string()));
+        assert_eq!(cfg.ingest.max_model_calls, 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn project_ingest_config_overrides_defaults() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            r#"
+[ingest]
+enabled = true
+include = ["docs"]
+exclude = ["secrets"]
+default_skip_dirs = ["target", "node_modules", ".cache"]
+max_file_bytes = 4096
+max_run_bytes = 8192
+max_files = 7
+max_tokens = 1234
+max_elapsed_secs = 15
+max_model_calls = 2
+"#,
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+
+        assert!(cfg.ingest.enabled);
+        assert_eq!(cfg.ingest.include, vec!["docs"]);
+        assert_eq!(cfg.ingest.exclude, vec!["secrets"]);
+        assert_eq!(
+            cfg.ingest.default_skip_dirs,
+            vec!["target", "node_modules", ".cache"]
+        );
+        assert_eq!(cfg.ingest.max_file_bytes, 4096);
+        assert_eq!(cfg.ingest.max_run_bytes, 8192);
+        assert_eq!(cfg.ingest.max_files, 7);
+        assert_eq!(cfg.ingest.max_tokens, 1234);
+        assert_eq!(cfg.ingest.max_elapsed_secs, 15);
+        assert_eq!(cfg.ingest.max_model_calls, 2);
+        Ok(())
+    })
+}
+
+#[test]
 fn invalid_config_names_the_offending_key() -> TestResult {
     isolated(|jail| {
         let project = write(

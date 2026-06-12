@@ -17,6 +17,7 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub quota: QuotaConfig,
     pub mcp: McpConfig,
+    pub ingest: IngestConfig,
 }
 
 impl Default for Config {
@@ -28,6 +29,66 @@ impl Default for Config {
             permissions: PermissionsConfig::default(),
             quota: QuotaConfig::default(),
             mcp: McpConfig::default(),
+            ingest: IngestConfig::default(),
+        }
+    }
+}
+
+/// Project-local folder ingestion configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IngestConfig {
+    /// Whether ingest commands are allowed to persist derived project knowledge.
+    pub enabled: bool,
+    /// Paths or glob-like fragments explicitly included for ingestion.
+    pub include: Vec<String>,
+    /// Paths or glob-like fragments explicitly excluded from ingestion.
+    pub exclude: Vec<String>,
+    /// Heavy/generated directory names skipped before file classification.
+    pub default_skip_dirs: Vec<String>,
+    /// Maximum bytes read from one file before it becomes metadata-only.
+    pub max_file_bytes: u64,
+    /// Maximum total candidate bytes processed in one run.
+    pub max_run_bytes: u64,
+    /// Maximum candidate files processed in one run.
+    pub max_files: u64,
+    /// Approximate token budget for persisted chunks.
+    pub max_tokens: u64,
+    /// Maximum elapsed time budget for a run.
+    pub max_elapsed_secs: u64,
+    /// Maximum model-backed calls for enrichment. The deterministic v1 path
+    /// leaves this at zero unless the user opts in later.
+    pub max_model_calls: u64,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            default_skip_dirs: [
+                ".git",
+                ".localmind",
+                ".localpilot",
+                "target",
+                "node_modules",
+                "bin",
+                "obj",
+                "dist",
+                "build",
+                ".venv",
+                ".next",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            max_file_bytes: 1_048_576,
+            max_run_bytes: 25_000_000,
+            max_files: 5_000,
+            max_tokens: 1_000_000,
+            max_elapsed_secs: 600,
+            max_model_calls: 0,
         }
     }
 }

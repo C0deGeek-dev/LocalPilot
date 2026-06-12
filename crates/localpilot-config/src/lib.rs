@@ -1,4 +1,4 @@
-﻿//! Configuration schema, loading, and redaction for LocalPilot.
+//! Configuration schema, loading, and redaction for LocalPilot.
 //!
 //! Owns the config schema, layered loading with deterministic precedence,
 //! environment-variable mapping, and the workspace's shared secret-detection /
@@ -15,7 +15,7 @@ mod schema;
 pub use error::ConfigError;
 pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
 pub use schema::{
-    AutoFix, Cadence, CheckConfig, Config, HarnessConfig, McpConfig, McpServerConfig, Mode,
-    PermissionProfile, PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume,
+    AutoFix, Cadence, CheckConfig, Config, HarnessConfig, IngestConfig, McpConfig, McpServerConfig,
+    Mode, PermissionProfile, PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume,
     QuotaConfig, RuleSeverity,
 };
