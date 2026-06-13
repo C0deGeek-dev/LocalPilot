@@ -126,6 +126,14 @@ the runtime in-process or driving it headless over RPC/ACP.
 | `learning` | LocalMind loop: `closeout`, `review`, `promote`, `search`, `skills`, `audit` |
 | `export` | Export a redacted session bundle |
 
+### Chat controls
+
+`PageUp` and `PageDown` scroll the transcript. The default mouse mode keeps
+normal terminal selection available and leaves wheel input with the terminal.
+Press `F12` to toggle mouse-wheel scrolling for the transcript; press `F12`
+again to restore normal terminal selection. Set
+`LOCALPILOT_ENABLE_MOUSE_CAPTURE=1` to start in wheel mode.
+
 ## Build features
 
 The default binary links the LocalMind learning subsystem. The `tui` feature

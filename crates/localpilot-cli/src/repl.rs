@@ -39,6 +39,8 @@ use crate::key_input::{
     write_mouse_tracking_off,
 };
 
+const MOUSE_TOGGLE_KEY: u8 = 12;
+
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
 struct ApprovalCall {
@@ -203,12 +205,15 @@ pub async fn run_chat(
     }
 
     let session_id = runtime.session_id();
-    let mut terminal = enter_terminal()?;
+    let mut mouse_capture = mouse_capture_enabled();
+    state.mouse_capture = mouse_capture;
+    let mut terminal = enter_terminal(mouse_capture)?;
     let result = event_loop(
         &mut terminal,
         &mut state,
         &mut runtime,
         &mut approval_rx,
+        &mut mouse_capture,
         CommandHost {
             approval_tx,
             cwd: &cwd,
@@ -229,6 +234,7 @@ async fn event_loop(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    mouse_capture: &mut bool,
     host: CommandHost<'_>,
 ) -> anyhow::Result<()> {
     loop {
@@ -240,7 +246,9 @@ async fn event_loop(
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if is_key_action(key) => {
-                    if state.trust.is_some() {
+                    if is_mouse_toggle(key) {
+                        toggle_mouse_capture(terminal, state, mouse_capture)?;
+                    } else if state.trust.is_some() {
                         // While the trust gate is up, route keys to it and persist
                         // the decision when the folder is trusted.
                         if let Some(mapped) = map_key(key) {
@@ -251,7 +259,15 @@ async fn event_loop(
                         }
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
-                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submit_current_input(
+                            terminal,
+                            state,
+                            runtime,
+                            approval_rx,
+                            mouse_capture,
+                            &host,
+                        )
+                        .await?;
                     } else if slash_picker_captures(state, key) {
                         if let Some(mapped) = map_key(key) {
                             handle_input(state, AppInput::Key(mapped));
@@ -259,7 +275,15 @@ async fn event_loop(
                     } else if is_newline(key, &state.input) {
                         state.insert_input_newline();
                     } else if is_submit(key, &state.input) {
-                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submit_current_input(
+                            terminal,
+                            state,
+                            runtime,
+                            approval_rx,
+                            mouse_capture,
+                            &host,
+                        )
+                        .await?;
                     } else if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
                     }
@@ -283,6 +307,7 @@ async fn submit_current_input(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
 ) -> anyhow::Result<()> {
     // Expand collapsed pastes for the model, but keep the compact form in the
@@ -292,11 +317,28 @@ async fn submit_current_input(
         return Ok(());
     }
     if let Some(action) = parse_slash(&prompt) {
-        run_slash(terminal, state, runtime, approval_rx, host, action).await
+        run_slash(
+            terminal,
+            state,
+            runtime,
+            approval_rx,
+            mouse_capture,
+            host,
+            action,
+        )
+        .await
     } else {
         state.apply(UiEvent::UserMessage(shown));
         state.busy = true;
-        let outcome = run_turn(terminal, state, runtime, approval_rx, &prompt).await;
+        let outcome = run_turn(
+            terminal,
+            state,
+            runtime,
+            approval_rx,
+            mouse_capture,
+            &prompt,
+        )
+        .await;
         state.busy = false;
         outcome
     }
@@ -307,6 +349,7 @@ async fn run_slash(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
     action: SlashAction,
 ) -> anyhow::Result<()> {
@@ -438,12 +481,12 @@ async fn run_slash(
         SlashAction::Resume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
-            run_harness_command(terminal, state, approval_rx, host, false).await?;
+            run_harness_command(terminal, state, approval_rx, mouse_capture, host, false).await?;
         }
         SlashAction::WaitResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
-            run_harness_command(terminal, state, approval_rx, host, true).await?;
+            run_harness_command(terminal, state, approval_rx, mouse_capture, host, true).await?;
         }
         SlashAction::Ingest(action) => run_ingest_slash(state, host.cwd, action),
         SlashAction::Knowledge(query) => {
@@ -528,6 +571,7 @@ async fn run_harness_command(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
     wait_resume: bool,
 ) -> anyhow::Result<()> {
@@ -586,6 +630,7 @@ async fn run_harness_command(
         &cancel,
         started,
         None,
+        mouse_capture,
         operation,
     )
     .await;
@@ -603,6 +648,7 @@ async fn run_turn(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    mouse_capture: &mut bool,
     prompt: &str,
 ) -> anyhow::Result<()> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
@@ -623,6 +669,7 @@ async fn run_turn(
         &cancel,
         started,
         Some(&steer),
+        mouse_capture,
         turn,
     )
     .await
@@ -637,6 +684,7 @@ async fn drive_runtime_operation<F, T>(
     cancel: &CancellationToken,
     started: std::time::Instant,
     steer: Option<&localpilot_harness::SteerQueue>,
+    mouse_capture: &mut bool,
     operation: F,
 ) -> anyhow::Result<T>
 where
@@ -661,7 +709,14 @@ where
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
-                    pending = resolve_event(state, pending, event::read()?, cancel, steer);
+                    let event = event::read()?;
+                    if let Event::Key(key) = event {
+                        if is_key_action(key) && is_mouse_toggle(key) {
+                            toggle_mouse_capture(terminal, state, mouse_capture)?;
+                            continue;
+                        }
+                    }
+                    pending = resolve_event(state, pending, event, cancel, steer);
                 }
                 terminal.draw(|frame| render(frame, state))?;
             }
@@ -817,6 +872,32 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::PageDown => Some(Key::PageDown),
         _ => None,
     }
+}
+
+fn is_mouse_toggle(key: KeyEvent) -> bool {
+    key.modifiers.is_empty() && matches!(key.code, KeyCode::F(MOUSE_TOGGLE_KEY))
+}
+
+fn toggle_mouse_capture(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    mouse_capture: &mut bool,
+) -> anyhow::Result<()> {
+    *mouse_capture = !*mouse_capture;
+    state.mouse_capture = *mouse_capture;
+    if *mouse_capture {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+        state.apply(UiEvent::Notice(
+            "mouse wheel scroll enabled; press F12 to restore normal selection".to_string(),
+        ));
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        write_mouse_tracking_off(terminal.backend_mut())?;
+        state.apply(UiEvent::Notice(
+            "normal terminal selection restored; press F12 for mouse wheel scrolling".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn slash_picker_captures(state: &AppState, key: KeyEvent) -> bool {
@@ -1005,9 +1086,8 @@ async fn discovered_window(
         .and_then(|m| m.context_window)
 }
 
-fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+fn enter_terminal(capture_mouse: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
-    let capture_mouse = mouse_capture_enabled();
     write_mouse_tracking_off(&mut stdout)?;
     terminal::enable_raw_mode()?;
     if capture_mouse {
@@ -1044,20 +1124,12 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     let _ = write_mouse_tracking_off(terminal.backend_mut());
     terminal::disable_raw_mode()?;
-    if mouse_capture_enabled() {
-        execute!(
-            terminal.backend_mut(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            terminal::LeaveAlternateScreen
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            DisableBracketedPaste,
-            terminal::LeaveAlternateScreen
-        )?;
-    }
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        terminal::LeaveAlternateScreen
+    )?;
     let _ = write_mouse_tracking_off(terminal.backend_mut());
     terminal.show_cursor()?;
     Ok(())

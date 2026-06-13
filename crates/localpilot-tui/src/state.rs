@@ -151,6 +151,8 @@ pub struct AppState {
     pub streaming: String,
     /// Visual rows to keep above the latest transcript output.
     pub transcript_scroll: usize,
+    /// Whether the terminal is currently reporting mouse events to LocalPilot.
+    pub mouse_capture: bool,
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
     pub input_cursor: usize,
@@ -194,6 +196,7 @@ impl AppState {
             transcript: Vec::new(),
             streaming: String::new(),
             transcript_scroll: 0,
+            mouse_capture: false,
             input: String::new(),
             input_cursor: 0,
             input_history: Vec::new(),

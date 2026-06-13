@@ -373,12 +373,19 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             f.tokens_in, f.tokens_out, f.tokens_per_sec
         )),
     ]);
-    let mut line2 = String::new();
+    let mut line2 = format!(
+        "F12 mouse:{}",
+        if state.mouse_capture {
+            "wheel"
+        } else {
+            "select"
+        }
+    );
     if let Some(cost) = f.cost_usd {
-        line2.push_str(&format!("est ${cost:.4}  "));
+        line2.push_str(&format!("  est ${cost:.4}"));
     }
     if let Some(reset) = &f.quota_reset {
-        line2.push_str(&format!("quota resets: {reset}"));
+        line2.push_str(&format!("  quota resets: {reset}"));
     }
     frame.render_widget(
         Paragraph::new(Text::from(vec![line1, Line::raw(line2)])),
