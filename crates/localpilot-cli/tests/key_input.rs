@@ -83,3 +83,14 @@ fn only_press_events_are_actions() {
         )));
     }
 }
+
+#[test]
+fn mouse_tracking_off_writes_all_common_disable_sequences() {
+    let mut out = Vec::new();
+    key_input::write_mouse_tracking_off(&mut out).unwrap();
+
+    assert_eq!(
+        out,
+        b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
+    );
+}

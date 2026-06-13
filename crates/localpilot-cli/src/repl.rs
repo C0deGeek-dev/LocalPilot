@@ -34,7 +34,10 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::key_input::{is_cancel, is_key_action, is_newline, is_submit};
+use crate::key_input::{
+    is_cancel, is_key_action, is_newline, is_submit, mouse_capture_enabled,
+    write_mouse_tracking_off,
+};
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
@@ -1003,14 +1006,26 @@ async fn discovered_window(
 }
 
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
-    terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
+    let capture_mouse = mouse_capture_enabled();
+    write_mouse_tracking_off(&mut stdout)?;
+    terminal::enable_raw_mode()?;
+    if capture_mouse {
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
+    } else {
+        execute!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            EnableBracketedPaste,
+            DisableMouseCapture
+        )?;
+        write_mouse_tracking_off(&mut stdout)?;
+    }
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
     // Pushed unconditionally (as Codex does): a terminal that doesn't support it
@@ -1032,6 +1047,7 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    let _ = write_mouse_tracking_off(terminal.backend_mut());
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -1039,6 +1055,7 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
         DisableMouseCapture,
         terminal::LeaveAlternateScreen
     )?;
+    let _ = write_mouse_tracking_off(terminal.backend_mut());
     terminal.show_cursor()?;
     Ok(())
 }

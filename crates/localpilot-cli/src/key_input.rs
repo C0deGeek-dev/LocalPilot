@@ -1,4 +1,23 @@
+use std::io::{self, Write};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+const MOUSE_TRACKING_OFF: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+pub(crate) fn write_mouse_tracking_off(out: &mut impl Write) -> io::Result<()> {
+    out.write_all(MOUSE_TRACKING_OFF)?;
+    out.flush()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn mouse_capture_enabled() -> bool {
+    matches!(
+        std::env::var("LOCALPILOT_ENABLE_MOUSE_CAPTURE")
+            .ok()
+            .as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
+}
 
 pub(crate) fn is_key_action(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
