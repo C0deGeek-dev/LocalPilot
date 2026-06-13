@@ -12,9 +12,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
@@ -246,22 +246,17 @@ async fn event_loop(
                         if state.trusted {
                             crate::trust::remember(host.cwd);
                         }
+                    } else if slash_picker_exact_submit(state, key) {
+                        state.close_slash_picker();
+                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                    } else if slash_picker_captures(state, key) {
+                        if let Some(mapped) = map_key(key) {
+                            handle_input(state, AppInput::Key(mapped));
+                        }
                     } else if is_newline(key, &state.input) {
                         state.insert_input_newline();
                     } else if is_submit(key, &state.input) {
-                        // Expand collapsed pastes for the model, but keep the
-                        // compact form in the transcript.
-                        let (shown, prompt) = state.take_input_for_submit();
-                        if let Some(action) = parse_slash(&prompt) {
-                            run_slash(terminal, state, runtime, approval_rx, &host, action).await?;
-                        } else {
-                            state.apply(UiEvent::UserMessage(shown));
-                            state.busy = true;
-                            let outcome =
-                                run_turn(terminal, state, runtime, approval_rx, &prompt).await;
-                            state.busy = false;
-                            outcome?;
-                        }
+                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
                     } else if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
                     }
@@ -277,6 +272,30 @@ async fn event_loop(
                 _ => {}
             }
         }
+    }
+}
+
+async fn submit_current_input(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    host: &CommandHost<'_>,
+) -> anyhow::Result<()> {
+    // Expand collapsed pastes for the model, but keep the compact form in the
+    // transcript.
+    let (shown, prompt) = state.take_input_for_submit();
+    if prompt.trim().is_empty() {
+        return Ok(());
+    }
+    if let Some(action) = parse_slash(&prompt) {
+        run_slash(terminal, state, runtime, approval_rx, host, action).await
+    } else {
+        state.apply(UiEvent::UserMessage(shown));
+        state.busy = true;
+        let outcome = run_turn(terminal, state, runtime, approval_rx, &prompt).await;
+        state.busy = false;
+        outcome
     }
 }
 
@@ -722,9 +741,19 @@ fn resolve_event(
             Event::Key(key) if is_key_action(key) => {
                 if is_cancel(key) {
                     cancel.cancel();
+                } else if slash_picker_captures(state, key) {
+                    if let Some(mapped) = map_key(key) {
+                        handle_input(state, AppInput::Key(mapped));
+                    }
                 } else if is_newline(key, &state.input) {
                     state.insert_input_newline();
                 } else if is_submit(key, &state.input) {
+                    if state.input.trim_start().starts_with('/') {
+                        state.apply(UiEvent::Notice(
+                            "slash commands run when the current turn is idle".to_string(),
+                        ));
+                        return None;
+                    }
                     // Submitting while a turn runs queues steering input,
                     // admitted at the next safe provider-turn boundary.
                     if let Some(steer) = steer {
@@ -783,6 +812,34 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::PageDown => Some(Key::PageDown),
         _ => None,
     }
+}
+
+fn slash_picker_captures(state: &AppState, key: KeyEvent) -> bool {
+    state.slash_picker.is_some()
+        && matches!(
+            key.code,
+            KeyCode::Enter
+                | KeyCode::Char('\n' | '\r')
+                | KeyCode::Tab
+                | KeyCode::Esc
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Backspace
+        )
+}
+
+fn slash_picker_exact_submit(state: &AppState, key: KeyEvent) -> bool {
+    if !key.modifiers.is_empty() || !matches!(key.code, KeyCode::Enter | KeyCode::Char('\n' | '\r'))
+    {
+        return false;
+    }
+    let Some(picker) = &state.slash_picker else {
+        return false;
+    };
+    let Some(suggestion) = picker.items.get(picker.selected) else {
+        return false;
+    };
+    state.input.trim() == format!("/{}", suggestion.name)
 }
 
 fn map_mouse(kind: MouseEventKind) -> Option<Key> {
@@ -946,12 +1003,7 @@ async fn discovered_window(
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        terminal::EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
+    execute!(stdout, terminal::EnterAlternateScreen, EnableBracketedPaste)?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
     // Pushed unconditionally (as Codex does): a terminal that doesn't support it
@@ -977,7 +1029,6 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
-        DisableMouseCapture,
         terminal::LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;

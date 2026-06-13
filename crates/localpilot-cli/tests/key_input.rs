@@ -35,6 +35,13 @@ fn plain_enter_submits_non_empty_input() {
 }
 
 #[test]
+fn plain_enter_submits_slash_commands() {
+    let event = key(KeyCode::Enter, KeyModifiers::empty());
+    assert!(!key_input::is_newline(event, "/ingest"));
+    assert!(key_input::is_submit(event, "/ingest"));
+}
+
+#[test]
 fn ctrl_j_inserts_newline() {
     let event = key(KeyCode::Char('j'), KeyModifiers::CONTROL);
     assert!(key_input::is_newline(event, "hello"));

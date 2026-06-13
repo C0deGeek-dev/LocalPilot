@@ -12,7 +12,6 @@ pub(crate) fn is_submit(key: KeyEvent, input: &str) -> bool {
     is_plain_enter(key)
         && key.modifiers.is_empty()
         && !input.trim().is_empty()
-        && !input.trim_start().starts_with('/')
         && !ends_with_continuation(input)
 }
 
