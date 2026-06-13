@@ -665,17 +665,7 @@ impl AppState {
                 }
             }
             UiEvent::TurnComplete => {
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming)
-                        .trim_end_matches(['\r', '\n'])
-                        .to_string();
-                    if !text.is_empty() {
-                        self.transcript.push(TranscriptLine {
-                            speaker: "assistant".to_string(),
-                            text,
-                        });
-                    }
-                }
+                self.flush_streaming_assistant();
             }
             UiEvent::UserMessage(text) => self.transcript.push(TranscriptLine {
                 speaker: "you".to_string(),
@@ -698,10 +688,13 @@ impl AppState {
                 self.footer.context_limit = context_limit;
             }
             UiEvent::QuotaPaused { reset } => self.footer.quota_reset = Some(reset),
-            UiEvent::Notice(text) => self.transcript.push(TranscriptLine {
-                speaker: "system".to_string(),
-                text,
-            }),
+            UiEvent::Notice(text) => {
+                self.flush_streaming_assistant();
+                self.transcript.push(TranscriptLine {
+                    speaker: "system".to_string(),
+                    text,
+                });
+            }
             UiEvent::RecoveryNotice(text) => {
                 // Drop the in-progress (bad) streamed text so the retry starts on a
                 // fresh line instead of appending to the discarded output.
@@ -713,6 +706,7 @@ impl AppState {
             }
             UiEvent::PlanUpdated(plan) => self.plan = plan,
             UiEvent::ToolStarted { id, name } => {
+                self.flush_streaming_assistant();
                 self.transcript.push(TranscriptLine {
                     speaker: "tool".to_string(),
                     text: format!("{name} running"),
@@ -743,6 +737,7 @@ impl AppState {
                     false
                 };
                 if !updated {
+                    self.flush_streaming_assistant();
                     self.transcript.push(TranscriptLine {
                         speaker: "tool".to_string(),
                         text,
@@ -753,6 +748,21 @@ impl AppState {
             UiEvent::ApprovalResolved => self.approval = None,
             UiEvent::ToggleThinking => self.thinking.visible = !self.thinking.visible,
             UiEvent::Quit => self.should_quit = true,
+        }
+    }
+
+    fn flush_streaming_assistant(&mut self) {
+        if self.streaming.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.streaming)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        if !text.is_empty() {
+            self.transcript.push(TranscriptLine {
+                speaker: "assistant".to_string(),
+                text,
+            });
         }
     }
 }
@@ -936,6 +946,32 @@ mod tests {
 
         assert_eq!(state.transcript.len(), 1);
         assert_eq!(state.transcript[0].text, "The answer");
+    }
+
+    #[test]
+    fn tool_events_are_inserted_after_the_assistant_text_that_preceded_them() {
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("First chunk\n\n".to_string()));
+        state.apply(UiEvent::ToolStarted {
+            id: "call_1".to_string(),
+            name: "run_shell".to_string(),
+        });
+        state.apply(UiEvent::ToolFinished {
+            id: "call_1".to_string(),
+            name: "run_shell".to_string(),
+            is_error: false,
+            output: "tool: run_shell\nstatus: ok\noutput:\nok".to_string(),
+        });
+        state.apply(UiEvent::TextDelta("Second chunk".to_string()));
+        state.apply(UiEvent::TurnComplete);
+
+        assert_eq!(state.transcript.len(), 3);
+        assert_eq!(state.transcript[0].speaker, "assistant");
+        assert_eq!(state.transcript[0].text, "First chunk");
+        assert_eq!(state.transcript[1].speaker, "tool");
+        assert_eq!(state.transcript[1].text, "run_shell ok: ok");
+        assert_eq!(state.transcript[2].speaker, "assistant");
+        assert_eq!(state.transcript[2].text, "Second chunk");
     }
 
     #[test]
