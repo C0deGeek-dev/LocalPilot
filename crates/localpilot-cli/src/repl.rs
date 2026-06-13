@@ -425,23 +425,8 @@ async fn run_slash(
                 )));
             }
         },
-        SlashAction::LoadSession(id) => match id.parse::<localpilot_core::SessionId>() {
-            Ok(session) => match runtime.load_session(session) {
-                Ok(()) => {
-                    state.clear_conversation_view();
-                    state.header.session_id = session.to_string();
-                    state.apply(UiEvent::Notice(format!(
-                        "resumed session {session}; current profile and trust apply"
-                    )));
-                }
-                Err(error) => {
-                    state.apply(UiEvent::Notice(format!("resume failed: {error}")));
-                }
-            },
-            Err(_) => {
-                state.apply(UiEvent::Notice(format!("not a session id: {id}")));
-            }
-        },
+        SlashAction::LoadSession(id) => load_session_from_input(state, runtime, &id),
+        SlashAction::ContinueSession(id) => continue_session(state, runtime, id.as_deref()),
         SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
             Some(effort) => {
                 runtime.set_reasoning_effort(Some(effort));
@@ -487,7 +472,7 @@ async fn run_slash(
             state.apply(UiEvent::Notice(notice));
         }
         SlashAction::Search(query) => state.set_search(query),
-        SlashAction::Resume => {
+        SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
             run_harness_command(terminal, state, approval_rx, mouse_capture, host, false).await?;
@@ -519,6 +504,65 @@ async fn run_slash(
         }
     }
     Ok(())
+}
+
+fn continue_session(state: &mut AppState, runtime: &mut SessionRuntime, id: Option<&str>) {
+    if let Some(id) = id {
+        load_session_from_input(state, runtime, id);
+        return;
+    }
+
+    let current = runtime.session_id();
+    let session = match runtime.store().list_sessions() {
+        Ok(mut sessions) => {
+            sessions.sort_by(|a, b| b.updated_unix.cmp(&a.updated_unix));
+            sessions
+                .into_iter()
+                .find(|entry| entry.id != current)
+                .map(|entry| entry.id)
+        }
+        Err(error) => {
+            state.apply(UiEvent::Notice(format!(
+                "session index unreadable: {error}"
+            )));
+            return;
+        }
+    };
+
+    match session {
+        Some(session) => load_session_id(state, runtime, session),
+        None => state.apply(UiEvent::Notice(
+            "no previous session in this workspace".to_string(),
+        )),
+    }
+}
+
+fn load_session_from_input(state: &mut AppState, runtime: &mut SessionRuntime, id: &str) {
+    match id.parse::<localpilot_core::SessionId>() {
+        Ok(session) => load_session_id(state, runtime, session),
+        Err(_) => {
+            state.apply(UiEvent::Notice(format!("not a session id: {id}")));
+        }
+    }
+}
+
+fn load_session_id(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    session: localpilot_core::SessionId,
+) {
+    match runtime.load_session(session) {
+        Ok(()) => {
+            state.clear_conversation_view();
+            state.header.session_id = session.to_string();
+            state.apply(UiEvent::Notice(format!(
+                "resumed session {session}; current profile and trust apply"
+            )));
+        }
+        Err(error) => {
+            state.apply(UiEvent::Notice(format!("resume failed: {error}")));
+        }
+    }
 }
 
 fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestAction) {

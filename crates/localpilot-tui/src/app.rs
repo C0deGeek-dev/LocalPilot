@@ -63,7 +63,9 @@ pub enum SlashAction {
     Sessions,
     /// Switch to (resume) the given session id.
     LoadSession(String),
-    Resume,
+    /// Continue the latest previous session, or a specific session when set.
+    ContinueSession(Option<String>),
+    HarnessResume,
     WaitResume,
     Ingest(IngestAction),
     Knowledge(String),
@@ -134,7 +136,15 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
             };
             SlashAction::Search(query)
         }
-        _ if name == "resume" && args.is_empty() => SlashAction::Resume,
+        _ if matches!(name, "resume" | "continue") => {
+            let id = if args.is_empty() {
+                None
+            } else {
+                Some(args.to_string())
+            };
+            SlashAction::ContinueSession(id)
+        }
+        _ if name == "harness-resume" && args.is_empty() => SlashAction::HarnessResume,
         _ if matches!(name, "wait-resume" | "wait_resume") && args.is_empty() => {
             SlashAction::WaitResume
         }
@@ -157,7 +167,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
                 | "thinking"
                 | "clear"
                 | "compact"
-                | "resume"
+                | "harness-resume"
                 | "wait-resume"
                 | "wait_resume"
                 | "quit"
@@ -355,7 +365,8 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         | SlashAction::CloneSession
         | SlashAction::Tree
         | SlashAction::Sessions
-        | SlashAction::LoadSession(_) => {
+        | SlashAction::LoadSession(_)
+        | SlashAction::ContinueSession(_) => {
             state.apply(UiEvent::Notice(
                 "session lifecycle commands are handled by the host".to_string(),
             ));
@@ -368,8 +379,8 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
             "/compact is handled by the interactive host".to_string(),
         )),
         SlashAction::Search(query) => state.set_search(query),
-        SlashAction::Resume => state.apply(UiEvent::Notice(
-            "/resume is handled by the interactive host".to_string(),
+        SlashAction::HarnessResume => state.apply(UiEvent::Notice(
+            "/harness-resume is handled by the interactive host".to_string(),
         )),
         SlashAction::WaitResume => state.apply(UiEvent::Notice(
             "/wait-resume is handled by the interactive host".to_string(),

@@ -152,7 +152,26 @@ fn a_slash_command_triggers_the_matching_action() {
 
 #[test]
 fn resume_slash_commands_are_parsed_for_the_host() {
-    assert_eq!(parse_slash("/resume"), Some(SlashAction::Resume));
+    assert_eq!(
+        parse_slash("/resume"),
+        Some(SlashAction::ContinueSession(None))
+    );
+    assert_eq!(
+        parse_slash("/resume session-1"),
+        Some(SlashAction::ContinueSession(Some("session-1".to_string())))
+    );
+    assert_eq!(
+        parse_slash("/continue"),
+        Some(SlashAction::ContinueSession(None))
+    );
+    assert_eq!(
+        parse_slash("/continue session-1"),
+        Some(SlashAction::ContinueSession(Some("session-1".to_string())))
+    );
+    assert_eq!(
+        parse_slash("/harness-resume"),
+        Some(SlashAction::HarnessResume)
+    );
     assert_eq!(parse_slash("/wait-resume"), Some(SlashAction::WaitResume));
     assert_eq!(parse_slash("/wait_resume"), Some(SlashAction::WaitResume));
 }
