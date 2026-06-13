@@ -1,8 +1,10 @@
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 const MOUSE_TRACKING_OFF: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+const UNBRACKETED_PASTE_WINDOW: Duration = Duration::from_millis(35);
 
 pub(crate) fn write_mouse_tracking_off(out: &mut impl Write) -> io::Result<()> {
     out.write_all(MOUSE_TRACKING_OFF)?;
@@ -21,6 +23,70 @@ pub(crate) fn mouse_capture_enabled() -> bool {
 
 pub(crate) fn is_key_action(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnbracketedPasteAction {
+    None,
+    InsertNewline,
+    Suppress,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct UnbracketedPaste {
+    active_until: Option<Instant>,
+    suppress_lf_until: Option<Instant>,
+}
+
+impl UnbracketedPaste {
+    pub(crate) fn observe_key(
+        &mut self,
+        key: KeyEvent,
+        buffered_after: bool,
+        now: Instant,
+    ) -> UnbracketedPasteAction {
+        let Some(c) = unmodified_char(key) else {
+            self.active_until = None;
+            self.suppress_lf_until = None;
+            return UnbracketedPasteAction::None;
+        };
+
+        match c {
+            '\n' if self.suppress_lf_until.is_some_and(|until| now <= until) => {
+                self.suppress_lf_until = None;
+                UnbracketedPasteAction::Suppress
+            }
+            '\n' | '\r'
+                if buffered_after || self.active_until.is_some_and(|until| now <= until) =>
+            {
+                self.active_until = Some(now + UNBRACKETED_PASTE_WINDOW);
+                self.suppress_lf_until = (c == '\r').then_some(now + UNBRACKETED_PASTE_WINDOW);
+                UnbracketedPasteAction::InsertNewline
+            }
+            '\n' | '\r' => {
+                self.active_until = None;
+                self.suppress_lf_until = None;
+                UnbracketedPasteAction::None
+            }
+            _ if buffered_after => {
+                self.active_until = Some(now + UNBRACKETED_PASTE_WINDOW);
+                self.suppress_lf_until = None;
+                UnbracketedPasteAction::None
+            }
+            _ => {
+                self.suppress_lf_until = None;
+                UnbracketedPasteAction::None
+            }
+        }
+    }
+}
+
+pub(crate) fn may_be_unbracketed_paste_key(key: KeyEvent) -> bool {
+    unmodified_char(key).is_some()
+}
+
+pub(crate) fn is_unbracketed_paste_newline_key(key: KeyEvent) -> bool {
+    matches!(unmodified_char(key), Some('\n' | '\r'))
 }
 
 pub(crate) fn is_cancel(key: KeyEvent) -> bool {
@@ -60,4 +126,13 @@ fn ends_with_continuation(input: &str) -> bool {
 
 fn is_plain_enter(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Enter | KeyCode::Char('\n' | '\r'))
+}
+
+fn unmodified_char(key: KeyEvent) -> Option<char> {
+    if key.modifiers.is_empty() {
+        if let KeyCode::Char(c) = key.code {
+            return Some(c);
+        }
+    }
+    None
 }

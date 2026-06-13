@@ -9,7 +9,7 @@
 use std::future::Future;
 use std::io::{self, Stdout};
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -35,8 +35,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{
-    is_cancel, is_key_action, is_newline, is_submit, mouse_capture_enabled,
-    write_mouse_tracking_off,
+    is_cancel, is_key_action, is_newline, is_submit, is_unbracketed_paste_newline_key,
+    may_be_unbracketed_paste_key, mouse_capture_enabled, write_mouse_tracking_off,
+    UnbracketedPaste, UnbracketedPasteAction,
 };
 
 const MOUSE_TOGGLE_KEY: u8 = 12;
@@ -237,6 +238,7 @@ async fn event_loop(
     mouse_capture: &mut bool,
     host: CommandHost<'_>,
 ) -> anyhow::Result<()> {
+    let mut unbracketed_paste = UnbracketedPaste::default();
     loop {
         terminal.draw(|frame| render(frame, state))?;
         if state.should_quit {
@@ -246,6 +248,7 @@ async fn event_loop(
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if is_key_action(key) => {
+                    let buffered_after = buffered_after_key(key)?;
                     if is_mouse_toggle(key) {
                         toggle_mouse_capture(terminal, state, mouse_capture)?;
                     } else if state.trust.is_some() {
@@ -257,6 +260,12 @@ async fn event_loop(
                         if state.trusted {
                             crate::trust::remember(host.cwd);
                         }
+                    } else if handle_unbracketed_paste_key(
+                        state,
+                        &mut unbracketed_paste,
+                        key,
+                        buffered_after,
+                    ) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
                         submit_current_input(
@@ -694,6 +703,7 @@ where
 
     // The reply channel for an approval the user has not yet answered.
     let mut pending: Option<oneshot::Sender<bool>> = None;
+    let mut unbracketed_paste = UnbracketedPaste::default();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -710,13 +720,25 @@ where
                         break;
                     }
                     let event = event::read()?;
+                    let buffered_after = match event {
+                        Event::Key(key) if is_key_action(key) => buffered_after_key(key)?,
+                        _ => false,
+                    };
                     if let Event::Key(key) = event {
                         if is_key_action(key) && is_mouse_toggle(key) {
                             toggle_mouse_capture(terminal, state, mouse_capture)?;
                             continue;
                         }
                     }
-                    pending = resolve_event(state, pending, event, cancel, steer);
+                    pending = resolve_event(
+                        state,
+                        pending,
+                        event,
+                        cancel,
+                        steer,
+                        &mut unbracketed_paste,
+                        buffered_after,
+                    );
                 }
                 terminal.draw(|frame| render(frame, state))?;
             }
@@ -769,6 +791,8 @@ fn resolve_event(
     event: Event,
     cancel: &CancellationToken,
     steer: Option<&localpilot_harness::SteerQueue>,
+    unbracketed_paste: &mut UnbracketedPaste,
+    buffered_after: bool,
 ) -> Option<oneshot::Sender<bool>> {
     if let Some(reply) = pending {
         let Event::Key(key) = event else {
@@ -801,6 +825,12 @@ fn resolve_event(
             Event::Key(key) if is_key_action(key) => {
                 if is_cancel(key) {
                     cancel.cancel();
+                } else if handle_unbracketed_paste_key(
+                    state,
+                    unbracketed_paste,
+                    key,
+                    buffered_after,
+                ) {
                 } else if slash_picker_captures(state, key) {
                     if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
@@ -850,6 +880,34 @@ fn insert_paste(state: &mut AppState, text: String) {
         state.insert_input(&placeholder);
     } else {
         state.insert_input(&text);
+    }
+}
+
+fn buffered_after_key(key: KeyEvent) -> anyhow::Result<bool> {
+    if !may_be_unbracketed_paste_key(key) {
+        return Ok(false);
+    }
+    let timeout = if is_unbracketed_paste_newline_key(key) {
+        Duration::from_millis(2)
+    } else {
+        Duration::ZERO
+    };
+    Ok(event::poll(timeout)?)
+}
+
+fn handle_unbracketed_paste_key(
+    state: &mut AppState,
+    unbracketed_paste: &mut UnbracketedPaste,
+    key: KeyEvent,
+    buffered_after: bool,
+) -> bool {
+    match unbracketed_paste.observe_key(key, buffered_after, Instant::now()) {
+        UnbracketedPasteAction::None => false,
+        UnbracketedPasteAction::InsertNewline => {
+            state.insert_input_newline();
+            true
+        }
+        UnbracketedPasteAction::Suppress => true,
     }
 }
 
