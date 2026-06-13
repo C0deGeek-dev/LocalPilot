@@ -769,6 +769,7 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlC),
         KeyCode::Char(c) => Some(Key::Char(c)),
         KeyCode::Enter => Some(Key::Enter),
+        KeyCode::Tab => Some(Key::Tab),
         KeyCode::Backspace => Some(Key::Backspace),
         KeyCode::Delete => Some(Key::Delete),
         KeyCode::Esc => Some(Key::Esc),

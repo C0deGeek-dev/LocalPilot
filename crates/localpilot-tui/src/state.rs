@@ -116,6 +116,26 @@ pub struct TrustPrompt {
     pub path: String,
 }
 
+/// One command shown in the slash-command autocomplete popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashSuggestion {
+    /// Command name without the leading slash (e.g. "search").
+    pub name: String,
+    /// Short description shown beside the command.
+    pub description: String,
+}
+
+/// Slash-command autocomplete popup state.
+#[derive(Debug, Clone)]
+pub struct SlashPicker {
+    /// The raw slash command text the user typed (e.g. "/se").
+    pub query: String,
+    /// All matching commands for the current query.
+    pub items: Vec<SlashSuggestion>,
+    /// Index of the currently highlighted item.
+    pub selected: usize,
+}
+
 /// One transcript entry.
 #[derive(Debug, Clone)]
 pub struct TranscriptLine {
@@ -149,6 +169,8 @@ pub struct AppState {
     pub trusted: bool,
     /// Large pastes collapsed to placeholders, expanded back on submit.
     pub pastes: Vec<Paste>,
+    /// Active slash-command autocomplete picker.
+    pub slash_picker: Option<SlashPicker>,
     pub search: Option<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
@@ -186,6 +208,7 @@ impl AppState {
             trust: None,
             trusted: false,
             pastes: Vec::new(),
+            slash_picker: None,
             search: None,
             plan: Vec::new(),
             active_tools: HashMap::new(),
@@ -474,6 +497,139 @@ impl AppState {
         self.transcript_scroll = 0;
     }
 
+    // --- Slash picker --------------------------------------------------------
+
+    /// The slash commands offered by the autocomplete picker, each with a short
+    /// description. This is the single source of truth for the picker; the names
+    /// mirror the commands parsed by `parse_slash`.
+    const SLASH_COMMANDS: &'static [(&'static str, &'static str)] = &[
+        ("agent", "Switch to agent mode"),
+        ("harness", "Switch to harness mode"),
+        ("default", "Use the default permission profile"),
+        ("relaxed", "Use the relaxed permission profile"),
+        ("bypass", "Use the bypass permission profile"),
+        ("think", "Toggle the reasoning panel"),
+        ("effort", "Set reasoning effort: minimal|low|medium|high"),
+        ("new", "Start a fresh session"),
+        ("fork", "Branch the conversation into a new session"),
+        ("clone", "Copy the conversation into a new session"),
+        ("tree", "Show the session event tree"),
+        ("sessions", "List this workspace's sessions"),
+        ("session", "Resume a session by id"),
+        ("clear", "Clear the conversation view"),
+        ("compact", "Summarize and compact the context"),
+        ("search", "Search the transcript"),
+        ("resume", "Resume after a paused turn"),
+        ("wait-resume", "Wait for quota, then resume"),
+        ("ingest", "Manage workspace ingestion"),
+        ("knowledge", "Query the knowledge base"),
+        ("context", "Build a context bundle"),
+        ("quit", "Exit LocalPilot"),
+    ];
+
+    /// Matching suggestions for `query` (e.g. "/se" or "/"). A query is matched on
+    /// the command name after the leading slash; "/" (or an empty query) lists
+    /// every command.
+    #[must_use]
+    fn slash_suggestions(query: &str) -> Vec<SlashSuggestion> {
+        let prefix = query.strip_prefix('/').unwrap_or(query);
+        Self::SLASH_COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(name, description)| SlashSuggestion {
+                name: (*name).to_string(),
+                description: (*description).to_string(),
+            })
+            .collect()
+    }
+
+    /// Open the slash picker for `query` (e.g. "/se") and populate matching items.
+    pub fn open_slash_picker(&mut self, query: String) {
+        let items = Self::slash_suggestions(&query);
+        self.slash_picker = Some(SlashPicker {
+            query,
+            items,
+            selected: 0,
+        });
+    }
+
+    /// Close the slash picker and clear its state.
+    pub fn close_slash_picker(&mut self) {
+        self.slash_picker = None;
+    }
+
+    /// Move the picker selection down one item, wrapping at the end.
+    pub fn slash_picker_next(&mut self) {
+        if let Some(picker) = &mut self.slash_picker {
+            if !picker.items.is_empty() {
+                picker.selected = (picker.selected + 1) % picker.items.len();
+            }
+        }
+    }
+
+    /// Move the picker selection up one item, wrapping at the start.
+    pub fn slash_picker_prev(&mut self) {
+        if let Some(picker) = &mut self.slash_picker {
+            let len = picker.items.len();
+            if len > 0 {
+                picker.selected = (picker.selected + len - 1) % len;
+            }
+        }
+    }
+
+    /// Accept the highlighted command: replace the typed `/query` at the cursor
+    /// with the full `/<name>` and close the picker. The user can then add
+    /// arguments and submit with a second Enter.
+    pub fn slash_picker_select(&mut self) {
+        if let Some(picker) = self.slash_picker.take() {
+            let Some(suggestion) = picker.items.get(picker.selected) else {
+                return;
+            };
+            let command = format!("/{}", suggestion.name);
+            // Replace from the slash up to the cursor with the full command.
+            if let Some(slash_pos) = self.input[..self.input_cursor].rfind('/') {
+                self.input.truncate(slash_pos);
+                self.input.push_str(&command);
+                self.input_cursor = slash_pos + command.len();
+            } else {
+                self.insert_input(&command);
+            }
+        }
+    }
+
+    /// Rebuild the picker items for a new `query`, keeping the picker open.
+    pub fn slash_picker_update_query(&mut self, query: String) {
+        let items = Self::slash_suggestions(&query);
+        if let Some(picker) = &mut self.slash_picker {
+            picker.query = query;
+            picker.items = items;
+            picker.selected = 0;
+        }
+    }
+
+    /// Rebuild the picker from the current input, or close it once the input has
+    /// left slash context. Called after each edit while the picker is open.
+    pub fn refresh_or_close_slash_picker(&mut self) {
+        if self.is_in_slash_context() {
+            let cursor = self.normalized_input_cursor();
+            self.slash_picker_update_query(self.input[..cursor].to_string());
+        } else {
+            self.close_slash_picker();
+        }
+    }
+
+    /// Whether the input is still a slash-command prefix at the cursor: it begins
+    /// with '/', the cursor is on the first line, and no whitespace has been typed
+    /// yet (a space starts arguments and dismisses the picker).
+    #[must_use]
+    pub fn is_in_slash_context(&self) -> bool {
+        if !self.input.starts_with('/') {
+            return false;
+        }
+        let cursor = self.normalized_input_cursor();
+        !self.input[..cursor].contains(char::is_whitespace)
+    }
+
     fn transcript_logical_rows(&self) -> usize {
         let transcript_rows = self
             .transcript
@@ -682,6 +838,58 @@ mod tests {
             Mode::Agent,
             Profile::Default,
         )
+    }
+
+    #[test]
+    fn slash_picker_filters_to_real_commands() {
+        let mut s = state();
+        s.open_slash_picker("/se".to_string());
+        let picker = s.slash_picker.as_ref().expect("picker open");
+        let names: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
+        // Preserves the table order and only keeps the "se" prefix.
+        assert_eq!(names, ["sessions", "session", "search"]);
+        assert!(picker.items.iter().all(|i| !i.description.is_empty()));
+    }
+
+    #[test]
+    fn slash_picker_lists_every_command_for_a_bare_slash() {
+        let mut s = state();
+        s.open_slash_picker("/".to_string());
+        let picker = s.slash_picker.as_ref().expect("picker open");
+        assert_eq!(picker.items.len(), AppState::SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn slash_picker_select_inserts_the_full_command() {
+        let mut s = state();
+        s.input = "/se".to_string();
+        s.input_cursor = s.input.len();
+        s.open_slash_picker("/se".to_string());
+        s.slash_picker_next(); // sessions -> session
+        s.slash_picker_select();
+        assert!(s.slash_picker.is_none());
+        assert_eq!(s.input, "/session");
+        assert_eq!(s.input_cursor, "/session".len());
+    }
+
+    #[test]
+    fn slash_picker_prev_wraps_to_the_last_item() {
+        let mut s = state();
+        s.open_slash_picker("/".to_string());
+        s.slash_picker_prev();
+        let picker = s.slash_picker.as_ref().expect("picker open");
+        assert_eq!(picker.selected, picker.items.len() - 1);
+    }
+
+    #[test]
+    fn typing_a_space_leaves_slash_context_and_closes_the_picker() {
+        let mut s = state();
+        s.input = "/search".to_string();
+        s.input_cursor = s.input.len();
+        s.open_slash_picker("/search".to_string());
+        s.insert_input(" ");
+        s.refresh_or_close_slash_picker();
+        assert!(s.slash_picker.is_none());
     }
 
     #[test]

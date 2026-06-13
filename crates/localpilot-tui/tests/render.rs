@@ -311,6 +311,32 @@ fn input_cursor_is_visible_at_the_edit_position() {
 }
 
 #[test]
+fn slash_autocomplete_lists_matching_commands_with_descriptions() {
+    let mut state = base();
+    handle_input(&mut state, AppInput::Key(Key::Char('/')));
+    handle_input(&mut state, AppInput::Key(Key::Char('c')));
+    let rendered = render_string(&state, 90, 18);
+    // Every command starting with "c" is offered, each with its description.
+    assert!(rendered.contains("/clear"));
+    assert!(rendered.contains("Clear the conversation view"));
+    assert!(rendered.contains("/compact"));
+    // Non-matching commands are filtered out.
+    assert!(!rendered.contains("/agent"));
+}
+
+#[test]
+fn slash_autocomplete_enter_fills_the_highlighted_command() {
+    let mut state = base();
+    for c in ['/', 'c', 'l', 'e'] {
+        handle_input(&mut state, AppInput::Key(Key::Char(c)));
+    }
+    // "/cle" matches only "clear"; Enter accepts it into the input and closes.
+    handle_input(&mut state, AppInput::Key(Key::Enter));
+    assert!(state.slash_picker.is_none());
+    assert_eq!(state.input, "/clear");
+}
+
+#[test]
 fn transcript_follows_the_latest_response_rows() {
     let mut state = base();
     state.transcript.clear();

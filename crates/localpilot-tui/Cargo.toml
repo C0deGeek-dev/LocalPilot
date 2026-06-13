@@ -17,6 +17,8 @@ ratatui = { workspace = true, default-features = false }
 # The transcript is a scrollable view with its own scrollbar; backend-agnostic,
 # so it does not pull crossterm into this testable UI crate.
 tui-scrollview = { workspace = true }
+# Slash-command autocomplete popup list (builder-driven, backend-agnostic).
+tui-widget-list = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

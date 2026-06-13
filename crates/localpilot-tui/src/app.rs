@@ -16,6 +16,7 @@ use crate::state::{AppState, Mode, Profile, UiEvent};
 pub enum Key {
     Char(char),
     Enter,
+    Tab,
     Backspace,
     Delete,
     Esc,
@@ -268,6 +269,28 @@ fn handle_key(state: &mut AppState, key: Key) {
         return;
     }
 
+    // While the slash-command autocomplete is open it captures input: arrows
+    // navigate, Enter/Tab accept the highlighted command, Esc dismisses, and
+    // edits refilter the list (closing it once the input leaves slash context).
+    if state.slash_picker.is_some() {
+        match key {
+            Key::Up => state.slash_picker_prev(),
+            Key::Down => state.slash_picker_next(),
+            Key::Enter | Key::Tab => state.slash_picker_select(),
+            Key::Esc => state.close_slash_picker(),
+            Key::Backspace => {
+                state.backspace_input();
+                state.refresh_or_close_slash_picker();
+            }
+            Key::Char(c) => {
+                state.insert_input(&c.to_string());
+                state.refresh_or_close_slash_picker();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key {
         Key::Esc | Key::CtrlC => state.should_quit = true,
         Key::Enter => submit_input(state),
@@ -295,7 +318,15 @@ fn handle_key(state: &mut AppState, key: Key) {
         Key::PageDown => state.scroll_transcript_down(10),
         Key::ScrollUp => state.scroll_transcript_up(3),
         Key::ScrollDown => state.scroll_transcript_down(3),
-        Key::Char(c) => state.insert_input(&c.to_string()),
+        Key::Tab => {}
+        Key::Char(c) => {
+            state.insert_input(&c.to_string());
+            // A '/' typed at the start of the line opens the slash-command
+            // autocomplete; once open, further edits are handled above.
+            if c == '/' && state.is_in_slash_context() {
+                state.open_slash_picker(state.input[..state.input_cursor].to_string());
+            }
+        }
     }
 }
 

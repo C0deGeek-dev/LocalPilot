@@ -47,6 +47,8 @@ tui-textarea = "=0.7.0"
 # Scrollable transcript view. Pinned to the last release on MSRV 1.74 that still
 # targets ratatui 0.29; newer releases bump the MSRV past our 1.82 floor.
 tui-scrollview = "=0.5.1"
+# Builder-driven scrollable list, used for the slash-command autocomplete popup.
+tui-widget-list = "=0.13.3"
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
 futures = "=0.3.31"
 ignore = "=0.4.23"

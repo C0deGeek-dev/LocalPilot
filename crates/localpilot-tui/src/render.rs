@@ -8,8 +8,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
+use tui_widget_list::{ListBuilder, ListState, ListView};
 
-use crate::state::{AppState, ApprovalRequest, Picker, Profile, TrustPrompt};
+use crate::state::{AppState, ApprovalRequest, Picker, Profile, SlashPicker, TrustPrompt};
 
 /// Below this width the optional side panel collapses; the footer stays visible.
 const NARROW_WIDTH: u16 = 80;
@@ -50,6 +51,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
     if let Some(picker) = &state.picker {
         render_picker(frame, area, picker);
+    }
+    if let Some(slash) = &state.slash_picker {
+        // Anchor the autocomplete just above the input box (rows[2]).
+        render_slash_picker(frame, area, rows[2], slash);
     }
     // The trust gate draws on top of everything else.
     if let Some(trust) = &state.trust {
@@ -408,6 +413,58 @@ fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
         })
         .collect();
     frame.render_widget(List::new(items).block(panel(&picker.title)), popup);
+}
+
+/// Render the slash-command autocomplete popup just above the input box. Each row
+/// shows the command and a short description; the highlighted row is reversed.
+fn render_slash_picker(frame: &mut Frame, area: Rect, input_area: Rect, picker: &SlashPicker) {
+    if picker.items.is_empty() {
+        return;
+    }
+    // Size the box to the widest rendered " /<name padded to 12><description>"
+    // line, capped to the screen. The leading " /" is two columns.
+    let content_width = picker
+        .items
+        .iter()
+        .map(|item| 2 + item.name.len().max(12) + item.description.len())
+        .max()
+        .unwrap_or(20) as u16;
+    let popup_width = content_width.saturating_add(2).clamp(12, area.width);
+    let visible = (picker.items.len() as u16).min(8);
+    let popup_height = visible + 2; // two rows for the border
+
+    // Anchor above the input box, left-aligned with it, clamped into the screen.
+    let popup_x = input_area.x.min(area.width.saturating_sub(popup_width));
+    let popup_y = input_area.y.saturating_sub(popup_height);
+    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup);
+
+    let builder = ListBuilder::new(|ctx| {
+        let item = &picker.items[ctx.index];
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" /{:<12}", item.name),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                item.description.clone(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        let line = if ctx.is_selected {
+            line.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        };
+        (line, 1u16)
+    });
+
+    let list = ListView::new(builder, picker.items.len())
+        .block(panel("commands"))
+        .infinite_scrolling(true);
+    let mut list_state = ListState::default();
+    list_state.select(Some(picker.selected));
+    frame.render_stateful_widget(list, popup, &mut list_state);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
