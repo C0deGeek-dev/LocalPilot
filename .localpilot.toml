@@ -1,0 +1,13 @@
+[provider]
+default = "local"
+
+[providers.local]
+kind = "anthropic"
+base_url = "http://127.0.0.1:11435/v1"
+api_key_env = "ANTHROPIC_AUTH_TOKEN"
+[harness]
+context_token_limit = 262144
+
+[ingest]
+enabled = true
+
