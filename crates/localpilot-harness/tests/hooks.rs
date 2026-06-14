@@ -173,6 +173,74 @@ async fn context_hooks_contribute_system_context_for_the_turn() {
 }
 
 #[tokio::test]
+async fn per_turn_retrieval_context_is_replaced_not_accumulated() {
+    // A context hook contributes the same block every turn. Across several
+    // turns the block must be replaced, not piled up, so retrieval seeding does
+    // not grow the context window with turn count.
+    let provider = Arc::new(FakeProvider::new().text("ok").text("ok").text("ok"));
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::new(
+        Arc::clone(&provider) as Arc<dyn localpilot_llm::ModelProvider>,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    runtime
+        .hooks_mut()
+        .register_context_hook(Arc::new(StaticContext));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+
+    for _ in 0..3 {
+        let reason = runtime.run_turn("hello", &events, &cancel).await;
+        assert_eq!(reason, StopReason::Done);
+    }
+
+    // The last request carries the hook's block exactly once, not once per turn.
+    let request = provider.requests().pop().unwrap();
+    let system_text: String = request
+        .messages
+        .iter()
+        .filter(|m| m.role == localpilot_core::Role::System)
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let occurrences = system_text
+        .matches("hook-contributed project context")
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "retrieval context must be replaced each turn, not accumulated (saw {occurrences})"
+    );
+
+    // The re-derived retrieval block is not written to the durable transcript:
+    // the transcript records authored turns only (here, three user prompts).
+    let transcript = runtime
+        .store()
+        .read_transcript(runtime.session_id())
+        .unwrap();
+    assert!(
+        transcript
+            .iter()
+            .all(|m| m.role != localpilot_core::Role::System
+                || !m
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("hook-contributed project context")))),
+        "ephemeral retrieval context must not be persisted to the transcript"
+    );
+}
+
+#[tokio::test]
 async fn gates_tighten_after_the_engine_and_never_grant() {
     // The engine allows an in-workspace read; the gate still blocks it. The
     // block is a model-visible error result and the pairing contract holds.

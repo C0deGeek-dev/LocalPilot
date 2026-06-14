@@ -201,6 +201,11 @@ const REPAIR_PROMPT: &str =
 /// intervenes.
 const DEFAULT_TOOL_FAILURE_THRESHOLD: u32 = 6;
 
+/// Synthetic-metadata marker for the per-turn retrieval context contributed by
+/// context hooks. Used to evict the prior turn's block before adding the new
+/// one so re-derived retrieval never accumulates.
+const RETRIEVAL_CONTEXT_MARKER: &str = "retrieval-context";
+
 /// Tracks per-tool failure counts within a single turn. Resets at every turn
 /// boundary so that failures from previous turns don't accumulate.
 #[derive(Debug, Default)]
@@ -652,11 +657,47 @@ impl SessionRuntime {
         outcomes
     }
 
-    /// Seed a system message into the conversation — for example retrieved
-    /// project context injected by the host before a turn. Persisted and counted
-    /// in context like any message.
+    /// Seed a system message into the conversation — for example durable host
+    /// context injected before a turn. Persisted and counted in context like any
+    /// message. For per-turn retrieval that is re-derived every turn, use
+    /// [`SessionRuntime::set_retrieval_context`] instead so it does not
+    /// accumulate.
     pub fn seed_system(&mut self, text: impl Into<String>) {
         self.append(Message::new(Role::System, vec![ContentBlock::text(text)]));
+    }
+
+    /// Replace the per-turn retrieval context contributed by context hooks.
+    ///
+    /// Retrieval context is re-derived from the prompt every turn, so the prior
+    /// turn's block is evicted before the new one is added — at most one
+    /// retrieval block is ever present, and context does not grow with turn
+    /// count. The block is marked synthetic with [`RETRIEVAL_CONTEXT_MARKER`] so
+    /// it is distinguishable from authored history, and it is deliberately *not*
+    /// written to the durable transcript: the transcript records authored turns
+    /// and runtime repairs, not re-computable retrieval, so the event-log
+    /// projection stays free of duplicated retrieval blobs. An empty `text`
+    /// evicts the stale block without adding a new one.
+    fn set_retrieval_context(&mut self, text: String) {
+        let had = self
+            .messages
+            .iter()
+            .any(|m| m.metadata.synthetic.as_deref() == Some(RETRIEVAL_CONTEXT_MARKER));
+        self.messages
+            .retain(|m| m.metadata.synthetic.as_deref() != Some(RETRIEVAL_CONTEXT_MARKER));
+        let added = if text.is_empty() {
+            false
+        } else {
+            self.messages.push(
+                Message::new(Role::System, vec![ContentBlock::text(text)])
+                    .into_synthetic(RETRIEVAL_CONTEXT_MARKER),
+            );
+            true
+        };
+        // Only invalidate the compaction cache when the live history actually
+        // changed, so a turn with no retrieval (and none last turn) is a no-op.
+        if had || added {
+            self.history_generation += 1;
+        }
     }
 
     /// Open a provider stream, retrying a transient connection failure (network
@@ -866,11 +907,11 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
-        // Context hooks contribute system context for this turn through the
-        // same seeded-system path a host would use.
-        for context in self.hooks.context_for(user_input) {
-            self.seed_system(context);
-        }
+        // Context hooks contribute system context for this turn. It is
+        // re-derived every turn, so it replaces the prior turn's block rather
+        // than accumulating (see `set_retrieval_context`).
+        let retrieval = self.hooks.context_for(user_input).join("\n");
+        self.set_retrieval_context(retrieval);
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
         self.tool_failure_guard.reset();
