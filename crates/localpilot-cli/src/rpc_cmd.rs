@@ -81,6 +81,9 @@ pub async fn run(
         Vec::new(),
     );
 
+    // The Native serve path moves `cwd` into the serve context; keep a copy so
+    // the session can be closed out into LocalMind when the client disconnects.
+    let project_root = cwd.clone();
     match protocol {
         WireProtocol::Native => {
             let context = ServeContext {
@@ -109,6 +112,9 @@ pub async fn run(
             .await?;
         }
     }
+    // Learn from the served session on disconnect (best-effort; skips an empty
+    // session), so editor/ACP sessions feed LocalMind like the REPL does.
+    crate::context_inject::close_out(&project_root, runtime.session_id());
     Ok(())
 }
 

@@ -7,13 +7,15 @@
 use std::path::Path;
 
 /// Close out a finished session into LocalMind: extract candidate lessons and
-/// enqueue them for review. Best-effort and non-fatal; a no-op when the session
-/// produced no transcript. The interactive REPL (the `tui` feature) is the
-/// consumer.
-#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+/// enqueue them for review, then keep the code graph current. Best-effort and
+/// non-fatal; a no-op when the session produced no transcript. Called on every
+/// deliberate session-end path — the interactive REPL, each headless harness
+/// step, and the RPC/ACP serve loop — so autonomous runs learn too, not just the
+/// REPL. (One-shot `print` deliberately does not close out, so a bare prompt
+/// never creates project files.)
 pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
     let store = localpilot_store::Store::open(cwd);
-    // Skip an empty session so opening and closing the REPL leaves no artifacts.
+    // Skip an empty session so opening and closing a session leaves no artifacts.
     if store
         .read_transcript(session)
         .map(|m| m.is_empty())

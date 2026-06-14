@@ -489,6 +489,11 @@ where
             cancel,
         )
         .await?;
+        // Learn from the finished step. Each harness step is its own session, so
+        // close it out into LocalMind here (best-effort; skips an empty session)
+        // — this is how autonomous runs produce reviewed memory, not just the
+        // interactive REPL.
+        crate::context_inject::close_out(root, runtime.session_id());
         let gate = render_gate(&outcome.gate);
         if !gate.is_empty() {
             write!(out, "{gate}")?;
