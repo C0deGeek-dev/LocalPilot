@@ -53,6 +53,9 @@ depends on LocalMind, never the reverse.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
 - Agent turns seed relevant accepted LocalMind memory as best-effort context.
+  The seed is lean (bounded) and re-derived each turn: it replaces the prior
+  turn's block rather than accumulating, and — being re-computable retrieval, not
+  authored history — it is not written to the durable transcript (ADR-0016).
 - Interactive sessions close out into LocalMind on exit, then run one bounded,
   incremental pass of the code-graph reindex (content-hash change detection;
   leftovers wait for the next close).
@@ -64,9 +67,12 @@ depends on LocalMind, never the reverse.
   its hints resolve to, so graph retrieval can surface it by structure.
 - Folder ingestion writes rebuildable derived knowledge under
   `.localmind/ingest/`: manifests, redacted chunks, job state, review
-  candidates, and task context packs. Normal turns may receive compact
-  high-ranking ingested chunks as local context, but that context is not accepted
-  memory. Promotion from ingestion enqueues LocalMind review items first.
+  candidates, and task context packs. By default (`[ingest] mode = "pull"`)
+  ingested knowledge is reached on demand through the read-only
+  `knowledge_search` tool rather than seeded into every turn; the legacy
+  `mode = "push"` restores always-on injection of high-ranking chunks. Ingested
+  context is never accepted memory. Promotion from ingestion enqueues LocalMind
+  review items first (ADR-0016).
 - Context compaction manages the active model projection only. It can emit a
   structured, source-grounded runtime digest and safe audit metadata, but it
   does not write accepted memory, create skill drafts, or enqueue LocalMind
@@ -130,6 +136,10 @@ localpilot memory delete <memory-id>
 localpilot memory graph <symbol>
 localpilot memory export graph.json
 ```
+
+The agent also has a read-only `knowledge_search` tool (registered on every
+session path) that queries the ingest index on demand, so ingested project
+knowledge is pulled when relevant instead of riding in every turn's context.
 
 New rich-learning behavior lands in LocalMind, not by expanding host-local memory
 implementations.

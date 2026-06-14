@@ -25,7 +25,7 @@ Context has layers with different trust and lifetimes:
 | Recent session suffix | LocalPilot | active request | Preserved raw within budget. |
 | Compacted runtime digest | LocalPilot | active session | Derived from older transcript; fallback is deterministic. |
 | Tool-output snapshots | LocalPilot | execution record | Redacted before persistence; model sees bounded previews. |
-| Ingest chunks and packs | LocalMind storage via LocalPilot host | rebuildable derived state | Local project knowledge, not accepted memory. |
+| Ingest chunks and packs | LocalMind storage via LocalPilot host | rebuildable derived state | Local project knowledge, not accepted memory. Pulled on demand via `knowledge_search` by default, not seeded every turn (ADR-0016). |
 | Accepted memory | LocalMind | durable reviewed memory | Review-gated and auditable. |
 | Code graph facts | LocalMind | derived indexed state | Host feeds sources; graph links code and accepted memory. |
 
@@ -222,6 +222,12 @@ Shipped and tested:
 - The `knowledge pack` command surfaces the active selection: per-source
   reserves, included entries with rank score and reason, and skipped
   near-misses with reasons.
+- Project knowledge is pulled on demand: a read-only `knowledge_search` tool
+  queries the ingest index when relevant, so ingested chunks are no longer seeded
+  into every turn. Only lean, evict-on-replace accepted memory stays auto-seeded,
+  and the per-turn retrieval block is re-derived and kept out of the durable
+  transcript. `[ingest] mode` (default `pull`, legacy `push`) selects the
+  behavior (ADR-0016).
 - LocalMind candidates carry evidence and validation status, and memory-update
   suggestions (merge, supersede, split, ignore, promote) are review items, never
   direct writes.

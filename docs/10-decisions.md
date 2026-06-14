@@ -2,6 +2,51 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0016: Project Knowledge Is Pulled On Demand, Not Pushed Every Turn
+
+Status: accepted. Refines ADR-0014 and ADR-0015 (the runtime-only projection and
+the ranked budget still hold; this record changes how the *ingest* source is
+delivered).
+
+Ingested folder knowledge is reached on demand through a read-only
+`knowledge_search` tool, not auto-seeded into every turn. The only always-on
+retrieval seed is accepted, review-gated memory, and it is contributed leanly:
+bounded in size, re-derived each turn, and **replaced** rather than accumulated.
+A new `[ingest] mode` selects behavior — `pull` (default) or `push` (legacy
+auto-injection of ingest chunks), the latter kept only as an escape hatch.
+
+The per-turn retrieval block is marked synthetic and is **not** written to the
+durable transcript or event log: it is re-computable context, not authored
+history.
+
+Consequences:
+
+- Retrieval no longer grows the context window with turn count. Previously the
+  pre-turn context hook appended a fresh system message every turn, so
+  re-derived retrieval accumulated; on the Anthropic wire a non-leading system
+  message also maps to a resent user message, compounding the growth.
+- The event-log → transcript projection and session close-out lesson extraction
+  stay clean, because the ephemeral retrieval seed never enters them.
+- Ingested knowledge is still ranked and budgeted when pulled (the tool wraps the
+  deterministic read-only ingest search; the ADR-0015 allocator remains available
+  via the pack path).
+- A fresh project's knowledge base is empty until `localpilot ingest` runs; the
+  tool returns a useful "not indexed yet" result rather than an error. The
+  first-use auto-ingest was removed from the turn path so a heavy walk/chunk no
+  longer stalls the first turn.
+- `push` mode restores the prior always-on ingest injection without a rebuild.
+
+Reason:
+
+- Auto-seeding the lowest-trust, highest-volume source (ingest) on every turn was
+  the dominant cause of context filling quickly, and it duplicated content the
+  model rarely needed standing by.
+- Pull keeps high-trust accepted memory passively available and lean while making
+  bulk project knowledge reachable on demand at no standing context cost — the
+  retrieval analogue of reading a file only when relevant.
+- The behavior, tool, config, and prompt cue are original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
 ## ADR-0015: Derived Context Sources Compete Under One Ranked Budget
 
 Status: accepted
