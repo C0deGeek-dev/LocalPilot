@@ -30,9 +30,9 @@ pub use ingest::{
     normalize_project_path, pause as ingest_pause, preview as ingest_preview,
     promote_for_review as ingest_promote, rebuild as ingest_rebuild, resume as ingest_resume,
     review_items as ingest_review_items, run as ingest_run, search as knowledge_search,
-    skipped as ingest_skipped, status as ingest_status, BudgetEstimate, CandidateStatus,
-    ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus, KnowledgeHit,
-    ManifestEntry, PreviewManifest, RunMode, RunSummary,
+    should_build_index, skipped as ingest_skipped, status as ingest_status, BudgetEstimate,
+    CandidateStatus, ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus,
+    KnowledgeHit, ManifestEntry, PreviewManifest, RunMode, RunSummary,
 };
 pub use knowledge_tool::KnowledgeSearch;
 pub use ops::{

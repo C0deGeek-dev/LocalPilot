@@ -497,6 +497,18 @@ pub fn status(project_root: &Path) -> Result<Option<IngestJob>, IngestError> {
     read_json(&path).map(Some)
 }
 
+/// Whether a first-use background index build should run, given the latest job
+/// state: build when there is no job yet, or the last job did not complete (so a
+/// previously interrupted build is retried). A pure decision so the host's
+/// session-open trigger is unit-testable.
+#[must_use]
+pub fn should_build_index(job: Option<&IngestJob>) -> bool {
+    match job {
+        None => true,
+        Some(job) => job.status != JobStatus::Completed,
+    }
+}
+
 /// Mark the current job paused.
 ///
 /// # Errors
@@ -1834,6 +1846,21 @@ mod tests {
         let built = build_pack(dir.path(), "parser", 100).unwrap();
         assert!(pack_path.exists(), "build_pack must persist last-pack.json");
         assert_eq!(built.entries, computed.entries);
+    }
+
+    #[test]
+    fn should_build_index_reflects_job_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        // No job yet → build.
+        assert!(should_build_index(status(dir.path()).unwrap().as_ref()));
+
+        fs::write(dir.path().join("README.md"), "hello world\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // A completed job → skip.
+        let job = status(dir.path()).unwrap();
+        assert_eq!(job.as_ref().map(|j| j.status), Some(JobStatus::Completed));
+        assert!(!should_build_index(job.as_ref()));
     }
 
     #[test]

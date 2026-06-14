@@ -210,6 +210,28 @@ pub async fn run_chat(
         state.trusted = true;
     }
 
+    // Build the project knowledge index in the background on first use, so
+    // `knowledge_search` has data without the first turn paying for a full walk.
+    // Interactive REPL only (non-interactive paths never create project files),
+    // and only once the workspace is trusted, so we never write `.localmind`
+    // before the user has consented. Detached: the ingest is bounded by its own
+    // budgets, writes its index atomically at the end, and a not-yet-completed
+    // job is retried on the next session.
+    if config.ingest.enabled && state.trusted {
+        let status = localpilot_localmind::ingest_status(&cwd).ok().flatten();
+        if localpilot_localmind::should_build_index(status.as_ref()) {
+            let ingest_root = cwd.clone();
+            let ingest_config = config.ingest.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = localpilot_localmind::ingest_run(
+                    &ingest_root,
+                    &ingest_config,
+                    localpilot_localmind::RunMode::Full,
+                );
+            });
+        }
+    }
+
     let session_id = runtime.session_id();
     let mut mouse_capture = mouse_capture_enabled();
     state.mouse_capture = mouse_capture;
