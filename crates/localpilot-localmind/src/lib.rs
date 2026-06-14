@@ -49,7 +49,7 @@ use localmind_store::{
     TranscriptImporter,
 };
 use localpilot_core::{ContentBlock, Message, Role, SessionId};
-use localpilot_store::Store;
+use localpilot_store::{SessionEventKind, Store};
 
 pub use error::LearningError;
 
@@ -99,7 +99,16 @@ pub fn closeout_session(
     let messages = store
         .read_transcript(session)
         .map_err(|e| LearningError::Transcript(e.to_string()))?;
-    let transcript = render_transcript(&messages);
+    let mut transcript = render_transcript(&messages);
+    // Enrich the transcript with structured signals from the execution log
+    // (failed tools, recovery events, committed steps) so extraction keys on the
+    // fact LocalPilot already recorded, not just re-parsed prose. Best-effort:
+    // the deterministic text path stays the baseline if the event log is absent.
+    if let Ok(events) = store.read_events(session) {
+        transcript.push_str(&render_session_signals(
+            events.iter().map(|event| &event.kind),
+        ));
+    }
 
     initialize(project_root)?;
     let config =
@@ -155,6 +164,55 @@ fn render_transcript(messages: &[Message]) -> String {
                 _ => {}
             }
         }
+    }
+    out
+}
+
+/// Render compact, redaction-safe structured signals from the session event log,
+/// appended to the imported transcript so the extractor sees explicit
+/// failure/recovery/outcome facts. Names, statuses, and short commit hashes only
+/// — no raw payloads. Returns empty when there is nothing notable to report.
+fn render_session_signals<'a>(kinds: impl Iterator<Item = &'a SessionEventKind>) -> String {
+    use std::collections::BTreeMap;
+    let mut failed_tools: BTreeMap<String, usize> = BTreeMap::new();
+    let mut recoveries: Vec<String> = Vec::new();
+    let mut commits: Vec<String> = Vec::new();
+    for kind in kinds {
+        match kind {
+            SessionEventKind::ToolFinished {
+                name,
+                is_error: true,
+                ..
+            } => {
+                *failed_tools.entry(name.clone()).or_default() += 1;
+            }
+            SessionEventKind::RecoveryDiagnostic { kind, health } => {
+                recoveries.push(format!("{kind} (health: {health})"));
+            }
+            SessionEventKind::StepCompleted {
+                number,
+                commit: Some(hash),
+                attempts,
+            } => {
+                commits.push(format!(
+                    "step {number} committed {hash} after {attempts} attempt(s)"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if failed_tools.is_empty() && recoveries.is_empty() && commits.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nSession signals (from the execution log):\n");
+    for (tool, count) in &failed_tools {
+        let _ = writeln!(out, "- tool {tool} failed {count} time(s)");
+    }
+    for recovery in &recoveries {
+        let _ = writeln!(out, "- recovery: {recovery}");
+    }
+    for commit in &commits {
+        let _ = writeln!(out, "- {commit}");
     }
     out
 }
@@ -255,6 +313,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(initialize(dir.path()).unwrap());
         assert!(!initialize(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn session_signals_summarize_failures_recovery_and_commits() {
+        let kinds = vec![
+            SessionEventKind::ToolFinished {
+                id: "1".into(),
+                name: "run_shell".into(),
+                is_error: true,
+            },
+            SessionEventKind::ToolFinished {
+                id: "2".into(),
+                name: "run_shell".into(),
+                is_error: true,
+            },
+            SessionEventKind::ToolFinished {
+                id: "3".into(),
+                name: "read_file".into(),
+                is_error: false,
+            },
+            SessionEventKind::RecoveryDiagnostic {
+                kind: "degenerate_output".into(),
+                health: "degraded".into(),
+            },
+            SessionEventKind::StepCompleted {
+                number: 2,
+                commit: Some("abc1234".into()),
+                attempts: 1,
+            },
+        ];
+        let out = render_session_signals(kinds.iter());
+        assert!(
+            out.contains("tool run_shell failed 2 time(s)"),
+            "got: {out}"
+        );
+        // Successful tools are not noise.
+        assert!(!out.contains("read_file"), "got: {out}");
+        assert!(out.contains("recovery: degenerate_output"), "got: {out}");
+        assert!(out.contains("step 2 committed abc1234"), "got: {out}");
+
+        // Nothing notable → empty, so the deterministic text path is unchanged.
+        assert!(render_session_signals(std::iter::empty()).is_empty());
     }
 
     #[test]
