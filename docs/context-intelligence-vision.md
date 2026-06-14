@@ -223,11 +223,17 @@ Shipped and tested:
   reserves, included entries with rank score and reason, and skipped
   near-misses with reasons.
 - Project knowledge is pulled on demand: a read-only `knowledge_search` tool
-  queries the ingest index when relevant, so ingested chunks are no longer seeded
-  into every turn. Only lean, evict-on-replace accepted memory stays auto-seeded,
-  and the per-turn retrieval block is re-derived and kept out of the durable
-  transcript. `[ingest] mode` (default `pull`, legacy `push`) selects the
-  behavior (ADR-0016).
+  returns a ranked cross-source pack (ingest, accepted memory, recent-session
+  facts, code graph) via a compute-only path that performs no write, so ingested
+  chunks are no longer seeded into every turn. `[ingest] mode` (default `pull`,
+  legacy `push`) selects the behavior (ADR-0016).
+- The per-turn accepted-memory block is a request-time projection: computed once
+  per turn and injected into the outgoing request adjacent to the leading system
+  prompt, never written to history/transcript/event-log, with its token cost
+  reserved from the compaction budget. So `messages == transcript`, retrieval
+  cannot accumulate, and it rides the wire as top-level `system` (ADR-0017). The
+  interactive REPL builds the ingest index in the background on first use
+  (trust-gated, off the turn path); a corrupt index is reported distinctly.
 - LocalMind candidates carry evidence and validation status, and memory-update
   suggestions (merge, supersede, split, ignore, promote) are review items, never
   direct writes.

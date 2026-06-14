@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0017: Retrieval Context Is A Request-Time Projection
+
+Status: accepted. Refines ADR-0016 and ADR-0014 (pull-over-push and
+runtime-only projection still hold; this record fixes *how* the per-turn seed
+reaches the model).
+
+Per-turn context-hook output — lean accepted project memory, plus ingest chunks
+only under `[ingest] mode = "push"` — is computed once per turn and injected into
+the outgoing `ModelRequest` adjacent to the leading system prompt. It is **never**
+appended to `self.messages`, the durable transcript, or the event log. Its token
+estimate is reserved from the compaction budget so the request still fits the
+limit. The ingest knowledge base is reached on demand through the read-only
+`knowledge_search` tool, which returns a ranked cross-source pack (ingest,
+accepted memory, recent-session facts, code graph) via a compute-only path that
+performs no write. On an interactive REPL the index is built in the background on
+first use (trust-gated, off the turn path).
+
+Consequences:
+
+- `self.messages` equals the authored history equals the stored transcript again:
+  the synthetic-message persistence invariant ("a resumed session reconstructs
+  exactly the history the model received") holds without a retrieval exception.
+- Re-derived retrieval cannot accumulate across turns, and folding it into the
+  leading system run means it rides the wire as top-level `system`, not as a
+  resent user message (on Anthropic, a non-leading system message maps to user).
+- Because the injected block is no longer part of the compacted history, the
+  compaction budget explicitly reserves its token estimate; reported context
+  usage is the real request total.
+- The evict-on-replace seed path (and its synthetic marker) are deleted — less
+  code, fewer states.
+- A present-but-unreadable ingest index is reported distinctly from a missing
+  one, so corruption is visible rather than masked as "no knowledge"; a turn
+  never breaks on a knowledge miss.
+
+Reason:
+
+- The interim ephemeral-but-in-`messages` seed (ADR-0016) softened the
+  synthetic-persistence invariant and required eviction bookkeeping and a
+  compaction cache that already counted it. Treating retrieval as a request-time
+  projection — what it always was conceptually — is the correct model and removes
+  that machinery.
+- Keeping the pull tool read-only (compute-only pack) means a model can pull
+  ranked project knowledge with no write or heavy side effect.
+- All behavior, tool, and prompt text remain original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
 ## ADR-0016: Project Knowledge Is Pulled On Demand, Not Pushed Every Turn
 
 Status: accepted. Refines ADR-0014 and ADR-0015 (the runtime-only projection and

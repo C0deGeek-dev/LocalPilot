@@ -52,13 +52,17 @@ depends on LocalMind, never the reverse.
   `promote`, `search`, `skills`, and `audit`.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
-- Agent turns seed relevant accepted LocalMind memory as best-effort context.
-  The seed is lean (bounded) and re-derived each turn: it replaces the prior
-  turn's block rather than accumulating, and — being re-computable retrieval, not
-  authored history — it is not written to the durable transcript (ADR-0016).
-- Interactive sessions close out into LocalMind on exit, then run one bounded,
-  incremental pass of the code-graph reindex (content-hash change detection;
-  leftovers wait for the next close).
+- Agent turns contribute relevant accepted LocalMind memory as best-effort
+  context. The block is lean (bounded) and re-derived each turn, and is injected
+  into the outgoing request adjacent to the leading system prompt at build
+  time — it is **not** appended to the message history, the transcript, or the
+  event log, so it cannot accumulate and the stored transcript stays equal to the
+  authored history (ADR-0017). Its token cost is reserved from the compaction
+  budget so the request still fits the limit.
+- Interactive sessions build the project ingest index in the background on first
+  use (trust-gated, off the turn path), so `knowledge_search` has data without
+  the first turn paying for a full walk; they close out into LocalMind on exit,
+  then run one bounded, incremental code-graph reindex pass.
 - `localpilot memory graph <symbol>` inspects a symbol's graph neighborhood,
   tests, and anchored lessons; `localpilot memory export <path> [--html]`
   writes a redacted, local-only snapshot of the graph (host redaction stack
@@ -138,8 +142,12 @@ localpilot memory export graph.json
 ```
 
 The agent also has a read-only `knowledge_search` tool (registered on every
-session path) that queries the ingest index on demand, so ingested project
-knowledge is pulled when relevant instead of riding in every turn's context.
+session path) that pulls a ranked cross-source pack on demand — ingested files,
+accepted memory, recent-session facts, and code structure under one budget — via
+a compute-only path that performs no write, so ingested project knowledge is
+pulled when relevant instead of riding in every turn's context. A missing index
+returns "not indexed yet"; a present-but-unreadable one is reported distinctly
+("rebuild") rather than masked as empty.
 
 New rich-learning behavior lands in LocalMind, not by expanding host-local memory
 implementations.
