@@ -12,6 +12,7 @@ mod codegraph;
 mod error;
 mod ingest;
 mod ops;
+mod pack;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -36,6 +37,7 @@ pub use ops::{
     skills_active, skills_generate, skills_list, ActiveSkillInfo, AuditEntry, MemorySummary,
     ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
 };
+pub use pack::{PackEntry, PackSource};
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
 use localmind_store::{

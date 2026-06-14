@@ -5,7 +5,7 @@
 //! promotion enqueues review candidates through LocalMind and never writes
 //! accepted memory directly.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -19,6 +19,8 @@ use localmind_store::ReviewQueue;
 use localpilot_config::{redact, IngestConfig};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::pack::{allocate, reserves, PackCandidate, PackEntry, PackSource};
 
 const INGEST_SCHEMA_VERSION: u32 = 1;
 const INGEST_DIR: &str = ".localmind/ingest";
@@ -234,6 +236,15 @@ pub struct ContextPack {
     pub ingest_budget: u64,
     #[serde(default)]
     pub code_graph_budget: u64,
+    #[serde(default)]
+    pub recent_session_budget: u64,
+    /// The unified cross-source allocation: every selected entry, in priority
+    /// order, with the reason it was included.
+    #[serde(default)]
+    pub entries: Vec<PackEntry>,
+    /// High-ranking candidates that lost the budget competition, with the reason.
+    #[serde(default)]
+    pub skipped_entries: Vec<PackEntry>,
 }
 
 struct ChunkSpan {
@@ -640,33 +651,65 @@ pub fn build_pack(
 ) -> Result<ContextPack, IngestError> {
     let root = canonical_root(project_root)?;
     let ingest_dir = root.join(INGEST_DIR);
-    let mut token_estimate = 0_u64;
-    let mut chunks = Vec::new();
-    let mut skipped_near_misses = Vec::new();
-    let mut seen_hashes = BTreeSet::new();
+
+    // Gather candidates from every reachable source so they compete under one
+    // budget. Ingest hits come from the task query; accepted-memory anchors are
+    // best-effort and only consulted when the project actually has a memory
+    // store (so a bare ingest project is untouched).
+    let mut candidates = Vec::new();
+    let mut hit_by_id: BTreeMap<String, KnowledgeHit> = BTreeMap::new();
     for hit in search(&root, task)? {
         let chunk = find_chunk(&ingest_dir, &hit.chunk_id)?;
-        if !seen_hashes.insert(chunk.content_hash.clone()) {
-            let mut skipped = hit;
-            skipped.skip_reason = Some("duplicate content hash".to_string());
-            skipped_near_misses.push(skipped);
-            continue;
-        }
-        if token_estimate.saturating_add(chunk.token_estimate) > token_budget {
-            let mut skipped = hit;
-            skipped.skip_reason = Some("token budget exceeded".to_string());
-            skipped_near_misses.push(skipped);
-            continue;
-        }
-        token_estimate = token_estimate.saturating_add(chunk.token_estimate);
-        let mut selected = hit;
-        selected.inclusion_reason = if selected.stale {
-            "query match retained as stale context".to_string()
-        } else {
-            "query match within budget".to_string()
-        };
-        chunks.push(selected);
+        candidates.push(PackCandidate {
+            source: PackSource::Ingest,
+            id: hit.chunk_id.clone(),
+            path: Some(hit.path.clone()),
+            score: hit.score,
+            token_estimate: chunk.token_estimate,
+            snippet: hit.snippet.clone(),
+            stale: hit.stale,
+        });
+        hit_by_id.insert(hit.chunk_id.clone(), hit);
     }
+    if root.join(".localmind").join("memory").exists() {
+        for anchor in crate::ops::search(&root, task).unwrap_or_default() {
+            let token_estimate = (anchor.snippet.chars().count() as u64 / 4).max(1);
+            candidates.push(PackCandidate {
+                source: PackSource::AcceptedMemory,
+                id: format!("memory:{}", anchor.memory_id),
+                path: Some(anchor.path),
+                score: u64::try_from(anchor.score.max(0)).unwrap_or(0),
+                token_estimate,
+                snippet: anchor.snippet,
+                stale: false,
+            });
+        }
+    }
+
+    let allocation = allocate(candidates, token_budget);
+
+    // Back-compat ingest view: rebuild the `KnowledgeHit` chunks the allocator
+    // selected from the ingest source, carrying its inclusion reason.
+    let mut chunks = Vec::new();
+    for entry in &allocation.selected {
+        if entry.source == PackSource::Ingest {
+            if let Some(mut hit) = hit_by_id.get(&entry.id).cloned() {
+                hit.token_estimate = entry.token_estimate;
+                hit.inclusion_reason = entry.reason.clone();
+                chunks.push(hit);
+            }
+        }
+    }
+    let mut skipped_near_misses = Vec::new();
+    for entry in &allocation.skipped {
+        if entry.source == PackSource::Ingest {
+            if let Some(mut hit) = hit_by_id.get(&entry.id).cloned() {
+                hit.skip_reason = Some(entry.reason.clone());
+                skipped_near_misses.push(hit);
+            }
+        }
+    }
+
     let exclusion_notes = if ingest_dir.join(MANIFEST_FILE).exists() {
         skipped(&root)?
             .into_iter()
@@ -684,17 +727,27 @@ pub fn build_pack(
     } else {
         Vec::new()
     };
+    let reserve = reserves(token_budget);
     let pack = ContextPack {
         schema_version: INGEST_SCHEMA_VERSION,
         task: task.to_string(),
         token_budget,
-        token_estimate,
+        token_estimate: allocation.token_estimate,
         chunks,
         exclusion_notes,
         skipped_near_misses: skipped_near_misses.into_iter().take(10).collect(),
-        accepted_memory_budget: token_budget / 4,
-        ingest_budget: token_budget / 2,
-        code_graph_budget: token_budget / 4,
+        accepted_memory_budget: reserve
+            .get(&PackSource::AcceptedMemory)
+            .copied()
+            .unwrap_or(0),
+        ingest_budget: reserve.get(&PackSource::Ingest).copied().unwrap_or(0),
+        code_graph_budget: reserve.get(&PackSource::CodeGraph).copied().unwrap_or(0),
+        recent_session_budget: reserve
+            .get(&PackSource::RecentSession)
+            .copied()
+            .unwrap_or(0),
+        entries: allocation.selected,
+        skipped_entries: allocation.skipped.into_iter().take(20).collect(),
     };
     write_json(&ingest_dir.join(PACK_FILE), &pack)?;
     Ok(pack)
@@ -1598,6 +1651,31 @@ mod tests {
         let pack = build_pack(dir.path(), "parser", 100).unwrap();
         assert_eq!(pack.chunks.len(), 1);
         assert!(dir.path().join(INGEST_DIR).join(PACK_FILE).exists());
+    }
+
+    #[test]
+    fn pack_entries_compete_under_budget_with_reasons_and_reserves() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser parser guide\n").unwrap();
+        fs::write(
+            dir.path().join("GUIDE.md"),
+            "parser internals and more parser tips\n",
+        )
+        .unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        let pack = build_pack(dir.path(), "parser", 1_000).unwrap();
+
+        // The unified allocation is populated and every entry explains itself.
+        assert!(!pack.entries.is_empty());
+        assert!(pack.entries.iter().all(|entry| !entry.reason.is_empty()));
+        // Per-source reserves are real token amounts, not cosmetic fractions.
+        assert!(pack.ingest_budget > 0);
+        assert!(pack.accepted_memory_budget > 0);
+        // The reported estimate matches the selected entries.
+        let summed: u64 = pack.entries.iter().map(|entry| entry.token_estimate).sum();
+        assert_eq!(pack.token_estimate, summed);
+        assert!(pack.token_estimate <= pack.token_budget);
     }
 
     #[test]
