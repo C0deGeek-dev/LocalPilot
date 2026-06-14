@@ -13,12 +13,28 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::ingest::IngestError;
+use crate::pack::PackSource;
+
 /// Default number of hits returned when the caller does not ask for a count.
 const DEFAULT_MAX_HITS: usize = 5;
 /// Ceiling on hits, so a single call cannot flood the context.
 const MAX_HITS: usize = 20;
 /// Bound on each snippet, keeping the result lean.
 const SNIPPET_CHARS: usize = 240;
+/// Token budget for the ranked pack a single call computes.
+const PACK_TOKEN_BUDGET: u64 = 2_048;
+
+/// A short, stable label for each pack source.
+fn source_label(source: PackSource) -> &'static str {
+    match source {
+        PackSource::ManualPin => "pinned",
+        PackSource::AcceptedMemory => "memory",
+        PackSource::RecentSession => "recent session",
+        PackSource::Ingest => "ingested file",
+        PackSource::CodeGraph => "code graph",
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct KnowledgeSearchInput {
@@ -40,9 +56,10 @@ impl Tool for KnowledgeSearch {
     }
 
     fn description(&self) -> &str {
-        "Search the project's ingested knowledge base (files indexed by `localpilot ingest`) \
-         for text relevant to a query, returning ranked path:line snippets. Read-only. Use it \
-         to pull project facts on demand instead of relying on always-on context."
+        "Search the project's knowledge base for text relevant to a query, returning ranked \
+         snippets across ingested files, accepted project memory, recent-session facts, and code \
+         structure. Read-only. Use it to pull project facts on demand instead of relying on \
+         always-on context."
     }
 
     fn schema(&self) -> Value {
@@ -76,18 +93,27 @@ impl Tool for KnowledgeSearch {
             .clamp(1, MAX_HITS);
         let root = ctx.workspace.root();
 
-        // A missing or unreadable index is not a failure: the project may simply
-        // not be ingested yet. Return a useful, non-error result so a turn never
-        // breaks on a knowledge miss.
-        let hits = match crate::ingest::search(root, &input.query) {
-            Ok(hits) => hits,
-            Err(_) => {
+        // Compute a ranked cross-source pack on demand (read-only). A missing
+        // index is normal (project not ingested yet); a present-but-unreadable
+        // index is distinguished so a corrupt store is visible rather than masked
+        // as "no knowledge". Either way the turn never breaks on a knowledge miss.
+        let pack = match crate::ingest::compute_pack(root, &input.query, PACK_TOKEN_BUDGET) {
+            Ok(pack) => pack,
+            Err(IngestError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
                 return Ok(ToolOutput::ok(
                     "no indexed project knowledge yet (run `localpilot ingest` to build it)",
                 ));
             }
+            Err(_) => {
+                return Ok(ToolOutput::ok(
+                    "project knowledge index is unreadable; rebuild it with \
+                     `localpilot ingest rebuild`",
+                ));
+            }
         };
-        if hits.is_empty() {
+        if pack.entries.is_empty() {
             return Ok(ToolOutput::ok(format!(
                 "no knowledge-base matches for \"{}\"",
                 input.query
@@ -95,13 +121,12 @@ impl Tool for KnowledgeSearch {
         }
 
         let mut out = format!("Knowledge-base matches for \"{}\":\n", input.query);
-        for hit in hits.into_iter().take(limit) {
-            let stale = if hit.stale { " (stale)" } else { "" };
-            let snippet: String = hit.snippet.chars().take(SNIPPET_CHARS).collect();
-            out.push_str(&format!(
-                "- {}:{}-{}{} — {}\n",
-                hit.path, hit.start_line, hit.end_line, stale, snippet
-            ));
+        for entry in pack.entries.iter().take(limit) {
+            let source = source_label(entry.source);
+            let path = entry.path.as_deref().unwrap_or("(no path)");
+            let stale = if entry.stale { " (stale)" } else { "" };
+            let snippet: String = entry.snippet.chars().take(SNIPPET_CHARS).collect();
+            out.push_str(&format!("- [{source}] {path}{stale} — {snippet}\n"));
         }
         Ok(ToolOutput::ok(out))
     }
@@ -170,6 +195,31 @@ mod tests {
 
         assert!(!out.is_error, "a missing index must not be an error");
         assert!(out.text.contains("no indexed project knowledge"));
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_index_is_reported_distinctly_not_masked_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // Present-but-unreadable index: distinct from "not indexed yet".
+        std::fs::create_dir_all(dir.path().join(".localmind/ingest")).unwrap();
+        std::fs::write(
+            dir.path().join(".localmind/ingest/chunks.json"),
+            "{ this is not valid json",
+        )
+        .unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = KnowledgeSearch
+            .invoke(json!({ "query": "anything" }), &context(&ws))
+            .await
+            .unwrap();
+
+        assert!(!out.is_error, "a corrupt index must not break the turn");
+        assert!(
+            out.text.contains("unreadable"),
+            "a corrupt index must be reported distinctly, got: {}",
+            out.text
+        );
     }
 
     #[tokio::test]

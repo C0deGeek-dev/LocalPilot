@@ -640,11 +640,15 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
     Ok(hits)
 }
 
-/// Build and persist a task-specific context pack.
+/// Compute a task-specific context pack from every reachable source under one
+/// ranked token budget, **without persisting it**. Read-only — it only reads
+/// derived state (ingest index, accepted memory, code graph, recent session), so
+/// callers like the `knowledge_search` tool can pull a ranked pack on demand
+/// without a write. Use [`build_pack`] for the inspectable on-disk pack.
 ///
 /// # Errors
-/// Returns [`IngestError`] when state cannot be read or written.
-pub fn build_pack(
+/// Returns [`IngestError`] when derived state cannot be read.
+pub fn compute_pack(
     project_root: &Path,
     task: &str,
     token_budget: u64,
@@ -819,6 +823,22 @@ pub fn build_pack(
         entries: allocation.selected,
         skipped_entries: allocation.skipped.into_iter().take(20).collect(),
     };
+    Ok(pack)
+}
+
+/// Build a task-specific context pack and persist it as `last-pack.json` for
+/// inspection and staleness handling. Thin persisting wrapper over
+/// [`compute_pack`].
+///
+/// # Errors
+/// Returns [`IngestError`] when state cannot be read or written.
+pub fn build_pack(
+    project_root: &Path,
+    task: &str,
+    token_budget: u64,
+) -> Result<ContextPack, IngestError> {
+    let pack = compute_pack(project_root, task, token_budget)?;
+    let ingest_dir = canonical_root(project_root)?.join(INGEST_DIR);
     write_json(&ingest_dir.join(PACK_FILE), &pack)?;
     Ok(pack)
 }
@@ -1793,6 +1813,27 @@ mod tests {
         let pack = build_pack(dir.path(), "parser", 100).unwrap();
         assert_eq!(pack.chunks.len(), 1);
         assert!(dir.path().join(INGEST_DIR).join(PACK_FILE).exists());
+    }
+
+    #[test]
+    fn compute_pack_does_not_persist_but_build_pack_does() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser parser guide\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+        let pack_path = dir.path().join(INGEST_DIR).join(PACK_FILE);
+
+        // compute_pack is read-only: it returns a pack but writes no file.
+        let computed = compute_pack(dir.path(), "parser", 100).unwrap();
+        assert!(!computed.chunks.is_empty());
+        assert!(
+            !pack_path.exists(),
+            "compute_pack must not persist last-pack.json"
+        );
+
+        // build_pack persists the same pack for inspection.
+        let built = build_pack(dir.path(), "parser", 100).unwrap();
+        assert!(pack_path.exists(), "build_pack must persist last-pack.json");
+        assert_eq!(built.entries, computed.entries);
     }
 
     #[test]
