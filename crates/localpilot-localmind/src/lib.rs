@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod codegraph;
+mod context_hook;
 mod error;
 mod ingest;
 mod knowledge_tool;
@@ -22,6 +23,7 @@ pub use codegraph::{
     codegraph_export, codegraph_inspect, codegraph_reindex, CodeGraphSummary, ExportFormat,
     SymbolReport,
 };
+pub use context_hook::{register_context_hook, LocalMindContext};
 pub use ingest::{
     build_pack, cancel as ingest_cancel, context_for_prompt as ingest_context_for,
     exclude_path as ingest_exclude, forget as ingest_forget, include_path as ingest_include,

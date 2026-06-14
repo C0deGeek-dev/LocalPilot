@@ -1,78 +1,10 @@
-//! Seed retrieved LocalMind context into a session before a turn.
+//! Session close-out into LocalMind.
+//!
+//! The pre-turn context hook now lives in `localpilot-localmind`
+//! (`register_context_hook`); this module keeps the host-side session close-out
+//! that runs on exit.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use localpilot_config::{CliOverrides, ConfigPaths, IngestMode};
-use localpilot_harness::{ContextHook, SessionRuntime};
-
-/// Cap on the auto-seeded accepted-memory block, so the always-on context stays
-/// lean regardless of how large the memory store grows.
-const ACCEPTED_MEMORY_CHAR_CAP: usize = 1_200;
-
-/// LocalMind retrieval as a pre-turn context hook. Only accepted, review-gated
-/// project memory is contributed as always-on context (lean, and replaced rather
-/// than accumulated by the harness). Ingested folder knowledge is pulled on
-/// demand through the `knowledge_search` tool instead of being seeded every turn,
-/// unless the project opts back into the legacy push behavior via
-/// `[ingest] mode = "push"`. Best-effort — a miss or error contributes nothing
-/// and never fails the turn.
-pub struct LocalMindContext {
-    root: PathBuf,
-}
-
-impl ContextHook for LocalMindContext {
-    fn name(&self) -> &str {
-        "localmind-context"
-    }
-
-    fn context_for(&self, prompt: &str) -> Option<String> {
-        let accepted = localpilot_localmind::context_for(&self.root, prompt)
-            .ok()
-            .flatten()
-            .map(|text| bound(&text, ACCEPTED_MEMORY_CHAR_CAP));
-        let ingested = match self.ingest_config() {
-            Some(config) if config.enabled && config.mode == IngestMode::Push => {
-                localpilot_localmind::ingest_context_for(&self.root, prompt)
-                    .ok()
-                    .flatten()
-            }
-            _ => None,
-        };
-        match (accepted, ingested) {
-            (Some(accepted), Some(ingested)) => Some(format!("{accepted}\n{ingested}")),
-            (Some(accepted), None) => Some(accepted),
-            (None, Some(ingested)) => Some(ingested),
-            (None, None) => None,
-        }
-    }
-}
-
-impl LocalMindContext {
-    fn ingest_config(&self) -> Option<localpilot_config::IngestConfig> {
-        localpilot_config::load(&ConfigPaths::standard(&self.root), &CliOverrides::default())
-            .ok()
-            .map(|config| config.ingest)
-    }
-}
-
-/// Truncate `text` to at most `cap` characters, adding a marker when it was cut.
-fn bound(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(cap).collect();
-    format!("{truncated}\n… (memory truncated)")
-}
-
-/// Register the LocalMind context hook on a runtime.
-pub fn register(cwd: &Path, runtime: &mut SessionRuntime) {
-    runtime
-        .hooks_mut()
-        .register_context_hook(Arc::new(LocalMindContext {
-            root: cwd.to_path_buf(),
-        }));
-}
+use std::path::Path;
 
 /// Close out a finished session into LocalMind: extract candidate lessons and
 /// enqueue them for review. Best-effort and non-fatal; a no-op when the session

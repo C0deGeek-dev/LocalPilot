@@ -78,7 +78,7 @@ pub async fn print_mode(
         },
         Vec::new(),
     );
-    crate::context_inject::register(&cwd, &mut runtime);
+    localpilot_localmind::register_context_hook(&cwd, &mut runtime);
     if let Some(session) = resume {
         // Resume rebuilds the conversation from the durable event log; the
         // profile and trust just configured stay in force.

@@ -477,7 +477,7 @@ where
             gate_allowance.clone(),
             (run.approver)(),
         );
-        crate::context_inject::register(root, &mut runtime);
+        localpilot_localmind::register_context_hook(root, &mut runtime);
         let outcome = resume_one_step_with_events(
             &mut runtime,
             root,

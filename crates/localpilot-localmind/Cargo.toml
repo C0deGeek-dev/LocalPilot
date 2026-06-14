@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }

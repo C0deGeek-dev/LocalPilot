@@ -1347,6 +1347,7 @@ dependencies = [
  "localmind-store",
  "localpilot-config",
  "localpilot-core",
+ "localpilot-harness",
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
