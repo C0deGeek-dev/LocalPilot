@@ -88,7 +88,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 18);
+    assert_eq!(registry.names().len(), 19);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -978,4 +978,138 @@ async fn fetch_rejects_non_http_schemes_without_a_network_call() {
     assert!(result.is_error);
     assert!(result.output.contains("invalid input"));
     assert!(result.output.contains("http or https"));
+}
+
+#[tokio::test]
+async fn replace_in_file_literal_changes_only_the_target() {
+    let (dir, ws) = workspace_with(&[("f.txt", "alpha\nbeta\nalpha gamma\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({ "path": "f.txt", "find": "alpha", "replace": "ALPHA" }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+    assert_eq!(content, "ALPHA\nbeta\nALPHA gamma\n");
+}
+
+#[tokio::test]
+async fn replace_in_file_regex_mode_matches_a_pattern() {
+    let (dir, ws) = workspace_with(&[("f.txt", "alpha\nbeta\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({ "path": "f.txt", "find": "al.ha", "replace": "X", "regex": true }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "X\nbeta\n"
+    );
+}
+
+#[tokio::test]
+async fn replace_in_file_no_match_leaves_the_file_unchanged() {
+    let (dir, ws) = workspace_with(&[("f.txt", "alpha\nbeta\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({ "path": "f.txt", "find": "zzz", "replace": "Y" }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    assert!(result.output.contains("no match"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "alpha\nbeta\n"
+    );
+}
+
+#[tokio::test]
+async fn replace_in_file_denied_outside_the_workspace() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().join("escape.txt");
+    std::fs::write(&outside, "alpha\n").unwrap();
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({ "path": outside.to_str().unwrap(), "find": "alpha", "replace": "X" }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error);
+    assert!(result.output.contains("permission denied"));
+    // The file outside the workspace is untouched.
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "alpha\n");
+}
+
+#[tokio::test]
+async fn replace_in_file_treats_shell_metacharacters_as_literal_data() {
+    // A replacement full of shell metacharacters must be inserted verbatim and
+    // must not run as a command: the sibling file survives.
+    let (dir, ws) = workspace_with(&[("f.txt", "beta\n"), ("keep.txt", "keep")]);
+    let registry = ToolRegistry::with_builtins();
+    // A multi-line payload full of shell metacharacters: must be inert data.
+    let payload = "\"; rm -rf .\n$(echo hi)\ndel *; `whoami` #";
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({ "path": "f.txt", "find": "beta", "replace": payload }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        format!("{payload}\n")
+    );
+    // No command ran: the sibling file is still there.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test]
+async fn replace_in_file_replaces_a_multiline_block() {
+    let (dir, ws) = workspace_with(&[("lib.rs", "fn old() {\n    work();\n}\n\nfn keep() {}\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let result = dispatch(
+        &registry,
+        "replace_in_file",
+        json!({
+            "path": "lib.rs",
+            "find": "fn old() {\n    work();\n}",
+            "replace": "fn renamed() {\n    work();\n    extra();\n}",
+        }),
+        &ctx(&ws, Interactivity::NonInteractive, true),
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error, "{}", result.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
+        "fn renamed() {\n    work();\n    extra();\n}\n\nfn keep() {}\n"
+    );
 }

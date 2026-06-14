@@ -21,7 +21,7 @@ test = false
 # binary (doctor/ask/print/harness/memory/export) links no terminal backend and
 # runs on every toolchain. Release and CI builds enable it.
 default = []
-tui = ["dep:crossterm", "dep:parking_lot", "dep:ratatui", "dep:localpilot-tui"]
+tui = ["dep:crossterm", "dep:parking_lot", "dep:ratatui", "dep:localpilot-tui", "dep:ignore"]
 # LocalMind is always linked; this feature remains as a compatibility alias for
 # existing build commands.
 learning = []
@@ -31,6 +31,8 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm = { workspace = true, optional = true }
 futures.workspace = true
+# Workspace file enumeration for the `@`-mention picker (TUI only).
+ignore = { workspace = true, optional = true }
 # Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:
 # parking_lot_core 0.9.12 crashes before main on rustc 1.82 x86_64-pc-windows-gnu.
 parking_lot = { workspace = true, optional = true }

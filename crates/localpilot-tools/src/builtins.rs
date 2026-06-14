@@ -1215,6 +1215,190 @@ impl Tool for Fetch {
     }
 }
 
+// --- replace_in_file --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReplaceInFileInput {
+    /// Path to edit within the workspace.
+    path: String,
+    /// Text to find — an exact block that may span multiple lines. A
+    /// platform-native regex when `regex` is true.
+    find: String,
+    /// Replacement text. May span multiple lines.
+    replace: String,
+    /// Treat `find` as a regex (.NET on Windows, Perl on Unix). Defaults to
+    /// false (literal block).
+    #[serde(default)]
+    regex: bool,
+    /// Replace every occurrence. Defaults to true; false replaces only the
+    /// first.
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+/// The fixed PowerShell stream-edit script. `find`/`replace` arrive via the
+/// environment (never interpolated into this text), so the command carries no
+/// model-controlled string and cannot be turned into another command. It
+/// transforms the whole input, so a `find`/`replace` may span lines.
+#[cfg(windows)]
+const POWERSHELL_REPLACE_SCRIPT: &str = r#"$ErrorActionPreference='Stop'
+[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+$find=$env:RIF_FIND; $repl=$env:RIF_REPL
+$useRegex=$env:RIF_REGEX -eq '1'; $all=$env:RIF_ALL -eq '1'
+$text=[Console]::In.ReadToEnd()
+if($useRegex){
+  $re=[regex]::new($find)
+  $out= if($all){ $re.Replace($text,$repl) } else { $re.Replace($text,$repl,1) }
+} else {
+  if($all){ $out=$text.Replace($find,$repl) }
+  else { $i=$text.IndexOf($find); if($i -lt 0){ $out=$text } else { $out=$text.Substring(0,$i)+$repl+$text.Substring($i+$find.Length) } }
+}
+[Console]::Out.Write($out)"#;
+
+/// The fixed Perl stream-edit script (Unix). `sed` cannot do portable
+/// multi-line edits (BSD/macOS `sed` lacks `-z`), so the whole input is slurped
+/// and transformed with Perl. `find`/`replace` arrive via the environment.
+/// Literal replacement is exact; in regex mode the replacement is not
+/// re-interpolated, so capture backreferences (`$1`) are not expanded on this
+/// platform.
+#[cfg(not(windows))]
+const PERL_REPLACE_SCRIPT: &str = r#"
+my $find=$ENV{RIF_FIND}; my $repl=$ENV{RIF_REPL};
+my $all=($ENV{RIF_ALL} eq '1'); my $useRegex=($ENV{RIF_REGEX} eq '1');
+my $text=do{ local $/=undef; <STDIN> };
+$text='' unless defined $text;
+if($useRegex){
+  if($all){ $text=~s/$find/$repl/g; } else { $text=~s/$find/$repl/; }
+} else {
+  my $flen=length($find);
+  if($flen>0){
+    my $out=''; my $pos=0;
+    while((my $i=index($text,$find,$pos))>=0){
+      $out.=substr($text,$pos,$i-$pos).$repl; $pos=$i+$flen; last unless $all;
+    }
+    $out.=substr($text,$pos); $text=$out;
+  }
+}
+print $text;
+"#;
+
+pub struct ReplaceInFile;
+
+#[async_trait]
+impl Tool for ReplaceInFile {
+    fn name(&self) -> &'static str {
+        "replace_in_file"
+    }
+    fn approval_detail(&self, input: &Value) -> String {
+        string_field_detail(input, "path")
+    }
+    fn description(&self) -> &'static str {
+        "Edit a file by replacing an exact block of text with another (literal by default; the block may span multiple lines). Runs through the platform stream editor (PowerShell on Windows, Perl on Unix). Use this as the default way to modify an existing file instead of rewriting it with write_file."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<ReplaceInFileInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: ReplaceInFileInput = parse_input(input)?;
+        Ok(vec![write_path_effect(ctx, Path::new(&input.path), true)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: ReplaceInFileInput = parse_input(&input)?;
+        if input.find.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "find must not be empty".to_string(),
+            ));
+        }
+        let path = ctx.workspace.normalize(Path::new(&input.path))?;
+        let original = std::fs::read_to_string(&path)
+            .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+
+        let updated = run_stream_editor(&original, &input).await?;
+
+        if updated == original {
+            return Ok(cap(format!("no match for find in {}", path.display())));
+        }
+        atomic_write(&path, updated.as_bytes())?;
+        Ok(cap(format!("updated {}", path.display())))
+    }
+}
+
+/// Run the find/replace through the platform stream editor as a pure stdin ->
+/// stdout transform over the whole file. The child never touches the
+/// filesystem; path handling and the atomic write stay in Rust.
+async fn run_stream_editor(text: &str, input: &ReplaceInFileInput) -> Result<String, ToolError> {
+    use tokio::io::AsyncWriteExt;
+
+    let all = input.all.unwrap_or(true);
+
+    #[cfg(windows)]
+    let (program, args): (&str, Vec<String>) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            POWERSHELL_REPLACE_SCRIPT.to_string(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (program, args): (&str, Vec<String>) = (
+        "perl",
+        vec!["-e".to_string(), PERL_REPLACE_SCRIPT.to_string()],
+    );
+
+    // `find`/`replace` are passed as data through the environment, never spliced
+    // into the command text, so model input can never become another command.
+    let envs = [
+        ("RIF_FIND", input.find.as_str()),
+        ("RIF_REPL", input.replace.as_str()),
+        ("RIF_REGEX", if input.regex { "1" } else { "0" }),
+        ("RIF_ALL", if all { "1" } else { "0" }),
+    ];
+
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
+
+    // Write stdin concurrently with draining stdout so a large file cannot
+    // deadlock on a full pipe buffer.
+    let stdin = child.stdin.take();
+    let bytes = text.as_bytes().to_vec();
+    let writer = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&bytes).await;
+            let _ = stdin.shutdown().await;
+        }
+    });
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| ToolError::Failed(e.to_string()))?;
+    let _ = writer.await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ToolError::Failed(format!(
+            "stream editor failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 // --- git_status / git_diff / git_log / git_add / git_restore / git_commit ---
 
 #[derive(Debug, Deserialize, JsonSchema)]

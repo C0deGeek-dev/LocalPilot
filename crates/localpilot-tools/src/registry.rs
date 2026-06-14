@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::builtins::{
     ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog, GitRestore,
-    GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, RunShell, SearchText, UpdatePlan,
-    WriteFile,
+    GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile, RunShell, SearchText,
+    UpdatePlan, WriteFile,
 };
 use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
 
@@ -41,6 +41,7 @@ impl ToolRegistry {
         registry.register(Box::new(WriteFile));
         registry.register(Box::new(EditFile));
         registry.register(Box::new(MultiEdit));
+        registry.register(Box::new(ReplaceInFile));
         registry.register(Box::new(ListFiles));
         registry.register(Box::new(FindFiles));
         registry.register(Box::new(SearchText));

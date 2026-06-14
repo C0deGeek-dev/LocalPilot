@@ -142,6 +142,46 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
     }
   ],
   [
+    "replace_in_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "all": {
+          "default": null,
+          "description": "Replace every occurrence. Defaults to true; false replaces only the first.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "find": {
+          "description": "Text to find — an exact block that may span multiple lines. A platform-native regex when `regex` is true.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path to edit within the workspace.",
+          "type": "string"
+        },
+        "regex": {
+          "default": false,
+          "description": "Treat `find` as a regex (.NET on Windows, Perl on Unix). Defaults to false (literal block).",
+          "type": "boolean"
+        },
+        "replace": {
+          "description": "Replacement text. May span multiple lines.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "find",
+        "path",
+        "replace"
+      ],
+      "title": "ReplaceInFileInput",
+      "type": "object"
+    }
+  ],
+  [
     "list_files",
     {
       "$schema": "http://json-schema.org/draft-07/schema#",

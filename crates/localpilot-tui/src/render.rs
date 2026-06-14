@@ -10,7 +10,9 @@ use ratatui::Frame;
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use tui_widget_list::{ListBuilder, ListState, ListView};
 
-use crate::state::{AppState, ApprovalRequest, Picker, Profile, SlashPicker, TrustPrompt};
+use crate::state::{
+    AppState, ApprovalRequest, FilePicker, Picker, Profile, SlashPicker, TrustPrompt,
+};
 
 /// Below this width the optional side panel collapses; the footer stays visible.
 const NARROW_WIDTH: u16 = 80;
@@ -55,6 +57,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(slash) = &state.slash_picker {
         // Anchor the autocomplete just above the input box (rows[2]).
         render_slash_picker(frame, area, rows[2], slash);
+    }
+    if let Some(files) = &state.file_picker {
+        render_file_picker(frame, area, rows[2], files);
     }
     // The trust gate draws on top of everything else.
     if let Some(trust) = &state.trust {
@@ -468,6 +473,50 @@ fn render_slash_picker(frame: &mut Frame, area: Rect, input_area: Rect, picker: 
 
     let list = ListView::new(builder, picker.items.len())
         .block(panel("commands"))
+        .infinite_scrolling(true);
+    let mut list_state = ListState::default();
+    list_state.select(Some(picker.selected));
+    frame.render_stateful_widget(list, popup, &mut list_state);
+}
+
+/// Render the `@` file-mention autocomplete popup just above the input box. Each
+/// row shows one workspace-relative path; the highlighted row is reversed.
+fn render_file_picker(frame: &mut Frame, area: Rect, input_area: Rect, picker: &FilePicker) {
+    if picker.items.is_empty() {
+        return;
+    }
+    // Size the box to the widest " <path>" line, capped to the screen.
+    let content_width = picker
+        .items
+        .iter()
+        .map(|item| 1 + item.path.len())
+        .max()
+        .unwrap_or(20) as u16;
+    let popup_width = content_width.saturating_add(2).clamp(12, area.width);
+    let visible = (picker.items.len() as u16).min(8);
+    let popup_height = visible + 2; // two rows for the border
+
+    let popup_x = input_area.x.min(area.width.saturating_sub(popup_width));
+    let popup_y = input_area.y.saturating_sub(popup_height);
+    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup);
+
+    let builder = ListBuilder::new(|ctx| {
+        let item = &picker.items[ctx.index];
+        let line = Line::from(Span::styled(
+            format!(" {}", item.path),
+            Style::default().fg(Color::Cyan),
+        ));
+        let line = if ctx.is_selected {
+            line.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        };
+        (line, 1u16)
+    });
+
+    let list = ListView::new(builder, picker.items.len())
+        .block(panel("files"))
         .infinite_scrolling(true);
     let mut list_state = ListState::default();
     list_state.select(Some(picker.selected));

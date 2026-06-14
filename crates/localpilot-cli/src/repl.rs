@@ -209,6 +209,8 @@ pub async fn run_chat(
     } else {
         state.trusted = true;
     }
+    // Seed the `@`-mention file list; refreshed after each turn (files may change).
+    state.set_workspace_files(workspace_files(&cwd));
 
     // Build the project knowledge index in the background on first use, so
     // `knowledge_search` has data without the first turn paying for a full walk.
@@ -304,7 +306,8 @@ async fn event_loop(
                             &host,
                         )
                         .await?;
-                    } else if slash_picker_captures(state, key) {
+                    } else if slash_picker_captures(state, key) || file_picker_captures(state, key)
+                    {
                         if let Some(mapped) = map_key(key) {
                             handle_input(state, AppInput::Key(mapped));
                         }
@@ -376,6 +379,8 @@ async fn submit_current_input(
         )
         .await;
         state.busy = false;
+        // The turn may have created or removed files; refresh the @-mention list.
+        state.set_workspace_files(workspace_files(host.cwd));
         outcome
     }
 }
@@ -922,7 +927,7 @@ fn resolve_event(
                     key,
                     buffered_after,
                 ) {
-                } else if slash_picker_captures(state, key) {
+                } else if slash_picker_captures(state, key) || file_picker_captures(state, key) {
                     if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
                     }
@@ -1062,6 +1067,44 @@ fn slash_picker_captures(state: &AppState, key: KeyEvent) -> bool {
                 | KeyCode::Down
                 | KeyCode::Backspace
         )
+}
+
+fn file_picker_captures(state: &AppState, key: KeyEvent) -> bool {
+    state.file_picker.is_some()
+        && matches!(
+            key.code,
+            KeyCode::Enter
+                | KeyCode::Char('\n' | '\r')
+                | KeyCode::Tab
+                | KeyCode::Esc
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Backspace
+        )
+}
+
+/// Enumerate workspace files for the `@`-mention picker: relative, forward-slash
+/// paths, respecting ignore files, sorted and capped.
+fn workspace_files(root: &std::path::Path) -> Vec<String> {
+    const MAX_FILES: usize = 10_000;
+    let mut files = Vec::new();
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .require_git(false)
+        .build()
+    {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+        files.push(rel.to_string_lossy().replace('\\', "/"));
+        if files.len() >= MAX_FILES {
+            break;
+        }
+    }
+    files.sort();
+    files
 }
 
 fn slash_picker_exact_submit(state: &AppState, key: KeyEvent) -> bool {

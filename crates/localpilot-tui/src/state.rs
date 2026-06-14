@@ -136,6 +136,24 @@ pub struct SlashPicker {
     pub selected: usize,
 }
 
+/// One workspace file shown in the `@` file-mention autocomplete popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSuggestion {
+    /// Workspace-relative path, forward-slash separated.
+    pub path: String,
+}
+
+/// `@`-mention file autocomplete popup state.
+#[derive(Debug, Clone)]
+pub struct FilePicker {
+    /// The text typed after the `@` (e.g. "b").
+    pub query: String,
+    /// All workspace files whose filename starts with `query`.
+    pub items: Vec<FileSuggestion>,
+    /// Index of the currently highlighted item.
+    pub selected: usize,
+}
+
 /// One transcript entry.
 #[derive(Debug, Clone)]
 pub struct TranscriptLine {
@@ -173,6 +191,11 @@ pub struct AppState {
     pub pastes: Vec<Paste>,
     /// Active slash-command autocomplete picker.
     pub slash_picker: Option<SlashPicker>,
+    /// Active `@`-mention file autocomplete picker.
+    pub file_picker: Option<FilePicker>,
+    /// Workspace files offered by the `@` picker (relative, forward-slash). The
+    /// host populates this; the picker filters it in memory.
+    workspace_files: Vec<String>,
     pub search: Option<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
@@ -212,6 +235,8 @@ impl AppState {
             trusted: false,
             pastes: Vec::new(),
             slash_picker: None,
+            file_picker: None,
+            workspace_files: Vec::new(),
             search: None,
             plan: Vec::new(),
             active_tools: HashMap::new(),
@@ -636,6 +661,133 @@ impl AppState {
         !self.input[..cursor].contains(char::is_whitespace)
     }
 
+    // --- File mention picker -------------------------------------------------
+
+    /// Replace the workspace file list offered by the `@` picker. Paths are
+    /// workspace-relative and forward-slash separated.
+    pub fn set_workspace_files(&mut self, files: Vec<String>) {
+        self.workspace_files = files;
+    }
+
+    /// Cap on the number of files shown in the `@` popup at once.
+    const MAX_FILE_SUGGESTIONS: usize = 50;
+
+    /// The `@`-token immediately left of the cursor, as `(at_byte, query)`, when
+    /// the input is in mention context. The `@` must start the input or follow
+    /// whitespace (so `user@host` does not trigger), with no whitespace between
+    /// it and the cursor.
+    fn mention_query(&self) -> Option<(usize, &str)> {
+        let cursor = self.normalized_input_cursor();
+        let before = &self.input[..cursor];
+        let at = before.rfind('@')?;
+        let preceded_ok = at == 0
+            || self.input[..at]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        if !preceded_ok {
+            return None;
+        }
+        let query = &before[at + 1..];
+        if query.contains(char::is_whitespace) {
+            return None;
+        }
+        Some((at, query))
+    }
+
+    /// Whether the cursor sits inside an `@` file-mention token.
+    #[must_use]
+    pub fn is_in_mention_context(&self) -> bool {
+        self.mention_query().is_some()
+    }
+
+    /// Files whose filename (basename) starts with `query`, case-insensitively.
+    #[must_use]
+    fn file_suggestions(&self, query: &str) -> Vec<FileSuggestion> {
+        let needle = query.to_lowercase();
+        self.workspace_files
+            .iter()
+            .filter(|path| {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                name.to_lowercase().starts_with(&needle)
+            })
+            .take(Self::MAX_FILE_SUGGESTIONS)
+            .map(|path| FileSuggestion { path: path.clone() })
+            .collect()
+    }
+
+    /// Open the `@` picker for the mention token at the cursor.
+    pub fn open_file_picker(&mut self) {
+        let Some((_, query)) = self.mention_query() else {
+            return;
+        };
+        let query = query.to_string();
+        let items = self.file_suggestions(&query);
+        self.file_picker = Some(FilePicker {
+            query,
+            items,
+            selected: 0,
+        });
+    }
+
+    /// Close the `@` picker and clear its state.
+    pub fn close_file_picker(&mut self) {
+        self.file_picker = None;
+    }
+
+    /// Move the `@` picker selection down one item, wrapping at the end.
+    pub fn file_picker_next(&mut self) {
+        if let Some(picker) = &mut self.file_picker {
+            if !picker.items.is_empty() {
+                picker.selected = (picker.selected + 1) % picker.items.len();
+            }
+        }
+    }
+
+    /// Move the `@` picker selection up one item, wrapping at the start.
+    pub fn file_picker_prev(&mut self) {
+        if let Some(picker) = &mut self.file_picker {
+            let len = picker.items.len();
+            if len > 0 {
+                picker.selected = (picker.selected + len - 1) % len;
+            }
+        }
+    }
+
+    /// Rebuild the `@` picker from the current input, or close it once the input
+    /// has left mention context. Called after each edit while the picker is open.
+    pub fn refresh_or_close_file_picker(&mut self) {
+        match self.mention_query() {
+            Some((_, query)) => {
+                let query = query.to_string();
+                let items = self.file_suggestions(&query);
+                if let Some(picker) = &mut self.file_picker {
+                    picker.query = query;
+                    picker.items = items;
+                    picker.selected = 0;
+                }
+            }
+            None => self.close_file_picker(),
+        }
+    }
+
+    /// Accept the highlighted file: replace the `@<query>` token at the cursor
+    /// with the bare relative path and a trailing space, then close the picker.
+    pub fn file_picker_select(&mut self) {
+        if let Some(picker) = self.file_picker.take() {
+            let Some(suggestion) = picker.items.get(picker.selected) else {
+                return;
+            };
+            let cursor = self.normalized_input_cursor();
+            let Some((at, _)) = self.mention_query() else {
+                return;
+            };
+            let insert = format!("{} ", suggestion.path);
+            self.input.replace_range(at..cursor, &insert);
+            self.input_cursor = at + insert.len();
+        }
+    }
+
     fn transcript_logical_rows(&self) -> usize {
         let transcript_rows = self
             .transcript
@@ -906,6 +1058,76 @@ mod tests {
         s.insert_input(" ");
         s.refresh_or_close_slash_picker();
         assert!(s.slash_picker.is_none());
+    }
+
+    fn state_with_files() -> AppState {
+        let mut s = state();
+        // Sorted as the host injects it (sorted by full path).
+        s.set_workspace_files(vec![
+            "Backlog.md".to_string(),
+            "README.md".to_string(),
+            "docs/banner.txt".to_string(),
+            "src/build.rs".to_string(),
+            "src/main.rs".to_string(),
+        ]);
+        s
+    }
+
+    #[test]
+    fn file_picker_filters_by_filename_prefix_case_insensitively() {
+        let mut s = state_with_files();
+        s.input = "@b".to_string();
+        s.input_cursor = s.input.len();
+        s.open_file_picker();
+        let picker = s.file_picker.as_ref().expect("picker open");
+        let paths: Vec<&str> = picker.items.iter().map(|i| i.path.as_str()).collect();
+        // Basenames starting with "b" (any case): build.rs, Backlog.md, banner.txt.
+        // README.md and main.rs are excluded (no leading "b" in the filename).
+        assert_eq!(paths, ["Backlog.md", "docs/banner.txt", "src/build.rs"]);
+    }
+
+    #[test]
+    fn file_picker_select_inserts_the_bare_path_and_keeps_the_suffix() {
+        let mut s = state_with_files();
+        s.input = "look at @ma now".to_string();
+        s.input_cursor = "look at @ma".len();
+        s.open_file_picker();
+        s.file_picker_select();
+        assert!(s.file_picker.is_none());
+        assert_eq!(s.input, "look at src/main.rs  now");
+        assert_eq!(s.input_cursor, "look at src/main.rs ".len());
+    }
+
+    #[test]
+    fn file_picker_closes_when_whitespace_leaves_mention_context() {
+        let mut s = state_with_files();
+        s.input = "@b".to_string();
+        s.input_cursor = s.input.len();
+        s.open_file_picker();
+        assert!(s.file_picker.is_some());
+        s.insert_input(" ");
+        s.refresh_or_close_file_picker();
+        assert!(s.file_picker.is_none());
+    }
+
+    #[test]
+    fn an_at_after_non_whitespace_is_not_mention_context() {
+        let mut s = state_with_files();
+        s.input = "user@b".to_string();
+        s.input_cursor = s.input.len();
+        assert!(!s.is_in_mention_context());
+        s.open_file_picker();
+        assert!(s.file_picker.is_none());
+    }
+
+    #[test]
+    fn a_bare_at_lists_all_files() {
+        let mut s = state_with_files();
+        s.input = "@".to_string();
+        s.input_cursor = s.input.len();
+        s.open_file_picker();
+        let picker = s.file_picker.as_ref().expect("picker open");
+        assert_eq!(picker.items.len(), 5);
     }
 
     #[test]

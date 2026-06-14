@@ -14,7 +14,7 @@ mod tool;
 
 pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
-    RunShell, SearchText, WriteFile,
+    ReplaceInFile, RunShell, SearchText, WriteFile,
 };
 pub use error::ToolError;
 pub use registry::ToolRegistry;

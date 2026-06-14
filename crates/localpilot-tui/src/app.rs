@@ -314,6 +314,28 @@ fn handle_key(state: &mut AppState, key: Key) {
         return;
     }
 
+    // While the `@` file-mention autocomplete is open it captures input the same
+    // way: arrows navigate, Enter/Tab insert the highlighted path, Esc dismisses,
+    // and edits refilter (closing it once the input leaves mention context).
+    if state.file_picker.is_some() {
+        match key {
+            Key::Up => state.file_picker_prev(),
+            Key::Down => state.file_picker_next(),
+            Key::Enter | Key::Tab => state.file_picker_select(),
+            Key::Esc => state.close_file_picker(),
+            Key::Backspace => {
+                state.backspace_input();
+                state.refresh_or_close_file_picker();
+            }
+            Key::Char(c) => {
+                state.insert_input(&c.to_string());
+                state.refresh_or_close_file_picker();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key {
         Key::Esc | Key::CtrlC => state.should_quit = true,
         Key::Enter => submit_input(state),
@@ -345,9 +367,13 @@ fn handle_key(state: &mut AppState, key: Key) {
         Key::Char(c) => {
             state.insert_input(&c.to_string());
             // A '/' typed at the start of the line opens the slash-command
-            // autocomplete; once open, further edits are handled above.
+            // autocomplete; an '@' (at the start or after whitespace) opens the
+            // file-mention autocomplete. Once open, further edits are handled
+            // above.
             if c == '/' && state.is_in_slash_context() {
                 state.open_slash_picker(state.input[..state.input_cursor].to_string());
+            } else if c == '@' && state.is_in_mention_context() {
+                state.open_file_picker();
             }
         }
     }
