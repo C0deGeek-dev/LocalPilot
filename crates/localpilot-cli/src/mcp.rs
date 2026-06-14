@@ -44,6 +44,9 @@ impl McpTools {
         // every turn. Harmless when no project is ingested (it returns an empty
         // result), and present on every session path that builds a registry.
         registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+        // The agent can propose a durable lesson for human review as it works.
+        // Enqueue-only — never a direct accepted-memory write.
+        registry.register(Box::new(localpilot_localmind::Remember));
         for (descriptor, transport) in &self.entries {
             registry.register(Box::new(McpTool::new(
                 descriptor,

@@ -26,12 +26,27 @@ const KNOWLEDGE_SEARCH_CUE: &str = concat!(
     "guessing.",
 );
 
+/// The cue, appended only when the `remember` tool is registered, that tells the
+/// model it can propose a durable lesson for human review as it works.
+const REMEMBER_CUE: &str = concat!(
+    "\n\n",
+    "When you learn something durable about this project — a convention, a pitfall, ",
+    "a decision worth keeping — call `remember` to propose it for human review. It ",
+    "enqueues a review candidate; it never writes accepted memory directly. Use it ",
+    "sparingly, not for transient notes.",
+);
+
 /// Render the prompt from the sorted tool names. Split from
 /// [`agent_system_prompt`] so the tool-driven cue is unit-testable without a live
 /// registry.
 fn build_prompt(names: &[&str]) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
+    } else {
+        ""
+    };
+    let remember_cue = if names.contains(&"remember") {
+        REMEMBER_CUE
     } else {
         ""
     };
@@ -50,7 +65,7 @@ for it — `bypass` lifts the permission gate, but does not imply permission to
 mutate history or share work without being told to.
 
 Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}
+{tools}.{knowledge_cue}{remember_cue}
 
 Tool use loop:
 - inspect before acting;
@@ -84,6 +99,20 @@ mod cue_tests {
         assert!(
             !without.contains("searchable knowledge base"),
             "the cue must be absent when knowledge_search is not registered"
+        );
+    }
+
+    #[test]
+    fn the_remember_cue_appears_only_when_the_tool_is_registered() {
+        let with = build_prompt(&["remember", "read_file"]);
+        assert!(
+            with.contains("call `remember` to propose it"),
+            "the cue must be present when remember is registered"
+        );
+        let without = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !without.contains("call `remember`"),
+            "the cue must be absent when remember is not registered"
         );
     }
 }

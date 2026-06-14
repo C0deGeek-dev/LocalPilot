@@ -15,6 +15,7 @@ mod ingest;
 mod knowledge_tool;
 mod ops;
 mod pack;
+mod remember_tool;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -42,6 +43,7 @@ pub use ops::{
     ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
+pub use remember_tool::Remember;
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
 use localmind_store::{
