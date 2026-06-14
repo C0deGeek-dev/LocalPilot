@@ -222,6 +222,24 @@ async fn per_turn_retrieval_context_is_replaced_not_accumulated() {
         "retrieval context must be replaced each turn, not accumulated (saw {occurrences})"
     );
 
+    // The block is injected at request-build time adjacent to the system prompt,
+    // so it folds into the single leading system message (not a trailing
+    // user-mapped one).
+    assert_eq!(request.messages[0].role, localpilot_core::Role::System);
+    let leading_text: String = request.messages[0]
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        leading_text.contains("hook-contributed project context"),
+        "retrieval context must fold into the leading system message"
+    );
+
     // The re-derived retrieval block is not written to the durable transcript:
     // the transcript records authored turns only (here, three user prompts).
     let transcript = runtime

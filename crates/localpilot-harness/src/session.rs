@@ -201,10 +201,38 @@ const REPAIR_PROMPT: &str =
 /// intervenes.
 const DEFAULT_TOOL_FAILURE_THRESHOLD: u32 = 6;
 
-/// Synthetic-metadata marker for the per-turn retrieval context contributed by
-/// context hooks. Used to evict the prior turn's block before adding the new
-/// one so re-derived retrieval never accumulates.
-const RETRIEVAL_CONTEXT_MARKER: &str = "retrieval-context";
+/// Inject per-turn context-hook output into the request message list.
+///
+/// The block is placed immediately after a leading system prompt (so both fold
+/// into the single top-level system message), then consecutive system messages
+/// are merged. With no context this is just the merge. The input `messages` are
+/// the compacted *stored* history; the returned list is request-only and is
+/// never written back to history.
+fn inject_turn_context(messages: Vec<Message>, context: Option<Message>) -> Vec<Message> {
+    let combined = match context {
+        None => messages,
+        Some(context) => {
+            let mut out = Vec::with_capacity(messages.len() + 1);
+            let mut rest = messages.into_iter();
+            match rest.next() {
+                // Keep the system prompt first, then the retrieval context.
+                Some(first) if first.role == Role::System => {
+                    out.push(first);
+                    out.push(context);
+                }
+                // No leading system prompt: the context leads.
+                Some(first) => {
+                    out.push(context);
+                    out.push(first);
+                }
+                None => out.push(context),
+            }
+            out.extend(rest);
+            out
+        }
+    };
+    crate::compaction::merge_consecutive_system(combined)
+}
 
 /// Tracks per-tool failure counts within a single turn. Resets at every turn
 /// boundary so that failures from previous turns don't accumulate.
@@ -258,9 +286,10 @@ pub struct SessionRuntime {
     last_event: Option<EventId>,
     /// Bumped on every mutation of `messages`; keys the compaction cache.
     history_generation: u64,
-    /// The compaction result for the current `history_generation`, so the
-    /// per-iteration request shaping does not recompact unchanged history.
-    compaction_cache: Option<(u64, CompactionResult)>,
+    /// The compaction result for the current `history_generation` and reserve,
+    /// so the per-iteration request shaping does not recompact unchanged history.
+    /// The reserve is the per-turn context-hook budget held back from the limit.
+    compaction_cache: Option<(u64, usize, CompactionResult)>,
     /// Steering input queued by the host while a turn runs.
     steer: SteerQueue,
     /// Registered lifecycle observers, context hooks, and tool gates.
@@ -567,7 +596,9 @@ impl SessionRuntime {
     /// before automatic provider requests.
     pub async fn compact_conversation(&mut self) -> ManualCompaction {
         let cancel = CancellationToken::new();
-        let result = self.compacted_history(&cancel).await;
+        // Manual compaction shapes stored history only; no per-turn request
+        // context is injected here, so nothing is reserved.
+        let result = self.compacted_history(0, &cancel).await;
         let context_used = estimate_tokens(&result.messages);
         let fallback_reason = result.metadata.fallback_reason.clone();
         let (requested_mode, used_mode) =
@@ -659,45 +690,11 @@ impl SessionRuntime {
 
     /// Seed a system message into the conversation — for example durable host
     /// context injected before a turn. Persisted and counted in context like any
-    /// message. For per-turn retrieval that is re-derived every turn, use
-    /// [`SessionRuntime::set_retrieval_context`] instead so it does not
-    /// accumulate.
+    /// message. Per-turn retrieval that is re-derived every turn is *not* seeded
+    /// here; context hooks contribute it and it is injected into the request at
+    /// build time (see `run_turn`), so it never accumulates in history.
     pub fn seed_system(&mut self, text: impl Into<String>) {
         self.append(Message::new(Role::System, vec![ContentBlock::text(text)]));
-    }
-
-    /// Replace the per-turn retrieval context contributed by context hooks.
-    ///
-    /// Retrieval context is re-derived from the prompt every turn, so the prior
-    /// turn's block is evicted before the new one is added — at most one
-    /// retrieval block is ever present, and context does not grow with turn
-    /// count. The block is marked synthetic with [`RETRIEVAL_CONTEXT_MARKER`] so
-    /// it is distinguishable from authored history, and it is deliberately *not*
-    /// written to the durable transcript: the transcript records authored turns
-    /// and runtime repairs, not re-computable retrieval, so the event-log
-    /// projection stays free of duplicated retrieval blobs. An empty `text`
-    /// evicts the stale block without adding a new one.
-    fn set_retrieval_context(&mut self, text: String) {
-        let had = self
-            .messages
-            .iter()
-            .any(|m| m.metadata.synthetic.as_deref() == Some(RETRIEVAL_CONTEXT_MARKER));
-        self.messages
-            .retain(|m| m.metadata.synthetic.as_deref() != Some(RETRIEVAL_CONTEXT_MARKER));
-        let added = if text.is_empty() {
-            false
-        } else {
-            self.messages.push(
-                Message::new(Role::System, vec![ContentBlock::text(text)])
-                    .into_synthetic(RETRIEVAL_CONTEXT_MARKER),
-            );
-            true
-        };
-        // Only invalidate the compaction cache when the live history actually
-        // changed, so a turn with no retrieval (and none last turn) is a no-op.
-        if had || added {
-            self.history_generation += 1;
-        }
     }
 
     /// Open a provider stream, retrying a transient connection failure (network
@@ -821,16 +818,22 @@ impl SessionRuntime {
     }
 
     /// Compact the live history for the next request, reusing the cached
-    /// result while the history is unchanged.
-    async fn compacted_history(&mut self, cancel: &CancellationToken) -> CompactionResult {
-        if let Some((generation, cached)) = &self.compaction_cache {
-            if *generation == self.history_generation {
+    /// result while the history and the reserve are unchanged. `reserve` is the
+    /// token budget held back for context that will be injected into the request
+    /// but is not part of the stored history (per-turn context-hook retrieval),
+    /// so the compacted history plus that context still fits the limit.
+    async fn compacted_history(
+        &mut self,
+        reserve: usize,
+        cancel: &CancellationToken,
+    ) -> CompactionResult {
+        if let Some((generation, cached_reserve, cached)) = &self.compaction_cache {
+            if *generation == self.history_generation && *cached_reserve == reserve {
                 return cached.clone();
             }
         }
-        let result = self
-            .compact_candidate(self.config.context_token_limit, cancel)
-            .await;
+        let limit = self.config.context_token_limit.saturating_sub(reserve);
+        let result = self.compact_candidate(limit, cancel).await;
         if result.compacted {
             if let Some(summary) = result.summary.clone() {
                 self.record_event(SessionEventKind::Compacted { summary });
@@ -838,7 +841,7 @@ impl SessionRuntime {
             self.record_compaction_attempt("completed", &result.metadata);
             self.hooks.notify(&HookEvent::Compacted);
         }
-        self.compaction_cache = Some((self.history_generation, result.clone()));
+        self.compaction_cache = Some((self.history_generation, reserve, result.clone()));
         result
     }
 
@@ -907,11 +910,19 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
-        // Context hooks contribute system context for this turn. It is
-        // re-derived every turn, so it replaces the prior turn's block rather
-        // than accumulating (see `set_retrieval_context`).
-        let retrieval = self.hooks.context_for(user_input).join("\n");
-        self.set_retrieval_context(retrieval);
+        // Context hooks contribute system context for this turn. It is computed
+        // once from the prompt and injected into the outgoing request adjacent to
+        // the leading system prompt — never appended to history or persisted — so
+        // re-derived retrieval cannot accumulate, the transcript stays equal to
+        // the authored history, and the block folds into the top-level system
+        // rather than riding the wire as a resent user message. Its token cost is
+        // reserved from the compaction budget so the request still fits the limit.
+        let retrieval_text = self.hooks.context_for(user_input).join("\n");
+        let turn_context = (!retrieval_text.is_empty())
+            .then(|| Message::new(Role::System, vec![ContentBlock::text(retrieval_text)]));
+        let context_reserve = turn_context
+            .as_ref()
+            .map_or(0, |message| estimate_tokens(std::slice::from_ref(message)));
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
         self.tool_failure_guard.reset();
@@ -932,20 +943,22 @@ impl SessionRuntime {
                 self.append(Message::text(Role::User, steer_text));
             }
 
-            let compacted = self.compacted_history(cancel).await;
-            let used = estimate_tokens(&compacted.messages);
-            let _ = events.send(RuntimeEvent::ContextUsage {
-                used,
-                limit: self.config.context_token_limit,
-            });
+            let compacted = self.compacted_history(context_reserve, cancel).await;
             let tools = if tools_enabled {
                 self.tool_specs()
             } else {
                 Vec::new()
             };
-            // Fold the compaction summary into the single leading system block
-            // so providers never receive two consecutive system messages.
-            let request_messages = crate::compaction::merge_consecutive_system(compacted.messages);
+            // Inject the per-turn retrieval context after the leading system
+            // prompt, then fold consecutive system blocks so the provider sees a
+            // single leading system message (and never two in a row). The token
+            // usage reported is the real request total, including injected context.
+            let request_messages = inject_turn_context(compacted.messages, turn_context.clone());
+            let used = estimate_tokens(&request_messages);
+            let _ = events.send(RuntimeEvent::ContextUsage {
+                used,
+                limit: self.config.context_token_limit,
+            });
             let request = ModelRequest::new(self.config.model.clone(), request_messages)
                 .with_tools(tools)
                 .with_reasoning_effort(self.config.reasoning_effort);
