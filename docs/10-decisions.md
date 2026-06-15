@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0018: The Learning Write-Path Closes On Every Opted-In Session, Keyed On Structured Signals
+
+Status: accepted. Complements ADR-0011 (the store split and review-gating) and
+ADR-0016/0017 (the read path); this record fixes the *write/learn* path.
+
+LocalMind was first-class on the read path but second-class on the learn path:
+close-out ran only in the interactive REPL, and it flattened the transcript to
+text and re-parsed prose. This record closes the loop.
+
+- **Close-out runs on every deliberate, opted-in session-end path** — the
+  interactive REPL, each headless harness step, and the RPC/ACP serve loop —
+  through one shared best-effort, non-fatal helper. It skips an empty session, so
+  opening and closing one leaves no artifacts. One-shot `localpilot print` is
+  excluded, so a bare prompt never creates project files. The headless harness
+  builds a fresh runtime per step, so per-step close-out is the natural granularity
+  and captures step-level failure/fix/commit.
+- **The import is keyed on structured signals, not re-parsed prose.** Close-out
+  builds the import from the redacted transcript and then appends compact lines
+  from the session **event log** — failed tools, recovery diagnostics, committed
+  steps — so the deterministic extractor sees the fact LocalPilot already recorded.
+  Only names, statuses, and short commit hashes are appended; never raw payloads.
+  The deterministic text path stays the baseline: when the event log has nothing
+  notable, the import is the transcript alone, unchanged. LocalMind-core's adapter
+  contract is metadata-thin and is **not** changed.
+- **In-session surfaces never bypass review-gating.** The `remember` tool lets the
+  agent propose a durable lesson — it enqueues a review candidate (permission-gated,
+  project-local write) and never writes accepted memory. The read-only
+  `skill_drafts` tool lists or inspects generated drafts without enabling them; the
+  disabled flag stays authoritative and activation stays a human step. Each tool
+  has a tool-gated system-prompt cue that appears only when the tool is registered.
+
+Consequences:
+
+- Autonomous runs learn, not just the REPL: a headless or RPC session produces
+  reviewable candidates enriched with execution outcomes.
+- Close-out cannot regress the autonomous critical path: it is best-effort,
+  non-blocking, off the turn path, and gated on the existing opt-in.
+- Review-gating (ADR-0011) holds end to end: nothing on the write path writes
+  accepted memory or activates a skill automatically; everything new produces a
+  review candidate or a read-only suggestion.
+- The change is a contained host-edge change (call sites plus the adapter import
+  text); LocalMind-core stays host-neutral and unchanged.
+
+Reason:
+
+- The structured truth LocalPilot already records in the event log is the
+  high-value, low-risk lever: enriching the import text the extractor consumes
+  needs no engine change, while flattening to prose threw that truth away.
+- Per-step close-out matches how the harness already builds sessions, so it adds
+  no new lifecycle.
+- All prompt, tool, and behavior text remains original to this repository
+  (clean-room, ADR-0005 / docs/00-clean-room.md).
+
 ## ADR-0017: Retrieval Context Is A Request-Time Projection
 
 Status: accepted. Refines ADR-0016 and ADR-0014 (pull-over-push and

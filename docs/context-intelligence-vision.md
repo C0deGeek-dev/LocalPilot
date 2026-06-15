@@ -237,6 +237,14 @@ Shipped and tested:
 - LocalMind candidates carry evidence and validation status, and memory-update
   suggestions (merge, supersede, split, ignore, promote) are review items, never
   direct writes.
+- The learning write-path is closed: close-out runs on every opted-in
+  session-end path (REPL, each headless harness step, the RPC serve loop; one-shot
+  `print` excluded), and the import is enriched with redacted structured signals
+  from the event log so extraction keys on fact, with the deterministic text path
+  intact as the baseline. The agent can enqueue a review candidate in-session
+  (`remember`) and surface generated skill drafts read-only (`skill_drafts`).
+  Nothing on this path writes accepted memory or activates a skill — review-gating
+  holds (ADR-0018).
 
 Deliberate gaps (intentionally deferred):
 

@@ -48,6 +48,19 @@ depends on LocalMind, never the reverse.
 
 - `localpilot-localmind::closeout_session` imports an LocalPilot transcript into
   LocalMind, extracts candidate lessons, and enqueues them for review.
+- Close-out runs on **every** deliberate, opted-in session-end path — the
+  interactive REPL, each headless harness step, and the RPC/ACP serve loop — so
+  autonomous runs learn too, not just the REPL. It is best-effort and non-fatal,
+  and skips an empty session so opening and closing one leaves no artifacts.
+  One-shot `localpilot print` deliberately does **not** close out, so a bare
+  prompt never creates project files (ADR-0018).
+- The agent can propose a durable lesson in-session with the `remember` tool: it
+  enqueues a review candidate (permission-gated, project-local write) and never
+  writes accepted memory directly — promotion stays a human, review-gated step
+  (ADR-0011).
+- The agent can list or inspect generated skill drafts read-only with the
+  `skill_drafts` tool. Surfacing a draft never enables it; the disabled flag stays
+  authoritative and activation stays a deliberate human step.
 - `localpilot learning` exposes the rich LocalMind loop: `closeout`, `review`,
   `promote`, `search`, `skills`, and `audit`.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
@@ -104,11 +117,20 @@ survive. The engine also exposes transport-agnostic MCP tool contracts
 | --- | --- |
 | Session transcript bundle | imported, redacted session for summarization |
 | Tool events in transcript | evidence for lesson extraction |
-| Code diffs and commits | future durable outcome anchors |
-| Test output and quality gate results | future pass/fail signal attached to lessons |
-| Recovery events | future frequent-failure candidate lessons |
+| Step/commit completions (event log) | durable outcome anchors appended to the import as redacted facts |
+| Failed-tool and quality-gate outcomes (event log) | pass/fail signal the extractor keys on, not re-parsed prose |
+| Recovery diagnostics (event log) | frequent-failure candidate lessons |
+| Agent-proposed lesson (`remember` tool) | a review candidate, enqueued in-session |
 | Accepted memory | LocalMind retrieval and context injection |
-| Skill drafts | LocalMind disabled `SKILL.md` draft emission |
+| Skill drafts | LocalMind disabled `SKILL.md` draft emission, surfaced read-only via `skill_drafts` |
+
+Close-out builds the import from the redacted transcript and then appends compact
+structured signals from the session **event log** (failed tools, recovery
+diagnostics, committed steps) so the deterministic extractor keys on the fact
+LocalPilot already recorded rather than re-parsing prose. The deterministic text
+path stays the baseline: when the event log has nothing notable, the import is the
+transcript alone, unchanged. Only names, statuses, and short commit hashes are
+appended — never raw payloads (ADR-0018).
 
 All capture stays redacted-before-persistence and inside the permission boundary;
 LocalMind never bypasses either.
@@ -148,6 +170,13 @@ a compute-only path that performs no write, so ingested project knowledge is
 pulled when relevant instead of riding in every turn's context. A missing index
 returns "not indexed yet"; a present-but-unreadable one is reported distinctly
 ("rebuild") rather than masked as empty.
+
+Two more agent tools close the learning loop in-session. `remember` lets the agent
+propose a durable lesson, enqueuing a review candidate it never accepts itself.
+`skill_drafts` lists or inspects generated skill drafts read-only without enabling
+them. Both are registered on every session path; a tool-gated cue in the agent
+system prompt mentions each only when it is present. Neither can write accepted
+memory or activate a skill — review-gating stays sacred (ADR-0011, ADR-0018).
 
 New rich-learning behavior lands in LocalMind, not by expanding host-local memory
 implementations.

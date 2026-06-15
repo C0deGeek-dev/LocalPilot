@@ -52,3 +52,49 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
 
 /// How many files one session-close reindex pass may touch.
 const CODEGRAPH_BATCH_LIMIT: usize = 64;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use localpilot_core::{Message, Role, SessionId};
+    use localpilot_store::Store;
+
+    #[test]
+    fn close_out_of_a_real_session_enqueues_review_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let session = SessionId::new();
+        store
+            .append_message(
+                session,
+                &Message::text(Role::User, "Lesson: redact secrets before persisting."),
+            )
+            .unwrap();
+
+        // The shared helper that every non-REPL session-end path calls (headless
+        // harness steps, the RPC serve loop) must learn from a real session, not
+        // just the interactive REPL.
+        close_out(dir.path(), session);
+
+        let items = localpilot_localmind::review_list(dir.path()).unwrap();
+        assert!(
+            !items.is_empty(),
+            "closeout of a real session must enqueue at least one review candidate"
+        );
+    }
+
+    #[test]
+    fn close_out_of_an_empty_session_creates_no_localmind_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+
+        // Opening and closing a bare session must leave no learning state, so a
+        // plain prompt never creates project files.
+        close_out(dir.path(), session);
+
+        assert!(!dir.path().join(".localmind").exists());
+        assert!(!dir.path().join(".localmind.toml").exists());
+    }
+}
