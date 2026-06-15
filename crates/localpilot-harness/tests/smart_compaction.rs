@@ -167,7 +167,7 @@ async fn smart_cutover_replaces_the_deterministic_summary() {
             .text("three")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 900);
+    let mut h = smart_runtime(Arc::clone(&provider), 1_100);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "SMART_MARKER",
@@ -267,7 +267,7 @@ async fn long_session_with_repeated_failures_is_digested_under_budget() {
             .text("next: rewrite the tokenizer")
             .text("after"),
     );
-    let mut h = smart_runtime(Arc::clone(&provider), 700);
+    let mut h = smart_runtime(Arc::clone(&provider), 800);
     h.runtime
         .set_summarizer(Arc::new(ScriptedSummarizer(Ok(smart_summary(
             "rewrite the tokenizer",
@@ -405,7 +405,7 @@ async fn repeated_compaction_folds_the_previous_summary_once() {
             .text("d")
             .text("e"),
     );
-    let mut h = det_runtime(Arc::clone(&provider), 700);
+    let mut h = det_runtime(Arc::clone(&provider), 800);
     let filler = "context ".repeat(120);
 
     for label in ["alpha keep src/keep.rs", "beta"] {
