@@ -27,10 +27,13 @@ use localpilot_sandbox::{
 };
 use localpilot_store::Store;
 use localpilot_tui::{
-    handle_input, parse_slash, render, AppInput, AppState, ApprovalRequest, Header, IngestAction,
-    Key, Mode, PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
+    handle_input, header_text, history_block_text, parse_slash, render, AppInput, AppState,
+    ApprovalRequest, Header, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
+    TrustPrompt, UiEvent,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -249,6 +252,9 @@ pub async fn run_chat(
     if mouse_capture {
         let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
     }
+    // Print the session header once into native scrollback; it scrolls into
+    // history naturally as the conversation grows.
+    emit_block(&mut terminal, header_text(&state.header))?;
     let result = event_loop(
         &mut terminal,
         &mut state,
@@ -280,7 +286,7 @@ async fn event_loop(
 ) -> anyhow::Result<()> {
     let mut unbracketed_paste = UnbracketedPaste::default();
     loop {
-        terminal.draw(|frame| render(frame, state))?;
+        draw_ui(terminal, state)?;
         if state.should_quit {
             return Ok(());
         }
@@ -847,7 +853,7 @@ where
                         buffered_after,
                     );
                 }
-                terminal.draw(|frame| render(frame, state))?;
+                draw_ui(terminal, state)?;
             }
             result = &mut operation => {
                 // Drain any events still buffered so a fast response is not lost
@@ -885,7 +891,7 @@ where
             }
         }
     };
-    terminal.draw(|frame| render(frame, state))?;
+    draw_ui(terminal, state)?;
     Ok(value)
 }
 
@@ -1306,6 +1312,47 @@ fn harness_compaction_mode_label(mode: localpilot_harness::CompactionMode) -> &'
         localpilot_harness::CompactionMode::Deterministic => "deterministic",
         localpilot_harness::CompactionMode::SmartWithFallback => "smart_with_fallback",
     }
+}
+
+/// Render `text` into native scrollback above the inline viewport, sized to its
+/// wrapped height at the current terminal width.
+fn emit_block(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    text: Text<'static>,
+) -> anyhow::Result<()> {
+    let width = terminal.size()?.width;
+    let height = (Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16)
+        .max(1);
+    terminal.insert_before(height, move |buf| {
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .render(buf.area, buf);
+    })?;
+    Ok(())
+}
+
+/// Push any finished transcript items into native scrollback, once each, so they
+/// flow into the terminal's own history and are never redrawn.
+fn flush_scrollback(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    for item in state.drain_for_scrollback() {
+        emit_block(terminal, history_block_text(&item))?;
+    }
+    Ok(())
+}
+
+/// Commit finished history to scrollback, then redraw the live region.
+fn draw_ui(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    flush_scrollback(terminal, state)?;
+    terminal.draw(|frame| render(frame, state))?;
+    Ok(())
 }
 
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {

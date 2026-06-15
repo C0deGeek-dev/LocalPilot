@@ -1,10 +1,13 @@
 //! Terminal UI for LocalPilot.
 //!
-//! A dense, terminal-native REPL on `ratatui` + `crossterm` + `tui-textarea`
-//! (ADR-0006). This crate owns terminal layout, rendering, and input only; it is
-//! decoupled from the provider/harness stack, consuming a mapped [`UiEvent`]
-//! stream. A single [`render`] draws the whole UI from [`AppState`] so the layout
-//! snapshot-tests cleanly with a `TestBackend`.
+//! A terminal-native REPL on `ratatui` (ADR-0006), rendered inline: finished
+//! transcript items become [`history_block_text`] that the host pushes into the
+//! terminal's native scrollback once, and [`render`] draws only the live region
+//! (in-progress activity, the composer, and the status line). This crate owns
+//! layout, rendering, and input — with a hand-rolled composer — and is decoupled
+//! from the provider/harness stack, consuming a mapped [`UiEvent`] stream. Every
+//! drawn surface uses ratatui's backend-agnostic widgets so it snapshot-tests
+//! cleanly with a `TestBackend`.
 #![forbid(unsafe_code)]
 
 mod app;
@@ -12,10 +15,10 @@ mod render;
 mod state;
 
 pub use app::{handle_input, parse_slash, run, AppInput, IngestAction, Key, SlashAction};
-pub use render::render;
+pub use render::{header_text, history_block_text, render};
 pub use state::{
-    AppState, ApprovalRequest, FooterStats, Header, Mode, Paste, Picker, PlanItem, Profile,
-    ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
+    ActiveTool, AppState, ApprovalRequest, FooterStats, Header, Mode, Paste, Picker, PlanItem,
+    Profile, ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
 };
 
 /// The product name shown in the UI.

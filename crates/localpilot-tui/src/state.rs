@@ -4,8 +4,6 @@
 //! logic. The session runtime's events are mapped into [`UiEvent`]s by the
 //! caller, keeping this crate decoupled from the provider/harness stack.
 
-use std::collections::HashMap;
-
 const MAX_INPUT_HISTORY: usize = 100;
 
 /// Operating mode shown in the UI.
@@ -161,11 +159,23 @@ pub struct TranscriptLine {
     pub text: String,
 }
 
+/// A tool that is currently running, shown as a transient live indicator until
+/// it finishes and its result line lands in scrollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTool {
+    pub id: String,
+    pub name: String,
+}
+
 /// The full UI state.
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub header: Header,
+    /// Finished transcript items, append-only. Items are emitted once into native
+    /// scrollback via [`AppState::drain_for_scrollback`] and never redrawn.
     pub transcript: Vec<TranscriptLine>,
+    /// How many `transcript` items have already been emitted to scrollback.
+    scrollback_emitted: usize,
     pub streaming: String,
     /// Visual rows to keep above the latest transcript output.
     pub transcript_scroll: usize,
@@ -199,8 +209,8 @@ pub struct AppState {
     pub search: Option<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
-    #[doc(hidden)]
-    pub active_tools: HashMap<String, usize>,
+    /// Tools currently running, shown as transient live indicators.
+    pub active_tools: Vec<ActiveTool>,
     pub should_quit: bool,
     /// Whether a turn is in flight (drives the working indicator).
     pub busy: bool,
@@ -217,6 +227,7 @@ impl AppState {
         Self {
             header,
             transcript: Vec::new(),
+            scrollback_emitted: 0,
             streaming: String::new(),
             transcript_scroll: 0,
             mouse_capture: false,
@@ -239,7 +250,7 @@ impl AppState {
             workspace_files: Vec::new(),
             search: None,
             plan: Vec::new(),
-            active_tools: HashMap::new(),
+            active_tools: Vec::new(),
             should_quit: false,
             busy: false,
             spinner: 0,
@@ -490,6 +501,7 @@ impl AppState {
     /// profile, mode, trust, and provider/model display.
     pub fn clear_conversation_view(&mut self) {
         self.transcript.clear();
+        self.scrollback_emitted = 0;
         self.streaming.clear();
         self.transcript_scroll = 0;
         self.search = None;
@@ -502,6 +514,15 @@ impl AppState {
         self.spinner = 0;
         self.working_secs = 0;
         self.footer = FooterStats::default();
+    }
+
+    /// Take the finished transcript items not yet emitted to native scrollback.
+    /// The host renders each above the inline viewport with `insert_before`, so
+    /// they flow into scrollback once and are never redrawn.
+    pub fn drain_for_scrollback(&mut self) -> Vec<TranscriptLine> {
+        let pending = self.transcript[self.scrollback_emitted..].to_vec();
+        self.scrollback_emitted = self.transcript.len();
+        pending
     }
 
     /// Set or clear the active transcript search query.
@@ -864,12 +885,10 @@ impl AppState {
             }
             UiEvent::PlanUpdated(plan) => self.plan = plan,
             UiEvent::ToolStarted { id, name } => {
+                // A running tool is a transient live indicator; only its finished
+                // result line is committed to scrollback.
                 self.flush_streaming_assistant();
-                self.transcript.push(TranscriptLine {
-                    speaker: "tool".to_string(),
-                    text: format!("{name} running"),
-                });
-                self.active_tools.insert(id, self.transcript.len() - 1);
+                self.active_tools.push(ActiveTool { id, name });
             }
             UiEvent::ToolFinished {
                 id,
@@ -877,6 +896,7 @@ impl AppState {
                 is_error,
                 output,
             } => {
+                self.active_tools.retain(|tool| tool.id != id);
                 let status = if is_error { "error" } else { "ok" };
                 let mut text = format!("{name} {status}");
                 let summary = compact_tool_output(&output);
@@ -884,23 +904,11 @@ impl AppState {
                     text.push_str(": ");
                     text.push_str(&summary);
                 }
-                let updated = if let Some(index) = self.active_tools.remove(&id) {
-                    if let Some(line) = self.transcript.get_mut(index) {
-                        line.text = text.clone();
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if !updated {
-                    self.flush_streaming_assistant();
-                    self.transcript.push(TranscriptLine {
-                        speaker: "tool".to_string(),
-                        text,
-                    });
-                }
+                self.flush_streaming_assistant();
+                self.transcript.push(TranscriptLine {
+                    speaker: "tool".to_string(),
+                    text,
+                });
             }
             UiEvent::ApprovalRequested(request) => self.approval = Some(request),
             UiEvent::ApprovalResolved => self.approval = None,

@@ -1,0 +1,12 @@
+---
+source: crates/localpilot-tui/tests/render.rs
+expression: "render_string(&state, 90, 8)"
+---
+                                                                                          
+                                                                                          
+                                                                                          
+╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
+│what changed?                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        
+F12 mouse:select

@@ -10,14 +10,13 @@ workspace = true
 
 [dependencies]
 # The testable UI crate renders with ratatui's backend-agnostic widgets and a
-# TestBackend; the real terminal backend (crossterm) and the tui-textarea input
-# widget live in the CLI's terminal driver, keeping this crate's tests free of
-# the terminal-init code that crashes the harness on some local toolchains.
+# TestBackend; the real terminal backend (crossterm) and the hand-rolled composer
+# live in the CLI's terminal driver, keeping this crate's tests free of the
+# terminal-init code that crashes the harness on some local toolchains.
 ratatui = { workspace = true, default-features = false }
-# The transcript is a scrollable view with its own scrollbar; backend-agnostic,
-# so it does not pull crossterm into this testable UI crate.
-tui-scrollview = { workspace = true }
-# Slash-command autocomplete popup list (builder-driven, backend-agnostic).
+# Slash-command and @-mention autocomplete popup lists (builder-driven,
+# backend-agnostic). Finished output now flows into native scrollback, so the
+# full-screen scrollable transcript view is gone.
 tui-widget-list = { workspace = true }
 
 [dev-dependencies]
