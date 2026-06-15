@@ -125,11 +125,25 @@ pub fn closeout_session(
     )
     .map_err(|e| LearningError::Import(e.to_string()))?;
 
-    let report = CloseoutProcessor::closeout_project_session(
-        project_root,
-        &import.session_id,
-        &DeterministicExtractor,
-    )
+    // Select the extractor from the project's inference config. When an
+    // `[inference]` endpoint is configured with extraction enabled, use the
+    // model-backed extractor — which itself falls back to the deterministic
+    // extractor when the endpoint is unreachable or returns malformed output —
+    // otherwise run the deterministic path directly. The default experience may
+    // depend on a local model for learning, but always degrades gracefully to
+    // the deterministic baseline.
+    let report = if uses_model_extraction(&config) {
+        CloseoutProcessor::closeout_project_session_with_configured_inference(
+            project_root,
+            &import.session_id,
+        )
+    } else {
+        CloseoutProcessor::closeout_project_session(
+            project_root,
+            &import.session_id,
+            &DeterministicExtractor,
+        )
+    }
     .map_err(|e| LearningError::Closeout(e.to_string()))?;
 
     Ok(CloseoutSummary {
@@ -137,6 +151,19 @@ pub fn closeout_session(
         candidate_count: report.candidate_count,
         enqueued_count: report.enqueued_count,
     })
+}
+
+/// Whether session closeout should use the model-backed extractor for this
+/// project. True when an `[inference]` endpoint is configured and its
+/// `features.extraction` flag is on. The model-backed path falls back to the
+/// deterministic extractor on its own when the endpoint is unreachable, so a
+/// configured-but-down endpoint still produces (deterministic) candidates.
+fn uses_model_extraction(config: &ProjectConfig) -> bool {
+    config
+        .config
+        .inference
+        .as_ref()
+        .is_some_and(|inference| inference.features.extraction)
 }
 
 /// Render a session's messages as a plain-text transcript for import. The text
@@ -407,5 +434,137 @@ mod tests {
             let memory_id = promote(root, &first.id).unwrap();
             assert!(!memory_id.is_empty());
         }
+    }
+
+    use localmind_store::ProjectConfig;
+
+    fn project_config_with(toml: &str) -> (tempfile::TempDir, ProjectConfig) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CONFIG_FILE), toml).unwrap();
+        let config = ProjectConfig::discover(dir.path()).unwrap();
+        (dir, config)
+    }
+
+    /// Path selection: the extractor follows the project's inference config.
+    /// No `[inference]` → deterministic; configured + extraction on → model;
+    /// configured but extraction off → deterministic.
+    #[test]
+    fn extractor_selection_follows_inference_config() {
+        let (_d1, no_inference) = project_config_with("[learning]\nenabled = true\n");
+        assert!(!uses_model_extraction(&no_inference));
+
+        let (_d2, configured) = project_config_with(
+            "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://127.0.0.1:1\"\nchat_model = \"m\"\n",
+        );
+        assert!(uses_model_extraction(&configured));
+
+        let (_d3, feature_off) = project_config_with(
+            "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://127.0.0.1:1\"\nchat_model = \"m\"\n\n[inference.features]\nextraction = false\n",
+        );
+        assert!(!uses_model_extraction(&feature_off));
+    }
+
+    /// Endpoint unavailable: a configured-but-unreachable endpoint must not break
+    /// closeout — the model path falls back to the (hardened) deterministic
+    /// extractor, which still surfaces the explicit lesson.
+    #[test]
+    fn closeout_falls_back_to_deterministic_when_endpoint_unavailable() {
+        // A bound-then-dropped port is guaranteed closed → connection refused.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://{dead_addr}\"\nchat_model = \"m\"\ntimeout_secs = 2\n"
+            ),
+        )
+        .unwrap();
+
+        let store = Store::open(root);
+        let session = SessionId::new();
+        store
+            .append_message(
+                session,
+                &Message::text(Role::User, "Lesson: prefer guard clauses over deeply nested ifs"),
+            )
+            .unwrap();
+
+        let summary = closeout_session(root, &store, session).unwrap();
+        assert!(
+            summary.enqueued_count >= 1,
+            "deterministic fallback should still enqueue the explicit lesson, got {summary:?}"
+        );
+        let items = review_list(root).unwrap();
+        assert!(
+            items.iter().any(|item| item.summary.contains("guard clauses")),
+            "fallback lesson missing: {items:?}"
+        );
+    }
+
+    /// Model path used: a reachable endpoint's structured output drives the
+    /// candidates, not the deterministic extractor.
+    #[test]
+    fn closeout_uses_model_output_when_endpoint_reachable() {
+        let content = "{\"summary_title\":\"T\",\"summary_body\":\"B\",\"candidates\":[\
+            {\"summary\":\"Model-extracted lesson: pin the exporter schema in a test\",\
+            \"category\":\"process\",\"confidence\":0.9,\"action\":\"promote_to_memory\"}]}";
+        let chat_body = serde_json::json!({
+            "choices": [{ "message": { "content": content } }]
+        })
+        .to_string();
+        let base_url = mock_chat_server(chat_body);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"{base_url}\"\nchat_model = \"m\"\ntimeout_secs = 5\n"
+            ),
+        )
+        .unwrap();
+
+        let store = Store::open(root);
+        let session = SessionId::new();
+        store
+            .append_message(session, &Message::text(Role::User, "the parser test was failing"))
+            .unwrap();
+
+        closeout_session(root, &store, session).unwrap();
+        let items = review_list(root).unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|item| item.summary.contains("Model-extracted lesson")),
+            "model output was not used: {items:?}"
+        );
+    }
+
+    /// A one-shot OpenAI-compatible chat endpoint that returns `body` to the
+    /// first request. Returns its base URL.
+    fn mock_chat_server(body: String) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 2048];
+                // Drain the request headers/body enough to let the client finish.
+                let _ = stream.read(&mut buffer);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
     }
 }
