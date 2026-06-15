@@ -11,6 +11,7 @@ use std::io::{self, Stdout};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use crossterm::cursor::MoveTo;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
@@ -30,7 +31,7 @@ use localpilot_tui::{
     Key, Mode, PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -41,6 +42,11 @@ use crate::key_input::{
 };
 
 const MOUSE_TOGGLE_KEY: u8 = 12;
+
+/// Height of the inline live region at the bottom of the terminal. The whole UI
+/// is drawn into this region for now; it becomes the composer-plus-status height
+/// once finished output streams into native scrollback above it.
+const INLINE_VIEWPORT_HEIGHT: u16 = 8;
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
@@ -237,7 +243,12 @@ pub async fn run_chat(
     let session_id = runtime.session_id();
     let mut mouse_capture = mouse_capture_enabled();
     state.mouse_capture = mouse_capture;
-    let mut terminal = enter_terminal(mouse_capture)?;
+    let mut terminal = enter_terminal()?;
+    // Mouse capture stays off by default so native selection, copy/paste, and
+    // scrollwheel keep working; an explicit opt-in turns on wheel reporting.
+    if mouse_capture {
+        let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
+    }
     let result = event_loop(
         &mut terminal,
         &mut state,
@@ -1297,28 +1308,19 @@ fn harness_compaction_mode_label(mode: localpilot_harness::CompactionMode) -> &'
     }
 }
 
-fn enter_terminal(capture_mouse: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
-    write_mouse_tracking_off(&mut stdout)?;
-    write_alternate_scroll_off(&mut stdout)?;
     terminal::enable_raw_mode()?;
-    if capture_mouse {
-        execute!(
-            stdout,
-            terminal::EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture
-        )?;
-    } else {
-        execute!(stdout, terminal::EnterAlternateScreen, EnableBracketedPaste)?;
-        write_mouse_tracking_off(&mut stdout)?;
-        write_alternate_scroll_off(&mut stdout)?;
-    }
+    // Stay in the main screen buffer (no alternate screen) and do not capture the
+    // mouse, so native scrollback, selection, copy/paste, and scrollwheel keep
+    // working. Bracketed paste is still enabled so large pastes arrive as one
+    // event.
+    execute!(stdout, EnableBracketedPaste)?;
     // Ask the terminal to report keys unambiguously (the kitty keyboard
     // protocol), so modified keys like Alt+Enter / Shift+Enter reach the app.
-    // Pushed unconditionally (as Codex does): a terminal that doesn't support it
-    // ignores the sequence, and the support query can false-negative. The flags
-    // are popped on exit.
+    // Pushed unconditionally: a terminal that doesn't support it ignores the
+    // sequence, and the support query can false-negative. The flags are popped on
+    // exit.
     // REPORT_EVENT_TYPES is required alongside DISAMBIGUATE_ESCAPE_CODES so that
     // release/repeat events carry an explicit kind in the CSI sequence. Without it
     // Windows Terminal emits both a legacy press event and a Kitty-encoded event
@@ -1330,7 +1332,15 @@ fn enter_terminal(capture_mouse: bool) -> anyhow::Result<Terminal<CrosstermBacke
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         )
     );
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+    // A bottom inline viewport: finished output lives above it in native
+    // scrollback; only this region is redrawn each frame.
+    let terminal = Terminal::with_options(
+        CrosstermBackend::new(stdout),
+        TerminalOptions {
+            viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+        },
+    )?;
+    Ok(terminal)
 }
 
 fn leave_terminal(
@@ -1338,25 +1348,22 @@ fn leave_terminal(
     capture_mouse: bool,
 ) -> anyhow::Result<()> {
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
-    let _ = write_mouse_tracking_off(terminal.backend_mut());
-    let _ = write_alternate_scroll_off(terminal.backend_mut());
+    // Clear the live region and land the cursor at its top so the shell prompt
+    // resumes cleanly below the finished output — there is no alternate screen to
+    // leave.
+    let region = terminal.get_frame().area();
+    let _ = terminal.clear();
     terminal::disable_raw_mode()?;
     if capture_mouse {
-        execute!(
-            terminal.backend_mut(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            terminal::LeaveAlternateScreen
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            DisableBracketedPaste,
-            terminal::LeaveAlternateScreen
-        )?;
+        let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+        let _ = write_mouse_tracking_off(terminal.backend_mut());
+        let _ = write_alternate_scroll_off(terminal.backend_mut());
     }
-    let _ = write_mouse_tracking_off(terminal.backend_mut());
-    let _ = write_alternate_scroll_off(terminal.backend_mut());
+    execute!(
+        terminal.backend_mut(),
+        MoveTo(region.x, region.y),
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
