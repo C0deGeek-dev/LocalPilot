@@ -161,6 +161,36 @@ Per the ecosystem remote-egress policy, a **remote** provider is never wired int
 learning automatically; pointing inference at a non-loopback endpoint is an
 explicit, disclosed choice.
 
+## Skill semantics (active-skill consumption contract)
+
+A *skill* in this ecosystem is a **reviewable advisory prompt module**, not an
+executable workflow (ecosystem decision: skills are advisory/active prompt
+modules with no silent execution). The lifecycle and the host's consumption
+contract:
+
+1. **Draft → enabled → consumed.** LocalMind distills *disabled* skill drafts
+   from accepted memory. A human enables a draft (`localpilot learning skills`),
+   which makes it an *active* skill carrying provenance to its source memory.
+2. **Host consumption is read-only and explicit.** Two model-callable tools
+   surface skills, both read-only:
+   - `skill_drafts` — lists/shows disabled drafts (suggestions to propose to the
+     user);
+   - `active_skills` — lists/shows enabled skills as advisory guidance the agent
+     applies in its own reasoning.
+   Each tool's only effect is a read inside the workspace
+   (`Effect::ReadPath`). Reading a skill returns Markdown guidance with
+   provenance; it never installs, enables, disables, or runs anything.
+3. **No silent execution, no auto-install.** There is no path by which a skill
+   is executed or activated automatically. Enabling, disabling, and retiring are
+   deliberate human, review-gated steps. A skill body is *content the agent
+   reads*, never an action the host takes.
+4. **Budgeted.** A single skill body is bounded when surfaced, so pulling skill
+   guidance stays lean alongside the always-on accepted-memory context.
+
+This contract is what makes skills safe to surface by default: the worst case of
+a wrong or stale skill is irrelevant guidance the agent can ignore, never an
+unintended action.
+
 ## Derived Context Metadata
 
 Compaction digests, ingestion chunks, and task context packs use the same

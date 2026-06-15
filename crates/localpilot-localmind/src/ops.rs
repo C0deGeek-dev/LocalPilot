@@ -343,6 +343,27 @@ pub fn skills_active(project_root: &Path) -> Result<Vec<ActiveSkillInfo>, Learni
         .collect())
 }
 
+/// Enable (activate) a skill draft — the deliberate human step that turns a
+/// disabled draft into an active, host-consumable skill. Returns the resulting
+/// active skill, or `None` when no draft has that id.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if the store cannot be read or written.
+pub fn skill_activate(
+    project_root: &Path,
+    draft_id: &str,
+) -> Result<Option<ActiveSkillInfo>, LearningError> {
+    let store = open_skills(project_root)?;
+    let record = store
+        .activate(&SkillDraftId::new(draft_id))
+        .map_err(skill_err)?;
+    Ok(record.map(|record| ActiveSkillInfo {
+        id: record.skill.id.to_string(),
+        name: record.skill.name,
+        body_markdown: record.skill.body_markdown,
+    }))
+}
+
 /// Inspect a single skill draft.
 ///
 /// # Errors
@@ -396,6 +417,27 @@ pub fn skill_draft_detail_readonly(
     };
     let record = store.get(&SkillDraftId::new(draft_id)).map_err(skill_err)?;
     Ok(record.map(|record| (draft_info(&record), record.draft.body_markdown)))
+}
+
+/// List **active** (enabled) skills without creating project files. The
+/// read-only, model-facing counterpart of [`skills_active`]: a project with no
+/// store yet returns an empty list instead of initializing one.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if an existing store cannot be read.
+pub fn skills_active_readonly(project_root: &Path) -> Result<Vec<ActiveSkillInfo>, LearningError> {
+    let Some(store) = open_skills_readonly(project_root)? else {
+        return Ok(Vec::new());
+    };
+    let records = store.active().map_err(skill_err)?;
+    Ok(records
+        .into_iter()
+        .map(|record| ActiveSkillInfo {
+            id: record.skill.id.to_string(),
+            name: record.skill.name,
+            body_markdown: record.skill.body_markdown,
+        })
+        .collect())
 }
 
 /// Open the review queue, ensuring the project has a LocalMind config first so a

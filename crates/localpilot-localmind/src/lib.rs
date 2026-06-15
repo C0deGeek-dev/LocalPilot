@@ -8,6 +8,7 @@
 //! LocalMind's contracts and drives the loop; LocalMind never depends back.
 #![forbid(unsafe_code)]
 
+mod active_skills_tool;
 mod codegraph;
 mod context_hook;
 mod error;
@@ -39,11 +40,12 @@ pub use ingest::{
 pub use knowledge_tool::KnowledgeSearch;
 pub use ops::{
     audit, context_for, memory_delete, memory_disable_injection, memory_injection_enabled,
-    memory_list, promote, review_decide, review_list, review_show, search, skill_body, skill_show,
-    skills_active, skills_generate, skills_list, ActiveSkillInfo, AuditEntry, MemorySummary,
-    ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
+    memory_list, promote, review_decide, review_list, review_show, search, skill_activate,
+    skill_body, skill_show, skills_active, skills_generate, skills_list, ActiveSkillInfo,
+    AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
+pub use active_skills_tool::ActiveSkills;
 pub use remember_tool::Remember;
 pub use skill_drafts_tool::SkillDrafts;
 

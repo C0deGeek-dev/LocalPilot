@@ -51,6 +51,9 @@ impl McpTools {
         // workflows) read-only. Listing a draft never enables it — activation
         // stays a deliberate human step.
         registry.register(Box::new(localpilot_localmind::SkillDrafts));
+        // The agent can read active (human-enabled) skills as advisory guidance,
+        // read-only. Reading a skill never runs, installs, or changes it.
+        registry.register(Box::new(localpilot_localmind::ActiveSkills));
         for (descriptor, transport) in &self.entries {
             registry.register(Box::new(McpTool::new(
                 descriptor,
