@@ -191,7 +191,11 @@ mod tests {
         let out = ActiveSkills.invoke(json!({}), &context(&ws)).await.unwrap();
 
         assert!(!out.is_error);
-        assert!(out.text.contains(&id), "the skill id must be listed: {}", out.text);
+        assert!(
+            out.text.contains(&id),
+            "the skill id must be listed: {}",
+            out.text
+        );
         assert!(out.text.contains("[active]"), "got: {}", out.text);
         assert!(
             out.text.to_lowercase().contains("not executed"),

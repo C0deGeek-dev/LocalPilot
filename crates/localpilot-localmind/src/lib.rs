@@ -22,6 +22,7 @@ mod skill_drafts_tool;
 use std::fmt::Write as _;
 use std::path::Path;
 
+pub use active_skills_tool::ActiveSkills;
 pub use codegraph::{
     codegraph_export, codegraph_inspect, codegraph_reindex, CodeGraphSummary, ExportFormat,
     SymbolReport,
@@ -45,7 +46,6 @@ pub use ops::{
     AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
-pub use active_skills_tool::ActiveSkills;
 pub use remember_tool::Remember;
 pub use skill_drafts_tool::SkillDrafts;
 
@@ -123,7 +123,8 @@ fn detect_local_inference_endpoint(project_root: &Path) -> Option<LocalInference
         user: None,
         project: Some(localpilot_config::project_config_path(project_root)),
     };
-    let config = localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).ok()?;
+    let config =
+        localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).ok()?;
     let provider = config.providers.get(&config.provider.default)?;
     let base_url = provider.base_url.as_deref()?;
     if !is_loopback_endpoint(base_url) {
@@ -152,9 +153,7 @@ fn detect_local_inference_endpoint(project_root: &Path) -> Option<LocalInference
 /// learning; LAN/remote endpoints require explicit configuration).
 fn is_loopback_endpoint(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    lower.contains("//127.0.0.1")
-        || lower.contains("//localhost")
-        || lower.contains("//[::1]")
+    lower.contains("//127.0.0.1") || lower.contains("//localhost") || lower.contains("//[::1]")
 }
 
 /// The result of closing out a session into LocalMind.
@@ -569,7 +568,10 @@ mod tests {
         store
             .append_message(
                 session,
-                &Message::text(Role::User, "Lesson: prefer guard clauses over deeply nested ifs"),
+                &Message::text(
+                    Role::User,
+                    "Lesson: prefer guard clauses over deeply nested ifs",
+                ),
             )
             .unwrap();
 
@@ -580,7 +582,9 @@ mod tests {
         );
         let items = review_list(root).unwrap();
         assert!(
-            items.iter().any(|item| item.summary.contains("guard clauses")),
+            items
+                .iter()
+                .any(|item| item.summary.contains("guard clauses")),
             "fallback lesson missing: {items:?}"
         );
     }
@@ -611,7 +615,10 @@ mod tests {
         let store = Store::open(root);
         let session = SessionId::new();
         store
-            .append_message(session, &Message::text(Role::User, "the parser test was failing"))
+            .append_message(
+                session,
+                &Message::text(Role::User, "the parser test was failing"),
+            )
             .unwrap();
 
         closeout_session(root, &store, session).unwrap();
