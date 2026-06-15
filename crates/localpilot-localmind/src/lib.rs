@@ -16,6 +16,7 @@ mod knowledge_tool;
 mod ops;
 mod pack;
 mod remember_tool;
+mod skill_drafts_tool;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -44,6 +45,7 @@ pub use ops::{
 };
 pub use pack::{PackEntry, PackSource};
 pub use remember_tool::Remember;
+pub use skill_drafts_tool::SkillDrafts;
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
 use localmind_store::{

@@ -36,6 +36,18 @@ const REMEMBER_CUE: &str = concat!(
     "sparingly, not for transient notes.",
 );
 
+/// The cue, appended only when the `skill_drafts` tool is registered, that tells
+/// the model candidate skill drafts may exist and that surfacing one never
+/// activates it.
+const SKILL_DRAFTS_CUE: &str = concat!(
+    "\n\n",
+    "This project may have generated skill drafts — candidate reusable workflows ",
+    "distilled from accepted memory. When a task resembles a recurring workflow, call ",
+    "`skill_drafts` to list or inspect them. They are always disabled; you can surface a ",
+    "relevant one and propose it to the user, but enabling a skill stays a human step — ",
+    "never assume a draft is active.",
+);
+
 /// Render the prompt from the sorted tool names. Split from
 /// [`agent_system_prompt`] so the tool-driven cue is unit-testable without a live
 /// registry.
@@ -47,6 +59,11 @@ fn build_prompt(names: &[&str]) -> String {
     };
     let remember_cue = if names.contains(&"remember") {
         REMEMBER_CUE
+    } else {
+        ""
+    };
+    let skill_drafts_cue = if names.contains(&"skill_drafts") {
+        SKILL_DRAFTS_CUE
     } else {
         ""
     };
@@ -70,7 +87,7 @@ for it — `bypass` lifts the permission gate, but does not imply permission to
 mutate history or share work without being told to.
 
 Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}{remember_cue}
+{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}
 
 Tool use loop:
 - inspect before acting;
@@ -118,6 +135,24 @@ mod cue_tests {
         assert!(
             !without.contains("call `remember`"),
             "the cue must be absent when remember is not registered"
+        );
+    }
+
+    #[test]
+    fn the_skill_drafts_cue_appears_only_when_the_tool_is_registered() {
+        let with = build_prompt(&["skill_drafts", "read_file"]);
+        assert!(
+            with.contains("call `skill_drafts`"),
+            "the cue must be present when skill_drafts is registered"
+        );
+        assert!(
+            with.contains("enabling a skill stays a human step"),
+            "the cue must keep activation a human step"
+        );
+        let without = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !without.contains("skill drafts"),
+            "the cue must be absent when skill_drafts is not registered"
         );
     }
 }

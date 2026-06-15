@@ -366,6 +366,38 @@ pub fn skill_body(project_root: &Path, draft_id: &str) -> Result<Option<String>,
     Ok(record.map(|record| record.draft.body_markdown))
 }
 
+/// List generated skill drafts **without** creating any project files. A project
+/// that has never closed out (no `.localmind.toml`) has no drafts, so this
+/// returns an empty list instead of initializing the store — keeping it safe to
+/// call from a read-only, model-facing surface on a bare prompt.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if an existing draft store cannot be read.
+pub fn skill_drafts_readonly(project_root: &Path) -> Result<Vec<SkillDraftInfo>, LearningError> {
+    let Some(store) = open_skills_readonly(project_root)? else {
+        return Ok(Vec::new());
+    };
+    let records = store.list().map_err(skill_err)?;
+    Ok(records.iter().map(draft_info).collect())
+}
+
+/// Inspect a single skill draft — its display info and Markdown body — without
+/// creating project files. Read-only; returns `None` when the project has no
+/// store yet or no draft with that id.
+///
+/// # Errors
+/// Returns [`LearningError::Skill`] if an existing draft store cannot be read.
+pub fn skill_draft_detail_readonly(
+    project_root: &Path,
+    draft_id: &str,
+) -> Result<Option<(SkillDraftInfo, String)>, LearningError> {
+    let Some(store) = open_skills_readonly(project_root)? else {
+        return Ok(None);
+    };
+    let record = store.get(&SkillDraftId::new(draft_id)).map_err(skill_err)?;
+    Ok(record.map(|record| (draft_info(&record), record.draft.body_markdown)))
+}
+
 /// Open the review queue, ensuring the project has a LocalMind config first so a
 /// never-closed-out project opens an empty queue rather than erroring.
 fn open_queue(project_root: &Path) -> Result<ReviewQueue, LearningError> {
@@ -383,6 +415,18 @@ fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> 
 fn open_skills(project_root: &Path) -> Result<SkillDraftStore, LearningError> {
     crate::initialize(project_root)?;
     SkillDraftStore::open_project(project_root).map_err(skill_err)
+}
+
+/// Open the skill-draft store **only if** the project already has a LocalMind
+/// config, so a read-only caller never creates `.localmind.toml`. Returns `None`
+/// when the project has no store yet.
+fn open_skills_readonly(project_root: &Path) -> Result<Option<SkillDraftStore>, LearningError> {
+    if !project_root.join(crate::CONFIG_FILE).exists() {
+        return Ok(None);
+    }
+    SkillDraftStore::open_project(project_root)
+        .map(Some)
+        .map_err(skill_err)
 }
 
 fn review_err(e: impl std::fmt::Display) -> LearningError {

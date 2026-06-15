@@ -47,6 +47,10 @@ impl McpTools {
         // The agent can propose a durable lesson for human review as it works.
         // Enqueue-only — never a direct accepted-memory write.
         registry.register(Box::new(localpilot_localmind::Remember));
+        // The agent can surface generated skill drafts (candidate reusable
+        // workflows) read-only. Listing a draft never enables it — activation
+        // stays a deliberate human step.
+        registry.register(Box::new(localpilot_localmind::SkillDrafts));
         for (descriptor, transport) in &self.entries {
             registry.register(Box::new(McpTool::new(
                 descriptor,
