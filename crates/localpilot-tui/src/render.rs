@@ -21,6 +21,13 @@ use crate::state::{
 /// Most text rows the input box grows to before it starts scrolling.
 const MAX_INPUT_TEXT_ROWS: u16 = 10;
 
+/// Most rows the live activity tail grows the region by before it scrolls
+/// internally; keeps a long stream from pushing the composer off-screen.
+const MAX_ACTIVITY_ROWS: u16 = 6;
+
+/// The two-row status line at the bottom of the live region.
+const STATUS_ROWS: u16 = 2;
+
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 
 /// A rounded-border block whose title is padded on the left with a space so the
@@ -126,14 +133,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 }
 
-/// The transient live tail: the model's plan, any running tools, the reasoning
-/// panel (when shown), and the in-progress streamed answer — bottom-anchored so
-/// the latest rows stay visible. Each item settles into scrollback once it is
-/// finished; this surface is for work still in flight.
-fn render_activity(frame: &mut Frame, area: Rect, state: &AppState) {
-    if area.height == 0 {
-        return;
-    }
+/// The transient live tail as styled lines: the model's plan, any running tools,
+/// the reasoning panel (when shown), and the in-progress streamed answer. Each
+/// item settles into scrollback once finished; this surface is for work in flight.
+fn activity_lines(state: &AppState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
     if !state.plan.is_empty() {
@@ -192,13 +195,33 @@ fn render_activity(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
+    lines
+}
+
+/// Rows the activity tail wraps to at `width`, capped so a long stream does not
+/// grow the live region without bound (it scrolls internally past the cap).
+fn activity_height(state: &AppState, width: u16) -> u16 {
+    let lines = activity_lines(state);
+    if lines.is_empty() {
+        return 0;
+    }
+    (Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16)
+        .clamp(1, MAX_ACTIVITY_ROWS)
+}
+
+/// Draw the transient live tail, bottom-anchored so the latest rows stay visible
+/// when the tail is taller than the region.
+fn render_activity(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = activity_lines(state);
     if lines.is_empty() {
         return;
     }
     let text = Text::from(lines);
-    // Bottom-anchor: count wrapped rows with ratatui's own word-wrapping and
-    // scroll so the latest rows stay in view when the tail is taller than the
-    // region.
     let total = (Paragraph::new(text.clone())
         .wrap(Wrap { trim: false })
         .line_count(area.width) as u16)
@@ -230,18 +253,31 @@ fn wrapped_rows(text: &str, width: u16) -> usize {
         .sum()
 }
 
-/// Height of the bordered input box: it grows with the content up to a cap, then
-/// the content scrolls inside a fixed box, never starving the status line.
-fn input_box_height(state: &AppState, area: Rect) -> u16 {
-    let inner_width = area.width.saturating_sub(2);
+/// Text rows the composer needs for its current content at `width`, clamped to
+/// `[1, MAX_INPUT_TEXT_ROWS]`. Beyond the cap the content scrolls inside the box.
+fn composer_rows(state: &AppState, width: u16) -> u16 {
+    let inner_width = width.saturating_sub(2);
     let cursor_rows = input_cursor_position(state, inner_width).0 + 1;
-    let text_rows = (wrapped_rows(&state.input, inner_width) as u16)
+    (wrapped_rows(&state.input, inner_width) as u16)
         .max(cursor_rows)
-        .max(1);
-    // Leave room for the two-row status line and this box's own two border rows.
-    let room = area.height.saturating_sub(2 + 2);
+        .clamp(1, MAX_INPUT_TEXT_ROWS)
+}
+
+/// Height of the bordered input box (composer rows + two borders), additionally
+/// capped so it never starves the status line in a small render area.
+fn input_box_height(state: &AppState, area: Rect) -> u16 {
+    let room = area.height.saturating_sub(STATUS_ROWS + 2);
     let cap = room.clamp(1, MAX_INPUT_TEXT_ROWS);
-    text_rows.min(cap) + 2
+    composer_rows(state, area.width).min(cap) + 2
+}
+
+/// The natural height of the whole live region for the current state at `width`:
+/// the capped activity tail, the composer box, and the status line. The host
+/// sizes the inline viewport to this and re-inits the terminal when it changes,
+/// since ratatui has no in-place inline-viewport-height setter.
+#[must_use]
+pub fn live_region_height(state: &AppState, width: u16) -> u16 {
+    activity_height(state, width) + composer_rows(state, width) + 2 + STATUS_ROWS
 }
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -350,19 +386,15 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             f.tokens_in, f.tokens_out, f.tokens_per_sec
         )),
     ]);
-    let mut line2 = format!(
-        "F12 mouse:{}",
-        if state.mouse_capture {
-            "wheel"
-        } else {
-            "select"
-        }
-    );
+    let mut line2 = String::new();
     if let Some(cost) = f.cost_usd {
-        line2.push_str(&format!("  est ${cost:.4}"));
+        line2.push_str(&format!("est ${cost:.4}"));
     }
     if let Some(reset) = &f.quota_reset {
-        line2.push_str(&format!("  quota resets: {reset}"));
+        if !line2.is_empty() {
+            line2.push_str("  ");
+        }
+        line2.push_str(&format!("quota resets: {reset}"));
     }
     frame.render_widget(
         Paragraph::new(Text::from(vec![line1, Line::raw(line2)])),
@@ -652,6 +684,35 @@ mod tests {
             .draw(|frame| render(frame, &state))
             .expect("render succeeds");
         assert!(buffer_to_string(&terminal).contains("plan (1/2)"));
+    }
+
+    #[test]
+    fn live_region_height_grows_and_shrinks_with_the_composer() {
+        let empty = state_with_input("");
+        let multiline = state_with_input("a\nb\nc\nd\ne");
+        // Empty composer: one row + two borders + the two-row status.
+        assert_eq!(live_region_height(&empty, 80), 5);
+        // Five composer rows + two borders + status.
+        assert_eq!(live_region_height(&multiline, 80), 9);
+        assert!(live_region_height(&multiline, 80) > live_region_height(&empty, 80));
+    }
+
+    #[test]
+    fn live_region_height_includes_capped_activity() {
+        let mut state = state_with_input("");
+        state.streaming = "one\ntwo\nthree".to_string();
+        // Three activity rows + one composer row + two borders + status.
+        assert_eq!(live_region_height(&state, 80), 8);
+
+        // A very tall stream is capped so the composer is never pushed off-screen.
+        state.streaming = (1..=20)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            live_region_height(&state, 80),
+            MAX_ACTIVITY_ROWS + 1 + 2 + STATUS_ROWS
+        );
     }
 
     #[test]

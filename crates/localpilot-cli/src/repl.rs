@@ -13,9 +13,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
@@ -40,16 +39,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{
     is_cancel, is_key_action, is_newline, is_submit, is_unbracketed_paste_newline_key,
-    may_be_unbracketed_paste_key, mouse_capture_enabled, write_alternate_scroll_off,
-    write_mouse_tracking_off, UnbracketedPaste, UnbracketedPasteAction,
+    may_be_unbracketed_paste_key, UnbracketedPaste, UnbracketedPasteAction,
 };
 
-const MOUSE_TOGGLE_KEY: u8 = 12;
-
-/// Height of the inline live region at the bottom of the terminal. The whole UI
-/// is drawn into this region for now; it becomes the composer-plus-status height
-/// once finished output streams into native scrollback above it.
-const INLINE_VIEWPORT_HEIGHT: u16 = 8;
+/// Initial height of the inline live region before the first draw sizes it to the
+/// state: an empty composer (one row plus its two borders) above the two-row
+/// status line.
+const INITIAL_INLINE_HEIGHT: u16 = 5;
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
@@ -244,14 +240,7 @@ pub async fn run_chat(
     }
 
     let session_id = runtime.session_id();
-    let mut mouse_capture = mouse_capture_enabled();
-    state.mouse_capture = mouse_capture;
     let mut terminal = enter_terminal()?;
-    // Mouse capture stays off by default so native selection, copy/paste, and
-    // scrollwheel keep working; an explicit opt-in turns on wheel reporting.
-    if mouse_capture {
-        let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
-    }
     // Print the session header once into native scrollback; it scrolls into
     // history naturally as the conversation grows.
     emit_block(&mut terminal, header_text(&state.header))?;
@@ -260,7 +249,6 @@ pub async fn run_chat(
         &mut state,
         &mut runtime,
         &mut approval_rx,
-        &mut mouse_capture,
         CommandHost {
             approval_tx,
             cwd: &cwd,
@@ -269,7 +257,7 @@ pub async fn run_chat(
         },
     )
     .await;
-    leave_terminal(&mut terminal, mouse_capture)?;
+    leave_terminal(&mut terminal)?;
     // Learn from the finished session. This is best-effort so terminal teardown
     // is never held hostage by the learning subsystem.
     crate::context_inject::close_out(&cwd, session_id);
@@ -281,7 +269,6 @@ async fn event_loop(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    mouse_capture: &mut bool,
     host: CommandHost<'_>,
 ) -> anyhow::Result<()> {
     let mut unbracketed_paste = UnbracketedPaste::default();
@@ -295,9 +282,7 @@ async fn event_loop(
             match event::read()? {
                 Event::Key(key) if is_key_action(key) => {
                     let buffered_after = buffered_after_key(key)?;
-                    if is_mouse_toggle(key) {
-                        toggle_mouse_capture(terminal, state, mouse_capture)?;
-                    } else if state.trust.is_some() {
+                    if state.trust.is_some() {
                         // While the trust gate is up, route keys to it and persist
                         // the decision when the folder is trusted.
                         if let Some(mapped) = map_key(key) {
@@ -314,15 +299,7 @@ async fn event_loop(
                     ) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
-                        submit_current_input(
-                            terminal,
-                            state,
-                            runtime,
-                            approval_rx,
-                            mouse_capture,
-                            &host,
-                        )
-                        .await?;
+                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
                     } else if slash_picker_captures(state, key) || file_picker_captures(state, key)
                     {
                         if let Some(mapped) = map_key(key) {
@@ -331,15 +308,7 @@ async fn event_loop(
                     } else if is_newline(key, &state.input) {
                         state.insert_input_newline();
                     } else if is_submit(key, &state.input) {
-                        submit_current_input(
-                            terminal,
-                            state,
-                            runtime,
-                            approval_rx,
-                            mouse_capture,
-                            &host,
-                        )
-                        .await?;
+                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
                     } else if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
                     }
@@ -347,11 +316,6 @@ async fn event_loop(
                 // Bracketed paste: insert small pastes inline, but collapse large
                 // ones to a placeholder so the input line stays readable.
                 Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
-                Event::Mouse(mouse) if state.trust.is_none() => {
-                    if let Some(mapped) = map_mouse(mouse.kind) {
-                        handle_input(state, AppInput::Key(mapped));
-                    }
-                }
                 _ => {}
             }
         }
@@ -363,7 +327,6 @@ async fn submit_current_input(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
 ) -> anyhow::Result<()> {
     // Expand collapsed pastes for the model, but keep the compact form in the
@@ -373,28 +336,11 @@ async fn submit_current_input(
         return Ok(());
     }
     if let Some(action) = parse_slash(&prompt) {
-        run_slash(
-            terminal,
-            state,
-            runtime,
-            approval_rx,
-            mouse_capture,
-            host,
-            action,
-        )
-        .await
+        run_slash(terminal, state, runtime, approval_rx, host, action).await
     } else {
         state.apply(UiEvent::UserMessage(shown));
         state.busy = true;
-        let outcome = run_turn(
-            terminal,
-            state,
-            runtime,
-            approval_rx,
-            mouse_capture,
-            &prompt,
-        )
-        .await;
+        let outcome = run_turn(terminal, state, runtime, approval_rx, &prompt).await;
         state.busy = false;
         // The turn may have created or removed files; refresh the @-mention list.
         state.set_workspace_files(workspace_files(host.cwd));
@@ -407,7 +353,6 @@ async fn run_slash(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
     action: SlashAction,
 ) -> anyhow::Result<()> {
@@ -544,12 +489,12 @@ async fn run_slash(
         SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
-            run_harness_command(terminal, state, approval_rx, mouse_capture, host, false).await?;
+            run_harness_command(terminal, state, approval_rx, host, false).await?;
         }
         SlashAction::WaitResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
-            run_harness_command(terminal, state, approval_rx, mouse_capture, host, true).await?;
+            run_harness_command(terminal, state, approval_rx, host, true).await?;
         }
         SlashAction::Ingest(action) => run_ingest_slash(state, host.cwd, action),
         SlashAction::Knowledge(query) => {
@@ -693,7 +638,6 @@ async fn run_harness_command(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    mouse_capture: &mut bool,
     host: &CommandHost<'_>,
     wait_resume: bool,
 ) -> anyhow::Result<()> {
@@ -752,7 +696,6 @@ async fn run_harness_command(
         &cancel,
         started,
         None,
-        mouse_capture,
         operation,
     )
     .await;
@@ -770,7 +713,6 @@ async fn run_turn(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    mouse_capture: &mut bool,
     prompt: &str,
 ) -> anyhow::Result<()> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
@@ -791,7 +733,6 @@ async fn run_turn(
         &cancel,
         started,
         Some(&steer),
-        mouse_capture,
         turn,
     )
     .await
@@ -806,7 +747,6 @@ async fn drive_runtime_operation<F, T>(
     cancel: &CancellationToken,
     started: std::time::Instant,
     steer: Option<&localpilot_harness::SteerQueue>,
-    mouse_capture: &mut bool,
     operation: F,
 ) -> anyhow::Result<T>
 where
@@ -837,12 +777,6 @@ where
                         Event::Key(key) if is_key_action(key) => buffered_after_key(key)?,
                         _ => false,
                     };
-                    if let Event::Key(key) = event {
-                        if is_key_action(key) && is_mouse_toggle(key) {
-                            toggle_mouse_capture(terminal, state, mouse_capture)?;
-                            continue;
-                        }
-                    }
                     pending = resolve_event(
                         state,
                         pending,
@@ -976,11 +910,6 @@ fn resolve_event(
                 }
             }
             Event::Paste(text) => insert_paste(state, text),
-            Event::Mouse(mouse) => {
-                if let Some(mapped) = map_mouse(mouse.kind) {
-                    handle_input(state, AppInput::Key(mapped));
-                }
-            }
             _ => {}
         }
         None
@@ -1043,33 +972,6 @@ fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::PageDown => Some(Key::PageDown),
         _ => None,
     }
-}
-
-fn is_mouse_toggle(key: KeyEvent) -> bool {
-    key.modifiers.is_empty() && matches!(key.code, KeyCode::F(MOUSE_TOGGLE_KEY))
-}
-
-fn toggle_mouse_capture(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    state: &mut AppState,
-    mouse_capture: &mut bool,
-) -> anyhow::Result<()> {
-    *mouse_capture = !*mouse_capture;
-    state.mouse_capture = *mouse_capture;
-    if *mouse_capture {
-        execute!(terminal.backend_mut(), EnableMouseCapture)?;
-        state.apply(UiEvent::Notice(
-            "mouse wheel scroll enabled; press F12 to restore normal selection".to_string(),
-        ));
-    } else {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-        write_mouse_tracking_off(terminal.backend_mut())?;
-        write_alternate_scroll_off(terminal.backend_mut())?;
-        state.apply(UiEvent::Notice(
-            "normal terminal selection restored; press F12 for mouse wheel scrolling".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn slash_picker_captures(state: &AppState, key: KeyEvent) -> bool {
@@ -1136,14 +1038,6 @@ fn slash_picker_exact_submit(state: &AppState, key: KeyEvent) -> bool {
         return false;
     };
     state.input.trim() == format!("/{}", suggestion.name)
-}
-
-fn map_mouse(kind: MouseEventKind) -> Option<Key> {
-    match kind {
-        MouseEventKind::ScrollUp => Some(Key::PageUp),
-        MouseEventKind::ScrollDown => Some(Key::PageDown),
-        _ => None,
-    }
 }
 
 fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
@@ -1345,12 +1239,42 @@ fn flush_scrollback(
     Ok(())
 }
 
-/// Commit finished history to scrollback, then redraw the live region.
+/// Resize the inline live region to `height` by re-initialising the terminal —
+/// ratatui has no in-place inline-viewport-height setter. The old region is
+/// cleared and the cursor parked at its top first, so the regrown region reserves
+/// from the same baseline and leaves no stale rows in scrollback.
+fn resize_viewport(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    height: u16,
+) -> anyhow::Result<()> {
+    let region = terminal.get_frame().area();
+    let _ = terminal.clear();
+    execute!(terminal.backend_mut(), MoveTo(region.x, region.y))?;
+    *terminal = Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )?;
+    Ok(())
+}
+
+/// Commit finished history to scrollback, size the live region to the current
+/// state, then redraw it.
 fn draw_ui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     flush_scrollback(terminal, state)?;
+    // The composer grows and shrinks with its content; track the live region's
+    // natural height and re-init the inline viewport when it changes. Clamp to the
+    // current terminal height so a short window does not trigger a re-init loop and
+    // a width change reflows on the recompute.
+    let size = terminal.size()?;
+    let desired = localpilot_tui::live_region_height(state, size.width).min(size.height);
+    if terminal.get_frame().area().height != desired {
+        resize_viewport(terminal, desired)?;
+    }
     terminal.draw(|frame| render(frame, state))?;
     Ok(())
 }
@@ -1384,16 +1308,13 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     let terminal = Terminal::with_options(
         CrosstermBackend::new(stdout),
         TerminalOptions {
-            viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+            viewport: Viewport::Inline(INITIAL_INLINE_HEIGHT),
         },
     )?;
     Ok(terminal)
 }
 
-fn leave_terminal(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    capture_mouse: bool,
-) -> anyhow::Result<()> {
+fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     // Clear the live region and land the cursor at its top so the shell prompt
     // resumes cleanly below the finished output — there is no alternate screen to
@@ -1401,11 +1322,6 @@ fn leave_terminal(
     let region = terminal.get_frame().area();
     let _ = terminal.clear();
     terminal::disable_raw_mode()?;
-    if capture_mouse {
-        let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
-        let _ = write_mouse_tracking_off(terminal.backend_mut());
-        let _ = write_alternate_scroll_off(terminal.backend_mut());
-    }
     execute!(
         terminal.backend_mut(),
         MoveTo(region.x, region.y),

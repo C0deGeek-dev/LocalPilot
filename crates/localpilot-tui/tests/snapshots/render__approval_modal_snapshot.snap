@@ -12,5 +12,4 @@ expression: "render_string(&state, 90, 12)"
 ╭ input  (Enter│                                                          │──────────────╮
 │              │[y] approve   [n] deny                                    │              │
 ╰──────────────╰──────────────────────────────────────────────────────────╯──────────────╯
-mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        
-F12 mouse:select
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000

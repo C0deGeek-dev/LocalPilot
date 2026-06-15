@@ -8,5 +8,4 @@ assistant: Streaming the answer live...
 ╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        
-F12 mouse:select
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000

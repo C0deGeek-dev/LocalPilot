@@ -15,7 +15,7 @@ mod render;
 mod state;
 
 pub use app::{handle_input, parse_slash, run, AppInput, IngestAction, Key, SlashAction};
-pub use render::{header_text, history_block_text, render};
+pub use render::{header_text, history_block_text, live_region_height, render};
 pub use state::{
     ActiveTool, AppState, ApprovalRequest, FooterStats, Header, Mode, Paste, Picker, PlanItem,
     Profile, ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
