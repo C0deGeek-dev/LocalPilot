@@ -14,6 +14,14 @@ ingest, LocalMind data quality, and retrieval. It is intentionally
 implementation-checkable: after the feature ships, every section should map to
 code, tests, docs, or an explicit non-goal.
 
+> **Scope and authority.** This doc owns LocalPilot's *host-side* context
+> behaviour (compaction, ingest, retrieval into the prompt). For the memory and
+> learning engine itself — session capture, lesson extraction, the review queue,
+> accepted-memory promotion, skills, and the graph layer — the **LocalMind
+> `vision.md`** is authoritative. Where the two overlap, defer to LocalMind
+> `vision.md` for engine semantics and keep this doc to how LocalPilot consumes
+> them.
+
 ## Core Model
 
 Context has layers with different trust and lifetimes:
