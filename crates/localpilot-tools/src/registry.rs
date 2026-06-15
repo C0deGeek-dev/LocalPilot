@@ -7,9 +7,10 @@ use serde_json::Value;
 
 use crate::builtins::{
     ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog, GitRestore,
-    GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile, RunShell, SearchText,
+    GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile, SearchText,
     UpdatePlan, WriteFile,
 };
+use crate::builtins_shell::RunShell;
 use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
 
 /// Context-size bound on a tool result. Output beyond this is kept as head +

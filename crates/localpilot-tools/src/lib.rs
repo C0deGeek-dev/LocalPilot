@@ -8,14 +8,16 @@
 #![forbid(unsafe_code)]
 
 mod builtins;
+mod builtins_shell;
 mod error;
 mod registry;
 mod tool;
 
 pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
-    ReplaceInFile, RunShell, SearchText, WriteFile,
+    ReplaceInFile, SearchText, WriteFile,
 };
+pub use builtins_shell::RunShell;
 pub use error::ToolError;
 pub use registry::ToolRegistry;
 pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
