@@ -177,8 +177,6 @@ pub struct AppState {
     /// How many `transcript` items have already been emitted to scrollback.
     scrollback_emitted: usize,
     pub streaming: String,
-    /// Visual rows to keep above the latest transcript output.
-    pub transcript_scroll: usize,
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
     pub input_cursor: usize,
@@ -227,7 +225,6 @@ impl AppState {
             transcript: Vec::new(),
             scrollback_emitted: 0,
             streaming: String::new(),
-            transcript_scroll: 0,
             input: String::new(),
             input_cursor: 0,
             input_history: Vec::new(),
@@ -500,7 +497,6 @@ impl AppState {
         self.transcript.clear();
         self.scrollback_emitted = 0;
         self.streaming.clear();
-        self.transcript_scroll = 0;
         self.search = None;
         self.thinking.text.clear();
         self.plan.clear();
@@ -525,22 +521,6 @@ impl AppState {
     /// Set or clear the active transcript search query.
     pub fn set_search(&mut self, query: Option<String>) {
         self.search = query.filter(|q| !q.is_empty());
-    }
-
-    /// Scroll the transcript upward by rendered rows.
-    pub fn scroll_transcript_up(&mut self, rows: usize) {
-        let max_scroll = self.transcript_logical_rows().saturating_sub(1);
-        self.transcript_scroll = self.transcript_scroll.saturating_add(rows).min(max_scroll);
-    }
-
-    /// Scroll the transcript downward by rendered rows.
-    pub fn scroll_transcript_down(&mut self, rows: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(rows);
-    }
-
-    /// Resume following the latest transcript output.
-    pub fn scroll_transcript_to_bottom(&mut self) {
-        self.transcript_scroll = 0;
     }
 
     // --- Slash picker --------------------------------------------------------
@@ -804,20 +784,6 @@ impl AppState {
             self.input.replace_range(at..cursor, &insert);
             self.input_cursor = at + insert.len();
         }
-    }
-
-    fn transcript_logical_rows(&self) -> usize {
-        let transcript_rows = self
-            .transcript
-            .iter()
-            .map(|line| line.text.trim_start_matches('\n').split('\n').count())
-            .sum::<usize>();
-        let streaming_rows = if self.streaming.is_empty() {
-            0
-        } else {
-            self.streaming.trim_start_matches('\n').split('\n').count()
-        };
-        transcript_rows + streaming_rows
     }
 
     /// Apply a mapped runtime/UI event to the state.

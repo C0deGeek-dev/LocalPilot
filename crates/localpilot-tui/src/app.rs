@@ -28,8 +28,6 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
-    ScrollUp,
-    ScrollDown,
     CtrlC,
 }
 
@@ -359,10 +357,9 @@ fn handle_key(state: &mut AppState, key: Key) {
         }
         Key::Home => state.move_input_home(),
         Key::End => state.move_input_end(),
-        Key::PageUp => state.scroll_transcript_up(10),
-        Key::PageDown => state.scroll_transcript_down(10),
-        Key::ScrollUp => state.scroll_transcript_up(3),
-        Key::ScrollDown => state.scroll_transcript_down(3),
+        // The terminal's own scrollback handles scrolling now, so the page keys
+        // no longer drive an in-app transcript scroll.
+        Key::PageUp | Key::PageDown => {}
         Key::Tab => {}
         Key::Char(c) => {
             state.insert_input(&c.to_string());
@@ -591,36 +588,18 @@ mod tests {
     }
 
     #[test]
-    fn transcript_scroll_keys_do_not_edit_input() {
+    fn the_page_keys_no_longer_edit_the_input() {
         let mut state = state();
         state.trust = None;
         state.input = "prompt".to_string();
         state.input_cursor = state.input.len();
-        state.streaming = (1..=20)
-            .map(|line| format!("response line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
 
+        // Scrolling is the terminal's job now; the page keys are inert and must
+        // not leak into the composer.
         handle_key(&mut state, Key::PageUp);
-        handle_key(&mut state, Key::ScrollUp);
+        handle_key(&mut state, Key::PageDown);
         assert_eq!(state.input, "prompt");
-        assert_eq!(state.transcript_scroll, 13);
-
-        handle_key(&mut state, Key::ScrollDown);
-        assert_eq!(state.transcript_scroll, 10);
-    }
-
-    #[test]
-    fn transcript_scroll_up_is_capped_to_existing_output() {
-        let mut state = state();
-        state.trust = None;
-        state.streaming = "one\ntwo\nthree".to_string();
-
-        handle_key(&mut state, Key::PageUp);
-        assert_eq!(state.transcript_scroll, 2);
-
-        handle_key(&mut state, Key::ScrollDown);
-        assert_eq!(state.transcript_scroll, 0);
+        assert_eq!(state.input_cursor, state.input.len());
     }
 
     #[test]

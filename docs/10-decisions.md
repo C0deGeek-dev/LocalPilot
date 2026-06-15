@@ -2,6 +2,69 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0022: The Final Alternate-Screen TUI Is Preserved As An Annotated Tag
+
+Status: accepted. Supports ADR-0021.
+
+Before the move to inline rendering, the last full alternate-screen terminal UI
+— with mouse capture and the mouse-mode toggle — was frozen as an annotated,
+immutable git tag, `legacy-altscreen-tui`, on the pristine pre-change release
+commit. It is a keep-for-posterity restore point only and is not maintained
+further.
+
+To restore and run it from a clean checkout, the bundled LocalMind submodule
+must be initialised first:
+
+```text
+git checkout legacy-altscreen-tui
+git submodule update --init --recursive
+cargo run -p localpilot --features tui -- chat
+```
+
+Reason:
+
+- a clearly named, immutable, zero-maintenance restore point lets anyone recover
+  the previous interface in one step without keeping dead code on the main line
+- recording the exact restore command — including the submodule step, which a
+  fresh checkout or worktree otherwise misses — makes the rollback reproducible
+
+## ADR-0021: Inline Terminal Rendering, No Alternate Screen Or Mouse Capture
+
+Status: accepted. Refines ADR-0006; the committed ratatui + crossterm stack is
+unchanged and this record fixes how that stack is driven.
+
+The interactive REPL renders inline in the terminal's main screen buffer rather
+than taking over an alternate screen. Finished transcript items — user messages,
+assistant turns, tool results, system notices — are written once into the
+terminal's native scrollback with ratatui's `Terminal::insert_before`, and a
+small bottom region (a `Viewport::Inline`) holds the only redrawn surface: the
+in-progress activity, the composer, and the status line. The mouse is never
+captured.
+
+Consequences:
+
+- Native scrollback, text selection, copy/paste, scrollwheel, and the terminal's
+  own search work again, because the app neither switches screen buffers nor
+  captures the mouse. The previous mouse-mode toggle is removed.
+- History is append-only: a finished block is emitted once and never redrawn;
+  only the bottom region repaints each frame.
+- The inline region's height tracks the composer. Because the framework has no
+  in-place inline-height setter, the terminal is re-initialised when the height
+  changes. The `scrolling-regions` capability is enabled so inserting history
+  uses the terminal's scroll regions instead of clearing the region each commit.
+- Arbitrary full-screen layout — a sticky top bar, or split panes that survive
+  scrolling — is given up. For a header-once, stream-output, input-at-bottom
+  agent REPL this loses nothing that matters.
+
+Reason:
+
+- the alternate-screen renderer was large and unstable and it disabled the
+  terminal features users expect; inline rendering is less code and restores them
+- the target API is ratatui's public `Viewport::Inline` / `Terminal::insert_before`;
+  behaviour was cross-checked against a local read-only behaviour reference, while
+  the implementation, prompts, and tests are original to this repository
+  (clean-room, ADR-0005)
+
 ## ADR-0020: Skills Are Read-Only Advisory Prompt Modules
 
 Status: accepted. Builds on ADR-0011 (review-gating) and ADR-0013.
