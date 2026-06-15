@@ -60,11 +60,23 @@ pub use error::LearningError;
 /// The project-local LocalMind config file name.
 const CONFIG_FILE: &str = ".localmind.toml";
 
-/// A minimal local-only learning config, written on first use.
-const DEFAULT_CONFIG: &str = "[learning]\nenabled = true\nlocal_only = true\n";
+/// The local-only learning header, always written.
+const LEARNING_CONFIG: &str = "[learning]\nenabled = true\nlocal_only = true\n";
+
+/// A local inference endpoint derived from the host's own provider config.
+struct LocalInferenceEndpoint {
+    base_url: String,
+    model: String,
+}
 
 /// Ensure the project has a LocalMind config, writing a local-only default when
-/// absent. Returns whether a config was created.
+/// absent. When the project's default LocalPilot provider points at a loopback
+/// endpoint, the written config also enables model-backed learning against that
+/// same local endpoint, so "local models do the learning jobs" needs no manual
+/// plumbing. The model path degrades to the deterministic extractor when the
+/// endpoint is unreachable, and a remote provider is never wired automatically
+/// (that stays an explicit opt-in per the ecosystem remote-egress policy).
+/// Returns whether a config was created.
 ///
 /// # Errors
 /// Returns [`LearningError::Config`] if the file cannot be written.
@@ -73,8 +85,74 @@ pub fn initialize(project_root: &Path) -> Result<bool, LearningError> {
     if path.exists() {
         return Ok(false);
     }
-    std::fs::write(&path, DEFAULT_CONFIG).map_err(|e| LearningError::Config(e.to_string()))?;
+    let endpoint = detect_local_inference_endpoint(project_root);
+    std::fs::write(&path, render_default_config(endpoint.as_ref()))
+        .map_err(|e| LearningError::Config(e.to_string()))?;
     Ok(true)
+}
+
+/// Build the default `.localmind.toml` body: always the local-only learning
+/// header, plus an `[inference]` block pointing at `endpoint` when one was
+/// detected. LocalMind stays host-neutral — it only reads a generic local
+/// endpoint; the host decides whether to populate it.
+fn render_default_config(endpoint: Option<&LocalInferenceEndpoint>) -> String {
+    let mut config = String::from(LEARNING_CONFIG);
+    if let Some(endpoint) = endpoint {
+        let _ = write!(
+            config,
+            "\n[inference]\nchat_base_url = \"{base}\"\nchat_model = \"{model}\"\nembedding_base_url = \"{base}\"\n",
+            base = endpoint.base_url,
+            model = endpoint.model,
+        );
+    }
+    config
+}
+
+/// Detect a local inference endpoint from the project's LocalPilot provider
+/// config: the default provider's `base_url`, when it is a loopback address.
+/// The `/v1` suffix LocalPilot carries is stripped because LocalMind appends the
+/// OpenAI path itself. Returns `None` when the default provider is remote,
+/// unconfigured, or unreadable — in which case learning stays deterministic.
+fn detect_local_inference_endpoint(project_root: &Path) -> Option<LocalInferenceEndpoint> {
+    // Project-scoped only: never let the machine's user config decide whether a
+    // project wires model-backed learning (that would make behaviour depend on
+    // the host machine, not the project).
+    let paths = localpilot_config::ConfigPaths {
+        user: None,
+        project: Some(localpilot_config::project_config_path(project_root)),
+    };
+    let config = localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).ok()?;
+    let provider = config.providers.get(&config.provider.default)?;
+    let base_url = provider.base_url.as_deref()?;
+    if !is_loopback_endpoint(base_url) {
+        return None;
+    }
+    let root = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .trim_end_matches('/')
+        .to_string();
+    if root.is_empty() {
+        return None;
+    }
+    let model = provider
+        .model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    Some(LocalInferenceEndpoint {
+        base_url: root,
+        model,
+    })
+}
+
+/// Whether `url`'s host is a loopback address (the only endpoint auto-wired for
+/// learning; LAN/remote endpoints require explicit configuration).
+fn is_loopback_endpoint(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("//127.0.0.1")
+        || lower.contains("//localhost")
+        || lower.contains("//[::1]")
 }
 
 /// The result of closing out a session into LocalMind.
@@ -544,6 +622,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_config_is_learning_only_without_a_local_provider() {
+        let config = render_default_config(None);
+        assert!(config.contains("[learning]"));
+        assert!(!config.contains("[inference]"));
+    }
+
+    #[test]
+    fn default_config_wires_inference_to_a_local_endpoint() {
+        let endpoint = LocalInferenceEndpoint {
+            base_url: "http://127.0.0.1:11435".to_string(),
+            model: "qcoder".to_string(),
+        };
+        let config = render_default_config(Some(&endpoint));
+        assert!(config.contains("[inference]"));
+        assert!(config.contains("chat_base_url = \"http://127.0.0.1:11435\""));
+        assert!(config.contains("chat_model = \"qcoder\""));
+        // The `/v1` path is LocalMind's to append; it must not be in the base.
+        assert!(!config.contains("11435/v1"));
+    }
+
+    #[test]
+    fn detects_a_loopback_provider_and_strips_the_v1_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[provider]\ndefault = \"local\"\n\n[providers.local]\nkind = \"anthropic\"\nbase_url = \"http://127.0.0.1:11435/v1\"\nmodel = \"qcoder\"\n",
+        )
+        .unwrap();
+        let endpoint = detect_local_inference_endpoint(dir.path()).expect("a local endpoint");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:11435");
+        assert_eq!(endpoint.model, "qcoder");
+    }
+
+    #[test]
+    fn ignores_a_remote_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[provider]\ndefault = \"remote\"\n\n[providers.remote]\nkind = \"anthropic\"\nbase_url = \"https://api.example.com/v1\"\n",
+        )
+        .unwrap();
+        assert!(detect_local_inference_endpoint(dir.path()).is_none());
+    }
+
+    #[test]
+    fn initialize_wires_model_extraction_for_a_local_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[provider]\ndefault = \"local\"\n\n[providers.local]\nkind = \"anthropic\"\nbase_url = \"http://127.0.0.1:11435/v1\"\nmodel = \"qcoder\"\n",
+        )
+        .unwrap();
+        assert!(initialize(dir.path()).unwrap());
+        let config = localmind_store::ProjectConfig::discover(dir.path()).unwrap();
+        assert!(
+            uses_model_extraction(&config),
+            "a local-provider project should default to model-backed extraction"
+        );
+    }
+
     /// A one-shot OpenAI-compatible chat endpoint that returns `body` to the
     /// first request. Returns its base URL.
     fn mock_chat_server(body: String) -> String {
@@ -554,9 +693,22 @@ mod tests {
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut buffer = [0_u8; 2048];
-                // Drain the request headers/body enough to let the client finish.
-                let _ = stream.read(&mut buffer);
+                // Drain the full request before responding, so the client never
+                // sees a reset mid-send (which would make this flaky under load).
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            request.extend_from_slice(&buffer[..read]);
+                            if request_is_complete(&request) {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -566,5 +718,23 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    /// Whether `request` holds a complete HTTP request (headers plus a body of
+    /// the declared Content-Length).
+    fn request_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let mut content_length = 0_usize;
+        for line in headers.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        request.len() >= header_end + 4 + content_length
     }
 }

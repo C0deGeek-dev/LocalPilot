@@ -135,6 +135,32 @@ appended — never raw payloads (ADR-0018).
 All capture stays redacted-before-persistence and inside the permission boundary;
 LocalMind never bypasses either.
 
+## Extractor selection and the local inference default
+
+LocalMind ships two extractors behind one `SessionExtractor` seam: a deterministic
+one (heuristics over the redacted transcript) and a model-backed one that calls a
+configured OpenAI-compatible endpoint. The host selects per the project's
+`.localmind.toml`:
+
+- `[inference]` configured with `features.extraction` on → **model-backed**
+  extractor, which falls back to deterministic automatically if the endpoint is
+  unreachable or returns malformed output;
+- otherwise → **deterministic** extractor.
+
+**Local inference is wired by default, not by hand.** When a project is first
+seen and its default LocalPilot provider points at a *loopback* endpoint (e.g. a
+local LocalBox gateway at `127.0.0.1`), `initialize` writes a `.localmind.toml`
+that already enables `[inference]` against that same local endpoint (the `/v1`
+suffix is dropped — LocalMind appends the OpenAI path itself). So "local models do
+the learning jobs" needs no extra config; if the gateway is down, extraction
+degrades to the hardened deterministic baseline. The endpoint LocalMind sees is a
+generic local URL — the engine stays host-neutral and learns nothing about
+LocalBox internals (LocalMind decision D-LM-0002).
+
+Per the ecosystem remote-egress policy, a **remote** provider is never wired into
+learning automatically; pointing inference at a non-loopback endpoint is an
+explicit, disclosed choice.
+
 ## Derived Context Metadata
 
 Compaction digests, ingestion chunks, and task context packs use the same
