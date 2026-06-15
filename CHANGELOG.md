@@ -3,6 +3,24 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## 0.3.0-beta.2 - 2026-06-15
+
+Coordinated LocalX beta release. The learning loop now closes end to end.
+
+- The learning adapter selects the model-backed extractor when an `[inference]`
+  endpoint is configured (with graceful deterministic fallback), instead of
+  always running deterministic. See ADR-0019.
+- New learning projects auto-wire `[inference]` to the host's own loopback
+  provider endpoint, so local models do the learning jobs with no manual config;
+  a remote provider is never wired automatically (remote-egress policy).
+- Added a read-only `active_skills` tool: active skills are advisory prompt
+  modules surfaced with provenance, never installed or executed. See ADR-0020.
+- Committed an end-to-end learning-loop regression fixture (closeout → promote →
+  durable memory + audit + retrieval).
+- Extracted the `run_shell` builtin into its own module.
+- Docs: scoped `context-intelligence-vision.md` against LocalMind's vision; added
+  the extractor-selection and skill-consumption contracts to the integration doc.
+
 ## 0.3.0-beta.1 - 2026-06-12
 
 - Fixed interactive input editing: the caret is visible, and Left/Right,
