@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0020: Skills Are Read-Only Advisory Prompt Modules
+
+Status: accepted. Builds on ADR-0011 (review-gating) and ADR-0013.
+
+A "skill" surfaced to the host is a reviewable advisory prompt module, never an
+executable workflow. The host exposes skills through read-only, model-callable
+tools only — `skill_drafts` (disabled candidate workflows) and `active_skills`
+(human-enabled skills, surfaced as guidance with provenance). Each tool's only
+effect is a workspace read; reading a skill never installs, enables, disables, or
+runs anything, and active skills are not auto-injected into always-on context.
+
+Reason:
+
+- a wrong or stale skill is then at worst irrelevant guidance the agent ignores,
+  never an unintended action;
+- enabling/disabling/retiring stay deliberate, review-gated human steps;
+- it keeps the local-first, no-surprise posture and is safe to automate later.
+
+The consumption contract is documented in `docs/localmind-integration.md`.
+
+## ADR-0019: The Host Selects The Extractor From Inference Config, Defaulting To A Local Endpoint
+
+Status: accepted. Realizes the learning loop's model path; complements ADR-0018.
+
+Session closeout selects the extractor from the project's `.localmind.toml`: the
+model-backed extractor when `[inference].features.extraction` is set, otherwise
+the deterministic extractor. The model path falls back to deterministic when the
+endpoint is unreachable or returns malformed output. On first use, when the
+project's default provider points at a loopback endpoint, the adapter writes an
+`[inference]` block targeting that same local endpoint (stripping the `/v1`
+suffix LocalMind appends itself), so "local models do the learning jobs" needs no
+manual plumbing.
+
+Reason:
+
+- the default learning experience may depend on a local model, with deterministic
+  as a graceful, always-available fallback;
+- detection is project-scoped, so behaviour does not depend on the host machine;
+- a remote provider is never wired automatically — pointing inference at a
+  non-loopback endpoint is an explicit, disclosed opt-in (ecosystem remote-egress
+  policy). LocalMind stays host-neutral: it only ever sees a generic local
+  endpoint (LocalMind decision D-LM-0002).
+
 ## ADR-0018: The Learning Write-Path Closes On Every Opted-In Session, Keyed On Structured Signals
 
 Status: accepted. Complements ADR-0011 (the store split and review-gating) and
