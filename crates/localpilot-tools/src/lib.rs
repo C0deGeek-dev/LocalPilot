@@ -9,6 +9,7 @@
 
 mod builtins;
 mod builtins_shell;
+mod contract;
 mod error;
 mod registry;
 mod tool;
@@ -18,6 +19,11 @@ pub use builtins::{
     ReplaceInFile, SearchText, WriteFile,
 };
 pub use builtins_shell::RunShell;
+pub use contract::{
+    string_arg, Confirmation, ContentExpectation, FailureMode, Idempotency, PathEffectKind,
+    Postcondition, Precondition, RetryPolicy, Reversibility, SideEffectClass, StatePredicate,
+    ToolContract, ToolExample, ToolVersion, VerificationMethod,
+};
 pub use error::ToolError;
 pub use registry::ToolRegistry;
 pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};

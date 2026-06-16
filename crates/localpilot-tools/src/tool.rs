@@ -122,6 +122,13 @@ pub trait Tool: Send + Sync {
     /// # Errors
     /// Returns [`ToolError`] on invalid input or execution failure.
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError>;
+
+    /// Static discipline metadata: side effects, reversibility, pre/post-
+    /// conditions, and how the result is verified. Additive and advisory — the
+    /// default is an empty contract, and the permission path is unaffected by it.
+    fn contract(&self) -> crate::contract::ToolContract {
+        crate::contract::ToolContract::default()
+    }
 }
 
 /// Parse a tool's JSON input into a typed struct.
@@ -146,4 +153,51 @@ pub(crate) fn detail_preview(text: &str) -> String {
         shown.push('…');
     }
     shown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::SideEffectClass;
+    use localpilot_sandbox::Effect;
+
+    /// A tool that overrides nothing beyond the required methods, to prove the
+    /// default contract path.
+    struct NoopTool;
+
+    #[async_trait]
+    impl Tool for NoopTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn schema(&self) -> Value {
+            Value::Null
+        }
+        fn effects(
+            &self,
+            _input: &Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<Vec<Effect>, ToolError> {
+            Ok(Vec::new())
+        }
+        async fn invoke(
+            &self,
+            _input: Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::ok(""))
+        }
+    }
+
+    #[test]
+    fn a_tool_without_an_override_reports_the_default_contract() {
+        let contract = NoopTool.contract();
+        assert_eq!(contract.side_effect, SideEffectClass::ReadOnly);
+        assert!(contract.preconditions.is_empty());
+        assert!(contract.postconditions.is_empty());
+        assert!(!contract.has_side_effect());
+    }
 }
