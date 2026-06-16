@@ -267,17 +267,23 @@ fn credential_present(env: &str) -> bool {
 }
 
 /// External tools the agent can use, checked by scanning `PATH`. `ripgrep` is
-/// optional — the builtin `search_text` tool searches in-process.
+/// optional — the builtin `search_text` tool searches in-process — and `sqlite3`
+/// is optional too: the first-class LocalMind read tools cover inspecting the
+/// store, so the agent never needs the CLI to read it.
 fn tools() -> Vec<ToolStatus> {
-    [("git", "git", false), ("ripgrep", "rg", true)]
-        .into_iter()
-        .map(|(name, command, optional)| ToolStatus {
-            name: name.to_string(),
-            command: command.to_string(),
-            available: tool_on_path(command),
-            optional,
-        })
-        .collect()
+    [
+        ("git", "git", false),
+        ("ripgrep", "rg", true),
+        ("sqlite3", "sqlite3", true),
+    ]
+    .into_iter()
+    .map(|(name, command, optional)| ToolStatus {
+        name: name.to_string(),
+        command: command.to_string(),
+        available: tool_on_path(command),
+        optional,
+    })
+    .collect()
 }
 
 /// Whether `command` resolves to an executable file on `PATH`.
@@ -372,6 +378,12 @@ mod tests {
                     available: false,
                     optional: true,
                 },
+                ToolStatus {
+                    name: "sqlite3".to_string(),
+                    command: "sqlite3".to_string(),
+                    available: false,
+                    optional: true,
+                },
             ],
             workspace_trust: TrustState::Unknown,
         }
@@ -401,5 +413,21 @@ mod tests {
         assert_eq!(r.version, env!("LOCALPILOT_VERSION"));
         assert!(!r.providers.is_empty());
         assert!(r.tools.iter().any(|t| t.command == "git"));
+    }
+
+    #[test]
+    fn report_probes_sqlite3_as_an_optional_tool() {
+        // The row is always present and flagged optional, regardless of whether
+        // sqlite3 happens to be installed on the host running the test.
+        let sqlite = report()
+            .tools
+            .into_iter()
+            .find(|t| t.command == "sqlite3")
+            .expect("sqlite3 must be probed");
+        assert_eq!(sqlite.name, "sqlite3");
+        assert!(
+            sqlite.optional,
+            "sqlite3 is optional — the builtin read tools cover the store"
+        );
     }
 }
