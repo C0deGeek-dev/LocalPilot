@@ -1037,9 +1037,15 @@ impl SessionRuntime {
                 used,
                 limit: self.config.context_token_limit,
             });
+            // For a constrained-decoding provider, derive a tool-call constraint
+            // from the tools' schemas so arguments are schema-valid by
+            // construction; `None` for every other provider (unchanged behaviour).
+            let tool_constraint =
+                localpilot_llm::constraint_for(self.provider.declaration(), &tools);
             let request = ModelRequest::new(self.config.model.clone(), request_messages)
                 .with_tools(tools)
-                .with_reasoning_effort(self.config.reasoning_effort);
+                .with_reasoning_effort(self.config.reasoning_effort)
+                .with_tool_constraint(tool_constraint);
 
             self.record_event(SessionEventKind::TurnStarted {
                 model: self.config.model.clone(),

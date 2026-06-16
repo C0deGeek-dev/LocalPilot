@@ -31,7 +31,7 @@ pub use provider::{
     ReasoningShape, SourceType, ToolCallShape,
 };
 pub use registry::ProviderRegistry;
-pub use request::{ModelRequest, ReasoningEffort, ToolSpec};
+pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
 pub use retry::{retry, RetryPolicy};
 
 /// Fuzzing entry points (enabled by the `fuzzing` feature; not public API).
