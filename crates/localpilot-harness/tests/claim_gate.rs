@@ -20,6 +20,10 @@ use tokio_util::sync::CancellationToken;
 /// Run one scripted turn with the claim gate on; return the final reply text as
 /// it was persisted.
 fn final_reply(root: &Path, provider: FakeProvider) -> String {
+    reply_with_gate(root, provider, true)
+}
+
+fn reply_with_gate(root: &Path, provider: FakeProvider, enforce_claim_gate: bool) -> String {
     let mut runtime = SessionRuntime::new(
         Arc::new(provider),
         ToolRegistry::with_builtins(),
@@ -31,7 +35,7 @@ fn final_reply(root: &Path, provider: FakeProvider) -> String {
         SessionConfig {
             interactivity: Interactivity::NonInteractive,
             trusted: true,
-            enforce_claim_gate: true,
+            enforce_claim_gate,
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -58,6 +62,36 @@ fn final_reply(root: &Path, provider: FakeProvider) -> String {
 
 fn is_text(block: &ContentBlock) -> bool {
     matches!(block, ContentBlock::Text { .. })
+}
+
+/// A/B for subject 03: the same failed-write false-success claim is unflagged
+/// with the gate off (the measured behaviour from subject 01) and flagged with
+/// the gate on (enforcement). A deterministic, offline 1→0 drop on this scenario.
+#[test]
+fn the_gate_neutralizes_a_false_success_claim() {
+    let provider = || {
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "../escape.txt", "content": "x\n" }),
+            )
+            .text("Saved the report successfully.")
+    };
+
+    let off_dir = tempfile::tempdir().unwrap();
+    let off = reply_with_gate(off_dir.path(), provider(), false);
+    assert!(
+        !off.contains("[unverified]"),
+        "gate off: the unsupported success claim is unflagged (the subject-01 baseline)"
+    );
+
+    let on_dir = tempfile::tempdir().unwrap();
+    let on = reply_with_gate(on_dir.path(), provider(), true);
+    assert!(
+        on.contains("[unverified]"),
+        "gate on: the false-success claim is flagged — the rate drops to zero on this scenario"
+    );
 }
 
 #[test]
