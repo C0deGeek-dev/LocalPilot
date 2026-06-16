@@ -50,7 +50,6 @@ pub enum SlashAction {
     Compact {
         force: bool,
     },
-    Search(Option<String>),
     /// Set the reasoning-effort level (validated by the host).
     SetEffort(String),
     /// Start a fresh session.
@@ -138,14 +137,6 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
             command: "compact".to_string(),
             reason: "usage: /compact [force]".to_string(),
         },
-        _ if name == "search" => {
-            let query = if args.is_empty() {
-                None
-            } else {
-                Some(args.to_string())
-            };
-            SlashAction::Search(query)
-        }
         _ if matches!(name, "resume" | "continue") => {
             let id = if args.is_empty() {
                 None
@@ -276,19 +267,6 @@ fn handle_key(state: &mut AppState, key: Key) {
         }
         return;
     }
-    if let Some(picker) = state.picker.as_mut() {
-        match key {
-            Key::Up => picker.selected = picker.selected.saturating_sub(1),
-            Key::Down => {
-                if picker.selected + 1 < picker.options.len() {
-                    picker.selected += 1;
-                }
-            }
-            Key::Enter | Key::Esc => state.picker = None,
-            _ => {}
-        }
-        return;
-    }
 
     // While the slash-command autocomplete is open it captures input: arrows
     // navigate, Enter/Tab accept the highlighted command, Esc dismisses, and
@@ -414,7 +392,6 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::Compact { .. } => state.apply(UiEvent::Notice(
             "/compact is handled by the interactive host".to_string(),
         )),
-        SlashAction::Search(query) => state.set_search(query),
         SlashAction::HarnessResume => state.apply(UiEvent::Notice(
             "/harness-resume is handled by the interactive host".to_string(),
         )),

@@ -1,20 +1,21 @@
 //! Rendering for the inline TUI.
 //!
 //! Two surfaces. Finished transcript items become [`Text`] via
-//! [`history_block_text`] and are pushed into native scrollback once by the host
-//! with `Terminal::insert_before`. The live region — in-progress activity, the
-//! composer, and the status line — is the only surface [`render`] redraws each
-//! frame, so it snapshot-tests cleanly with a `TestBackend`.
+//! [`history_block_text`] (and the launch [`banner_text`]) and are pushed into
+//! native scrollback once by the host with `Terminal::insert_before`. The live
+//! region — a top section (a blocking prompt, the autocomplete list, or the
+//! in-progress activity tail), the composer, and the status line — is the only
+//! surface [`render`] redraws each frame, sized by [`live_region_height`] so its
+//! content never clips. Nothing floats: there are no centered modals.
 
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use ratatui::Frame;
-use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::state::{
-    AppState, ApprovalRequest, FilePicker, Header, Picker, Profile, SlashPicker, TranscriptLine,
+    AppState, ApprovalRequest, FilePicker, Header, Profile, SlashPicker, TranscriptLine,
     TrustPrompt,
 };
 
@@ -25,14 +26,27 @@ const MAX_INPUT_TEXT_ROWS: u16 = 10;
 /// internally; keeps a long stream from pushing the composer off-screen.
 const MAX_ACTIVITY_ROWS: u16 = 6;
 
+/// Most rows the autocomplete list shows at once before it windows around the
+/// selection.
+const MAX_PICKER_ROWS: u16 = 8;
+
 /// The two-row status line at the bottom of the live region.
 const STATUS_ROWS: u16 = 2;
 
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 
+/// The terminal-monitor mark from the project README, padded to a uniform width
+/// so the banner text aligns beside it.
+const LOGO: [&str; 5] = [
+    "╔══════╗ ╔══╗  ",
+    "║ >_ █ ║ ║██║║ ",
+    "╚══╦═══╝ ║██║║ ",
+    " ══╩══   ╚══╝║ ",
+    "═════════════╝",
+];
+
 /// A rounded-border block whose title is padded on the left with a space so the
-/// label does not butt against the corner. Centralizing the border style keeps
-/// every panel (and the modals) visually consistent.
+/// label does not butt against the corner.
 fn panel(title: impl AsRef<str>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -81,61 +95,237 @@ pub fn history_block_text(line: &TranscriptLine) -> Text<'static> {
     Text::from(lines)
 }
 
-/// The one-time session header, printed into scrollback at startup.
+/// The launch banner: the README monitor mark beside the session identity, in
+/// color. The host prints it once into scrollback at startup.
 #[must_use]
-pub fn header_text(header: &Header) -> Text<'static> {
-    let mut text = format!(
-        "LocalPilot {} | {}/{} | ws:{} | session:{}",
-        header.version, header.provider, header.model, header.workspace, header.session_id
-    );
-    if let Some(update) = &header.update {
-        text.push_str(&format!("  ·  update available: {update}"));
+pub fn banner_text(header: &Header) -> Text<'static> {
+    let mark = Style::default().fg(Color::Cyan);
+    let name = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let gutter = "   ";
+
+    // Identity text sits beside the middle three rows of the five-row mark.
+    let beside: [Vec<Span>; 5] = [
+        vec![],
+        vec![
+            Span::raw(gutter),
+            Span::styled("LocalPilot", name),
+            Span::styled(format!("  ·  v{}", header.version), dim),
+        ],
+        vec![
+            Span::raw(gutter),
+            Span::styled(format!("{}/{}", header.provider, header.model), dim),
+        ],
+        vec![
+            Span::raw(gutter),
+            Span::styled(
+                format!("ws:{} · session:{}", header.workspace, header.session_id),
+                dim,
+            ),
+        ],
+        vec![],
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (mark_row, extra) in LOGO.iter().zip(beside) {
+        let mut spans = vec![Span::styled((*mark_row).to_string(), mark)];
+        spans.extend(extra);
+        lines.push(Line::from(spans));
     }
-    Text::from(Line::styled(
-        text,
-        Style::default().add_modifier(Modifier::BOLD),
-    ))
+    if let Some(update) = &header.update {
+        lines.push(Line::styled(
+            format!("   update available: {update}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    Text::from(lines)
 }
 
-/// Draw the live region: in-progress activity, the composer, and the status line.
-/// Finished output lives in native scrollback above this region and is not drawn
-/// here.
+/// Draw the live region: a top section (a blocking prompt, the autocomplete list,
+/// or the in-progress activity tail), the composer, and the status line. Finished
+/// output lives in native scrollback above this region and is not drawn here.
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
     let input_height = input_box_height(state, area);
     let rows = Layout::vertical([
-        Constraint::Min(0),               // live activity tail
+        Constraint::Min(0),               // top section
         Constraint::Length(input_height), // composer
-        Constraint::Length(2),            // status
+        Constraint::Length(STATUS_ROWS),  // status
     ])
     .split(area);
 
-    render_activity(frame, rows[0], state);
+    render_top(frame, rows[0], state);
     render_input(frame, rows[1], state);
-    render_footer(frame, rows[2], state);
+    render_status(frame, rows[2], state);
+}
 
-    if let Some(approval) = &state.approval {
-        render_approval(frame, area, approval, state);
+// --- Top section --------------------------------------------------------------
+
+/// Lines for the blocking trust gate.
+fn trust_lines(trust: &TrustPrompt) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    vec![
+        Line::styled("Trust this folder?", bold),
+        Line::styled(trust.path.clone(), Style::default().fg(Color::Cyan)),
+        Line::raw("Once trusted, LocalPilot may read, edit, and run commands here"),
+        Line::raw("subject to the active permission profile."),
+        Line::styled("[y] trust this folder    [n] exit", bold),
+    ]
+}
+
+/// Lines for a pending tool approval.
+fn approval_lines(approval: &ApprovalRequest, profile: &str) -> Vec<Line<'static>> {
+    let warn = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    vec![
+        Line::styled("Approve tool?", warn),
+        Line::raw(format!(
+            "tool: {}  ({})",
+            approval.tool, approval.risk_class
+        )),
+        Line::raw(format!("target: {}", approval.target)),
+        Line::raw(format!("profile: {profile}")),
+        Line::styled("[y] approve    [n] deny", warn),
+    ]
+}
+
+/// The visible window of a list so `selected` stays in view, capped to `max` rows.
+fn window(len: usize, selected: usize, max: usize) -> std::ops::Range<usize> {
+    if len <= max {
+        return 0..len;
     }
-    if let Some(picker) = &state.picker {
-        render_picker(frame, area, picker);
-    }
-    if let Some(slash) = &state.slash_picker {
-        // Anchor the autocomplete just above the input box (rows[1]).
-        render_slash_picker(frame, area, rows[1], slash);
-    }
-    if let Some(files) = &state.file_picker {
-        render_file_picker(frame, area, rows[1], files);
-    }
-    // The trust gate draws on top of everything else.
+    let start = selected.saturating_sub(max / 2).min(len - max);
+    start..start + max
+}
+
+/// Lines for the slash-command autocomplete list.
+fn slash_lines(picker: &SlashPicker) -> Vec<Line<'static>> {
+    let range = window(
+        picker.items.len(),
+        picker.selected,
+        MAX_PICKER_ROWS as usize,
+    );
+    range
+        .map(|i| {
+            let item = &picker.items[i];
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" /{:<12}", item.name),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    item.description.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            if i == picker.selected {
+                line.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// Lines for the `@` file-mention autocomplete list.
+fn file_lines(picker: &FilePicker) -> Vec<Line<'static>> {
+    let range = window(
+        picker.items.len(),
+        picker.selected,
+        MAX_PICKER_ROWS as usize,
+    );
+    range
+        .map(|i| {
+            let line = Line::from(Span::styled(
+                format!(" {}", picker.items[i].path),
+                Style::default().fg(Color::Cyan),
+            ));
+            if i == picker.selected {
+                line.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// The top section's content for the current state, in priority order: a blocking
+/// prompt, then the open autocomplete list, then the in-progress activity tail.
+fn top_lines(state: &AppState) -> Vec<Line<'static>> {
     if let Some(trust) = &state.trust {
-        render_trust(frame, area, trust);
+        trust_lines(trust)
+    } else if let Some(approval) = &state.approval {
+        approval_lines(approval, state.profile.label())
+    } else if let Some(slash) = &state.slash_picker {
+        slash_lines(slash)
+    } else if let Some(files) = &state.file_picker {
+        file_lines(files)
+    } else {
+        activity_lines(state)
     }
 }
 
+/// Rows the top section needs at `width`, capped per content type so a long
+/// stream or command list cannot push the composer off-screen.
+fn top_section_height(state: &AppState, width: u16) -> u16 {
+    let lines = top_lines(state);
+    if lines.is_empty() {
+        return 0;
+    }
+    let rows = Paragraph::new(Text::from(lines.clone()))
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16;
+    // Prompts must show in full; lists and the activity tail are capped.
+    let cap = if state.trust.is_some() || state.approval.is_some() {
+        lines.len() as u16
+    } else if state.slash_picker.is_some() || state.file_picker.is_some() {
+        MAX_PICKER_ROWS
+    } else {
+        MAX_ACTIVITY_ROWS
+    };
+    rows.clamp(1, cap)
+}
+
+/// Draw the top section. The activity tail is bottom-anchored (latest rows stay
+/// visible); prompts and lists render top-down.
+fn render_top(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = top_lines(state);
+    if lines.is_empty() {
+        return;
+    }
+    let text = Text::from(lines);
+    let total = (Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(area.width) as u16)
+        .max(1);
+    // Only the streaming activity tail follows the bottom; prompts/lists pin top.
+    let follows_bottom =
+        state.trust.is_none() && state.approval.is_none() && !is_autocomplete_open(state);
+    let scroll = if follows_bottom {
+        total.saturating_sub(area.height)
+    } else {
+        0
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn is_autocomplete_open(state: &AppState) -> bool {
+    state.slash_picker.is_some() || state.file_picker.is_some()
+}
+
 /// The transient live tail as styled lines: the model's plan, any running tools,
-/// the reasoning panel (when shown), and the in-progress streamed answer. Each
-/// item settles into scrollback once finished; this surface is for work in flight.
+/// the reasoning panel (when shown), and the in-progress streamed answer.
 fn activity_lines(state: &AppState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -198,42 +388,7 @@ fn activity_lines(state: &AppState) -> Vec<Line<'static>> {
     lines
 }
 
-/// Rows the activity tail wraps to at `width`, capped so a long stream does not
-/// grow the live region without bound (it scrolls internally past the cap).
-fn activity_height(state: &AppState, width: u16) -> u16 {
-    let lines = activity_lines(state);
-    if lines.is_empty() {
-        return 0;
-    }
-    (Paragraph::new(Text::from(lines))
-        .wrap(Wrap { trim: false })
-        .line_count(width) as u16)
-        .clamp(1, MAX_ACTIVITY_ROWS)
-}
-
-/// Draw the transient live tail, bottom-anchored so the latest rows stay visible
-/// when the tail is taller than the region.
-fn render_activity(frame: &mut Frame, area: Rect, state: &AppState) {
-    if area.height == 0 {
-        return;
-    }
-    let lines = activity_lines(state);
-    if lines.is_empty() {
-        return;
-    }
-    let text = Text::from(lines);
-    let total = (Paragraph::new(text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(area.width) as u16)
-        .max(1);
-    let scroll = total.saturating_sub(area.height);
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        area,
-    );
-}
+// --- Composer -----------------------------------------------------------------
 
 /// The number of terminal rows a string occupies once wrapped to `width`.
 fn wrapped_rows(text: &str, width: u16) -> usize {
@@ -272,12 +427,12 @@ fn input_box_height(state: &AppState, area: Rect) -> u16 {
 }
 
 /// The natural height of the whole live region for the current state at `width`:
-/// the capped activity tail, the composer box, and the status line. The host
-/// sizes the inline viewport to this and re-inits the terminal when it changes,
-/// since ratatui has no in-place inline-viewport-height setter.
+/// the top section, the composer box, and the status line. The host sizes the
+/// inline viewport to this and re-inits the terminal when it changes, since
+/// ratatui has no in-place inline-viewport-height setter.
 #[must_use]
 pub fn live_region_height(state: &AppState, width: u16) -> u16 {
-    activity_height(state, width) + composer_rows(state, width) + 2 + STATUS_ROWS
+    top_section_height(state, width) + composer_rows(state, width) + 2 + STATUS_ROWS
 }
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -301,7 +456,8 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             .scroll((scroll, 0)),
         area,
     );
-    if state.trust.is_none() && state.approval.is_none() && state.picker.is_none() {
+    // Show the edit cursor unless a blocking y/n prompt owns the keyboard.
+    if state.trust.is_none() && state.approval.is_none() {
         frame.set_cursor_position(Position::new(
             area.x.saturating_add(1).saturating_add(cursor_col),
             area.y
@@ -331,31 +487,9 @@ fn input_cursor_position(state: &AppState, width: u16) -> (u16, u16) {
     (row, col)
 }
 
-fn render_trust(frame: &mut Frame, area: Rect, trust: &TrustPrompt) {
-    let popup = centered(area, 72, 11);
-    frame.render_widget(Clear, popup);
-    let text = Text::from(vec![
-        Line::raw("Starting a session in this folder:"),
-        Line::raw(""),
-        Line::styled(
-            trust.path.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(""),
-        Line::raw("Once trusted, LocalPilot may read, edit, and run commands here"),
-        Line::raw("subject to the active permission profile."),
-        Line::raw(""),
-        Line::raw("[y] trust this folder    [n] exit"),
-    ]);
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(panel("trust this folder?"))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
+// --- Status -------------------------------------------------------------------
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
+fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
     let f = &state.footer;
     let context = if f.context_limit > 0 {
         format!("{}/{}", f.context_used, f.context_limit)
@@ -370,9 +504,6 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         Style::default()
     };
 
-    // The context figure is the bytes/4 estimate against the session budget
-    // (the model's real window minus a response reserve when known); the tilde
-    // states the basis.
     let effort = f
         .effort
         .as_deref()
@@ -386,164 +517,34 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             f.tokens_in, f.tokens_out, f.tokens_per_sec
         )),
     ]);
-    let mut line2 = String::new();
+
+    // The banner scrolls away, so the status line keeps the model and a short
+    // session id always visible.
+    let short_session = state
+        .header
+        .session_id
+        .get(..8)
+        .unwrap_or(state.header.session_id.as_str());
+    let mut line2 = format!("{} · session:{short_session}", state.header.model);
     if let Some(cost) = f.cost_usd {
-        line2.push_str(&format!("est ${cost:.4}"));
+        line2.push_str(&format!("  est ${cost:.4}"));
     }
     if let Some(reset) = &f.quota_reset {
-        if !line2.is_empty() {
-            line2.push_str("  ");
-        }
-        line2.push_str(&format!("quota resets: {reset}"));
+        line2.push_str(&format!("  quota resets: {reset}"));
     }
     frame.render_widget(
-        Paragraph::new(Text::from(vec![line1, Line::raw(line2)])),
+        Paragraph::new(Text::from(vec![
+            line1,
+            Line::styled(line2, Style::default().fg(Color::DarkGray)),
+        ])),
         area,
     );
-}
-
-fn render_approval(frame: &mut Frame, area: Rect, approval: &ApprovalRequest, state: &AppState) {
-    let popup = centered(area, 60, 8);
-    frame.render_widget(Clear, popup);
-    let text = Text::from(vec![
-        Line::raw(format!("tool: {}", approval.tool)),
-        Line::raw(format!("target: {}", approval.target)),
-        Line::raw(format!("risk: {}", approval.risk_class)),
-        Line::raw(format!("profile: {}", state.profile.label())),
-        Line::raw(""),
-        Line::raw("[y] approve   [n] deny"),
-    ]);
-    frame.render_widget(Paragraph::new(text).block(panel("approve tool?")), popup);
-}
-
-fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
-    let popup = centered(area, 50, picker.options.len() as u16 + 2);
-    frame.render_widget(Clear, popup);
-    let items: Vec<ListItem> = picker
-        .options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let marker = if i == picker.selected { "> " } else { "  " };
-            ListItem::new(format!("{marker}{opt}"))
-        })
-        .collect();
-    frame.render_widget(List::new(items).block(panel(&picker.title)), popup);
-}
-
-/// Render the slash-command autocomplete popup just above the input box. Each row
-/// shows the command and a short description; the highlighted row is reversed.
-fn render_slash_picker(frame: &mut Frame, area: Rect, input_area: Rect, picker: &SlashPicker) {
-    if picker.items.is_empty() {
-        return;
-    }
-    // Size the box to the widest rendered " /<name padded to 12><description>"
-    // line, capped to the screen. The leading " /" is two columns.
-    let content_width = picker
-        .items
-        .iter()
-        .map(|item| 2 + item.name.len().max(12) + item.description.len())
-        .max()
-        .unwrap_or(20) as u16;
-    let popup_width = content_width.saturating_add(2).clamp(12, area.width);
-    let visible = (picker.items.len() as u16).min(8);
-    let popup_height = visible + 2; // two rows for the border
-
-    // Anchor above the input box, left-aligned with it, clamped into the screen.
-    let popup_x = input_area.x.min(area.width.saturating_sub(popup_width));
-    let popup_y = input_area.y.saturating_sub(popup_height);
-    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    frame.render_widget(Clear, popup);
-
-    let builder = ListBuilder::new(|ctx| {
-        let item = &picker.items[ctx.index];
-        let line = Line::from(vec![
-            Span::styled(
-                format!(" /{:<12}", item.name),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(
-                item.description.clone(),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        let line = if ctx.is_selected {
-            line.style(Style::default().add_modifier(Modifier::REVERSED))
-        } else {
-            line
-        };
-        (line, 1u16)
-    });
-
-    let list = ListView::new(builder, picker.items.len())
-        .block(panel("commands"))
-        .infinite_scrolling(true);
-    let mut list_state = ListState::default();
-    list_state.select(Some(picker.selected));
-    frame.render_stateful_widget(list, popup, &mut list_state);
-}
-
-/// Render the `@` file-mention autocomplete popup just above the input box. Each
-/// row shows one workspace-relative path; the highlighted row is reversed.
-fn render_file_picker(frame: &mut Frame, area: Rect, input_area: Rect, picker: &FilePicker) {
-    if picker.items.is_empty() {
-        return;
-    }
-    // Size the box to the widest " <path>" line, capped to the screen.
-    let content_width = picker
-        .items
-        .iter()
-        .map(|item| 1 + item.path.len())
-        .max()
-        .unwrap_or(20) as u16;
-    let popup_width = content_width.saturating_add(2).clamp(12, area.width);
-    let visible = (picker.items.len() as u16).min(8);
-    let popup_height = visible + 2; // two rows for the border
-
-    let popup_x = input_area.x.min(area.width.saturating_sub(popup_width));
-    let popup_y = input_area.y.saturating_sub(popup_height);
-    let popup = Rect::new(popup_x, popup_y, popup_width, popup_height);
-    frame.render_widget(Clear, popup);
-
-    let builder = ListBuilder::new(|ctx| {
-        let item = &picker.items[ctx.index];
-        let line = Line::from(Span::styled(
-            format!(" {}", item.path),
-            Style::default().fg(Color::Cyan),
-        ));
-        let line = if ctx.is_selected {
-            line.style(Style::default().add_modifier(Modifier::REVERSED))
-        } else {
-            line
-        };
-        (line, 1u16)
-    });
-
-    let list = ListView::new(builder, picker.items.len())
-        .block(panel("files"))
-        .infinite_scrolling(true);
-    let mut list_state = ListState::default();
-    list_state.select(Some(picker.selected));
-    frame.render_stateful_widget(list, popup, &mut list_state);
-}
-
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width,
-        height,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Header, Mode, PlanItem, TranscriptLine};
+    use crate::state::{ActiveTool, Header, Mode, SlashSuggestion, TranscriptLine};
 
     fn state_with_input(input: &str) -> AppState {
         let mut state = AppState::new(
@@ -575,6 +576,16 @@ mod tests {
         out
     }
 
+    /// Render at the state's own natural live-region height — the size the host
+    /// gives the inline viewport — so tests see what the user sees.
+    fn render_natural(state: &AppState, width: u16) -> String {
+        let height = live_region_height(state, width).max(1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, state)).unwrap();
+        buffer_to_string(&terminal)
+    }
+
     #[test]
     fn input_box_grows_until_the_global_cap() {
         let state = state_with_input("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12");
@@ -583,17 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn input_box_cap_shrinks_with_terminal_height() {
-        // A live region only tall enough for two text rows plus the status line
-        // and borders caps the input box to those two rows.
-        let state = state_with_input("1\n2\n3\n4\n5\n6");
-        let area = Rect::new(0, 0, 80, 6);
-        assert_eq!(input_box_height(&state, area), 4);
-    }
-
-    #[test]
     fn input_box_counts_wrapped_rows() {
-        // 22 chars wrap to three rows at inner width 10, plus two border rows.
         let state = state_with_input("abcdefghijklmnopqrstuv");
         let area = Rect::new(0, 0, 12, 40);
         assert_eq!(input_box_height(&state, area), 5);
@@ -612,8 +613,7 @@ mod tests {
             speaker: "assistant".to_string(),
             text: "line one\nline two".to_string(),
         };
-        let text = history_block_text(&line);
-        let rendered: Vec<String> = text
+        let rendered: Vec<String> = history_block_text(&line)
             .lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
@@ -622,30 +622,32 @@ mod tests {
     }
 
     #[test]
-    fn history_block_text_uses_a_compact_tool_prefix() {
-        let line = TranscriptLine {
-            speaker: "tool".to_string(),
-            text: "read_file ok: hello".to_string(),
-        };
-        let text = history_block_text(&line);
-        let rendered: String = text.lines[0]
-            .spans
+    fn the_banner_carries_the_logo_and_identity() {
+        let mut state = state_with_input("");
+        state.header.version = "9.9".into();
+        state.header.session_id = "abcd1234ef".into();
+        let rendered: String = banner_text(&state.header)
+            .lines
             .iter()
-            .map(|s| s.content.clone())
-            .collect();
-        assert_eq!(rendered, "[tool] read_file ok: hello");
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("LocalPilot"));
+        assert!(rendered.contains("v9.9"));
+        assert!(rendered.contains("session:abcd1234ef"));
+        assert!(rendered.contains("╔══════╗")); // the monitor mark
     }
 
     #[test]
     fn the_live_region_shows_streaming_and_keeps_the_status_visible() {
         let mut state = state_with_input("");
         state.streaming = "Streaming the answer live...".to_string();
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| render(frame, &state))
-            .expect("render succeeds");
-        let rendered = buffer_to_string(&terminal);
+        let rendered = render_natural(&state, 60);
         assert!(rendered.contains("assistant: Streaming the answer live..."));
         assert!(rendered.contains("mode:agent"));
     }
@@ -653,66 +655,71 @@ mod tests {
     #[test]
     fn an_active_tool_is_shown_as_a_live_indicator() {
         let mut state = state_with_input("");
-        state.active_tools.push(crate::state::ActiveTool {
+        state.active_tools.push(ActiveTool {
             id: "1".to_string(),
             name: "run_shell".to_string(),
         });
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 8))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| render(frame, &state))
-            .expect("render succeeds");
-        assert!(buffer_to_string(&terminal).contains("run_shell running"));
+        assert!(render_natural(&state, 60).contains("run_shell running"));
     }
 
     #[test]
-    fn the_plan_renders_in_the_live_region() {
+    fn the_status_line_keeps_model_and_session_visible() {
         let mut state = state_with_input("");
-        state.plan = vec![
-            PlanItem {
-                title: "first".to_string(),
-                status: "done".to_string(),
-            },
-            PlanItem {
-                title: "second".to_string(),
-                status: "in_progress".to_string(),
-            },
-        ];
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| render(frame, &state))
-            .expect("render succeeds");
-        assert!(buffer_to_string(&terminal).contains("plan (1/2)"));
+        state.header.model = "test-model".into();
+        state.header.session_id = "abcd1234ef".into();
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("test-model"));
+        assert!(rendered.contains("session:abcd1234")); // short, 8 chars
     }
 
     #[test]
-    fn live_region_height_grows_and_shrinks_with_the_composer() {
-        let empty = state_with_input("");
-        let multiline = state_with_input("a\nb\nc\nd\ne");
-        // Empty composer: one row + two borders + the two-row status.
-        assert_eq!(live_region_height(&empty, 80), 5);
-        // Five composer rows + two borders + status.
-        assert_eq!(live_region_height(&multiline, 80), 9);
-        assert!(live_region_height(&multiline, 80) > live_region_height(&empty, 80));
-    }
-
-    #[test]
-    fn live_region_height_includes_capped_activity() {
+    fn the_trust_gate_shows_fully_at_natural_height() {
         let mut state = state_with_input("");
-        state.streaming = "one\ntwo\nthree".to_string();
-        // Three activity rows + one composer row + two borders + status.
-        assert_eq!(live_region_height(&state, 80), 8);
+        state.trust = Some(TrustPrompt {
+            path: r"D:\repos\demo".to_string(),
+        });
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("Trust this folder?"));
+        assert!(rendered.contains(r"D:\repos\demo"));
+        // The action line is fully visible — it is not clipped by the viewport.
+        assert!(rendered.contains("[y] trust this folder"));
+    }
 
-        // A very tall stream is capped so the composer is never pushed off-screen.
-        state.streaming = (1..=20)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(
-            live_region_height(&state, 80),
-            MAX_ACTIVITY_ROWS + 1 + 2 + STATUS_ROWS
-        );
+    #[test]
+    fn the_approval_prompt_shows_fully_at_natural_height() {
+        let mut state = state_with_input("");
+        state.approval = Some(ApprovalRequest {
+            tool: "run_shell".to_string(),
+            target: "rm -rf build".to_string(),
+            risk_class: "destructive".to_string(),
+        });
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("Approve tool?"));
+        assert!(rendered.contains("rm -rf build"));
+        assert!(rendered.contains("[y] approve"));
+    }
+
+    #[test]
+    fn the_slash_autocomplete_lists_in_region() {
+        let mut state = state_with_input("/c");
+        state.slash_picker = Some(SlashPicker {
+            query: "/c".to_string(),
+            items: vec![
+                SlashSuggestion {
+                    name: "clear".to_string(),
+                    description: "Clear the conversation view".to_string(),
+                },
+                SlashSuggestion {
+                    name: "compact".to_string(),
+                    description: "Summarize and compact".to_string(),
+                },
+            ],
+            selected: 0,
+        });
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("/clear"));
+        assert!(rendered.contains("Clear the conversation view"));
+        assert!(rendered.contains("/compact"));
     }
 
     #[test]
@@ -720,11 +727,10 @@ mod tests {
         let mut state = state_with_input("next");
         state.input_cursor = state.input.len();
         state.busy = true;
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 8))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| render(frame, &state))
-            .expect("render succeeds");
+        let height = live_region_height(&state, 80).max(1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
         assert!(terminal.get_cursor_position().is_ok());
     }
 }

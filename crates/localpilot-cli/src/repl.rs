@@ -26,7 +26,7 @@ use localpilot_sandbox::{
 };
 use localpilot_store::Store;
 use localpilot_tui::{
-    handle_input, header_text, history_block_text, parse_slash, render, AppInput, AppState,
+    banner_text, handle_input, history_block_text, parse_slash, render, AppInput, AppState,
     ApprovalRequest, Header, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
     TrustPrompt, UiEvent,
 };
@@ -241,9 +241,8 @@ pub async fn run_chat(
 
     let session_id = runtime.session_id();
     let mut terminal = enter_terminal()?;
-    // Print the session header once into native scrollback; it scrolls into
-    // history naturally as the conversation grows.
-    emit_block(&mut terminal, header_text(&state.header))?;
+    // Print the launch banner once and seat the live region at the screen bottom.
+    launch_banner(&mut terminal, banner_text(&state.header))?;
     let result = event_loop(
         &mut terminal,
         &mut state,
@@ -485,7 +484,6 @@ async fn run_slash(
             };
             state.apply(UiEvent::Notice(notice));
         }
-        SlashAction::Search(query) => state.set_search(query),
         SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
@@ -1303,6 +1301,13 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         )
     );
+    // Clear the visible screen (not scrollback — that is the user's history) so
+    // the launch banner starts on a clean surface.
+    execute!(
+        stdout,
+        terminal::Clear(terminal::ClearType::All),
+        MoveTo(0, 0)
+    )?;
     // A bottom inline viewport: finished output lives above it in native
     // scrollback; only this region is redrawn each frame.
     let terminal = Terminal::with_options(
@@ -1312,6 +1317,28 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
         },
     )?;
     Ok(terminal)
+}
+
+/// Print the launch banner into scrollback, then pad blank rows so the inline
+/// viewport seats at the bottom of the screen (banner on top, blank middle,
+/// composer at the bottom). On a terminal too short to pad, the composer simply
+/// follows the banner.
+fn launch_banner(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    banner: Text<'static>,
+) -> anyhow::Result<()> {
+    let size = terminal.size()?;
+    let banner_height = (Paragraph::new(banner.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(size.width) as u16)
+        .max(1);
+    let viewport_height = terminal.get_frame().area().height;
+    emit_block(terminal, banner)?;
+    let fill = size.height.saturating_sub(banner_height + viewport_height);
+    if fill > 0 {
+        terminal.insert_before(fill, |_buf| {})?;
+    }
+    Ok(())
 }
 
 fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {

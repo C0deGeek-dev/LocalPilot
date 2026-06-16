@@ -90,14 +90,6 @@ pub struct ApprovalRequest {
     pub risk_class: String,
 }
 
-/// A modal picker (model/provider selection).
-#[derive(Debug, Clone)]
-pub struct Picker {
-    pub title: String,
-    pub options: Vec<String>,
-    pub selected: usize,
-}
-
 /// A large pasted block collapsed to a short placeholder in the input line. The
 /// full content is restored before the prompt is sent to the model.
 #[derive(Debug, Clone)]
@@ -117,7 +109,7 @@ pub struct TrustPrompt {
 /// One command shown in the slash-command autocomplete popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashSuggestion {
-    /// Command name without the leading slash (e.g. "search").
+    /// Command name without the leading slash (e.g. "clear").
     pub name: String,
     /// Short description shown beside the command.
     pub description: String,
@@ -171,11 +163,10 @@ pub struct ActiveTool {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub header: Header,
-    /// Finished transcript items, append-only. Items are emitted once into native
-    /// scrollback via [`AppState::drain_for_scrollback`] and never redrawn.
+    /// Finished transcript items awaiting emission to native scrollback. The host
+    /// drains them each frame via [`AppState::drain_for_scrollback`]; they are
+    /// emitted once and never redrawn.
     pub transcript: Vec<TranscriptLine>,
-    /// How many `transcript` items have already been emitted to scrollback.
-    scrollback_emitted: usize,
     pub streaming: String,
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
@@ -188,7 +179,6 @@ pub struct AppState {
     pub mode: Mode,
     pub profile: Profile,
     pub approval: Option<ApprovalRequest>,
-    pub picker: Option<Picker>,
     /// A blocking first-run trust gate, shown until the folder is trusted.
     pub trust: Option<TrustPrompt>,
     /// Whether the workspace folder has been trusted this session.
@@ -202,7 +192,6 @@ pub struct AppState {
     /// Workspace files offered by the `@` picker (relative, forward-slash). The
     /// host populates this; the picker filters it in memory.
     workspace_files: Vec<String>,
-    pub search: Option<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
     /// Tools currently running, shown as transient live indicators.
@@ -223,7 +212,6 @@ impl AppState {
         Self {
             header,
             transcript: Vec::new(),
-            scrollback_emitted: 0,
             streaming: String::new(),
             input: String::new(),
             input_cursor: 0,
@@ -235,14 +223,12 @@ impl AppState {
             mode,
             profile,
             approval: None,
-            picker: None,
             trust: None,
             trusted: false,
             pastes: Vec::new(),
             slash_picker: None,
             file_picker: None,
             workspace_files: Vec::new(),
-            search: None,
             plan: Vec::new(),
             active_tools: Vec::new(),
             should_quit: false,
@@ -495,32 +481,22 @@ impl AppState {
     /// profile, mode, trust, and provider/model display.
     pub fn clear_conversation_view(&mut self) {
         self.transcript.clear();
-        self.scrollback_emitted = 0;
         self.streaming.clear();
-        self.search = None;
         self.thinking.text.clear();
         self.plan.clear();
         self.active_tools.clear();
         self.approval = None;
-        self.picker = None;
         self.busy = false;
         self.spinner = 0;
         self.working_secs = 0;
         self.footer = FooterStats::default();
     }
 
-    /// Take the finished transcript items not yet emitted to native scrollback.
-    /// The host renders each above the inline viewport with `insert_before`, so
-    /// they flow into scrollback once and are never redrawn.
+    /// Take the finished transcript items, handing ownership to the host, which
+    /// renders each above the inline viewport with `insert_before`. They flow into
+    /// native scrollback once and are dropped here, so the buffer does not grow.
     pub fn drain_for_scrollback(&mut self) -> Vec<TranscriptLine> {
-        let pending = self.transcript[self.scrollback_emitted..].to_vec();
-        self.scrollback_emitted = self.transcript.len();
-        pending
-    }
-
-    /// Set or clear the active transcript search query.
-    pub fn set_search(&mut self, query: Option<String>) {
-        self.search = query.filter(|q| !q.is_empty());
+        std::mem::take(&mut self.transcript)
     }
 
     // --- Slash picker --------------------------------------------------------
@@ -546,7 +522,6 @@ impl AppState {
         ("clear", "Clear the conversation view"),
         ("compact", "Summarize and compact the context"),
         ("compact_force", "Compact now, even if within the budget"),
-        ("search", "Search the transcript"),
         ("resume", "Continue a previous session"),
         ("harness-resume", "Resume harness plan work"),
         ("wait-resume", "Wait for quota, then resume"),
@@ -986,7 +961,7 @@ mod tests {
         let picker = s.slash_picker.as_ref().expect("picker open");
         let names: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
         // Preserves the table order and only keeps the "se" prefix.
-        assert_eq!(names, ["sessions", "session", "search"]);
+        assert_eq!(names, ["sessions", "session"]);
         assert!(picker.items.iter().all(|i| !i.description.is_empty()));
     }
 

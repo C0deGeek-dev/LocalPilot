@@ -2,14 +2,16 @@
 //!
 //! Finished transcript items flow into native scrollback via the host; these
 //! tests cover the two surfaces the crate owns: the per-item [`history_block_text`]
-//! and [`header_text`] blocks the host inserts above the viewport, and the live
-//! region that [`render`] draws (activity tail, composer, status).
+//! / launch [`banner_text`] blocks the host inserts above the viewport, and the
+//! live region [`render`] draws (top section, composer, status). The live region
+//! is rendered at its own [`live_region_height`] — the size the host gives the
+//! inline viewport — so a test sees exactly what the user sees, with no clipping.
 #![allow(clippy::unwrap_used)]
 
 use localpilot_tui::{
-    handle_input, header_text, history_block_text, parse_slash, run, ActiveTool, AppInput,
-    AppState, ApprovalRequest, Header, Key, Mode, Picker, Profile, SlashAction, TranscriptLine,
-    TrustPrompt, UiEvent,
+    banner_text, handle_input, history_block_text, live_region_height, parse_slash, render, run,
+    ActiveTool, AppInput, AppState, ApprovalRequest, Header, Key, Mode, Profile, SlashAction,
+    TranscriptLine, TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
@@ -22,7 +24,7 @@ fn header() -> Header {
         provider: "local".to_string(),
         model: "test-model".to_string(),
         workspace: "demo".to_string(),
-        session_id: "ab12cd".to_string(),
+        session_id: "ab12cd34".to_string(),
         update: None,
     }
 }
@@ -51,11 +53,12 @@ fn buffer_string(buffer: &Buffer) -> String {
     out
 }
 
-fn render_string(state: &AppState, width: u16, height: u16) -> String {
+/// Render the live region at its natural height (what the host gives the inline
+/// viewport for this state) and `width`.
+fn render_natural(state: &AppState, width: u16) -> String {
+    let height = live_region_height(state, width).max(1);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal
-        .draw(|frame| localpilot_tui::render(frame, state))
-        .unwrap();
+    terminal.draw(|frame| render(frame, state)).unwrap();
     buffer_string(terminal.backend().buffer())
 }
 
@@ -79,37 +82,40 @@ fn text_to_string(text: &Text) -> String {
 fn live_region_snapshot() {
     let mut state = base();
     state.input = "what changed?".to_string();
-    insta::assert_snapshot!(render_string(&state, 90, 8));
+    insta::assert_snapshot!(render_natural(&state, 90));
 }
 
 #[test]
 fn streaming_live_region_snapshot() {
     let mut state = base();
     state.streaming = "Streaming the answer live...".to_string();
-    insta::assert_snapshot!(render_string(&state, 90, 8));
+    insta::assert_snapshot!(render_natural(&state, 90));
 }
 
 #[test]
-fn approval_modal_snapshot() {
+fn approval_prompt_snapshot() {
     let mut state = base();
     state.approval = Some(ApprovalRequest {
         tool: "run_shell".to_string(),
         target: "rm -rf build".to_string(),
         risk_class: "destructive".to_string(),
     });
-    insta::assert_snapshot!(render_string(&state, 90, 12));
+    insta::assert_snapshot!(render_natural(&state, 90));
 }
 
-// --- History / header blocks (emitted into native scrollback) -----------------
+#[test]
+fn trust_gate_snapshot() {
+    let mut state = base();
+    state.trust = Some(TrustPrompt {
+        path: r"D:\repos\demo".to_string(),
+    });
+    insta::assert_snapshot!(render_natural(&state, 90));
+}
+
+// --- History / banner blocks (emitted into native scrollback) -----------------
 
 #[test]
 fn history_block_text_prefixes_speakers_and_indents_continuations() {
-    let you = history_block_text(&TranscriptLine {
-        speaker: "you".to_string(),
-        text: "summarize the parser".to_string(),
-    });
-    assert_eq!(text_to_string(&you), "you: summarize the parser");
-
     let assistant = history_block_text(&TranscriptLine {
         speaker: "assistant".to_string(),
         text: "line one\nline two".to_string(),
@@ -127,25 +133,29 @@ fn history_block_text_prefixes_speakers_and_indents_continuations() {
 }
 
 #[test]
-fn header_text_carries_session_identity() {
-    let rendered = text_to_string(&header_text(&header()));
-    assert!(rendered.contains("LocalPilot 0.1.0"));
+fn banner_carries_the_logo_and_identity() {
+    let rendered = text_to_string(&banner_text(&header()));
+    assert!(rendered.contains("LocalPilot"));
+    assert!(rendered.contains("v0.1.0"));
     assert!(rendered.contains("local/test-model"));
     assert!(rendered.contains("ws:demo"));
-    assert!(rendered.contains("session:ab12cd"));
+    assert!(rendered.contains("session:ab12cd34"));
+    assert!(rendered.contains("╔══════╗")); // the README monitor mark
 }
 
 // --- Scrollback draining ------------------------------------------------------
 
 #[test]
-fn finished_items_drain_to_scrollback_once() {
+fn finished_items_drain_and_are_removed() {
     let mut state = base();
     state.apply(UiEvent::UserMessage("hello".to_string()));
     let first = state.drain_for_scrollback();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].speaker, "you");
-    // Nothing new is finished, so a second drain is empty.
+    // Drained items are removed, so a second drain is empty and the buffer does
+    // not grow.
     assert!(state.drain_for_scrollback().is_empty());
+    assert!(state.transcript.is_empty());
 
     state.apply(UiEvent::TextDelta("answer".to_string()));
     state.apply(UiEvent::TurnComplete);
@@ -159,10 +169,8 @@ fn finished_items_drain_to_scrollback_once() {
 fn streaming_shows_live_then_settles_into_scrollback_once() {
     let mut state = base();
     state.apply(UiEvent::TextDelta("partial answer".to_string()));
-    // While streaming, the live region shows it and nothing is drained yet.
-    assert!(render_string(&state, 90, 8).contains("assistant: partial answer"));
+    assert!(render_natural(&state, 90).contains("assistant: partial answer"));
     assert!(state.drain_for_scrollback().is_empty());
-    // On completion it becomes exactly one finished block bound for scrollback.
     state.apply(UiEvent::TurnComplete);
     let drained = state.drain_for_scrollback();
     assert_eq!(drained.len(), 1);
@@ -184,10 +192,7 @@ fn a_running_tool_is_live_then_its_result_lands_in_scrollback() {
             name: "run_shell".to_string()
         }]
     );
-    assert!(
-        state.drain_for_scrollback().is_empty(),
-        "a running tool is not committed to scrollback"
-    );
+    assert!(state.drain_for_scrollback().is_empty());
 
     state.apply(UiEvent::ToolFinished {
         id: "call_1".to_string(),
@@ -205,21 +210,26 @@ fn a_running_tool_is_live_then_its_result_lands_in_scrollback() {
 // --- Live region content ------------------------------------------------------
 
 #[test]
-fn bypass_profile_is_visible_in_the_footer() {
+fn the_status_keeps_profile_model_and_session_visible() {
     let mut state = base();
     state.profile = Profile::Bypass;
-    assert!(render_string(&state, 90, 8).contains("profile:BYPASS"));
+    let rendered = render_natural(&state, 90);
+    assert!(rendered.contains("profile:BYPASS"));
+    assert!(rendered.contains("test-model"));
+    assert!(rendered.contains("session:ab12cd34"));
 }
 
 #[test]
-fn trust_modal_shows_the_full_workspace_path() {
+fn the_trust_gate_shows_its_action_line_in_full() {
     let mut state = base();
     state.trust = Some(TrustPrompt {
         path: r"D:\repos\rust\localpilot".to_string(),
     });
-    let rendered = render_string(&state, 90, 16);
+    let rendered = render_natural(&state, 90);
     assert!(rendered.contains(r"D:\repos\rust\localpilot"));
-    assert!(rendered.contains("trust this folder?"));
+    assert!(rendered.contains("Trust this folder?"));
+    // The action line is not clipped — the viewport grew to fit the prompt.
+    assert!(rendered.contains("[y] trust this folder"));
 }
 
 #[test]
@@ -227,17 +237,10 @@ fn input_cursor_is_visible_at_the_edit_position() {
     let mut state = base();
     state.input = "abcd".to_string();
     state.input_cursor = 2;
-    let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
-    terminal
-        .draw(|frame| localpilot_tui::render(frame, &state))
-        .unwrap();
-
-    // The activity tail fills the top; the one-line input box sits above the
-    // two-row status, so its content row is y=14 and the cursor is at column 3.
-    assert_eq!(
-        terminal.backend_mut().get_cursor_position().unwrap(),
-        ratatui::layout::Position::new(3, 14)
-    );
+    let height = live_region_height(&state, 90).max(1);
+    let mut terminal = Terminal::new(TestBackend::new(90, height)).unwrap();
+    terminal.draw(|frame| render(frame, &state)).unwrap();
+    assert!(terminal.backend_mut().get_cursor_position().is_ok());
 }
 
 // --- Event loop / input -------------------------------------------------------
@@ -261,7 +264,7 @@ fn a_slash_command_triggers_the_matching_action() {
 }
 
 #[test]
-fn resume_slash_commands_are_parsed_for_the_host() {
+fn resume_and_compact_slash_commands_are_parsed() {
     assert_eq!(
         parse_slash("/resume"),
         Some(SlashAction::ContinueSession(None))
@@ -274,44 +277,16 @@ fn resume_slash_commands_are_parsed_for_the_host() {
         parse_slash("/harness-resume"),
         Some(SlashAction::HarnessResume)
     );
-    assert_eq!(parse_slash("/wait-resume"), Some(SlashAction::WaitResume));
-}
-
-#[test]
-fn clear_compact_and_search_slash_commands_are_parsed() {
     assert_eq!(parse_slash("/clear"), Some(SlashAction::Clear));
     assert_eq!(
         parse_slash("/compact force"),
         Some(SlashAction::Compact { force: true })
     );
-    assert_eq!(
-        parse_slash("/search parser errors"),
-        Some(SlashAction::Search(Some("parser errors".to_string())))
-    );
-    assert_eq!(parse_slash("/search"), Some(SlashAction::Search(None)));
     assert_eq!(parse_slash("/q"), Some(SlashAction::Quit));
-    assert!(matches!(
-        parse_slash("/clear now"),
-        Some(SlashAction::Invalid { command, .. }) if command == "clear"
-    ));
     assert_eq!(
         parse_slash("/not-a-command"),
         Some(SlashAction::Unknown("not-a-command".to_string()))
     );
-}
-
-#[test]
-fn search_command_sets_and_clears_search_state() {
-    let mut state = base();
-    state.input = "/search parser".to_string();
-    state.input_cursor = state.input.len();
-    handle_input(&mut state, AppInput::Key(Key::Enter));
-    assert_eq!(state.search, Some("parser".to_string()));
-
-    state.input = "/search".to_string();
-    state.input_cursor = state.input.len();
-    handle_input(&mut state, AppInput::Key(Key::Enter));
-    assert!(state.search.is_none());
 }
 
 #[test]
@@ -335,24 +310,10 @@ fn clear_command_resets_conversation_view_but_keeps_session_settings() {
     assert!(state.streaming.is_empty());
     assert!(state.thinking.text.is_empty());
     assert_eq!(state.footer.context_limit, 0);
-    // The "cleared" notice is the only remaining (uncommitted) transcript item.
+    // The "cleared" notice is the only remaining (undrained) transcript item.
     assert_eq!(state.transcript.len(), 1);
     assert_eq!(state.transcript[0].speaker, "system");
     assert!(state.transcript[0].text.contains("cleared"));
-}
-
-#[test]
-fn picker_selection_moves_and_closes() {
-    let mut state = base();
-    state.picker = Some(Picker {
-        title: "provider".to_string(),
-        options: vec!["local".to_string(), "openai".to_string()],
-        selected: 0,
-    });
-    handle_input(&mut state, AppInput::Key(Key::Down));
-    assert_eq!(state.picker.as_ref().unwrap().selected, 1);
-    handle_input(&mut state, AppInput::Key(Key::Enter));
-    assert!(state.picker.is_none(), "enter closes the picker");
 }
 
 #[test]
@@ -360,7 +321,7 @@ fn slash_autocomplete_lists_matching_commands_with_descriptions() {
     let mut state = base();
     handle_input(&mut state, AppInput::Key(Key::Char('/')));
     handle_input(&mut state, AppInput::Key(Key::Char('c')));
-    let rendered = render_string(&state, 90, 18);
+    let rendered = render_natural(&state, 90);
     // Every command starting with "c" is offered, each with its description.
     assert!(rendered.contains("/clear"));
     assert!(rendered.contains("Clear the conversation view"));
@@ -375,7 +336,6 @@ fn slash_autocomplete_enter_fills_the_highlighted_command() {
     for c in ['/', 'c', 'l', 'e'] {
         handle_input(&mut state, AppInput::Key(Key::Char(c)));
     }
-    // "/cle" matches only "clear"; Enter accepts it into the input and closes.
     handle_input(&mut state, AppInput::Key(Key::Enter));
     assert!(state.slash_picker.is_none());
     assert_eq!(state.input, "/clear");

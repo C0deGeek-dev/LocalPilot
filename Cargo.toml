@@ -43,8 +43,6 @@ crossterm = "=0.28.1"
 ratatui = { version = "=0.29.0", default-features = false, features = [
     "unstable-rendered-line-info",
 ] }
-# Builder-driven scrollable list, used for the slash-command autocomplete popup.
-tui-widget-list = "=0.13.3"
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
 futures = "=0.3.31"
 ignore = "=0.4.23"

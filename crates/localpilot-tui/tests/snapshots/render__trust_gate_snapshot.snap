@@ -2,7 +2,11 @@
 source: crates/localpilot-tui/tests/render.rs
 expression: "render_natural(&state, 90)"
 ---
-assistant: Streaming the answer live...                                                   
+Trust this folder?                                                                        
+D:\repos\demo                                                                             
+Once trusted, LocalPilot may read, edit, and run commands here                            
+subject to the active permission profile.                                                 
+[y] trust this folder    [n] exit                                                         
 ╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯

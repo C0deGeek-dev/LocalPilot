@@ -14,10 +14,6 @@ workspace = true
 # live in the CLI's terminal driver, keeping this crate's tests free of the
 # terminal-init code that crashes the harness on some local toolchains.
 ratatui = { workspace = true, default-features = false }
-# Slash-command and @-mention autocomplete popup lists (builder-driven,
-# backend-agnostic). Finished output now flows into native scrollback, so the
-# full-screen scrollable transcript view is gone.
-tui-widget-list = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

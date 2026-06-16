@@ -1,11 +1,9 @@
 ---
 source: crates/localpilot-tui/tests/render.rs
-expression: "render_string(&state, 90, 8)"
+expression: "render_natural(&state, 90)"
 ---
-                                                                                          
-                                                                                          
-                                                                                          
 ╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
 │what changed?                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        
+test-model · session:ab12cd34
