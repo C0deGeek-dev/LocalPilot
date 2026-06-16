@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod observation;
+mod postcondition;
 mod verdict;
 mod verifier;
 
