@@ -39,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{
     is_cancel, is_key_action, is_newline, is_submit, is_unbracketed_paste_newline_key,
-    may_be_unbracketed_paste_key, UnbracketedPaste, UnbracketedPasteAction,
+    may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
 
 /// Initial height of the inline live region before the first draw sizes it to the
@@ -284,14 +284,33 @@ async fn event_loop(
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     host: CommandHost<'_>,
 ) -> anyhow::Result<()> {
-    let mut unbracketed_paste = UnbracketedPaste::default();
+    let mut paste_burst = PasteBurst::default();
     loop {
+        // Commit a paste once its key-event stream has gone idle (it may have been
+        // absorbed without a final flush because a trailing event looked like more
+        // input). Time-based, so a momentary gap mid-paste never commits a half.
+        if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+            insert_paste(state, text);
+        }
         draw_ui(terminal, state)?;
         if state.should_quit {
             return Ok(());
         }
-
-        if event::poll(Duration::from_millis(100))? {
+        // Poll briefly while a burst is pending so we re-check the idle flush
+        // promptly; idle at the normal cadence otherwise.
+        let timeout = if paste_burst.has_pending() {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(100)
+        };
+        if !event::poll(timeout)? {
+            continue;
+        }
+        // Drain all currently-buffered events in one pass before redrawing. A
+        // terminal that delivers no bracketed paste sends one key event per
+        // pasted character; redrawing per character made a large paste crawl.
+        for _ in 0..4096 {
+            let mut submitted = false;
             match event::read()? {
                 Event::Key(key) if is_key_action(key) => {
                     let buffered_after = buffered_after_key(key)?;
@@ -304,15 +323,11 @@ async fn event_loop(
                         if state.trusted {
                             crate::trust::remember(host.cwd);
                         }
-                    } else if handle_unbracketed_paste_key(
-                        state,
-                        &mut unbracketed_paste,
-                        key,
-                        buffered_after,
-                    ) {
+                    } else if handle_paste_burst(state, &mut paste_burst, key, buffered_after) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
                         submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submitted = true;
                     } else if slash_picker_captures(state, key) || file_picker_captures(state, key)
                     {
                         if let Some(mapped) = map_key(key) {
@@ -322,6 +337,7 @@ async fn event_loop(
                         state.insert_input_newline();
                     } else if is_submit(key, &state.input) {
                         submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submitted = true;
                     } else if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
                     }
@@ -330,6 +346,14 @@ async fn event_loop(
                 // ones to a placeholder so the input line stays readable.
                 Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
                 _ => {}
+            }
+            if submitted || state.should_quit {
+                break;
+            }
+            // Keep draining while events remain so a paste is absorbed in one pass;
+            // committing it is left to the idle flush at the loop top.
+            if !event::poll(Duration::ZERO)? {
+                break;
             }
         }
     }
@@ -768,7 +792,7 @@ where
 
     // The reply channel for an approval the user has not yet answered.
     let mut pending: Option<oneshot::Sender<bool>> = None;
-    let mut unbracketed_paste = UnbracketedPaste::default();
+    let mut paste_burst = PasteBurst::default();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -795,9 +819,15 @@ where
                         event,
                         cancel,
                         steer,
-                        &mut unbracketed_paste,
+                        &mut paste_burst,
                         buffered_after,
                     );
+                }
+                // Commit a paste once its event stream has gone idle (the 50ms tick
+                // re-checks). Time-based, so a gap between batches never commits a
+                // half-paste.
+                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                    insert_paste(state, text);
                 }
                 draw_ui(terminal, state)?;
             }
@@ -850,7 +880,7 @@ fn resolve_event(
     event: Event,
     cancel: &CancellationToken,
     steer: Option<&localpilot_harness::SteerQueue>,
-    unbracketed_paste: &mut UnbracketedPaste,
+    paste_burst: &mut PasteBurst,
     buffered_after: bool,
 ) -> Option<oneshot::Sender<bool>> {
     if let Some(reply) = pending {
@@ -884,12 +914,7 @@ fn resolve_event(
             Event::Key(key) if is_key_action(key) => {
                 if is_cancel(key) {
                     cancel.cancel();
-                } else if handle_unbracketed_paste_key(
-                    state,
-                    unbracketed_paste,
-                    key,
-                    buffered_after,
-                ) {
+                } else if handle_paste_burst(state, paste_burst, key, buffered_after) {
                 } else if slash_picker_captures(state, key) || file_picker_captures(state, key) {
                     if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
@@ -929,6 +954,9 @@ fn resolve_event(
 }
 
 fn insert_paste(state: &mut AppState, text: String) {
+    // Normalize line endings so the row count and the expanded text are clean
+    // whether the paste arrived as a bracketed event or a key burst.
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     if text.lines().count() >= 4 || text.len() > 400 {
         let placeholder = state.register_paste(text);
         state.insert_input(&placeholder);
@@ -941,27 +969,38 @@ fn buffered_after_key(key: KeyEvent) -> anyhow::Result<bool> {
     if !may_be_unbracketed_paste_key(key) {
         return Ok(false);
     }
+    // A pasted character's successor is already on its way; give the terminal a
+    // brief moment to deliver it so a burst is detected reliably (a poll of ZERO
+    // races the OS/terminal parsing on Windows and misses it). Human typing has
+    // far larger gaps, so this never mistakes typing for a paste. Newlines get a
+    // touch longer for the CR/LF split.
     let timeout = if is_unbracketed_paste_newline_key(key) {
-        Duration::from_millis(2)
+        Duration::from_millis(4)
     } else {
-        Duration::ZERO
+        Duration::from_millis(3)
     };
     Ok(event::poll(timeout)?)
 }
 
-fn handle_unbracketed_paste_key(
+/// Drive the paste-burst accumulator for one key. Returns `true` when the key was
+/// consumed by the burst (the caller should do nothing else with it).
+fn handle_paste_burst(
     state: &mut AppState,
-    unbracketed_paste: &mut UnbracketedPaste,
+    burst: &mut PasteBurst,
     key: KeyEvent,
     buffered_after: bool,
 ) -> bool {
-    match unbracketed_paste.observe_key(key, buffered_after, Instant::now()) {
-        UnbracketedPasteAction::None => false,
-        UnbracketedPasteAction::InsertNewline => {
-            state.insert_input_newline();
+    match burst.observe(key, buffered_after, Instant::now()) {
+        PasteAction::Pass => false,
+        PasteAction::Absorbed => true,
+        PasteAction::Flush(text) => {
+            insert_paste(state, text);
             true
         }
-        UnbracketedPasteAction::Suppress => true,
+        PasteAction::FlushThenPass(text) => {
+            insert_paste(state, text);
+            false
+        }
     }
 }
 
