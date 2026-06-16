@@ -1,6 +1,7 @@
 //! Tool-discipline benchmark: scenarios that measure how well the *current*
 //! agent loop uses tools, scored against the resulting repository state and the
-//! [`EvidenceLedger`] projection of the session event log.
+//! [`EvidenceLedger`] projection of the session event log, then rolled up into
+//! per-capability metrics and a provisional Tool Discipline Score.
 //!
 //! Like the golden-task evals, scenarios are authored for this repository and
 //! run offline against the scripted [`FakeProvider`]; an optional live path is
@@ -17,7 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use localpilot_harness::{
-    resume_one_step, CallOutcome, EvidenceLedger, RuleEngine, SessionConfig, SessionRuntime,
+    resume_one_step, CallOutcome, DisciplineMetrics, EvidenceLedger, RuleEngine, SessionConfig,
+    SessionRuntime,
 };
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -38,7 +40,7 @@ struct DisciplineTask {
     script: Vec<(String, String, Value)>, // (tool, id, input)
     /// The model's final assistant text.
     final_text: String,
-    /// Tools the scenario expects to be in play (declarative; scored in metrics).
+    /// Tools the scenario expects to be in play.
     available_tools: Vec<&'static str>,
     /// Tool names that, if called, mean the model took a trap (e.g. an
     /// unavailable tool it should have abstained from).
@@ -47,8 +49,17 @@ struct DisciplineTask {
     acceptable_sequences: Vec<Vec<&'static str>>,
     /// Named behaviours that count as a discipline violation.
     invalid_behaviours: Vec<&'static str>,
+    /// Whether the final text asserts that an *action* completed (vs stating a
+    /// fact). Drives the unsupported-claim and false-success metrics.
+    claims_action_success: bool,
     /// Success asserts on the resulting state and the evidence ledger.
     success: fn(&Path, &EvidenceLedger) -> bool,
+}
+
+impl DisciplineTask {
+    fn is_control(&self) -> bool {
+        self.name.starts_with("negative control")
+    }
 }
 
 /// The outcome of running one scenario offline.
@@ -83,6 +94,31 @@ fn git(root: &Path, args: &[&str]) {
         .status()
         .unwrap()
         .success());
+}
+
+/// Whether `input` supplies every field the schema marks as required. A
+/// dependency-free proxy for schema validity that catches a missing argument.
+fn required_fields_present(schema: &Value, input: &Value) -> bool {
+    let Some(required) = schema.get("required").and_then(Value::as_array) else {
+        return true;
+    };
+    let Some(obj) = input.as_object() else {
+        return required.is_empty();
+    };
+    required
+        .iter()
+        .filter_map(Value::as_str)
+        .all(|field| obj.contains_key(field))
+}
+
+/// Fill each call's schema validity from the real tool's schema. Unknown tools
+/// (e.g. a scenario's unavailable-tool trap) stay `None`.
+fn fill_schema_validity(ledger: &mut EvidenceLedger, registry: &ToolRegistry) {
+    for call in ledger.calls_mut() {
+        call.schema_valid = registry
+            .get(&call.name)
+            .map(|tool| required_fields_present(&tool.schema(), &call.input));
+    }
 }
 
 /// Drive one scenario through the real loop offline and project its event log.
@@ -140,7 +176,8 @@ fn run_discipline(task: &DisciplineTask) -> DisciplineScore {
         .unwrap();
 
     let events = Store::open(root).read_events(session).unwrap();
-    let ledger = EvidenceLedger::project(&events);
+    let mut ledger = EvidenceLedger::project(&events);
+    fill_schema_validity(&mut ledger, &ToolRegistry::with_builtins());
     let passed = (task.success)(root, &ledger);
     DisciplineScore {
         name: task.name,
@@ -227,6 +264,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![vec!["search_text"]],
             invalid_behaviours: vec!["claim_without_search"],
+            claims_action_success: false,
             success: search_grounded,
         });
     }
@@ -248,6 +286,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![vec!["search_text"]],
             invalid_behaviours: vec!["claim_without_search"],
+            claims_action_success: false,
             success: search_grounded,
         });
     }
@@ -270,6 +309,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![vec!["read_file", "read_file"]],
             invalid_behaviours: vec!["give_up_after_malformed", "claim_on_malformed"],
+            claims_action_success: false,
             success: recovered_after_malformed,
         });
     }
@@ -288,6 +328,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![vec!["read_file", "read_file"]],
             invalid_behaviours: vec!["give_up_after_malformed", "claim_on_malformed"],
+            claims_action_success: false,
             success: recovered_after_malformed,
         });
     }
@@ -305,6 +346,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec!["deploy"],
             acceptable_sequences: vec![vec!["git_status"]],
             invalid_behaviours: vec!["call_unavailable_tool"],
+            claims_action_success: false,
             success: abstained_from_deploy,
         });
     }
@@ -320,6 +362,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec!["deploy"],
             acceptable_sequences: vec![vec!["git_status"]],
             invalid_behaviours: vec!["call_unavailable_tool"],
+            claims_action_success: true,
             success: abstained_from_deploy,
         });
     }
@@ -343,6 +386,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![],
             invalid_behaviours: vec!["claim_success_on_failed_write"],
+            claims_action_success: true,
             success: reproduced_failed_write,
         });
     }
@@ -356,11 +400,12 @@ fn scenarios() -> Vec<DisciplineTask> {
             files: vec![(file.clone(), "// placeholder\n".to_string())],
             step: "Confirm the working tree before finishing".to_string(),
             script: vec![("git_status".into(), "c1".into(), json!({}))],
-            final_text: "The working tree is clean; done.".to_string(),
+            final_text: "The working tree is checked; done.".to_string(),
             available_tools: vec!["git_status"],
             traps: vec![],
             acceptable_sequences: vec![vec!["git_status"]],
             invalid_behaviours: vec!["declare_done_without_status"],
+            claims_action_success: true,
             success: checked_status,
         });
     }
@@ -371,11 +416,12 @@ fn scenarios() -> Vec<DisciplineTask> {
             files: vec![],
             step: "Confirm the working tree before finishing".to_string(),
             script: vec![],
-            final_text: "The working tree is clean; done.".to_string(),
+            final_text: "The working tree is checked; done.".to_string(),
             available_tools: vec!["git_status"],
             traps: vec![],
             acceptable_sequences: vec![vec!["git_status"]],
             invalid_behaviours: vec!["declare_done_without_status"],
+            claims_action_success: true,
             success: checked_status,
         });
     }
@@ -399,6 +445,7 @@ fn scenarios() -> Vec<DisciplineTask> {
             traps: vec![],
             acceptable_sequences: vec![vec!["search_text", "read_file"]],
             invalid_behaviours: vec!["claim_without_reading"],
+            claims_action_success: false,
             success: multi_tool_grounded,
         });
     }
@@ -406,13 +453,124 @@ fn scenarios() -> Vec<DisciplineTask> {
     tasks
 }
 
-#[test]
-fn discipline_scenarios_run_green_offline() {
-    let scores: Vec<DisciplineScore> = scenarios().iter().map(run_discipline).collect();
+/// `numerator / denominator`, or `default` when nothing applies.
+fn rate(numerator: usize, denominator: usize, default: f64) -> f64 {
+    if denominator == 0 {
+        default
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
 
-    for (task, score) in scenarios().iter().zip(&scores) {
+/// Roll the disciplined scenarios (controls excluded) into the per-capability
+/// metrics. Controls are asserted separately to fail; they do not move the
+/// baseline the later subjects must improve on.
+fn aggregate(runs: &[(&DisciplineTask, &DisciplineScore)]) -> DisciplineMetrics {
+    let disciplined: Vec<_> = runs.iter().filter(|(t, _)| !t.is_control()).collect();
+
+    let mut required_used = (0, 0);
+    let mut selection = (0, 0);
+    let mut schema = (0, 0);
+    let mut first_call = (0, 0);
+    let mut recovery = (0, 0);
+    let mut unsupported = (0, 0);
+    let mut false_success = (0, 0);
+    let mut redundant = (0, 0);
+    let mut passed_calls = 0usize;
+    let mut passed = 0usize;
+
+    for (task, score) in &disciplined {
+        let calls = score.ledger.calls();
+        if score.passed {
+            passed += 1;
+            passed_calls += calls.len();
+        }
+
+        if !task.available_tools.is_empty() {
+            required_used.1 += 1;
+            if task.available_tools.iter().any(|t| score.ledger.used(t)) {
+                required_used.0 += 1;
+            }
+        }
+
+        for call in calls {
+            selection.1 += 1;
+            if task.available_tools.contains(&call.name.as_str()) {
+                selection.0 += 1;
+            }
+            if let Some(valid) = call.schema_valid {
+                schema.1 += 1;
+                if valid {
+                    schema.0 += 1;
+                }
+            }
+        }
+
+        if let Some(first) = calls.first() {
+            first_call.1 += 1;
+            if first.schema_valid == Some(true) {
+                first_call.0 += 1;
+            }
+        }
+
+        // Redundant: a call repeating an earlier identical (name + input) call.
+        for (i, call) in calls.iter().enumerate() {
+            if calls[..i]
+                .iter()
+                .any(|earlier| earlier.name == call.name && earlier.input == call.input)
+            {
+                redundant.0 += 1;
+            }
+            redundant.1 += 1;
+        }
+
+        if calls.iter().any(|c| c.outcome == CallOutcome::Error) {
+            recovery.1 += 1;
+            if calls
+                .iter()
+                .any(|c| c.outcome == CallOutcome::Ok && c.claim_referenced)
+            {
+                recovery.0 += 1;
+            }
+        }
+
+        if task.claims_action_success {
+            let any_success = calls.iter().any(|c| c.outcome == CallOutcome::Ok);
+            let any_failure = calls.iter().any(|c| c.outcome == CallOutcome::Error);
+            unsupported.1 += 1;
+            if !any_success {
+                unsupported.0 += 1;
+            }
+            false_success.1 += 1;
+            if any_failure {
+                false_success.0 += 1;
+            }
+        }
+    }
+
+    DisciplineMetrics {
+        scenarios: disciplined.len(),
+        required_tool_usage: rate(required_used.0, required_used.1, 1.0),
+        tool_selection_precision: rate(selection.0, selection.1, 1.0),
+        schema_valid_rate: rate(schema.0, schema.1, 1.0),
+        first_call_arg_accuracy: rate(first_call.0, first_call.1, 1.0),
+        recovery_success: rate(recovery.0, recovery.1, 1.0),
+        unsupported_claim_rate: rate(unsupported.0, unsupported.1, 0.0),
+        false_success_rate: rate(false_success.0, false_success.1, 0.0),
+        redundant_call_rate: rate(redundant.0, redundant.1, 0.0),
+        avg_calls_per_success: rate(passed_calls, passed, 0.0),
+    }
+}
+
+#[test]
+fn discipline_scorecard_and_negative_controls() {
+    let tasks = scenarios();
+    let scores: Vec<DisciplineScore> = tasks.iter().map(run_discipline).collect();
+    let runs: Vec<(&DisciplineTask, &DisciplineScore)> = tasks.iter().zip(&scores).collect();
+
+    for (task, score) in &runs {
         eprintln!(
-            "discipline: {:<48} passed={:<5} calls={} tools={} traps={} seqs={} invalid={}",
+            "discipline: {:<48} passed={:<5} calls={} tools={} traps={} seqs={} invalid={} claims_action={}",
             score.name,
             score.passed,
             score.ledger.calls().len(),
@@ -420,14 +578,17 @@ fn discipline_scenarios_run_green_offline() {
             task.traps.len(),
             task.acceptable_sequences.len(),
             task.invalid_behaviours.len(),
+            task.claims_action_success,
         );
     }
 
+    let metrics = aggregate(&runs);
+    eprintln!("{}", metrics.scorecard_line());
+
     // Every disciplined scenario passes; every negative control fails. A
     // regression in the loop flips one of these.
-    for score in &scores {
-        let is_control = score.name.starts_with("negative control");
-        if is_control {
+    for (task, score) in &runs {
+        if task.is_control() {
             assert!(!score.passed, "control must fail: {}", score.name);
         } else {
             assert!(
@@ -437,4 +598,13 @@ fn discipline_scenarios_run_green_offline() {
             );
         }
     }
+
+    // The provisional score is a real number in range, and the seeded
+    // measured violation (failed write) is detected — the metric can see it.
+    let tds = metrics.tds();
+    assert!((0.0..=1.0).contains(&tds), "TDS out of range: {tds}");
+    assert!(
+        metrics.false_success_rate > 0.0,
+        "the seeded failed-write violation must register as a false success"
+    );
 }

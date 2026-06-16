@@ -9,6 +9,7 @@
 mod brief;
 mod compaction;
 mod decisions;
+mod discipline;
 mod error;
 mod evidence;
 mod hooks;
@@ -27,6 +28,7 @@ pub use compaction::{
     compact, compact_with_summary, estimate_tokens, CompactionMetadata, CompactionMode,
 };
 pub use decisions::{today, Decision, Decisions};
+pub use discipline::DisciplineMetrics;
 pub use error::HarnessError;
 pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
 pub use hooks::{ContextHook, HookEvent, HookFabric, SessionObserver};
