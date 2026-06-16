@@ -59,6 +59,17 @@ Redaction applies to:
 Secret detection is best-effort. Inspect/delete controls are the backstop; the
 product must not promise perfect secret filtering.
 
+## Retention
+
+The project-local `.localpilot/` state is bounded by a retention policy so it
+cannot grow without limit (ADR-0024). A conservative cap is on by default —
+`[storage]`: `max_sessions = 100`, `max_age_days = 90`, `auto_prune = true` —
+pruning the oldest session transcripts/event logs and any tool-output snapshot no
+surviving session references. Because deleting history is sensitive, cleanup is
+best-effort and silent at chat startup, every limit is configurable, `0`/`false`
+disables it, and `localpilot session prune --dry-run` reports what would be
+removed without deleting. Cache and provider metadata are out of scope.
+
 ## Shell Policy
 
 Commands are classified as:

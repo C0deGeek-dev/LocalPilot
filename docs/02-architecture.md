@@ -173,6 +173,8 @@ Owns:
 - redaction before persistence
 - skill manifests
 - quota wait records
+- retention: prunes sessions and orphaned tool-output under a `RetentionPolicy`
+  (ADR-0024)
 
 Storage must be inspectable plain files where possible.
 

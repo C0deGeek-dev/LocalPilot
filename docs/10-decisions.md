@@ -2,6 +2,36 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0024: Session Store Has A Conservative Default Retention
+
+Status: accepted. Builds on ADR-0011 (store convergence: the execution record)
+and ADR-0012 (`.localpilot` is local, disposable, never committed).
+
+The project-local `.localpilot/` state grew without bound: one transcript and
+event-log pair per session, and one `tool-output/<id>.txt` snapshot per tool
+call, none of it ever removed. A `RetentionPolicy` (`max_sessions`,
+`max_age_days`; `0` = unbounded on that axis) now governs cleanup. `Store::prune`
+removes the sessions outside the policy, trims the index, and sweeps any
+tool-output snapshot no surviving session still references (a mark-and-sweep over
+survivors' tool-call ids plus their `recovery-<id>` snapshot — no mtime
+heuristics). It is exposed as `localpilot session prune [--keep] [--older-than]
+[--dry-run]` and run best-effort at interactive chat startup.
+
+A conservative cap is **on by default** (`[storage]`: 100 sessions, 90 days,
+`auto_prune = true`) so the directory cannot grow forever without anyone opting
+in. Both limits and the auto-prune are configurable, and `0`/`false` disable
+them.
+
+Reason:
+
+- unbounded growth is a real disk and inspectability problem; a default cap fixes
+  it for users who never touch config, the common case
+- retention is the store's concern, so the policy and the mark-and-sweep live in
+  `localpilot-store` behind one `prune` entry point rather than scattered deletes
+- deletion of user history is sensitive (the privacy model treats inspect/delete
+  as user controls), so cleanup is best-effort, silent, fully configurable, and
+  has an explicit `--dry-run`; cache and provider metadata stay out of scope
+
 ## ADR-0023: Deterministic Result Verification In A Thin `localpilot-verify` Crate
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and

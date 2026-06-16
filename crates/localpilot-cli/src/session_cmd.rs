@@ -7,12 +7,12 @@
 
 use std::io::Write;
 
-use localpilot_config::{CliOverrides, ConfigPaths};
+use localpilot_config::{CliOverrides, ConfigPaths, StorageConfig};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
-use localpilot_store::Store;
+use localpilot_store::{RetentionPolicy, Store};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -150,6 +150,60 @@ pub fn export_session(id: &str, output: &std::path::Path) -> anyhow::Result<()> 
     let cwd = std::env::current_dir()?;
     let session: localpilot_core::SessionId = id.parse()?;
     Store::open(&cwd).export_session(session, output)?;
+    Ok(())
+}
+
+/// Build a retention policy from the configured `[storage]` defaults, overridden
+/// per-run by explicit `keep` / `older_than` flags.
+#[must_use]
+pub fn retention_policy(
+    storage: &StorageConfig,
+    keep: Option<u64>,
+    older_than: Option<u64>,
+) -> RetentionPolicy {
+    RetentionPolicy {
+        max_sessions: keep.unwrap_or(storage.max_sessions),
+        max_age_days: older_than.unwrap_or(storage.max_age_days),
+    }
+}
+
+/// Current wall-clock time as a Unix timestamp (seconds), or `0` if the clock is
+/// before the epoch.
+#[must_use]
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Prune this workspace's sessions per the retention policy, printing a summary.
+///
+/// # Errors
+/// Returns an error if configuration or the store cannot be read, or a delete
+/// fails.
+pub fn prune_sessions(
+    keep: Option<u64>,
+    older_than: Option<u64>,
+    dry_run: bool,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    let policy = retention_policy(&config.storage, keep, older_than);
+
+    if policy.is_unbounded() {
+        writeln!(out, "no retention limits set — nothing to prune")?;
+        return Ok(());
+    }
+
+    let report = Store::open(&cwd).prune(policy, now_unix(), dry_run)?;
+    let verb = if dry_run { "would remove" } else { "removed" };
+    writeln!(
+        out,
+        "{verb} {} session(s) and {} tool-output snapshot(s)",
+        report.sessions_removed, report.tool_outputs_removed
+    )?;
     Ok(())
 }
 

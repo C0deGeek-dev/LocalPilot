@@ -19,6 +19,7 @@ pub struct Config {
     pub mcp: McpConfig,
     pub ingest: IngestConfig,
     pub compaction: CompactionConfig,
+    pub storage: StorageConfig,
 }
 
 impl Default for Config {
@@ -32,6 +33,34 @@ impl Default for Config {
             mcp: McpConfig::default(),
             ingest: IngestConfig::default(),
             compaction: CompactionConfig::default(),
+            storage: StorageConfig::default(),
+        }
+    }
+}
+
+/// Retention for the project-local `.localpilot/` state. A conservative cap is on
+/// by default so session history and tool-output snapshots cannot grow without
+/// bound; `0` on either limit disables that axis, and `auto_prune = false` turns
+/// off the best-effort cleanup at chat startup (the `session prune` command still
+/// works).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageConfig {
+    /// Prune on a best-effort basis when the interactive chat starts.
+    pub auto_prune: bool,
+    /// Keep at most this many of the most-recently-updated sessions (`0` = no
+    /// limit).
+    pub max_sessions: u64,
+    /// Drop sessions not updated within this many days (`0` = no limit).
+    pub max_age_days: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            auto_prune: true,
+            max_sessions: 100,
+            max_age_days: 90,
         }
     }
 }
@@ -479,6 +508,26 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn storage_defaults_to_a_conservative_cap_and_round_trips() {
+        let storage = StorageConfig::default();
+        assert!(storage.auto_prune);
+        assert_eq!(storage.max_sessions, 100);
+        assert_eq!(storage.max_age_days, 90);
+
+        let value = serde_json::to_value(storage).unwrap();
+        assert_eq!(
+            serde_json::from_value::<StorageConfig>(value).unwrap(),
+            storage
+        );
+
+        // Partial config fills the rest from defaults.
+        let partial: StorageConfig = serde_json::from_value(json!({ "max_sessions": 10 })).unwrap();
+        assert_eq!(partial.max_sessions, 10);
+        assert!(partial.auto_prune);
+        assert_eq!(partial.max_age_days, 90);
     }
 
     #[test]

@@ -12,12 +12,13 @@ mod atomic;
 mod error;
 mod events;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use localpilot_config::redact::redact;
-use localpilot_core::{EventId, Message, SessionId};
+use localpilot_core::{ContentBlock, EventId, Message, SessionId};
 use serde::{Deserialize, Serialize};
 
 pub use atomic::atomic_write;
@@ -58,6 +59,31 @@ struct SessionIndex {
 pub struct SessionBundle {
     pub id: SessionId,
     pub messages: Vec<Message>,
+}
+
+/// How much session history to retain. `0` on either axis means unbounded for
+/// that axis; a session is kept only when it satisfies *both* constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    /// Keep at most this many of the most-recently-updated sessions.
+    pub max_sessions: u64,
+    /// Drop sessions not updated within this many days.
+    pub max_age_days: u64,
+}
+
+impl RetentionPolicy {
+    /// Whether this policy can ever remove anything.
+    #[must_use]
+    pub fn is_unbounded(&self) -> bool {
+        self.max_sessions == 0 && self.max_age_days == 0
+    }
+}
+
+/// What a [`Store::prune`] call removed (or, in a dry run, would remove).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub sessions_removed: usize,
+    pub tool_outputs_removed: usize,
 }
 
 impl Store {
@@ -344,6 +370,153 @@ impl Store {
         let redacted = redact(&serde_json::to_string_pretty(&bundle)?);
         atomic_write(destination, redacted.as_bytes())
     }
+
+    // --- retention ---------------------------------------------------------
+
+    /// Apply a [`RetentionPolicy`]: remove the session transcripts and event logs
+    /// that fall outside it, prune the index, and sweep any tool-output snapshot
+    /// no surviving session still references. With `dry_run`, nothing is deleted
+    /// and the report describes what *would* be removed.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the index or a transcript cannot be read, or a
+    /// delete/index write fails.
+    pub fn prune(
+        &self,
+        policy: RetentionPolicy,
+        now_unix: u64,
+        dry_run: bool,
+    ) -> Result<PruneReport, StoreError> {
+        let index = self.load_index()?;
+        let doomed = sessions_to_remove(&index.sessions, policy, now_unix);
+
+        // The keys (file stems under `tool-output/`) still owned by survivors:
+        // a `recovery-<id>` snapshot per session, plus every tool-use id that
+        // appears in its transcript. Anything else is an orphan to sweep.
+        let mut live_keys: HashSet<String> = HashSet::new();
+        for entry in &index.sessions {
+            if doomed.contains(&entry.id) {
+                continue;
+            }
+            live_keys.insert(format!("recovery-{}", entry.id));
+            for message in self.read_transcript(entry.id)? {
+                collect_tool_output_keys(&message, &mut live_keys);
+            }
+        }
+
+        let mut tool_outputs_removed = 0;
+        for stem in self.tool_output_stems()? {
+            if !live_keys.contains(&stem) {
+                tool_outputs_removed += 1;
+                if !dry_run {
+                    self.remove_tool_output(&stem)?;
+                }
+            }
+        }
+
+        if !dry_run && !doomed.is_empty() {
+            for id in &doomed {
+                remove_file_if_present(&self.session_path(*id))?;
+                remove_file_if_present(&self.events_path(*id))?;
+            }
+            let kept = SessionIndex {
+                sessions: index
+                    .sessions
+                    .into_iter()
+                    .filter(|e| !doomed.contains(&e.id))
+                    .collect(),
+            };
+            atomic_write(
+                &self.index_path(),
+                serde_json::to_string_pretty(&kept)?.as_bytes(),
+            )?;
+        }
+
+        Ok(PruneReport {
+            sessions_removed: doomed.len(),
+            tool_outputs_removed,
+        })
+    }
+
+    /// The file stems (names without the `.txt` suffix) present under
+    /// `tool-output/`. A missing directory yields an empty list.
+    fn tool_output_stems(&self) -> Result<Vec<String>, StoreError> {
+        let dir = self.root.join(TOOL_OUTPUT_DIR);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StoreError::io(&dir, e)),
+        };
+        let mut stems = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(|e| StoreError::io(&dir, e))?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    stems.push(stem.to_string());
+                }
+            }
+        }
+        Ok(stems)
+    }
+
+    fn remove_tool_output(&self, stem: &str) -> Result<(), StoreError> {
+        remove_file_if_present(&self.root.join(TOOL_OUTPUT_DIR).join(format!("{stem}.txt")))
+    }
+}
+
+/// Which sessions a policy removes: those that fall outside the most-recent
+/// `max_sessions` window, or were last updated before the `max_age_days` cutoff.
+/// A `0` on either axis disables that constraint.
+fn sessions_to_remove(
+    entries: &[SessionIndexEntry],
+    policy: RetentionPolicy,
+    now_unix: u64,
+) -> HashSet<SessionId> {
+    let mut ordered: Vec<&SessionIndexEntry> = entries.iter().collect();
+    // Most recently updated first; ties broken by id for a stable order.
+    ordered.sort_by(|a, b| {
+        b.updated_unix
+            .cmp(&a.updated_unix)
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+
+    let age_cutoff = (policy.max_age_days > 0)
+        .then(|| now_unix.saturating_sub(policy.max_age_days.saturating_mul(86_400)));
+
+    ordered
+        .into_iter()
+        .enumerate()
+        .filter(|(rank, entry)| {
+            let over_count = policy.max_sessions > 0 && *rank as u64 >= policy.max_sessions;
+            let too_old = age_cutoff.is_some_and(|cutoff| entry.updated_unix < cutoff);
+            over_count || too_old
+        })
+        .map(|(_, entry)| entry.id)
+        .collect()
+}
+
+/// Add the tool-output snapshot keys referenced by one message: the ids of any
+/// tool calls and tool results it carries.
+fn collect_tool_output_keys(message: &Message, keys: &mut HashSet<String>) {
+    for block in &message.content {
+        match block {
+            ContentBlock::ToolUse(call) => {
+                keys.insert(call.id.to_string());
+            }
+            ContentBlock::ToolResult(result) => {
+                keys.insert(result.id.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreError::io(path, source)),
+    }
 }
 
 fn read_to_string_opt(path: &Path) -> Result<Option<String>, StoreError> {
@@ -387,12 +560,21 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use localpilot_core::{ContentBlock, Role};
+    use localpilot_core::{ContentBlock, Role, ToolCall, ToolUseId};
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path());
         (dir, store)
+    }
+
+    fn entry(updated_unix: u64) -> SessionIndexEntry {
+        SessionIndexEntry {
+            id: SessionId::new(),
+            message_count: 1,
+            created_unix: updated_unix,
+            updated_unix,
+        }
     }
 
     #[test]
@@ -502,5 +684,157 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(bundle.id, session);
         assert_eq!(bundle.messages.len(), 1);
+    }
+
+    #[test]
+    fn sessions_to_remove_honors_count_age_and_unbounded() {
+        // Newest to oldest: e3 (300), e2 (200), e1 (100).
+        let e1 = entry(100);
+        let e2 = entry(200);
+        let e3 = entry(300);
+        let entries = vec![e1.clone(), e2.clone(), e3.clone()];
+
+        // Count only: keep the 2 newest, drop the oldest.
+        let by_count = sessions_to_remove(
+            &entries,
+            RetentionPolicy {
+                max_sessions: 2,
+                max_age_days: 0,
+            },
+            10_000,
+        );
+        assert_eq!(by_count, HashSet::from([e1.id]));
+
+        // Age only: cutoff = now - 1 day = 300. Sessions updated before 300 go;
+        // e3 at exactly the cutoff stays.
+        let by_age = sessions_to_remove(
+            &entries,
+            RetentionPolicy {
+                max_sessions: 0,
+                max_age_days: 1,
+            },
+            300 + 86_400,
+        );
+        assert_eq!(by_age, HashSet::from([e1.id, e2.id]));
+
+        // Unbounded removes nothing.
+        let none = sessions_to_remove(
+            &entries,
+            RetentionPolicy {
+                max_sessions: 0,
+                max_age_days: 0,
+            },
+            10_000,
+        );
+        assert!(none.is_empty());
+    }
+
+    /// Re-stamp the index so `newest` is more recently updated than every other
+    /// session, making the prune order deterministic regardless of wall-clock
+    /// timing.
+    fn restamp(store: &Store, newest: SessionId) {
+        let mut index = store.load_index().unwrap();
+        for e in &mut index.sessions {
+            e.updated_unix = if e.id == newest { 200 } else { 100 };
+        }
+        atomic_write(
+            &store.index_path(),
+            serde_json::to_string_pretty(&index).unwrap().as_bytes(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prune_drops_old_sessions_and_sweeps_orphan_tool_output() {
+        let (_dir, store) = store();
+        let keep = SessionId::new();
+        let doomed = SessionId::new();
+
+        // The surviving session references tool output `callKeep`; the doomed one
+        // references `callDrop`; `orphan` belongs to nobody.
+        store
+            .append_message(
+                keep,
+                &Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse(ToolCall::new(
+                        ToolUseId::from("callKeep"),
+                        "run",
+                        serde_json::json!({}),
+                    ))],
+                ),
+            )
+            .unwrap();
+        store
+            .append_message(
+                doomed,
+                &Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse(ToolCall::new(
+                        ToolUseId::from("callDrop"),
+                        "run",
+                        serde_json::json!({}),
+                    ))],
+                ),
+            )
+            .unwrap();
+        store.put_tool_output("callKeep", "out").unwrap();
+        store.put_tool_output("callDrop", "out").unwrap();
+        store.put_tool_output("orphan", "out").unwrap();
+        restamp(&store, keep);
+
+        let report = store
+            .prune(
+                RetentionPolicy {
+                    max_sessions: 1,
+                    max_age_days: 0,
+                },
+                0,
+                false,
+            )
+            .unwrap();
+        assert_eq!(report.sessions_removed, 1);
+        assert_eq!(report.tool_outputs_removed, 2); // callDrop + orphan
+
+        // Survivor intact; doomed session and orphaned outputs gone.
+        assert!(store.session_path(keep).exists());
+        assert!(!store.session_path(doomed).exists());
+        assert!(store.get_tool_output("callKeep").unwrap().is_some());
+        assert!(store.get_tool_output("callDrop").unwrap().is_none());
+        assert!(store.get_tool_output("orphan").unwrap().is_none());
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_dry_run_reports_without_deleting() {
+        let (_dir, store) = store();
+        let keep = SessionId::new();
+        let doomed = SessionId::new();
+        store
+            .append_message(keep, &Message::text(Role::User, "a"))
+            .unwrap();
+        store
+            .append_message(doomed, &Message::text(Role::User, "b"))
+            .unwrap();
+        store.put_tool_output("orphan", "out").unwrap();
+        restamp(&store, keep);
+
+        let report = store
+            .prune(
+                RetentionPolicy {
+                    max_sessions: 1,
+                    max_age_days: 0,
+                },
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(report.sessions_removed, 1);
+        assert_eq!(report.tool_outputs_removed, 1);
+
+        // Nothing was actually removed.
+        assert!(store.session_path(doomed).exists());
+        assert!(store.get_tool_output("orphan").unwrap().is_some());
+        assert_eq!(store.list_sessions().unwrap().len(), 2);
     }
 }

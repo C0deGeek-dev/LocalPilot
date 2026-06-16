@@ -217,6 +217,19 @@ enum SessionCommand {
         #[arg(long)]
         allow_writes: bool,
     },
+    /// Prune old sessions (and their orphaned tool-output) per the retention
+    /// policy. Flags override the `[storage]` config for this run.
+    Prune {
+        /// Keep at most this many of the most recent sessions (0 = no limit).
+        #[arg(long)]
+        keep: Option<u64>,
+        /// Drop sessions not updated within this many days (0 = no limit).
+        #[arg(long)]
+        older_than: Option<u64>,
+        /// Report what would be removed without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -813,6 +826,15 @@ async fn main() -> anyhow::Result<()> {
                     Some(session),
                 )
                 .await?;
+            }
+            SessionCommand::Prune {
+                keep,
+                older_than,
+                dry_run,
+            } => {
+                let mut stdout = io::stdout().lock();
+                session_cmd::prune_sessions(keep, older_than, dry_run, &mut stdout)?;
+                stdout.flush()?;
             }
         },
     }

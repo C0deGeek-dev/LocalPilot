@@ -137,6 +137,17 @@ pub async fn run_chat(
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+
+    // Best-effort retention so `.localpilot/` cannot grow without bound. Errors
+    // are ignored — cleanup must never block starting a chat — and it runs before
+    // the live region is drawn.
+    if config.storage.auto_prune {
+        let policy = crate::session_cmd::retention_policy(&config.storage, None, None);
+        if !policy.is_unbounded() {
+            let _ = Store::open(&cwd).prune(policy, crate::session_cmd::now_unix(), false);
+        }
+    }
+
     let model = model
         .map(str::to_string)
         .or_else(|| config.resolve_model(provider_id))
