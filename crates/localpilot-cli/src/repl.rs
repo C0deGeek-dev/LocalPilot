@@ -47,6 +47,9 @@ use crate::key_input::{
 /// status line.
 const INITIAL_INLINE_HEIGHT: u16 = 5;
 
+/// Blank rows between the launch banner and the composer at startup.
+const BANNER_GAP_ROWS: u16 = 2;
+
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
 struct ApprovalCall {
@@ -1319,25 +1322,15 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     Ok(terminal)
 }
 
-/// Print the launch banner into scrollback, then pad blank rows so the inline
-/// viewport seats at the bottom of the screen (banner on top, blank middle,
-/// composer at the bottom). On a terminal too short to pad, the composer simply
-/// follows the banner.
+/// Print the launch banner into scrollback, then a small fixed gap before the
+/// composer (banner on top, a couple of blank rows, then the inline composer
+/// directly below) — no full-screen padding.
 fn launch_banner(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     banner: Text<'static>,
 ) -> anyhow::Result<()> {
-    let size = terminal.size()?;
-    let banner_height = (Paragraph::new(banner.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(size.width) as u16)
-        .max(1);
-    let viewport_height = terminal.get_frame().area().height;
     emit_block(terminal, banner)?;
-    let fill = size.height.saturating_sub(banner_height + viewport_height);
-    if fill > 0 {
-        terminal.insert_before(fill, |_buf| {})?;
-    }
+    terminal.insert_before(BANNER_GAP_ROWS, |_buf| {})?;
     Ok(())
 }
 
