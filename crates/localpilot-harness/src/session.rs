@@ -124,6 +124,12 @@ pub struct SessionConfig {
     pub compaction_mode: CompactionMode,
     /// Budgets and timeout for an optional model-backed smart summarizer.
     pub summarizer_tuning: SummarizerTuning,
+    /// When set, a tool contract's `RequiresPriorRead` precondition is enforced:
+    /// a destructive overwrite of an existing, unread file is refused before the
+    /// permission engine. Off by default so existing flows are unchanged; the
+    /// discipline track opts in to measure its false-positive rate before any
+    /// default-on decision.
+    pub enforce_prior_read: bool,
 }
 
 impl Default for SessionConfig {
@@ -137,6 +143,7 @@ impl Default for SessionConfig {
             max_stream_retries: 3,
             compaction_mode: CompactionMode::Deterministic,
             summarizer_tuning: SummarizerTuning::default(),
+            enforce_prior_read: false,
         }
     }
 }
@@ -366,6 +373,23 @@ impl SessionRuntime {
     #[must_use]
     pub fn last_event_id(&self) -> Option<EventId> {
         self.last_event
+    }
+
+    /// Evaluate a tool's contract preconditions before it runs. Returns a
+    /// model-visible block reason when a precondition is unmet (tighten-only:
+    /// this can only refuse a call, never grant one). Projects the evidence
+    /// ledger from this session's own event log.
+    fn precondition_block(&self, name: &str, input: &serde_json::Value) -> Option<String> {
+        if !self.config.enforce_prior_read {
+            return None;
+        }
+        let contract = self.tools.get(name)?.contract();
+        if contract.preconditions.is_empty() {
+            return None;
+        }
+        let events = self.store.read_events(self.session_id).ok()?;
+        let ledger = crate::evidence::EvidenceLedger::project(&events);
+        crate::precondition::evaluate(contract.preconditions, input, &ledger, &self.workspace).err()
     }
 
     /// Record that this session is closing.
@@ -1243,7 +1267,15 @@ impl SessionRuntime {
                 // the dispatch future drops spawned children, which are
                 // configured to die with it instead of waiting out their
                 // timeout. The aborted execution stays in the event log.
-                let result = {
+                let result = if let Some(reason) = self.precondition_block(name, input) {
+                    // A contract precondition (e.g. RequiresPriorRead) refused the
+                    // call before permission. Tighten-only: surface it as an error
+                    // result so the model sees why and can recover.
+                    Some(localpilot_core::ToolResult::error(
+                        ToolUseId::from(id.as_str()),
+                        reason,
+                    ))
+                } else {
                     let retention = StoreRetention(&self.store);
                     let ctx = ToolContext {
                         workspace: &self.workspace,

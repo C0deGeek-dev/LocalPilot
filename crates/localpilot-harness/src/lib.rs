@@ -14,6 +14,7 @@ mod error;
 mod evidence;
 mod hooks;
 mod planning;
+mod precondition;
 mod progress;
 mod quality;
 mod resume;
