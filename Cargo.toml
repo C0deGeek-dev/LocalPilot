@@ -15,6 +15,7 @@ members = [
     "crates/localpilot-rpc",
     "crates/localpilot-quota",
     "crates/localpilot-localmind",
+    "crates/localpilot-verify",
 ]
 # The LocalMind engine is vendored as a git submodule and consumed by
 # localpilot-localmind via path dependencies. It is its own workspace, so it is

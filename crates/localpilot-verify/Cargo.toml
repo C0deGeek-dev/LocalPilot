@@ -1,0 +1,16 @@
+[package]
+name = "localpilot-verify"
+version = "0.3.0-beta.2"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+localpilot-tools = { path = "../localpilot-tools" }
+
+[dev-dependencies]
