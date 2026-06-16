@@ -10,6 +10,7 @@ mod brief;
 mod compaction;
 mod decisions;
 mod error;
+mod evidence;
 mod hooks;
 mod planning;
 mod progress;
@@ -27,6 +28,7 @@ pub use compaction::{
 };
 pub use decisions::{today, Decision, Decisions};
 pub use error::HarnessError;
+pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
 pub use hooks::{ContextHook, HookEvent, HookFabric, SessionObserver};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
