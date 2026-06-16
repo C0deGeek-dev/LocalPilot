@@ -44,6 +44,10 @@ pub enum StopReason {
     Degraded,
     /// The provider could not be reached.
     ProviderError,
+    /// The per-turn tool-call budget was exhausted; the loop stopped to bound
+    /// cost. Distinct from the attempt limit — that bounds *retries*, this
+    /// bounds total tool calls in a turn.
+    BudgetExceeded,
 }
 
 /// A UI-agnostic runtime event. Consumers (print mode, the TUI) subscribe to a
@@ -130,6 +134,10 @@ pub struct SessionConfig {
     /// discipline track opts in to measure its false-positive rate before any
     /// default-on decision.
     pub enforce_prior_read: bool,
+    /// Maximum tool calls allowed in a single turn before the loop stops to
+    /// bound cost. A safety ceiling against a runaway tool loop, well above any
+    /// normal task; distinct from the attempt limit (which bounds retries).
+    pub tool_call_budget: usize,
 }
 
 impl Default for SessionConfig {
@@ -144,6 +152,7 @@ impl Default for SessionConfig {
             compaction_mode: CompactionMode::Deterministic,
             summarizer_tuning: SummarizerTuning::default(),
             enforce_prior_read: false,
+            tool_call_budget: 50,
         }
     }
 }
@@ -955,6 +964,8 @@ impl SessionRuntime {
         // estimate believed it fit. The first overflow forces a tighter
         // compaction and one retry; a second overflow this turn is terminal.
         let mut overflow_retried = false;
+        // Total tool calls executed this turn, bounded by the cost ceiling.
+        let mut tool_calls_used = 0usize;
 
         loop {
             if cancel.is_cancelled() {
@@ -1242,6 +1253,22 @@ impl SessionRuntime {
 
             // Execute tool calls through the permission-gated registry.
             for (id, name, input) in &calls {
+                // Cost ceiling: a runaway tool loop stops cleanly with a
+                // model-visible, recorded reason before the next call runs.
+                if tool_calls_used >= self.config.tool_call_budget {
+                    let notice = format!(
+                        "tool-call budget of {} reached this turn; stopping to bound cost",
+                        self.config.tool_call_budget
+                    );
+                    let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+                    self.append(
+                        Message::text(Role::User, notice)
+                            .into_synthetic("tool-call budget exceeded"),
+                    );
+                    return self.stop(events, StopReason::BudgetExceeded);
+                }
+                tool_calls_used += 1;
+
                 // Surface the task plan to the UI as the model updates it.
                 if name == "update_plan" {
                     if let Some(steps) = parse_plan(input) {
