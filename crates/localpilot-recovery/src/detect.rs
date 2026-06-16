@@ -1,5 +1,7 @@
 //! Context-aware bad-output detection.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// A detected bad-output state.
@@ -13,6 +15,9 @@ pub enum BadOutputKind {
     MalformedToolCall,
     MalformedStructuredOutput,
     RepeatedTransientError,
+    /// The same tool call failed, then was repeated unchanged — a futile loop
+    /// distinct from output degeneracy.
+    ToolCallLoop,
 }
 
 /// A run of forward slashes outside fenced code this long is degenerate.
@@ -242,6 +247,51 @@ pub fn is_repeated_token_loop(text: &str) -> bool {
     best >= REPEATED_TOKEN_THRESHOLD
 }
 
+/// Detects a futile tool-call loop within a step: the same failing call
+/// repeated. It escalates on the **second** occurrence of a failing call
+/// signature (a fast break, before the per-tool failure safeguard's higher
+/// threshold). A successful call does not seed the loop, so a corrected retry
+/// with different arguments never trips it.
+///
+/// The caller supplies an opaque signature per call (e.g. `name` + arguments);
+/// this detector stays free of any tool or JSON dependency.
+#[derive(Debug, Default)]
+pub struct ToolLoopDetector {
+    failing_signatures: HashSet<String>,
+}
+
+impl ToolLoopDetector {
+    /// A fresh detector for a step.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one tool call's outcome. Returns `true` the moment a *failing*
+    /// call repeats a failing-call signature already seen this step — the point
+    /// to escalate rather than loop.
+    pub fn observe(&mut self, signature: &str, failed: bool) -> bool {
+        // A success is not part of a futile loop and never seeds one.
+        failed && !self.failing_signatures.insert(signature.to_string())
+    }
+}
+
+/// Batch reference for [`ToolLoopDetector`]: whether any failing-call signature
+/// repeats over the whole sequence. Used to prove the incremental detector.
+#[must_use]
+pub fn has_tool_loop<'a, I>(calls: I) -> bool
+where
+    I: IntoIterator<Item = (&'a str, bool)>,
+{
+    let mut seen = HashSet::new();
+    for (signature, failed) in calls {
+        if failed && !seen.insert(signature) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +379,50 @@ mod tests {
             }
             let expected = is_slash_flood(&text) || is_repeated_token_loop(&text);
             proptest::prop_assert_eq!(monitor.detected(), expected);
+        }
+    }
+
+    #[test]
+    fn two_identical_failing_calls_escalate() {
+        let mut detector = ToolLoopDetector::new();
+        let sig = "edit_file|{\"path\":\"a.rs\",\"old\":\"x\"}";
+        assert!(
+            !detector.observe(sig, true),
+            "first failure is not yet a loop"
+        );
+        assert!(
+            detector.observe(sig, true),
+            "the identical repeat of a failing call escalates"
+        );
+    }
+
+    #[test]
+    fn a_corrected_retry_does_not_trip_the_detector() {
+        let mut detector = ToolLoopDetector::new();
+        assert!(!detector.observe("edit_file|{\"old\":\"x\"}", true));
+        // A different (corrected) call, even if it also fails, is novel.
+        assert!(!detector.observe("edit_file|{\"old\":\"y\"}", true));
+        // And a success never seeds a loop.
+        assert!(!detector.observe("edit_file|{\"old\":\"z\"}", false));
+    }
+
+    proptest::proptest! {
+        // The incremental detector flags a loop exactly when the batch reference
+        // finds a repeated failing signature, regardless of interleaving.
+        #[test]
+        fn tool_loop_detector_matches_the_batch_reference(
+            calls in proptest::collection::vec(
+                ("[a-c]{1,2}", proptest::bool::ANY),
+                0..16,
+            )
+        ) {
+            let mut detector = ToolLoopDetector::new();
+            let incremental = calls
+                .iter()
+                .map(|(sig, failed)| detector.observe(sig, *failed))
+                .any(|tripped| tripped);
+            let batch = has_tool_loop(calls.iter().map(|(sig, failed)| (sig.as_str(), *failed)));
+            proptest::prop_assert_eq!(incremental, batch);
         }
     }
 }

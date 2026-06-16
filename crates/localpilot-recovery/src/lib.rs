@@ -9,5 +9,8 @@
 mod detect;
 mod engine;
 
-pub use detect::{detect, is_repeated_token_loop, is_slash_flood, BadOutputKind, StreamMonitor};
+pub use detect::{
+    detect, has_tool_loop, is_repeated_token_loop, is_slash_flood, BadOutputKind, StreamMonitor,
+    ToolLoopDetector,
+};
 pub use engine::{ModelHealth, RecoveryAction, RecoveryBudget, RecoveryDiagnostic, RecoveryEngine};
