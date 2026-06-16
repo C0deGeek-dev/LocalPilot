@@ -76,6 +76,11 @@ pub struct Capabilities {
     pub quota_reset_metadata: bool,
     /// No-tool models need a different prompt path.
     pub needs_no_tool_prompt_path: bool,
+    /// The provider can constrain decoding to a JSON schema, so tool-call
+    /// arguments are schema-valid by construction (e.g. a local `llama-server`
+    /// `json_schema` constraint). Hosted providers leave this off and keep their
+    /// native tool-calling.
+    pub constrained_decoding: bool,
 }
 
 /// A provider's self-description.

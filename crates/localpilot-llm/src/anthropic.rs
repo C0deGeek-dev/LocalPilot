@@ -81,6 +81,9 @@ impl AnthropicProvider {
                     per_request_tool_disable: true,
                     quota_reset_metadata: true,
                     needs_no_tool_prompt_path: false,
+                    // Hosted Anthropic uses native tool-calling, not a schema
+                    // constraint through this path.
+                    constrained_decoding: false,
                 },
                 max_context_tokens: None,
                 auth,

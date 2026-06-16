@@ -1,4 +1,4 @@
-﻿//! A scripted, in-memory provider for deterministic offline tests.
+//! A scripted, in-memory provider for deterministic offline tests.
 //!
 //! This is first-party test support, reused across the workspace: a session or
 //! harness test drives it instead of touching the network. Each call to
@@ -166,6 +166,7 @@ fn default_declaration() -> ProviderDeclaration {
             per_request_tool_disable: true,
             quota_reset_metadata: true,
             needs_no_tool_prompt_path: false,
+            constrained_decoding: false,
         },
         max_context_tokens: Some(8192),
         auth: AuthRequirement::None,

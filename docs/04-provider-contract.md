@@ -158,6 +158,10 @@ provider implementation must document:
 - whether tools can be disabled per request
 - how quota/rate-limit reset metadata is surfaced
 - whether no-tool models need a different prompt path
+- whether the provider can constrain decoding to a JSON schema (a local
+  `llama-server` can, via a `json_schema` constraint, so tool-call arguments are
+  schema-valid by construction); hosted providers leave this off and keep native
+  tool-calling
 
 The session runtime should branch on provider capabilities, not provider names.
 

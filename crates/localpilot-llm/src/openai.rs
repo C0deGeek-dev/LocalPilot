@@ -74,6 +74,10 @@ impl OpenAiProvider {
                     per_request_tool_disable: true,
                     quota_reset_metadata: true,
                     needs_no_tool_prompt_path: false,
+                    // A local OpenAI-compatible server (llama-server) supports a
+                    // json_schema constraint; a hosted OpenAI endpoint does not
+                    // expose one through this path, so gate on the source.
+                    constrained_decoding: matches!(source_type, SourceType::LocalServer),
                 },
                 max_context_tokens: None,
                 auth,
