@@ -124,6 +124,15 @@ impl OpenAiProvider {
         if !request.tools.is_empty() {
             body["tools"] = Value::Array(request.tools.iter().map(translate_tool).collect());
         }
+        // A constrained-decoding server accepts a JSON-schema constraint via the
+        // structured-output `response_format` field. Absent for every other
+        // provider, so the body is unchanged for them.
+        if let Some(constraint) = &request.tool_constraint {
+            body["response_format"] = json!({
+                "type": "json_schema",
+                "json_schema": { "name": "tool_call", "schema": constraint },
+            });
+        }
         if self.suppresses_thinking() && !self.has_option("reasoning_effort", request) {
             body["reasoning_effort"] = json!("minimal");
         }
@@ -203,6 +212,21 @@ impl ModelProvider for OpenAiProvider {
 
         let response = builder.send().await?;
         let status = response.status();
+        // Degrade gracefully: a server that declares the capability but rejects
+        // the schema constraint (a client error on a constrained request) must
+        // not break the turn. Retry once without the constraint — native
+        // tool-calling — recording the fallback reason. The retry carries no
+        // constraint, so this guard cannot recurse.
+        if status.is_client_error() && request.tool_constraint.is_some() {
+            tracing::warn!(
+                status = status.as_u16(),
+                model = %request.model,
+                "constrained-decoding request was rejected; falling back to native tool-calling"
+            );
+            let mut fallback = request.clone();
+            fallback.tool_constraint = None;
+            return self.stream(fallback).await;
+        }
         if !status.is_success() {
             return Err(classify_error_response(status.as_u16(), response).await);
         }

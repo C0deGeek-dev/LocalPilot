@@ -7,9 +7,9 @@ use futures::StreamExt;
 use localpilot_core::{Message, Role};
 use localpilot_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, OpenAiProvider, ProviderError,
-    SourceType,
+    SourceType, ToolSpec,
 };
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// `ModelEventStream` is not `Debug`, so `unwrap_err` is unavailable; extract the
@@ -237,4 +237,59 @@ async fn anthropic_adapter_consumes_a_localbox_proxy_shaped_stream() {
         .collect();
     assert_eq!(text, "Hello world");
     assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+}
+
+#[tokio::test]
+async fn a_rejected_constraint_falls_back_to_native_tool_calling() {
+    let server = MockServer::start().await;
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+               data: [DONE]\n\n";
+
+    // A request carrying the schema constraint (response_format) is rejected.
+    Mock::given(method("POST"))
+        .and(body_string_contains("response_format"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_string("{\"error\":{\"message\":\"unsupported response_format\"}}"),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    // The unconstrained retry (native tool-calling) succeeds.
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .with_priority(5)
+        .mount(&server)
+        .await;
+
+    let req = request()
+        .with_tools(vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: "read".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }])
+        .with_tool_constraint(Some(serde_json::json!({ "oneOf": [] })));
+
+    let events: Vec<_> = provider(server.uri())
+        .stream(req)
+        .await
+        .expect("the rejected constraint must fall back, not break the turn")
+        .collect()
+        .await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Ok(ModelEvent::TextDelta(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "ok",
+        "the turn completed via native tool-calling after the constraint was rejected"
+    );
 }
