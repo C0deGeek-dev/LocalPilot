@@ -12,7 +12,7 @@ use futures::StreamExt;
 use localpilot_config::redact::redact;
 use localpilot_config::CheckConfig;
 use localpilot_core::{
-    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolUseId,
+    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
 };
 use localpilot_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
@@ -21,6 +21,7 @@ use localpilot_recovery::{detect, ModelHealth, RecoveryEngine, StreamMonitor};
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
 use localpilot_tools::{ToolContext, ToolRegistry};
+use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -138,6 +139,10 @@ pub struct SessionConfig {
     /// bound cost. A safety ceiling against a runaway tool loop, well above any
     /// normal task; distinct from the attempt limit (which bounds retries).
     pub tool_call_budget: usize,
+    /// When set, the no-unsupported-claim gate reviews the final reply: an
+    /// action-completion claim that no `Verified` call supports is flagged.
+    /// Off by default until the benchmark shows a low false-positive rate.
+    pub enforce_claim_gate: bool,
 }
 
 impl Default for SessionConfig {
@@ -153,6 +158,7 @@ impl Default for SessionConfig {
             summarizer_tuning: SummarizerTuning::default(),
             enforce_prior_read: false,
             tool_call_budget: 50,
+            enforce_claim_gate: false,
         }
     }
 }
@@ -399,6 +405,43 @@ impl SessionRuntime {
         let events = self.store.read_events(self.session_id).ok()?;
         let ledger = crate::evidence::EvidenceLedger::project(&events);
         crate::precondition::evaluate(contract.preconditions, input, &ledger, &self.workspace).err()
+    }
+
+    /// Verify an executed call against its contract and return the verdict label
+    /// to record. Deterministic-first; a model critic is a future drop-in.
+    fn verify_call(&self, name: &str, input: &serde_json::Value, result: &ToolResult) -> String {
+        let verdict = match self.tools.get(name) {
+            Some(tool) => {
+                let contract = tool.contract();
+                let observation = Observation::from_tool_result(result);
+                DeterministicVerifier.verify(&VerificationInput {
+                    contract: &contract,
+                    input,
+                    observation: &observation,
+                    workspace: &self.workspace,
+                })
+            }
+            None => Verdict::Unverified,
+        };
+        match verdict {
+            Verdict::Verified => "verified",
+            Verdict::Unverified => "unverified",
+            Verdict::Failed => "failed",
+        }
+        .to_string()
+    }
+
+    /// Apply the no-unsupported-claim gate to a final reply, returning the
+    /// (possibly rewritten) text. A no-op unless `enforce_claim_gate` is set.
+    fn gate_final_reply(&self, text: String) -> String {
+        if !self.config.enforce_claim_gate {
+            return text;
+        }
+        let Ok(events) = self.store.read_events(self.session_id) else {
+            return text;
+        };
+        let ledger = crate::evidence::EvidenceLedger::project(&events);
+        crate::claim::review_final_reply(&text, &ledger).unwrap_or(text)
     }
 
     /// Record that this session is closing.
@@ -1189,6 +1232,13 @@ impl SessionRuntime {
             let mut content = Vec::new();
             let reasoning = trim_blank_boundary_lines(reasoning);
             let text = trim_blank_boundary_lines(text);
+            // When this turn ends without more tool calls, the text is the final
+            // reply: the no-unsupported-claim gate reviews it (no-op when off).
+            let text = if calls.is_empty() {
+                self.gate_final_reply(text)
+            } else {
+                text
+            };
 
             if !reasoning.trim().is_empty() {
                 content.push(ContentBlock::Reasoning {
@@ -1389,6 +1439,13 @@ impl SessionRuntime {
                     id: result.id.to_string(),
                     name: name.clone(),
                     is_error: result.is_error,
+                });
+                // Verifier stage: judge the call against its contract and record
+                // the verdict durably, so a later claim can be checked against it.
+                let verdict = self.verify_call(name, input, &result);
+                self.record_event(SessionEventKind::ToolVerified {
+                    id: result.id.to_string(),
+                    verdict,
                 });
                 self.append(Message::new(
                     Role::Tool,

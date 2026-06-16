@@ -26,6 +26,7 @@ localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
+localpilot-verify = { path = "../localpilot-verify" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

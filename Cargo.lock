@@ -1295,6 +1295,7 @@ dependencies = [
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
+ "localpilot-verify",
  "proptest",
  "serde",
  "serde_json",

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod brief;
+mod claim;
 mod compaction;
 mod decisions;
 mod discipline;
