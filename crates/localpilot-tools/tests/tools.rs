@@ -1,9 +1,14 @@
 //! Tool registry, permission, and builtin-tool behaviour tests.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use async_trait::async_trait;
 use localpilot_core::{ToolCall, ToolResult, ToolUseId};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
-use localpilot_tools::{ToolContext, ToolRegistry};
+use localpilot_sandbox::{
+    Effect, Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
+};
+use localpilot_tools::{
+    Reversibility, Tool, ToolContext, ToolContract, ToolError, ToolOutput, ToolRegistry,
+};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1131,4 +1136,118 @@ fn every_side_effecting_builtin_declares_verification() {
             );
         }
     }
+}
+
+/// A tool with a benign in-workspace read effect (which the relaxed profile
+/// auto-allows) and a configurable reversibility, to exercise reversibility-
+/// aware confirmation.
+struct TaggedTool {
+    reversibility: Reversibility,
+}
+
+#[async_trait]
+impl Tool for TaggedTool {
+    fn name(&self) -> &str {
+        "tagged"
+    }
+    fn description(&self) -> &str {
+        "a tagged test tool"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+    fn effects(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        }])
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("done"))
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            reversibility: self.reversibility,
+            ..ToolContract::default()
+        }
+    }
+}
+
+fn registry_with_tagged(reversibility: Reversibility) -> ToolRegistry {
+    let mut registry = ToolRegistry::with_builtins();
+    registry.register(Box::new(TaggedTool { reversibility }));
+    registry
+}
+
+#[tokio::test]
+async fn irreversible_tool_prompts_under_relaxed_where_reversible_auto_approves() {
+    let (_dir, ws) = workspace_with(&[]);
+    let context = ctx(&ws, Interactivity::Interactive, true);
+    let relaxed = PermissionEngine::new(Profile::Relaxed, Vec::new());
+
+    // Irreversible: the auto-allow is raised to a prompt. The approver denies,
+    // so the call is refused — proving it was asked.
+    let registry = registry_with_tagged(Reversibility::Irreversible);
+    let denied = dispatch(
+        &registry,
+        "tagged",
+        json!({}),
+        &context,
+        &relaxed,
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(
+        denied.is_error,
+        "an irreversible tool must prompt under relaxed"
+    );
+    assert!(denied.output.contains("permission denied"));
+
+    // Reversible: the relaxed profile auto-allows without a prompt, so the same
+    // denying approver is never consulted and the call succeeds.
+    let registry = registry_with_tagged(Reversibility::Reversible);
+    let allowed = dispatch(
+        &registry,
+        "tagged",
+        json!({}),
+        &context,
+        &relaxed,
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(
+        !allowed.is_error,
+        "a reversible tool auto-approves under relaxed"
+    );
+}
+
+#[tokio::test]
+async fn bypass_scope_is_unchanged_by_reversibility() {
+    let (_dir, ws) = workspace_with(&[]);
+    let context = ctx(&ws, Interactivity::Interactive, true);
+
+    // Under bypass, even an irreversible tool is not prompted: the denying
+    // approver is never consulted, so the call still succeeds.
+    let registry = registry_with_tagged(Reversibility::Irreversible);
+    let result = dispatch(
+        &registry,
+        "tagged",
+        json!({}),
+        &context,
+        &bypass_engine(),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "bypass must not prompt, even for an irreversible tool"
+    );
 }

@@ -2,8 +2,10 @@
 
 use localpilot_config::redact::redact;
 use localpilot_core::{ToolCall, ToolResult};
-use localpilot_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest};
+use localpilot_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest, Profile};
 use serde_json::Value;
+
+use crate::contract::{Confirmation, Reversibility};
 
 use crate::builtins::{
     ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog, GitRestore,
@@ -137,6 +139,16 @@ impl ToolRegistry {
             }
         };
 
+        // Reversibility-aware confirmation: an irreversible tool (or one that
+        // asks to always confirm) raises an `Allow` to `Ask`, so even the
+        // relaxed profile pauses for a destructive, un-undoable action. This is
+        // tighten-only — it never turns a `Deny` into anything weaker — and it
+        // does not touch `bypass`, whose whole point is no prompts.
+        let contract = tool.contract();
+        let force_confirm = engine.profile() != Profile::Bypass
+            && (matches!(contract.reversibility, Reversibility::Irreversible)
+                || matches!(contract.confirmation, Confirmation::Always));
+
         // The tool supplies its own approval detail — it knows its schema; the
         // registry does not guess at input keys. Display-only, never decisive.
         let detail = tool.approval_detail(&call.input);
@@ -149,6 +161,7 @@ impl ToolRegistry {
                 detail: detail.clone(),
             };
             let allowed = match engine.decide(&request) {
+                Decision::Allow if force_confirm => approver.approve(&request).await,
                 Decision::Allow => true,
                 Decision::Ask => approver.approve(&request).await,
                 Decision::Deny => false,
