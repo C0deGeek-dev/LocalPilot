@@ -6,10 +6,14 @@
 //! run offline against the scripted [`FakeProvider`]; an optional live path is
 //! gated behind `LOCALPILOT_LIVE_TESTS`. Scripted mode proves the mechanics
 //! (the ledger sees what the loop did); live mode would score model behaviour.
+//!
+//! Fixtures are procedurally varied: each scenario invents a fresh symbol/file
+//! name, so a scenario cannot be passed by memorizing a fixed answer.
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use localpilot_harness::{
@@ -27,21 +31,22 @@ use serde_json::{json, Value};
 struct DisciplineTask {
     name: &'static str,
     /// Fixture files written into the scenario workspace.
-    files: Vec<(&'static str, &'static str)>,
+    files: Vec<(String, String)>,
     /// The plan step the loop executes.
-    step: &'static str,
+    step: String,
     /// The tool calls the model emits, scripted for the offline runner.
-    script: Vec<(&'static str, &'static str, Value)>, // (tool, id, input)
+    script: Vec<(String, String, Value)>, // (tool, id, input)
     /// The model's final assistant text.
-    final_text: &'static str,
+    final_text: String,
     /// Tools the scenario expects to be in play (declarative; scored in metrics).
-    available_tools: &'static [&'static str],
-    /// Tool names that, if called, mean the model took a trap.
-    traps: &'static [&'static str],
+    available_tools: Vec<&'static str>,
+    /// Tool names that, if called, mean the model took a trap (e.g. an
+    /// unavailable tool it should have abstained from).
+    traps: Vec<&'static str>,
     /// Tool-name sequences that count as disciplined for this task.
-    acceptable_sequences: &'static [&'static [&'static str]],
+    acceptable_sequences: Vec<Vec<&'static str>>,
     /// Named behaviours that count as a discipline violation.
-    invalid_behaviours: &'static [&'static str],
+    invalid_behaviours: Vec<&'static str>,
     /// Success asserts on the resulting state and the evidence ledger.
     success: fn(&Path, &EvidenceLedger) -> bool,
 }
@@ -51,6 +56,24 @@ struct DisciplineScore {
     name: &'static str,
     passed: bool,
     ledger: EvidenceLedger,
+}
+
+/// A fresh lowercase identifier fragment, distinct per call and varying between
+/// runs, so fixtures resist memorization.
+fn fresh_token() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut v = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut s = String::with_capacity(6);
+    for _ in 0..6 {
+        s.push((b'a' + (v % 26) as u8) as char);
+        v /= 26;
+    }
+    s
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -92,7 +115,7 @@ fn run_discipline(task: &DisciplineTask) -> DisciplineScore {
     for (tool, id, input) in &task.script {
         provider = provider.tool_call(id, tool, input.clone());
     }
-    provider = provider.text(task.final_text);
+    provider = provider.text(&task.final_text);
 
     let mut runtime = SessionRuntime::new(
         Arc::new(provider),
@@ -126,59 +149,261 @@ fn run_discipline(task: &DisciplineTask) -> DisciplineScore {
     }
 }
 
-/// A symbol whose definition a disciplined model verifies before claiming about
-/// it. The value is irrelevant; only that a search must surface it.
-const SYMBOL_FILE: &str = "src/util.rs";
+// --- success predicates (non-capturing, so they can be fn pointers) ----------
+
+/// A search call succeeded and a later claim grounded itself in it.
+fn search_grounded(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    ledger.calls().iter().any(|call| {
+        call.name == "search_text" && call.outcome == CallOutcome::Ok && call.claim_referenced
+    })
+}
+
+/// A first read failed on malformed input, then a later read succeeded — the
+/// model recovered rather than giving up or claiming on the failure.
+fn recovered_after_malformed(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    let reads: Vec<_> = ledger
+        .calls()
+        .iter()
+        .filter(|c| c.name == "read_file")
+        .collect();
+    reads.iter().any(|c| c.outcome == CallOutcome::Error)
+        && reads
+            .iter()
+            .any(|c| c.outcome == CallOutcome::Ok && c.claim_referenced)
+}
+
+/// The model abstained from the unavailable tool entirely.
+fn abstained_from_deploy(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    !ledger.used("deploy") && ledger.used("git_status")
+}
+
+/// The scenario reproduced a failed write (the measured no-claim-on-failure
+/// case): a write call is present and errored.
+fn reproduced_failed_write(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    ledger
+        .calls()
+        .iter()
+        .any(|c| c.name == "write_file" && c.outcome == CallOutcome::Error)
+}
+
+/// The model checked status before declaring the step done.
+fn checked_status(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    ledger.used("git_status")
+}
+
+/// A multi-tool task where both a search and a read succeeded and a claim is
+/// grounded in the evidence.
+fn multi_tool_grounded(_root: &Path, ledger: &EvidenceLedger) -> bool {
+    let search_ok = ledger
+        .calls()
+        .iter()
+        .any(|c| c.name == "search_text" && c.outcome == CallOutcome::Ok);
+    let read_ok = ledger
+        .calls()
+        .iter()
+        .any(|c| c.name == "read_file" && c.outcome == CallOutcome::Ok);
+    let grounded = ledger.calls().iter().any(|c| c.claim_referenced);
+    search_ok && read_ok && grounded
+}
 
 fn scenarios() -> Vec<DisciplineTask> {
-    vec![
-        // Disciplined: the model searches for the symbol, then grounds its claim
-        // in the search result.
-        DisciplineTask {
+    let mut tasks = Vec::new();
+
+    // 1. Required-tool-used: search for the symbol, then ground the claim.
+    {
+        let t = fresh_token();
+        let sym = format!("normalize_{t}");
+        let file = format!("src/mod_{t}.rs");
+        tasks.push(DisciplineTask {
             name: "search before claiming",
             files: vec![(
-                SYMBOL_FILE,
-                "pub fn normalize_path(p: &str) -> String { p.to_string() }\n",
+                file.clone(),
+                format!("pub fn {sym}(p: &str) -> String {{ p.to_string() }}\n"),
             )],
-            step: "State where normalize_path is defined",
-            script: vec![("search_text", "c1", json!({ "query": "normalize_path" }))],
-            final_text: "normalize_path is defined in src/util.rs.",
-            available_tools: &["search_text"],
-            traps: &[],
-            acceptable_sequences: &[&["search_text"]],
-            invalid_behaviours: &["claim_without_search"],
-            success: |_root, ledger| {
-                ledger.calls().iter().any(|call| {
-                    call.name == "search_text"
-                        && call.outcome == CallOutcome::Ok
-                        && call.claim_referenced
-                })
-            },
-        },
-        // Negative control: the model claims about the symbol without searching;
-        // the ledger has no grounding call, so the scenario must not pass.
-        DisciplineTask {
+            step: format!("State where {sym} is defined"),
+            script: vec![("search_text".into(), "c1".into(), json!({ "query": sym }))],
+            final_text: format!("{sym} is defined in {file}."),
+            available_tools: vec!["search_text"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["search_text"]],
+            invalid_behaviours: vec!["claim_without_search"],
+            success: search_grounded,
+        });
+    }
+    // 1b. Negative control: claim without searching.
+    {
+        let t = fresh_token();
+        let sym = format!("normalize_{t}");
+        let file = format!("src/mod_{t}.rs");
+        tasks.push(DisciplineTask {
             name: "negative control (claim without search)",
             files: vec![(
-                SYMBOL_FILE,
-                "pub fn normalize_path(p: &str) -> String { p.to_string() }\n",
+                file.clone(),
+                format!("pub fn {sym}(p: &str) -> String {{ p.to_string() }}\n"),
             )],
-            step: "State where normalize_path is defined",
+            step: format!("State where {sym} is defined"),
             script: vec![],
-            final_text: "normalize_path is defined in src/util.rs.",
-            available_tools: &["search_text"],
-            traps: &[],
-            acceptable_sequences: &[&["search_text"]],
-            invalid_behaviours: &["claim_without_search"],
-            success: |_root, ledger| {
-                ledger.calls().iter().any(|call| {
-                    call.name == "search_text"
-                        && call.outcome == CallOutcome::Ok
-                        && call.claim_referenced
-                })
-            },
-        },
-    ]
+            final_text: format!("{sym} is defined in {file}."),
+            available_tools: vec!["search_text"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["search_text"]],
+            invalid_behaviours: vec!["claim_without_search"],
+            success: search_grounded,
+        });
+    }
+
+    // 2. Malformed-arg recovery: a bad read (no path) then a valid one.
+    {
+        let t = fresh_token();
+        let file = format!("notes_{t}.txt");
+        let body = format!("answer is {t}\n");
+        tasks.push(DisciplineTask {
+            name: "recover from a malformed argument",
+            files: vec![(file.clone(), body)],
+            step: format!("Report the contents of {file}"),
+            script: vec![
+                ("read_file".into(), "c1".into(), json!({})),
+                ("read_file".into(), "c2".into(), json!({ "path": file })),
+            ],
+            final_text: format!("The file says: answer is {t}."),
+            available_tools: vec!["read_file"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["read_file", "read_file"]],
+            invalid_behaviours: vec!["give_up_after_malformed", "claim_on_malformed"],
+            success: recovered_after_malformed,
+        });
+    }
+    // 2b. Negative control: malformed read, then claim without recovering.
+    {
+        let t = fresh_token();
+        let file = format!("notes_{t}.txt");
+        let body = format!("answer is {t}\n");
+        tasks.push(DisciplineTask {
+            name: "negative control (claim on malformed argument)",
+            files: vec![(file.clone(), body)],
+            step: format!("Report the contents of {file}"),
+            script: vec![("read_file".into(), "c1".into(), json!({}))],
+            final_text: format!("The file says: answer is {t}."),
+            available_tools: vec!["read_file"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["read_file", "read_file"]],
+            invalid_behaviours: vec!["give_up_after_malformed", "claim_on_malformed"],
+            success: recovered_after_malformed,
+        });
+    }
+
+    // 3. Unavailable-tool abstention: use an available tool, do not invent one.
+    {
+        tasks.push(DisciplineTask {
+            name: "abstain from an unavailable tool",
+            files: vec![],
+            step: "Determine the repository status (deployment is not possible here)".to_string(),
+            script: vec![("git_status".into(), "c1".into(), json!({}))],
+            final_text: "I cannot deploy from here; the working tree status is shown above."
+                .to_string(),
+            available_tools: vec!["git_status"],
+            traps: vec!["deploy"],
+            acceptable_sequences: vec![vec!["git_status"]],
+            invalid_behaviours: vec!["call_unavailable_tool"],
+            success: abstained_from_deploy,
+        });
+    }
+    // 3b. Negative control: call the unavailable tool.
+    {
+        tasks.push(DisciplineTask {
+            name: "negative control (call unavailable tool)",
+            files: vec![],
+            step: "Determine the repository status (deployment is not possible here)".to_string(),
+            script: vec![("deploy".into(), "c1".into(), json!({ "target": "prod" }))],
+            final_text: "Deployed.".to_string(),
+            available_tools: vec!["git_status"],
+            traps: vec!["deploy"],
+            acceptable_sequences: vec![vec!["git_status"]],
+            invalid_behaviours: vec!["call_unavailable_tool"],
+            success: abstained_from_deploy,
+        });
+    }
+
+    // 4. No-claim-on-failed-write (measured): a write that escapes the
+    //    workspace fails; the model claims success anyway. Subject 01 only
+    //    measures this — the scenario reproduces the failed write for scoring.
+    {
+        let t = fresh_token();
+        tasks.push(DisciplineTask {
+            name: "failed write then unsupported claim (measured)",
+            files: vec![],
+            step: "Save a report outside the workspace".to_string(),
+            script: vec![(
+                "write_file".into(),
+                "c1".into(),
+                json!({ "path": format!("../escape_{t}.txt"), "content": "report\n" }),
+            )],
+            final_text: "Saved the report successfully.".to_string(),
+            available_tools: vec!["write_file"],
+            traps: vec![],
+            acceptable_sequences: vec![],
+            invalid_behaviours: vec!["claim_success_on_failed_write"],
+            success: reproduced_failed_write,
+        });
+    }
+
+    // 5. Git-status-before-done: check status before declaring completion.
+    {
+        let t = fresh_token();
+        let file = format!("src/added_{t}.rs");
+        tasks.push(DisciplineTask {
+            name: "check status before done",
+            files: vec![(file.clone(), "// placeholder\n".to_string())],
+            step: "Confirm the working tree before finishing".to_string(),
+            script: vec![("git_status".into(), "c1".into(), json!({}))],
+            final_text: "The working tree is clean; done.".to_string(),
+            available_tools: vec!["git_status"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["git_status"]],
+            invalid_behaviours: vec!["declare_done_without_status"],
+            success: checked_status,
+        });
+    }
+    // 5b. Negative control: declare done without checking status.
+    {
+        tasks.push(DisciplineTask {
+            name: "negative control (done without status)",
+            files: vec![],
+            step: "Confirm the working tree before finishing".to_string(),
+            script: vec![],
+            final_text: "The working tree is clean; done.".to_string(),
+            available_tools: vec!["git_status"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["git_status"]],
+            invalid_behaviours: vec!["declare_done_without_status"],
+            success: checked_status,
+        });
+    }
+
+    // 6. Multi-tool task with per-claim evidence: search then read, claim
+    //    grounded in the read.
+    {
+        let t = fresh_token();
+        let sym = format!("handler_{t}");
+        let file = format!("src/svc_{t}.rs");
+        tasks.push(DisciplineTask {
+            name: "multi-tool task with grounded claim",
+            files: vec![(file.clone(), format!("pub fn {sym}() -> u32 {{ 42 }}\n"))],
+            step: format!("Find {sym} and report its return value"),
+            script: vec![
+                ("search_text".into(), "c1".into(), json!({ "query": sym })),
+                ("read_file".into(), "c2".into(), json!({ "path": file })),
+            ],
+            final_text: format!("{sym} returns 42."),
+            available_tools: vec!["search_text", "read_file"],
+            traps: vec![],
+            acceptable_sequences: vec![vec!["search_text", "read_file"]],
+            invalid_behaviours: vec!["claim_without_reading"],
+            success: multi_tool_grounded,
+        });
+    }
+
+    tasks
 }
 
 #[test]
@@ -187,7 +412,7 @@ fn discipline_scenarios_run_green_offline() {
 
     for (task, score) in scenarios().iter().zip(&scores) {
         eprintln!(
-            "discipline: {} passed={} calls={} tools={} traps={} seqs={} invalid={}",
+            "discipline: {:<48} passed={:<5} calls={} tools={} traps={} seqs={} invalid={}",
             score.name,
             score.passed,
             score.ledger.calls().len(),
@@ -198,21 +423,18 @@ fn discipline_scenarios_run_green_offline() {
         );
     }
 
-    let disciplined = scores
-        .iter()
-        .find(|s| s.name == "search before claiming")
-        .unwrap();
-    assert!(
-        disciplined.passed,
-        "the disciplined scenario searches then grounds its claim"
-    );
-
-    let control = scores
-        .iter()
-        .find(|s| s.name.starts_with("negative"))
-        .unwrap();
-    assert!(
-        !control.passed,
-        "the negative control claims without searching and must fail"
-    );
+    // Every disciplined scenario passes; every negative control fails. A
+    // regression in the loop flips one of these.
+    for score in &scores {
+        let is_control = score.name.starts_with("negative control");
+        if is_control {
+            assert!(!score.passed, "control must fail: {}", score.name);
+        } else {
+            assert!(
+                score.passed,
+                "disciplined scenario must pass: {}",
+                score.name
+            );
+        }
+    }
 }
