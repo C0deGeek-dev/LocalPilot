@@ -30,10 +30,11 @@ pub use codegraph::{
 };
 pub use context_hook::{register_context_hook, LocalMindContext};
 pub use ingest::{
-    build_pack, cancel as ingest_cancel, compute_pack, context_for_prompt as ingest_context_for,
-    exclude_path as ingest_exclude, forget as ingest_forget, include_path as ingest_include,
-    normalize_project_path, pause as ingest_pause, preview as ingest_preview,
-    promote_for_review as ingest_promote, rebuild as ingest_rebuild, resume as ingest_resume,
+    active_session, build_pack, cancel as ingest_cancel, compute_pack,
+    context_for_prompt as ingest_context_for, exclude_path as ingest_exclude,
+    forget as ingest_forget, include_path as ingest_include, normalize_project_path,
+    pause as ingest_pause, preview as ingest_preview, promote_for_review as ingest_promote,
+    rebuild as ingest_rebuild, record_active_session, resume as ingest_resume,
     review_items as ingest_review_items, run as ingest_run, search as knowledge_search,
     should_build_index, skipped as ingest_skipped, status as ingest_status, BudgetEstimate,
     CandidateStatus, ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus,

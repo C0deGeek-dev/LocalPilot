@@ -97,7 +97,15 @@ impl Tool for KnowledgeSearch {
         // index is normal (project not ingested yet); a present-but-unreadable
         // index is distinguished so a corrupt store is visible rather than masked
         // as "no knowledge". Either way the turn never breaks on a knowledge miss.
-        let pack = match crate::ingest::compute_pack(root, &input.query, PACK_TOKEN_BUDGET) {
+        // Exclude the live/in-progress session so the current conversation is not
+        // served back to itself as a "knowledge-base match".
+        let exclude = crate::ingest::active_session(root);
+        let pack = match crate::ingest::compute_pack(
+            root,
+            &input.query,
+            PACK_TOKEN_BUDGET,
+            exclude.as_deref(),
+        ) {
             Ok(pack) => pack,
             Err(IngestError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>

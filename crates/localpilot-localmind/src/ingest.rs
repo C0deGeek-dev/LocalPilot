@@ -24,6 +24,10 @@ use crate::pack::{allocate, reserves, PackCandidate, PackEntry, PackSource};
 
 const INGEST_SCHEMA_VERSION: u32 = 1;
 const INGEST_DIR: &str = ".localmind/ingest";
+/// Marker file under `.localmind/` naming the live/just-closed session, so
+/// on-demand retrieval can exclude the in-progress conversation from its
+/// recent-session candidates instead of echoing it back as "knowledge".
+const ACTIVE_SESSION_FILE: &str = ".localmind/active-session";
 const MANIFEST_FILE: &str = "manifest.json";
 const CHUNKS_FILE: &str = "chunks.json";
 const JOB_FILE: &str = "job.json";
@@ -658,12 +662,18 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
 /// callers like the `knowledge_search` tool can pull a ranked pack on demand
 /// without a write. Use [`build_pack`] for the inspectable on-disk pack.
 ///
+/// `exclude_session` names the live/in-progress session (by its
+/// `.localmind/sessions/<id>` directory name) so its summary never competes as a
+/// recent-session candidate — the current conversation must not be echoed back as
+/// project knowledge.
+///
 /// # Errors
 /// Returns [`IngestError`] when derived state cannot be read.
 pub fn compute_pack(
     project_root: &Path,
     task: &str,
     token_budget: u64,
+    exclude_session: Option<&str>,
 ) -> Result<ContextPack, IngestError> {
     let root = canonical_root(project_root)?;
     let ingest_dir = root.join(INGEST_DIR);
@@ -754,8 +764,13 @@ pub fn compute_pack(
         }
     }
 
-    // Recent session facts come from the most recent LocalMind session summary.
-    for (index, fact) in recent_session_facts(&root).into_iter().enumerate() {
+    // Recent session facts come from the most recent LocalMind session summary,
+    // excluding the live/in-progress session so the current conversation is not
+    // served back to itself as "knowledge".
+    for (index, fact) in recent_session_facts(&root, exclude_session)
+        .into_iter()
+        .enumerate()
+    {
         candidates.push(PackCandidate {
             source: PackSource::RecentSession,
             id: format!("session:{index}"),
@@ -849,7 +864,7 @@ pub fn build_pack(
     task: &str,
     token_budget: u64,
 ) -> Result<ContextPack, IngestError> {
-    let pack = compute_pack(project_root, task, token_budget)?;
+    let pack = compute_pack(project_root, task, token_budget, None)?;
     let ingest_dir = canonical_root(project_root)?.join(INGEST_DIR);
     write_json(&ingest_dir.join(PACK_FILE), &pack)?;
     Ok(pack)
@@ -875,14 +890,21 @@ fn task_symbols(task: &str) -> Vec<String> {
 
 /// Key points from the most recent LocalMind session summary, used as
 /// recent-session retrieval candidates. Best-effort: a missing or malformed
-/// summary yields none.
-fn recent_session_facts(root: &Path) -> Vec<String> {
+/// summary yields none. `exclude_session` (a `.localmind/sessions/<id>` directory
+/// name) is skipped so the live/in-progress conversation never surfaces. Raw
+/// transcript-echo key-points (role-prefixed lines like `user:` / `assistant
+/// calls …:`) are dropped — they are conversation, not durable facts.
+fn recent_session_facts(root: &Path, exclude_session: Option<&str>) -> Vec<String> {
     let sessions_dir = root.join(".localmind").join("sessions");
     let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
         return Vec::new();
     };
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in entries.flatten() {
+        // Skip the active/in-progress session's own directory.
+        if exclude_session.is_some_and(|active| entry.file_name().to_string_lossy() == active) {
+            continue;
+        }
         let summary = entry.path().join("summary.json");
         let Ok(modified) = summary.metadata().and_then(|m| m.modified()) else {
             continue;
@@ -900,6 +922,13 @@ fn recent_session_facts(root: &Path) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Vec::new();
     };
+    // Belt-and-suspenders: a summary that names itself as the excluded session
+    // contributes nothing even if its directory was renamed.
+    if exclude_session.is_some_and(|active| {
+        value.get("session_id").and_then(serde_json::Value::as_str) == Some(active)
+    }) {
+        return Vec::new();
+    }
     value
         .get("key_points")
         .and_then(serde_json::Value::as_array)
@@ -908,10 +937,67 @@ fn recent_session_facts(root: &Path) -> Vec<String> {
                 .iter()
                 .filter_map(|point| point.as_str().map(str::to_string))
                 .filter(|point| !point.trim().is_empty())
+                .filter(|point| !is_transcript_echo(point))
                 .take(6)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether a session-summary "key point" is just a raw transcript line echoed
+/// from the conversation rather than a distilled fact. The transcript renderer
+/// prefixes every line with a speaker label (`user:`, `assistant:`,
+/// `assistant calls <tool>:`, `assistant (reasoning):`, `tool result:`,
+/// `tool error:`, `user shell:`); such lines are conversation, not knowledge, and
+/// must not surface through `knowledge_search`.
+fn is_transcript_echo(point: &str) -> bool {
+    let Some((prefix, _)) = point.trim_start().split_once(':') else {
+        return false;
+    };
+    let prefix = prefix.trim().to_ascii_lowercase();
+    // Reduce "assistant calls run_shell" / "assistant (reasoning)" to the role.
+    let role = prefix
+        .split_once(" calls ")
+        .map_or(prefix.as_str(), |(role, _)| role)
+        .trim_end_matches(" (reasoning)")
+        .trim();
+    matches!(
+        role,
+        "user" | "assistant" | "system" | "tool" | "tool result" | "tool error" | "user shell"
+    )
+}
+
+/// The live/just-closed session id recorded under `.localmind/active-session`, if
+/// any. Read-only and best-effort: the host records it at session close-out so
+/// on-demand retrieval can exclude the in-progress conversation.
+#[must_use]
+pub fn active_session(root: &Path) -> Option<String> {
+    let marker = root.join(ACTIVE_SESSION_FILE);
+    let id = std::fs::read_to_string(marker).ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Record the live/just-closed LocalMind session id so later retrieval excludes
+/// it. A no-op when the project has no `.localmind/` state (nothing to exclude),
+/// so a bare prompt never creates project files.
+///
+/// # Errors
+/// Returns [`IngestError::Io`] when the marker cannot be written.
+pub fn record_active_session(root: &Path, session_id: &str) -> Result<(), IngestError> {
+    let dir = root.join(".localmind");
+    if !dir.exists() {
+        return Ok(());
+    }
+    let marker = dir.join("active-session");
+    fs::write(&marker, session_id).map_err(|source| IngestError::Io {
+        path: marker,
+        source,
+    })
 }
 
 /// Whether a (lowercased) task query names this candidate's path or file name —
@@ -1835,7 +1921,7 @@ mod tests {
         let pack_path = dir.path().join(INGEST_DIR).join(PACK_FILE);
 
         // compute_pack is read-only: it returns a pack but writes no file.
-        let computed = compute_pack(dir.path(), "parser", 100).unwrap();
+        let computed = compute_pack(dir.path(), "parser", 100, None).unwrap();
         assert!(!computed.chunks.is_empty());
         assert!(
             !pack_path.exists(),
@@ -1917,6 +2003,121 @@ mod tests {
             "recent-session fact missing from {:?}",
             pack.entries
         );
+    }
+
+    fn write_session_summary(root: &Path, id: &str, key_points: &[&str]) {
+        let dir = root.join(".localmind").join("sessions").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let points = serde_json::to_string(key_points).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            format!(r#"{{"session_id":"{id}","key_points":{points}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_active_session_is_excluded_while_a_prior_session_still_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "changelog guide\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // A prior session holds a real distilled fact; the live session is the
+        // newest summary and must not surface even though it mentions the task.
+        write_session_summary(
+            dir.path(),
+            "session-prior",
+            &["update the changelog before every release"],
+        );
+        // Make the live session strictly newer so, without the exclude, it would
+        // win the "most recent summary" pick.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_session_summary(
+            dir.path(),
+            "session-live",
+            &["the changelog discussion in this very chat"],
+        );
+
+        let pack = compute_pack(dir.path(), "changelog", 1_000, Some("session-live")).unwrap();
+        let recent: Vec<&str> = pack
+            .entries
+            .iter()
+            .filter(|entry| entry.source == PackSource::RecentSession)
+            .map(|entry| entry.snippet.as_str())
+            .collect();
+        assert!(
+            recent.iter().any(|s| s.contains("before every release")),
+            "the prior session's fact must still surface: {recent:?}"
+        );
+        assert!(
+            !recent.iter().any(|s| s.contains("this very chat")),
+            "the active session must contribute zero recent-session facts: {recent:?}"
+        );
+    }
+
+    #[test]
+    fn raw_transcript_echo_lines_are_not_surfaced_as_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "ping guide\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // A summary built from raw role-prefixed transcript lines — exactly what
+        // the deterministic extractor fell back to — yields no echo entries.
+        write_session_summary(
+            dir.path(),
+            "session-echo",
+            &[
+                "user: ping",
+                "assistant: ping",
+                "assistant calls run_shell: {\"command\":\"pwd\"}",
+                "tool result: /work",
+                "assistant (reasoning): thinking about ping",
+            ],
+        );
+
+        let pack = compute_pack(dir.path(), "ping", 1_000, None).unwrap();
+        assert!(
+            !pack
+                .entries
+                .iter()
+                .any(|entry| entry.source == PackSource::RecentSession),
+            "raw role-prefixed transcript lines must not surface as facts: {:?}",
+            pack.entries
+        );
+    }
+
+    #[test]
+    fn transcript_echo_detector_keeps_real_facts() {
+        // Role-prefixed conversation lines are echoes…
+        assert!(is_transcript_echo("user: ping"));
+        assert!(is_transcript_echo("assistant: here is the answer"));
+        assert!(is_transcript_echo(
+            "assistant calls run_shell: {\"command\":\"ls\"}"
+        ));
+        assert!(is_transcript_echo("assistant (reasoning): planning"));
+        assert!(is_transcript_echo("tool result: ok"));
+        assert!(is_transcript_echo("tool error: boom"));
+        assert!(is_transcript_echo("user shell: ls -la"));
+        // …distilled facts (even with a colon) are kept.
+        assert!(!is_transcript_echo(
+            "Note: prefer guard clauses over nesting"
+        ));
+        assert!(!is_transcript_echo("update the changelog before release"));
+        assert!(!is_transcript_echo("asdasd"));
+    }
+
+    #[test]
+    fn active_session_marker_round_trips_and_is_inert_without_localmind() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `.localmind/` yet: recording is a no-op and creates nothing.
+        record_active_session(dir.path(), "session-x").unwrap();
+        assert!(!dir.path().join(".localmind").exists());
+        assert_eq!(active_session(dir.path()), None);
+
+        // Once `.localmind/` exists, the marker round-trips.
+        fs::create_dir_all(dir.path().join(".localmind")).unwrap();
+        record_active_session(dir.path(), "session-live").unwrap();
+        assert_eq!(active_session(dir.path()).as_deref(), Some("session-live"));
     }
 
     #[test]

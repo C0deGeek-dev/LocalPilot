@@ -24,10 +24,16 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
         return;
     }
     match localpilot_localmind::closeout_session(cwd, &store, session) {
-        Ok(summary) => eprintln!(
-            "learning: closed out session — {} candidate(s), {} enqueued for review",
-            summary.candidate_count, summary.enqueued_count
-        ),
+        Ok(summary) => {
+            // Record the just-closed session so on-demand `knowledge_search` in
+            // any later turn of this run excludes the in-progress conversation
+            // instead of echoing it back as project knowledge. Best-effort.
+            let _ = localpilot_localmind::record_active_session(cwd, &summary.session_id);
+            eprintln!(
+                "learning: closed out session — {} candidate(s), {} enqueued for review",
+                summary.candidate_count, summary.enqueued_count
+            );
+        }
         Err(error) => eprintln!("learning: closeout skipped ({error})"),
     }
 
