@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0023: Deterministic Result Verification In A Thin `localpilot-verify` Crate
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and
+ADR-0001 (narrow crates, one-way dependencies).
+
+The permission engine controls *whether* a tool may run; it does not check
+*whether the call did what it claimed*. A separate stage closes that gap: after
+a call executes, a `Verifier` judges it against its tool contract and returns a
+`Verdict` of `Verified`, `Unverified`, or `Failed`. An effect a contract marks
+`Unverifiable`, or one with no checkable postcondition, is `Unverified` — never
+silently a success. The verdict is recorded durably (a `ToolVerified` event in
+the execution log), and an opt-in gate refuses a final reply that claims an
+action completed without a `Verified` call to support it.
+
+This lives in a thin new crate, `localpilot-verify`, depending only on `core`,
+`tools`, and `sandbox` — not on the harness — so verification is a stage the
+harness composes, not a parallel control loop. A model-critic verifier is a
+future drop-in behind the same `Verifier` trait; the deterministic verifier is
+the default.
+
+Reason:
+
+- "no success claim without verified evidence" becomes a structural property of
+  the loop, not a prompt convention — the gap ADR-0010 left between *controlling*
+  an action and *confirming* it
+- a deterministic-first stage keeps verification offline, testable, and free of a
+  model in the hot path, with the model critic gated behind the same seam
+- a narrow crate with a one-way dependency keeps the reliability contract from
+  drifting into a second control plane; dropping the crate dependency returns the
+  loop to its prior behaviour
+
 ## ADR-0022: The Final Alternate-Screen TUI Is Preserved As An Annotated Tag
 
 Status: accepted. Supports ADR-0021.
