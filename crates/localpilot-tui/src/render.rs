@@ -112,7 +112,15 @@ pub fn banner_text(header: &Header) -> Text<'static> {
         vec![
             Span::raw(gutter),
             Span::styled("LocalPilot", name),
-            Span::styled(format!("  ·  v{}", header.version), dim),
+            Span::styled(
+                // The embedded version may already carry a leading `v` (from a
+                // `git describe` tag); strip it so we never render `vv…`.
+                format!(
+                    "  ·  v{}",
+                    header.version.strip_prefix('v').unwrap_or(&header.version)
+                ),
+                dim,
+            ),
         ],
         vec![
             Span::raw(gutter),
@@ -641,6 +649,26 @@ mod tests {
         assert!(rendered.contains("v9.9"));
         assert!(rendered.contains("session:abcd1234ef"));
         assert!(rendered.contains("╔══════╗")); // the monitor mark
+    }
+
+    #[test]
+    fn the_banner_does_not_double_the_version_v_prefix() {
+        let mut state = state_with_input("");
+        // A `git describe` tag already carries a leading `v`.
+        state.header.version = "v0.3.0-beta.2".into();
+        let rendered: String = banner_text(&state.header)
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("v0.3.0-beta.2"));
+        assert!(!rendered.contains("vv0.3.0-beta.2"));
     }
 
     #[test]

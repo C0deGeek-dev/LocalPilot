@@ -22,7 +22,11 @@ fn main() {
 
 fn git_describe() -> Option<String> {
     let output = Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
+        // Restrict to version tags so an unrelated tag (e.g. a branch marker)
+        // is never picked up as the version.
+        .args([
+            "describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {

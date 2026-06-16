@@ -19,23 +19,59 @@ pub fn current_version() -> &'static str {
     env!("LOCALPILOT_VERSION")
 }
 
-/// A parsed `major.minor.patch[-alpha.N]` version. A release (no pre-release)
-/// sorts above its pre-releases.
+/// A pre-release channel, ordered `alpha < beta < rc`. A full release has no
+/// channel and sorts above all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Alpha,
+    Beta,
+    Rc,
+}
+
+impl Channel {
+    /// The marker between the release and the channel number, e.g. `-alpha.`.
+    fn marker(self) -> &'static str {
+        match self {
+            Channel::Alpha => "-alpha.",
+            Channel::Beta => "-beta.",
+            Channel::Rc => "-rc.",
+        }
+    }
+
+    /// Sort rank: lower is earlier in the release cycle.
+    fn rank(self) -> u64 {
+        match self {
+            Channel::Alpha => 0,
+            Channel::Beta => 1,
+            Channel::Rc => 2,
+        }
+    }
+}
+
+/// A parsed `major.minor.patch[-{alpha,beta,rc}.N]` version. A release (no
+/// pre-release) sorts above its pre-releases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Version {
     major: u64,
     minor: u64,
     patch: u64,
-    alpha: Option<u64>,
+    prerelease: Option<(Channel, u64)>,
 }
 
 impl Version {
     fn parse(text: &str) -> Option<Self> {
         let core = text.trim().trim_start_matches('v');
-        let (release, alpha) = match core.split_once("-alpha.") {
-            Some((release, rest)) => {
+        let channels = [Channel::Alpha, Channel::Beta, Channel::Rc];
+        let split = channels.into_iter().find_map(|c| {
+            core.split_once(c.marker())
+                .map(|(rel, rest)| (rel, c, rest))
+        });
+        let (release, prerelease) = match split {
+            Some((release, channel, rest)) => {
+                // Take only the leading digits, dropping any `git describe`
+                // suffix (e.g. `-26-gabc1234-dirty`).
                 let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                (release, Some(digits.parse().ok()?))
+                (release, Some((channel, digits.parse().ok()?)))
             }
             // Drop any `git describe` suffix (e.g. `-2-gabc1234`).
             None => (core.split('-').next()?, None),
@@ -45,18 +81,18 @@ impl Version {
             major: parts.next()?.parse().ok()?,
             minor: parts.next()?.parse().ok()?,
             patch: parts.next().unwrap_or("0").parse().ok()?,
-            alpha,
+            prerelease,
         })
     }
 
-    /// Sort key: a release (`alpha = None`) is newer than any of its alphas.
-    fn key(&self) -> (u64, u64, u64, u64) {
-        (
-            self.major,
-            self.minor,
-            self.patch,
-            self.alpha.unwrap_or(u64::MAX),
-        )
+    /// Sort key: a release (`prerelease = None`) is newer than any of its
+    /// pre-releases, which order `alpha < beta < rc` then by number.
+    fn key(&self) -> (u64, u64, u64, u64, u64) {
+        let (channel, number) = match self.prerelease {
+            Some((channel, number)) => (channel.rank(), number),
+            None => (u64::MAX, u64::MAX),
+        };
+        (self.major, self.minor, self.patch, channel, number)
     }
 }
 
@@ -238,7 +274,32 @@ mod tests {
     }
 
     #[test]
+    fn channel_ordering() {
+        let alpha = Version::parse("v0.3.0-alpha.9").unwrap();
+        let beta1 = Version::parse("v0.3.0-beta.1").unwrap();
+        let beta2 = Version::parse("v0.3.0-beta.2").unwrap();
+        let rc = Version::parse("v0.3.0-rc.1").unwrap();
+        let release = Version::parse("0.3.0").unwrap();
+
+        // alpha < beta < rc < release, and numbers order within a channel.
+        assert!(beta1.key() > alpha.key());
+        assert!(beta2.key() > beta1.key());
+        assert!(rc.key() > beta2.key());
+        assert!(release.key() > rc.key());
+    }
+
+    #[test]
+    fn beta_describe_suffix_equals_base_tag() {
+        // A dirty dev build off `v0.3.0-beta.2` must still read as that tag.
+        let dev = Version::parse("v0.3.0-beta.2-26-g61f9559-dirty").unwrap();
+        let tag = Version::parse("v0.3.0-beta.2").unwrap();
+        assert_eq!(dev.key(), tag.key());
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(Version::parse("not-a-version").is_none());
+        // A non-version describe tag must not parse as a version.
+        assert!(Version::parse("legacy-altscreen-tui-26-g61f9559-dirty").is_none());
     }
 }

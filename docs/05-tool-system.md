@@ -81,6 +81,26 @@ Rules:
 Applies several exact-text replacements to one file atomically; rejects
 missing or ambiguous context before writing anything.
 
+### `replace_in_file`
+
+Whole-file find/replace on a workspace file: replace an exact block of text
+(which may span multiple lines) with another. The default editing tool — the
+model should reach for it instead of rewriting a file with `write_file`. Runs
+through the platform stream editor (PowerShell on Windows, `perl` on Unix); the
+implementation keeps the dangerous parts native.
+
+Rules:
+
+- the editor is a pure stdin→stdout transform over the whole file; path
+  containment and the atomic write are native Rust, identical to `write_file`
+- `find`/`replace` are passed via the environment, never interpolated into a
+  shell string — model input cannot become another command
+- literal by default; opt-in platform-native regex (.NET on Windows, Perl on
+  Unix). Regex replacement backreferences (`$1`) are supported on Windows but not
+  on the Unix/`perl` path
+- `perl` is used on Unix because `sed` cannot do portable multi-line edits
+- gated as a workspace write; output is capped and redacted
+
 ### `apply_patch`
 
 Applies a structured multi-file patch: create, update (exact-match hunks), and
