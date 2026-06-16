@@ -59,6 +59,9 @@ pub struct CallRecord {
     /// Whether a later assistant message grounded a claim in this call (it named
     /// the tool or echoed a distinctive token from the call's output).
     pub claim_referenced: bool,
+    /// The verifier's verdict for this call, if one was recorded (`"verified"`,
+    /// `"unverified"`, `"failed"`). `None` until a verifier runs.
+    pub verdict: Option<String>,
     /// Event ordinal at which the call was invoked, used to order later claims.
     invoked_at: usize,
     /// The tool's output text, retained only to detect grounded claims.
@@ -104,6 +107,11 @@ impl EvidenceLedger {
                         record.permission = PermissionVerdict::Decided(decision.clone());
                     }
                 }
+                SessionEventKind::ToolVerified { id, verdict } => {
+                    if let Some(&pos) = index.get(id.as_str()) {
+                        records[pos].verdict = Some(verdict.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -133,6 +141,7 @@ impl EvidenceLedger {
                         permission: PermissionVerdict::Unrecorded,
                         outcome: CallOutcome::Pending,
                         claim_referenced: false,
+                        verdict: None,
                         invoked_at: ordinal,
                         output: String::new(),
                     });
@@ -344,5 +353,66 @@ mod tests {
         let after = std::fs::read_dir(dir.path()).expect("read tempdir").count();
         assert_eq!(before, 0);
         assert_eq!(after, 0, "a compute-only projection must not write");
+    }
+
+    #[test]
+    fn a_verdict_event_binds_to_its_call() {
+        let events = vec![
+            assistant(vec![call_block(
+                "c1",
+                "write_file",
+                serde_json::json!({ "path": "out.txt" }),
+            )]),
+            event(SessionEventKind::ToolVerified {
+                id: "c1".to_string(),
+                verdict: "verified".to_string(),
+            }),
+        ];
+        let ledger = EvidenceLedger::project(&events);
+        assert_eq!(ledger.calls()[0].verdict.as_deref(), Some("verified"));
+    }
+
+    #[test]
+    fn the_verdict_record_lives_in_the_execution_store_not_memory() {
+        use localpilot_core::{SessionId, ToolCall};
+        use localpilot_store::Store;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let session = SessionId::new();
+        let parent = store
+            .append_event(
+                session,
+                None,
+                SessionEventKind::Message {
+                    message: Message::new(
+                        Role::Assistant,
+                        vec![ContentBlock::ToolUse(ToolCall::new(
+                            "c1".into(),
+                            "write_file",
+                            serde_json::json!({ "path": "out.txt" }),
+                        ))],
+                    ),
+                    origin: MessageOrigin::Assistant,
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                session,
+                Some(parent),
+                SessionEventKind::ToolVerified {
+                    id: "c1".to_string(),
+                    verdict: "verified".to_string(),
+                },
+            )
+            .unwrap();
+
+        // The verdict round-trips out of the execution-record store and binds to
+        // its call — and it lives under `.localpilot/`, not in LocalMind memory.
+        let events = store.read_events(session).unwrap();
+        let ledger = EvidenceLedger::project(&events);
+        assert_eq!(ledger.calls()[0].verdict.as_deref(), Some("verified"));
+        assert!(store.root().join("sessions").exists());
     }
 }

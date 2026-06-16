@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 1;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 2;
 
 /// One durable entry in a session's event log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +150,14 @@ pub enum SessionEventKind {
         from: EventId,
     },
     Cancelled,
+    /// The verdict a verifier reached for a tool call, bound to the call id.
+    /// The verdict is a plain label (the verifier's enum serialized) so the
+    /// store keeps no dependency on the verifier crate. This is the durable,
+    /// per-call execution record a claim is checked against.
+    ToolVerified {
+        id: String,
+        verdict: String,
+    },
 }
 
 impl SessionEvent {
@@ -191,6 +199,15 @@ fn migrate(
             0 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(1));
+                }
+                value
+            }
+            // v1 -> v2: additive only. v2 introduced the `ToolVerified` event
+            // kind; existing v1 events keep their shape, so the migration only
+            // stamps the current version.
+            1 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(2));
                 }
                 value
             }
@@ -329,6 +346,10 @@ mod tests {
                 from: EventId::new(),
             },
             SessionEventKind::Cancelled,
+            SessionEventKind::ToolVerified {
+                id: "c1".to_string(),
+                verdict: "verified".to_string(),
+            },
         ];
         let mut parent = None;
         for kind in kinds {
