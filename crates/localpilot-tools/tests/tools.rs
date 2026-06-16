@@ -1113,3 +1113,22 @@ async fn replace_in_file_replaces_a_multiline_block() {
         "fn renamed() {\n    work();\n    extra();\n}\n\nfn keep() {}\n"
     );
 }
+
+/// Every builtin whose contract declares a side effect must also declare how its
+/// result is verified — a postcondition, or an explicit `Unverifiable` admission.
+/// A side effect with no declared verification could be claimed as success
+/// without evidence, which the discipline track forbids.
+#[test]
+fn every_side_effecting_builtin_declares_verification() {
+    let registry = ToolRegistry::with_builtins();
+    for name in registry.names() {
+        let tool = registry.get(name).expect("registered tool is retrievable");
+        let contract = tool.contract();
+        if contract.has_side_effect() {
+            assert!(
+                contract.is_verification_declared(),
+                "{name} declares a side effect but no postcondition or Unverifiable admission"
+            );
+        }
+    }
+}

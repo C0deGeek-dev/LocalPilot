@@ -14,6 +14,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::builtins::cap;
+use crate::contract::{
+    Idempotency, Postcondition, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
+};
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
 
@@ -207,6 +210,20 @@ pub struct RunShell;
 impl Tool for RunShell {
     fn name(&self) -> &'static str {
         "run_shell"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Run a shell command line or program in the workspace.",
+            // A shell command can do anything, so the contract is conservative:
+            // potentially destructive, not automatically reversible, and its
+            // general effects cannot be cheaply verified beyond exit status.
+            side_effect: SideEffectClass::Destructive,
+            reversibility: Reversibility::Irreversible,
+            idempotency: Idempotency::Unknown,
+            postconditions: &[Postcondition::ResultStatus],
+            verification: VerificationMethod::Unverifiable,
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         // The user must see the full command line they are approving.

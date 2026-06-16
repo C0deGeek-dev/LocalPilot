@@ -10,6 +10,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::contract::{
+    Idempotency, PathEffectKind, Postcondition, Precondition, Reversibility, SideEffectClass,
+    ToolContract, VerificationMethod,
+};
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
 
@@ -21,6 +25,35 @@ fn string_field_detail(input: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .map(detail_preview)
         .unwrap_or_default()
+}
+
+// --- builtin contract fragments ---------------------------------------------
+
+/// `write_file`/`edit_file`-style preconditions: the target must have been read
+/// this session before it is overwritten (enforced only when it already exists).
+const PRIOR_READ_PATH: &[Precondition] = &[Precondition::RequiresPriorRead { path_arg: "path" }];
+const PATH_EXISTS: &[Postcondition] = &[Postcondition::PathEffect {
+    path_arg: "path",
+    kind: PathEffectKind::Exists,
+}];
+const PATH_MODIFIED: &[Postcondition] = &[Postcondition::PathEffect {
+    path_arg: "path",
+    kind: PathEffectKind::Modified,
+}];
+const RESULT_STATUS: &[Postcondition] = &[Postcondition::ResultStatus];
+
+/// A read-only tool's contract: no side effect, idempotent, its own status is
+/// the postcondition.
+fn read_only_contract(model_description: &'static str) -> ToolContract {
+    ToolContract {
+        model_description,
+        side_effect: SideEffectClass::ReadOnly,
+        reversibility: Reversibility::Reversible,
+        idempotency: Idempotency::Idempotent,
+        postconditions: RESULT_STATUS,
+        verification: VerificationMethod::Postconditions,
+        ..ToolContract::default()
+    }
 }
 
 /// Approval detail for a `paths` array field, joined for display.
@@ -122,6 +155,9 @@ impl Tool for ReadFile {
     fn name(&self) -> &'static str {
         "read_file"
     }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Read a file's contents from the workspace.")
+    }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
     }
@@ -180,6 +216,18 @@ pub struct WriteFile;
 impl Tool for WriteFile {
     fn name(&self) -> &'static str {
         "write_file"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Create or overwrite a workspace file with exact content.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::Idempotent,
+            preconditions: PRIOR_READ_PATH,
+            postconditions: PATH_EXISTS,
+            verification: VerificationMethod::ReadBack { tool: "read_file" },
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
@@ -243,6 +291,18 @@ impl Tool for EditFile {
     fn name(&self) -> &'static str {
         "edit_file"
     }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Replace an exact span of text in an existing file.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::NonIdempotent,
+            preconditions: PRIOR_READ_PATH,
+            postconditions: PATH_MODIFIED,
+            verification: VerificationMethod::ReadBack { tool: "read_file" },
+            ..ToolContract::default()
+        }
+    }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
     }
@@ -302,6 +362,18 @@ pub struct MultiEdit;
 impl Tool for MultiEdit {
     fn name(&self) -> &'static str {
         "multi_edit"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Apply several exact text edits to one file atomically.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::NonIdempotent,
+            preconditions: PRIOR_READ_PATH,
+            postconditions: PATH_MODIFIED,
+            verification: VerificationMethod::ReadBack { tool: "read_file" },
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
@@ -376,6 +448,9 @@ impl Tool for ListFiles {
     fn name(&self) -> &'static str {
         "list_files"
     }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("List files under a workspace directory.")
+    }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
     }
@@ -449,6 +524,9 @@ pub struct FindFiles;
 impl Tool for FindFiles {
     fn name(&self) -> &'static str {
         "find_files"
+    }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Find files whose path matches a glob pattern.")
     }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "pattern")
@@ -543,6 +621,9 @@ pub struct SearchText;
 impl Tool for SearchText {
     fn name(&self) -> &'static str {
         "search_text"
+    }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Search workspace file contents for a query.")
     }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "query")
@@ -670,6 +751,17 @@ pub struct ApplyPatch;
 impl Tool for ApplyPatch {
     fn name(&self) -> &'static str {
         "apply_patch"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Apply a unified-diff patch to the workspace.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::NonIdempotent,
+            postconditions: RESULT_STATUS,
+            verification: VerificationMethod::Postconditions,
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         // The diff preview for the approval prompt: one line per operation.
@@ -806,6 +898,9 @@ impl Tool for ReadToolOutput {
     fn name(&self) -> &'static str {
         "read_tool_output"
     }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Read back the full output of an earlier tool call.")
+    }
     fn description(&self) -> &'static str {
         "Read the full retained output of an earlier tool call that was truncated in context, by its retention id, optionally a line range."
     }
@@ -895,6 +990,16 @@ pub struct Fetch;
 impl Tool for Fetch {
     fn name(&self) -> &'static str {
         "fetch"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Fetch a URL over the network and return its body.",
+            side_effect: SideEffectClass::Network,
+            reversibility: Reversibility::Reversible,
+            idempotency: Idempotency::Idempotent,
+            verification: VerificationMethod::Unverifiable,
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "url")
@@ -1034,6 +1139,18 @@ impl Tool for ReplaceInFile {
     fn name(&self) -> &'static str {
         "replace_in_file"
     }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Replace occurrences of a pattern in an existing file.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::NonIdempotent,
+            preconditions: PRIOR_READ_PATH,
+            postconditions: PATH_MODIFIED,
+            verification: VerificationMethod::ReadBack { tool: "read_file" },
+            ..ToolContract::default()
+        }
+    }
     fn approval_detail(&self, input: &Value) -> String {
         string_field_detail(input, "path")
     }
@@ -1154,6 +1271,9 @@ pub struct GitStatus;
 impl Tool for GitStatus {
     fn name(&self) -> &'static str {
         "git_status"
+    }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Show the working tree status.")
     }
     fn approval_detail(&self, _input: &Value) -> String {
         "git status".to_string()
@@ -1334,6 +1454,17 @@ pub struct GitCommit;
 impl Tool for GitCommit {
     fn name(&self) -> &'static str {
         "git_commit"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description: "Create a git commit from staged changes.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            idempotency: Idempotency::NonIdempotent,
+            postconditions: RESULT_STATUS,
+            verification: VerificationMethod::Postconditions,
+            ..ToolContract::default()
+        }
     }
     fn approval_detail(&self, input: &Value) -> String {
         paths_detail(input, "git commit")
