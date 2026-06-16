@@ -17,16 +17,19 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use localpilot_config::{load, CliOverrides, ConfigPaths};
 use localpilot_harness::{
     resume_one_step, CallOutcome, DisciplineMetrics, EvidenceLedger, RuleEngine, SessionConfig,
     SessionRuntime,
 };
-use localpilot_llm::FakeProvider;
+use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_store::Store;
 use localpilot_tools::ToolRegistry;
 use serde_json::{json, Value};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// One discipline scenario: a repository setup, the tool calls the model emits,
 /// its final claim, and a success check over **state and the evidence ledger**.
@@ -607,4 +610,125 @@ fn discipline_scorecard_and_negative_controls() {
         metrics.false_success_rate > 0.0,
         "the seeded failed-write violation must register as a false success"
     );
+}
+
+/// Drive one behaviour scenario against a real provider: the model chooses the
+/// tools, and the ledger scores what it actually did.
+async fn run_live_discipline(
+    task: &DisciplineTask,
+    provider: Arc<dyn ModelProvider>,
+    model: String,
+) -> DisciplineScore {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (rel, contents) in &task.files {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    let (events_tx, _rx) = broadcast::channel(128);
+    let cancel = CancellationToken::new();
+    let mut runtime = SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            model,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let session = runtime.session_id();
+
+    let prompt = format!(
+        "Complete this task using the available tools, and claim only what your \
+         tool results actually support: {}",
+        task.step
+    );
+    let _ = runtime.run_turn(&prompt, &events_tx, &cancel).await;
+
+    let events = Store::open(root).read_events(session).unwrap();
+    let mut ledger = EvidenceLedger::project(&events);
+    fill_schema_validity(&mut ledger, &ToolRegistry::with_builtins());
+    let passed = (task.success)(root, &ledger);
+    DisciplineScore {
+        name: task.name,
+        passed,
+        ledger,
+    }
+}
+
+/// Live tool-discipline scorecard, scoring real model behaviour. Off by default.
+/// Run it with a configured local model:
+///   `LOCALPILOT_LIVE_TESTS=1 [LOCALPILOT_LIVE_MODEL=<model>] cargo test -p localpilot-harness --test discipline -- --nocapture`
+/// Skips cleanly when the env var, a provider, or a model is absent.
+#[test]
+fn live_discipline_scorecard_is_gated() {
+    if std::env::var("LOCALPILOT_LIVE_TESTS").is_err() {
+        eprintln!("skipping live discipline: set LOCALPILOT_LIVE_TESTS to enable");
+        return;
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    let config = match load(&ConfigPaths::standard(&cwd), &CliOverrides::default()) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("skipping live discipline: config load failed: {err}");
+            return;
+        }
+    };
+    let registry = match ProviderRegistry::from_config(&config) {
+        Ok(registry) => registry,
+        Err(err) => {
+            eprintln!("skipping live discipline: provider configuration is incomplete: {err}");
+            return;
+        }
+    };
+    let Some(provider) = registry.default_provider().cloned() else {
+        eprintln!("skipping live discipline: no default provider is configured");
+        return;
+    };
+    let Some(model) = std::env::var("LOCALPILOT_LIVE_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| config.resolve_model(None))
+    else {
+        eprintln!("skipping live discipline: set provider.model or LOCALPILOT_LIVE_MODEL");
+        return;
+    };
+
+    let tasks = scenarios();
+    let behaviour: Vec<&DisciplineTask> = tasks.iter().filter(|t| !t.is_control()).collect();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let scores: Vec<DisciplineScore> = behaviour
+        .iter()
+        .map(|task| rt.block_on(run_live_discipline(task, provider.clone(), model.clone())))
+        .collect();
+    let runs: Vec<(&DisciplineTask, &DisciplineScore)> =
+        behaviour.iter().copied().zip(&scores).collect();
+    let metrics = aggregate(&runs);
+
+    let passed = scores.iter().filter(|s| s.passed).count();
+    eprintln!(
+        "live discipline: {passed}/{} scenarios disciplined (model={model})",
+        scores.len()
+    );
+    for score in &scores {
+        eprintln!(
+            "  {} passed={} calls={}",
+            score.name,
+            score.passed,
+            score.ledger.calls().len()
+        );
+    }
+    eprintln!("live {}", metrics.scorecard_line());
 }
