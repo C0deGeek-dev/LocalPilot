@@ -35,6 +35,13 @@ const STATUS_ROWS: u16 = 2;
 
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 
+/// Size of the shimmer placeholder shown where the reply will appear while the
+/// model is working and nothing has streamed yet. Rows are Braille cells (each a
+/// 2×4 dot grid), so a couple of text rows read as a dense, tightly-stacked field
+/// of dots rather than widely-spaced single-dot rows.
+const SHIMMER_WIDTH: usize = 20;
+const SHIMMER_ROWS: usize = 2;
+
 /// The terminal-monitor mark from the project README, padded to a uniform width
 /// so the banner text aligns beside it.
 const LOGO: [&str; 5] = [
@@ -393,7 +400,47 @@ fn activity_lines(state: &AppState) -> Vec<Line<'static>> {
         }
     }
 
+    // Waiting for the reply: a shimmer placeholder where the answer will appear,
+    // until the first tokens stream in (then `streaming` is no longer empty).
+    if state.busy && state.streaming.is_empty() {
+        lines.extend(shimmer_lines(state.spinner));
+    }
+
     lines
+}
+
+/// A skeleton "shimmer" placeholder: `SHIMMER_ROWS` rows of `SHIMMER_WIDTH` grey
+/// Braille dot-cells with a white crest that sweeps across, animated by `tick`
+/// (the host's per-frame spinner counter). Each row is phase-shifted so the crest
+/// leans into a diagonal wave.
+fn shimmer_lines(tick: usize) -> Vec<Line<'static>> {
+    // A fully-lit Braille cell: a 2×4 block of dots, so the rows stack densely.
+    const DOT: char = '⣿';
+    // Grey values: resting dots sit at BASE, the crest peaks at PEAK, fading over
+    // HALF columns on either side.
+    const BASE: u16 = 80;
+    const PEAK: u16 = 255;
+    const HALF: f32 = 3.0;
+
+    // The crest travels the full width plus a gap, then repeats.
+    let cycle = (SHIMMER_WIDTH + 8) as i32;
+    let crest = (tick % cycle as usize) as i32;
+
+    (0..SHIMMER_ROWS)
+        .map(|y| {
+            // Lean the crest across rows so the wave reads as a diagonal sweep.
+            let center = crest - (y as i32) * 2;
+            let spans = (0..SHIMMER_WIDTH)
+                .map(|x| {
+                    let distance = (x as i32 - center).unsigned_abs() as f32;
+                    let t = (1.0 - distance / HALF).max(0.0);
+                    let v = (BASE + ((PEAK - BASE) as f32 * t) as u16).min(255) as u8;
+                    Span::styled(DOT.to_string(), Style::default().fg(Color::Rgb(v, v, v)))
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect()
 }
 
 // --- Composer -----------------------------------------------------------------
@@ -678,6 +725,49 @@ mod tests {
         let rendered = render_natural(&state, 60);
         assert!(rendered.contains("assistant: Streaming the answer live..."));
         assert!(rendered.contains("mode:agent"));
+    }
+
+    /// The column of the brightest dot in a shimmer row (its grey value peaks at
+    /// the crest of the wave).
+    fn brightest_col(line: &Line) -> usize {
+        line.spans
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, span)| match span.style.fg {
+                Some(Color::Rgb(v, _, _)) => v,
+                _ => 0,
+            })
+            .map_or(0, |(i, _)| i)
+    }
+
+    #[test]
+    fn shimmer_has_the_expected_shape_and_animates() {
+        let frame0 = shimmer_lines(0);
+        assert_eq!(frame0.len(), SHIMMER_ROWS);
+        assert!(frame0.iter().all(|l| l.spans.len() == SHIMMER_WIDTH));
+
+        // The crest moves with the tick, so the brightest column shifts.
+        let later = shimmer_lines(6);
+        assert_ne!(brightest_col(&frame0[0]), brightest_col(&later[0]));
+    }
+
+    #[test]
+    fn the_shimmer_placeholder_shows_only_while_waiting_for_the_reply() {
+        // The Braille dot-cells are unique to the shimmer, so match on the run.
+        let dot_row = "⣿".repeat(SHIMMER_WIDTH);
+
+        let mut state = state_with_input("");
+        state.busy = true;
+        assert!(
+            render_natural(&state, 60).contains(&dot_row),
+            "waiting shows the shimmer"
+        );
+
+        // Once tokens stream, the real answer replaces the placeholder.
+        state.streaming = "the answer".to_string();
+        let rendered = render_natural(&state, 60);
+        assert!(rendered.contains("assistant: the answer"));
+        assert!(!rendered.contains(&dot_row));
     }
 
     #[test]
