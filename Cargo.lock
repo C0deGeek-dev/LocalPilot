@@ -1467,6 +1467,7 @@ dependencies = [
 name = "localpilot-verify"
 version = "0.3.0-beta.2"
 dependencies = [
+ "localpilot-core",
  "localpilot-tools",
  "serde",
  "serde_json",

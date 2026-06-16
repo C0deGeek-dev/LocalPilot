@@ -14,8 +14,10 @@
 //! as success.
 #![forbid(unsafe_code)]
 
+mod observation;
 mod verdict;
 mod verifier;
 
+pub use observation::{Observation, Trust};
 pub use verdict::Verdict;
 pub use verifier::{DeterministicVerifier, VerificationInput, Verifier};
