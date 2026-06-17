@@ -1,4 +1,4 @@
-﻿# Rust Best Practices
+# Rust Best Practices
 
 This is the engineering style guide for LocalPilot. It is opinionated and
 project-specific. It assumes the architecture in
@@ -270,6 +270,10 @@ Test toolbox (add as dev-dependencies when the relevant layer lands; see
   any) have `# Panics`. Non-obvious examples are doc-tested.
 - Keep prompts and protocol decisions documented and cited to public API docs
   (provenance note), per CONTRIBUTING.
+- **Agent-facing prose** (the system prompt, tool descriptions, skill bodies) is
+  written and pruned per the ecosystem [prompt-authoring doctrine](https://github.com/David-c0degeek/c0degeek-ai/blob/main/instructions/prompt-authoring-doctrine.md)
+  — predictability of process, context vs cognitive load, the no-op pruning test.
+  Link it; do not restate it here.
 
 ## 14. PR checklist (Rust-specific)
 

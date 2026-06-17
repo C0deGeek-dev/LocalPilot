@@ -92,7 +92,7 @@ Use tools when local information or side effects are needed. Available tools:
 Tool use loop:
 - inspect before acting;
 - call one or more tools with valid JSON inputs;
-- read tool results carefully, including error results;
+- read tool results, including error results;
 - repair malformed or incomplete tool calls instead of repeating them;
 - continue until the task is complete, blocked by a concrete reason, or the user
   cancels.
