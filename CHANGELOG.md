@@ -3,6 +3,24 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## 2026-06-17 - Retrieval and learning
+
+- Ingested chunks are now prefixed with offline document context (front matter
+  or leading line) before indexing, so a chunk split mid-thought still matches
+  its document's subject. Opt-in model-written prefixes are gated and audited.
+- Added a layered retrieval contract — `knowledge_expand` and `knowledge_fetch`
+  tools alongside `knowledge_search` — so a turn spends a bounded number of
+  tokens to locate the right knowledge before paying for full bodies.
+- Off-machine learning extraction is now gated: model-backed extraction runs
+  against a loopback endpoint by default, and an off-machine endpoint is reached
+  only with the `LOCALPILOT_LEARNING_ALLOW_REMOTE` opt-in (audited); otherwise
+  close-out falls back to the deterministic extractor and the transcript stays
+  local.
+- Added a local "memories used this turn" inspector: a `memory used` CLI
+  subcommand and a TUI panel showing each used memory's provenance, confidence,
+  epistemic status, contradictions, and staleness. Fully offline.
+- Fixed a TUI-only build break in the `ingest resume` path.
+
 ## 2026-06-17 - Documentation
 
 - README now documents the `ingest` and `knowledge` commands and the
