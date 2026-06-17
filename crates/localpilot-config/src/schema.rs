@@ -142,6 +142,12 @@ pub struct IngestConfig {
     /// Maximum model-backed calls for enrichment. The deterministic v1 path
     /// leaves this at zero unless the user opts in later.
     pub max_model_calls: u64,
+    /// Opt in to model-written contextual chunk prefixes. Off by default: chunk
+    /// prefixes are synthesized locally from front matter and leading lines. When
+    /// on, a wired enricher may send file content off-machine to write richer
+    /// prefixes, and each use is audited. Without an enricher this stays
+    /// synthetic even when set.
+    pub contextual_prefix_enrichment: bool,
     /// Minimum seconds between session-open auto-refreshes of a completed index.
     /// Once the index is built, a later session re-runs a refresh only when
     /// source files have changed and at least this long has passed since the last
@@ -178,6 +184,7 @@ impl Default for IngestConfig {
             max_tokens: 1_000_000,
             max_elapsed_secs: 600,
             max_model_calls: 0,
+            contextual_prefix_enrichment: false,
             refresh_min_interval_secs: 600,
         }
     }

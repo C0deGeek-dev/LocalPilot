@@ -165,6 +165,12 @@ pub struct ChunkRecord {
     pub text: String,
     pub token_estimate: u64,
     pub stale: bool,
+    /// The deterministic, offline context prefix for this chunk (file path plus
+    /// a one-line gist). The prefixed text — not the raw `text` — is what the FTS
+    /// index sees, so a chunk split mid-thought still matches its document's
+    /// subject. Empty for chunks ingested before contextual prefixing existed.
+    #[serde(default)]
+    pub context_prefix: String,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
@@ -363,6 +369,12 @@ pub fn run(
     let ingest_dir = ensure_ingest_dir(&root)?;
     let manifest = preview(&root, config)?;
     let store = ChunkStore::open(&ingest_dir)?;
+    // Contextual chunk prefixing. The model-enrichment tier is gated on the
+    // opt-in flag; no enricher is wired on this local path, so prefixes stay
+    // synthetic (the flag alone never causes egress).
+    let prefix_policy = crate::context_prefix::PrefixEnrichmentPolicy {
+        enabled: config.contextual_prefix_enrichment,
+    };
     // A full run rebuilds from scratch; a refresh updates incrementally,
     // reusing unchanged files and tombstoning what changed or disappeared.
     if mode == RunMode::Full {
@@ -415,7 +427,7 @@ pub fn run(
             continue;
         }
         let absolute = root.join(platform_path(&entry.path));
-        match chunk_file(&absolute, &entry.path, hash) {
+        match chunk_file(&absolute, &entry.path, hash, &prefix_policy) {
             Ok(file_chunks) => {
                 // Changed file: tombstone the path's prior fresh rows (kept,
                 // flagged, pointed at the new hash) before writing the new ones.
@@ -1397,11 +1409,27 @@ fn chunk_file(
     path: &Path,
     display_path: &str,
     content_hash: &str,
+    prefix_policy: &crate::context_prefix::PrefixEnrichmentPolicy,
 ) -> Result<Vec<ChunkRecord>, IngestError> {
     let text = fs::read_to_string(path).map_err(|source| IngestError::Io {
         path: path.to_path_buf(),
         source,
     })?;
+    // One context prefix per file, shared by all its chunks. With no enricher
+    // wired the off-machine tier is unreachable and this resolves to the
+    // deterministic synthetic prefix; any egress would record an audit row.
+    let mut prefix_audit = Vec::new();
+    let context_prefix = crate::context_prefix::resolve_context_prefix(
+        prefix_policy,
+        None,
+        display_path,
+        &text,
+        &mut prefix_audit,
+    );
+    debug_assert!(
+        prefix_audit.is_empty(),
+        "no enricher is wired, so no egress audit row can be produced"
+    );
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut start_line = 1_u64;
@@ -1416,6 +1444,7 @@ fn chunk_file(
                 &mut chunks,
                 display_path,
                 content_hash,
+                &context_prefix,
                 &current,
                 ChunkSpan {
                     start_line,
@@ -1437,6 +1466,7 @@ fn chunk_file(
             &mut chunks,
             display_path,
             content_hash,
+            &context_prefix,
             &current,
             ChunkSpan {
                 start_line,
@@ -1453,6 +1483,7 @@ fn push_chunk(
     chunks: &mut Vec<ChunkRecord>,
     path: &str,
     content_hash: &str,
+    context_prefix: &str,
     text: &str,
     span: ChunkSpan,
 ) {
@@ -1471,6 +1502,7 @@ fn push_chunk(
         end_byte: span.end_byte,
         content_hash: content_hash.to_string(),
         token_estimate: estimate_tokens(redacted.len() as u64),
+        context_prefix: context_prefix.to_string(),
         summary: summarize_chunk(path, &redacted),
         redaction_status: "redacted".to_string(),
         original_bytes: text.len() as u64,
@@ -2201,6 +2233,7 @@ mod tests {
                 text: sentinel.to_string(),
                 token_estimate: 1,
                 stale: false,
+                context_prefix: String::new(),
                 summary: String::new(),
                 redaction_status: "redacted".to_string(),
                 original_bytes: 6,

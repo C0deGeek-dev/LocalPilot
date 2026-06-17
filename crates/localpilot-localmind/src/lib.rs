@@ -12,6 +12,7 @@ mod active_skills_tool;
 mod chunk_store;
 mod codegraph;
 mod context_hook;
+mod context_prefix;
 mod error;
 mod ingest;
 mod knowledge_tool;

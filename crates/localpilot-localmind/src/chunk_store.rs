@@ -21,7 +21,8 @@ const CHUNKS_DB: &str = "chunks.sqlite";
 /// Legacy JSON index migrated in on first open of an existing project.
 const LEGACY_CHUNKS_FILE: &str = "chunks.json";
 /// Highest schema version this build understands.
-const SCHEMA_VERSION: i32 = 1;
+/// v2 adds the additive `context_prefix` column (contextual chunk prefixing).
+const SCHEMA_VERSION: i32 = 2;
 /// Cap on candidate rows pulled from the FTS index for one query, ordered by
 /// relevance. Bounds query memory on a large corpus; far above any realistic
 /// matched-set for a context pack, so it never changes small-fixture results.
@@ -64,42 +65,61 @@ impl ChunkStore {
         }
     }
 
+    /// Step the schema forward one version at a time, so a fresh database and a
+    /// pre-existing one converge on the same shape. Each step is additive; a
+    /// database newer than this build is refused upstream in [`Self::open`]'s
+    /// caller via the shared `user_version` discipline.
     fn migrate(&self) -> Result<(), IngestError> {
-        let current: i32 = self
+        let mut current: i32 = self
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|source| self.sqlite_err(source))?;
         if current >= SCHEMA_VERSION {
             return Ok(());
         }
-        self.connection
-            .execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS ingest_chunks (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    chunk_index INTEGER NOT NULL,
-                    start_line INTEGER NOT NULL,
-                    end_line INTEGER NOT NULL,
-                    start_byte INTEGER NOT NULL,
-                    end_byte INTEGER NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    token_estimate INTEGER NOT NULL,
-                    stale INTEGER NOT NULL DEFAULT 0,
-                    summary TEXT NOT NULL DEFAULT '',
-                    redaction_status TEXT NOT NULL DEFAULT '',
-                    original_bytes INTEGER NOT NULL DEFAULT 0,
-                    preview_bytes INTEGER NOT NULL DEFAULT 0,
-                    superseded_by TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_ingest_chunks_path
-                    ON ingest_chunks(path);
-                CREATE VIRTUAL TABLE IF NOT EXISTS ingest_chunks_fts
-                    USING fts5(chunk_id UNINDEXED, path, text);
-                "#,
-            )
-            .map_err(|source| self.sqlite_err(source))?;
+        if current < 1 {
+            self.connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS ingest_chunks (
+                        id TEXT PRIMARY KEY,
+                        path TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        start_line INTEGER NOT NULL,
+                        end_line INTEGER NOT NULL,
+                        start_byte INTEGER NOT NULL,
+                        end_byte INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        token_estimate INTEGER NOT NULL,
+                        stale INTEGER NOT NULL DEFAULT 0,
+                        summary TEXT NOT NULL DEFAULT '',
+                        redaction_status TEXT NOT NULL DEFAULT '',
+                        original_bytes INTEGER NOT NULL DEFAULT 0,
+                        preview_bytes INTEGER NOT NULL DEFAULT 0,
+                        superseded_by TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_ingest_chunks_path
+                        ON ingest_chunks(path);
+                    CREATE VIRTUAL TABLE IF NOT EXISTS ingest_chunks_fts
+                        USING fts5(chunk_id UNINDEXED, path, text);
+                    "#,
+                )
+                .map_err(|source| self.sqlite_err(source))?;
+            current = 1;
+        }
+        if current < 2 {
+            // Additive: the offline contextual prefix. Existing rows default to
+            // empty; their FTS text is unchanged until they are re-ingested.
+            self.connection
+                .execute_batch(
+                    "ALTER TABLE ingest_chunks \
+                     ADD COLUMN context_prefix TEXT NOT NULL DEFAULT '';",
+                )
+                .map_err(|source| self.sqlite_err(source))?;
+            current = 2;
+        }
+        let _ = current;
         self.connection
             .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .map_err(|source| self.sqlite_err(source))?;
@@ -160,9 +180,9 @@ impl ChunkStore {
                 r#"
                 INSERT INTO ingest_chunks
                     (id, path, chunk_index, start_line, end_line, start_byte, end_byte,
-                     content_hash, text, token_estimate, stale, summary, redaction_status,
-                     original_bytes, preview_bytes, superseded_by)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                     content_hash, text, token_estimate, stale, context_prefix, summary,
+                     redaction_status, original_bytes, preview_bytes, superseded_by)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 ON CONFLICT(id) DO UPDATE SET
                     path = excluded.path,
                     chunk_index = excluded.chunk_index,
@@ -174,6 +194,7 @@ impl ChunkStore {
                     text = excluded.text,
                     token_estimate = excluded.token_estimate,
                     stale = excluded.stale,
+                    context_prefix = excluded.context_prefix,
                     summary = excluded.summary,
                     redaction_status = excluded.redaction_status,
                     original_bytes = excluded.original_bytes,
@@ -192,6 +213,7 @@ impl ChunkStore {
                     chunk.text,
                     to_i64(chunk.token_estimate),
                     i64::from(chunk.stale),
+                    chunk.context_prefix,
                     chunk.summary,
                     chunk.redaction_status,
                     to_i64(chunk.original_bytes),
@@ -200,9 +222,12 @@ impl ChunkStore {
                 ],
             )
             .map_err(|source| self.sqlite_err(source))?;
+            // The prefixed text — context prefix then the chunk body — is what
+            // the FTS index sees, so a chunk split mid-thought still matches its
+            // document's subject. The stored `text` stays the raw chunk.
             tx.execute(
                 "INSERT INTO ingest_chunks_fts(chunk_id, path, text) VALUES (?1, ?2, ?3)",
-                params![chunk.id, chunk.path, chunk.text],
+                params![chunk.id, chunk.path, prefixed_text(chunk)],
             )
             .map_err(|source| self.sqlite_err(source))?;
         }
@@ -295,8 +320,9 @@ impl ChunkStore {
             .prepare(
                 r#"
                 SELECT c.id, c.path, c.chunk_index, c.start_line, c.end_line, c.start_byte,
-                       c.end_byte, c.content_hash, c.text, c.token_estimate, c.stale, c.summary,
-                       c.redaction_status, c.original_bytes, c.preview_bytes, c.superseded_by
+                       c.end_byte, c.content_hash, c.text, c.token_estimate, c.stale,
+                       c.context_prefix, c.summary, c.redaction_status, c.original_bytes,
+                       c.preview_bytes, c.superseded_by
                 FROM ingest_chunks_fts f
                 JOIN ingest_chunks c ON c.id = f.chunk_id
                 WHERE ingest_chunks_fts MATCH ?1
@@ -359,8 +385,8 @@ impl ChunkStore {
             .prepare(
                 r#"
                 SELECT id, path, chunk_index, start_line, end_line, start_byte, end_byte,
-                       content_hash, text, token_estimate, stale, summary, redaction_status,
-                       original_bytes, preview_bytes, superseded_by
+                       content_hash, text, token_estimate, stale, context_prefix, summary,
+                       redaction_status, original_bytes, preview_bytes, superseded_by
                 FROM ingest_chunks ORDER BY path, chunk_index
                 "#,
             )
@@ -394,12 +420,24 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRecord> {
         text: row.get(8)?,
         token_estimate: from_i64(row.get(9)?),
         stale: row.get::<_, i64>(10)? != 0,
-        summary: row.get(11)?,
-        redaction_status: row.get(12)?,
-        original_bytes: from_i64(row.get(13)?),
-        preview_bytes: from_i64(row.get(14)?),
-        superseded_by: row.get(15)?,
+        context_prefix: row.get(11)?,
+        summary: row.get(12)?,
+        redaction_status: row.get(13)?,
+        original_bytes: from_i64(row.get(14)?),
+        preview_bytes: from_i64(row.get(15)?),
+        superseded_by: row.get(16)?,
     })
+}
+
+/// The text indexed for full-text search: the context prefix (when present)
+/// followed by the chunk body. An empty prefix yields the raw body, so legacy
+/// rows index exactly as before.
+fn prefixed_text(chunk: &ChunkRecord) -> String {
+    if chunk.context_prefix.is_empty() {
+        chunk.text.clone()
+    } else {
+        format!("{}\n{}", chunk.context_prefix, chunk.text)
+    }
 }
 
 /// Turns the (already lowercased, non-empty) query terms into an FTS5 MATCH
@@ -447,6 +485,7 @@ mod tests {
             text: text.to_string(),
             token_estimate: 1,
             stale: false,
+            context_prefix: String::new(),
             summary: String::new(),
             redaction_status: "redacted".to_string(),
             original_bytes: text.len() as u64,
@@ -471,6 +510,92 @@ mod tests {
         drop(store);
         let reopened = ChunkStore::open(dir.path()).unwrap();
         assert_eq!(reopened.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn the_context_prefix_is_indexed_so_a_chunk_matches_its_documents_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        let mut prefixed = chunk(
+            "c1",
+            "docs/auth.md",
+            "h1",
+            "the token is refreshed on expiry",
+        );
+        prefixed.context_prefix = "File docs/auth.md: Authentication Flow.".to_string();
+        store.upsert_chunks(&[prefixed]).unwrap();
+
+        // The body never says "authentication"; only the indexed prefix does.
+        let by_prefix = store.search(&["authentication".to_string()]).unwrap();
+        assert_eq!(by_prefix.len(), 1, "prefix terms must be searchable");
+        assert_eq!(by_prefix[0].id, "c1");
+        // The stored body is still the raw chunk, prefix kept in its own column.
+        assert_eq!(by_prefix[0].text, "the token is refreshed on expiry");
+        assert_eq!(
+            by_prefix[0].context_prefix,
+            "File docs/auth.md: Authentication Flow."
+        );
+        // The body itself still matches its own terms.
+        assert_eq!(store.search(&["token".to_string()]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_a_preexisting_v1_database_by_adding_the_prefix_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join(CHUNKS_DB);
+        // Hand-build a v1 database: the old schema with no context_prefix column.
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE ingest_chunks (
+                        id TEXT PRIMARY KEY,
+                        path TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        start_line INTEGER NOT NULL,
+                        end_line INTEGER NOT NULL,
+                        start_byte INTEGER NOT NULL,
+                        end_byte INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        token_estimate INTEGER NOT NULL,
+                        stale INTEGER NOT NULL DEFAULT 0,
+                        summary TEXT NOT NULL DEFAULT '',
+                        redaction_status TEXT NOT NULL DEFAULT '',
+                        original_bytes INTEGER NOT NULL DEFAULT 0,
+                        preview_bytes INTEGER NOT NULL DEFAULT 0,
+                        superseded_by TEXT
+                    );
+                    CREATE VIRTUAL TABLE ingest_chunks_fts
+                        USING fts5(chunk_id UNINDEXED, path, text);
+                    INSERT INTO ingest_chunks
+                        (id, path, chunk_index, start_line, end_line, start_byte, end_byte,
+                         content_hash, text, token_estimate)
+                    VALUES ('old', 'a.md', 0, 1, 1, 0, 5, 'h1', 'legacy body', 1);
+                    INSERT INTO ingest_chunks_fts(chunk_id, path, text)
+                        VALUES ('old', 'a.md', 'legacy body');
+                    PRAGMA user_version = 1;
+                    "#,
+                )
+                .unwrap();
+        }
+
+        // Opening with the current build migrates the v1 database to v2.
+        let store = ChunkStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.count().unwrap(),
+            1,
+            "the legacy row survives migration"
+        );
+        let all = store.all_chunks().unwrap();
+        assert_eq!(all[0].context_prefix, "", "migrated rows default to empty");
+        // The added column is usable: a new prefixed row round-trips.
+        let mut fresh = chunk("new", "b.md", "h2", "fresh body");
+        fresh.context_prefix = "File b.md: New.".to_string();
+        store.upsert_chunks(&[fresh]).unwrap();
+        let hits = store.search(&["new".to_string()]).unwrap();
+        assert!(hits.iter().any(|hit| hit.id == "new"));
     }
 
     #[test]
