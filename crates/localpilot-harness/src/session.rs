@@ -18,7 +18,8 @@ use localpilot_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
 };
 use localpilot_recovery::{
-    detect, ModelHealth, RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
+    detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryEngine,
+    RepeatedErrorBreaker, StreamMonitor,
 };
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
@@ -49,8 +50,13 @@ pub enum StopReason {
     ProviderError,
     /// The per-turn tool-call budget was exhausted; the loop stopped to bound
     /// cost. Distinct from the attempt limit — that bounds *retries*, this
-    /// bounds total tool calls in a turn.
+    /// bounds total tool calls in a turn. This is the hard cost-contract ceiling.
     BudgetExceeded,
+    /// The turn was making no forward progress — the same successful calls
+    /// repeating, or a tiny cycle of calls — and had reached the soft start, so
+    /// the loop stopped rather than spend the rest of the budget spinning.
+    /// Distinct from `BudgetExceeded`, which is the absolute cost ceiling.
+    NoProgress,
 }
 
 /// A UI-agnostic runtime event. Consumers (print mode, the TUI) subscribe to a
@@ -137,10 +143,16 @@ pub struct SessionConfig {
     /// discipline track opts in to measure its false-positive rate before any
     /// default-on decision.
     pub enforce_prior_read: bool,
-    /// Maximum tool calls allowed in a single turn before the loop stops to
-    /// bound cost. A safety ceiling against a runaway tool loop, well above any
-    /// normal task; distinct from the attempt limit (which bounds retries).
+    /// Soft start for the per-turn tool-call ceiling. A turn that keeps making
+    /// progress runs past this up to `tool_call_budget_max`; a turn detected as
+    /// making no forward progress stops here. An ordinary task stays well under
+    /// it. Distinct from the attempt limit (which bounds retries).
     pub tool_call_budget: usize,
+    /// Hard cost-contract ceiling: the per-turn tool-call count that always
+    /// stops the loop regardless of progress, so a turn can never run unbounded.
+    /// With `tool_call_budget_max == tool_call_budget` the ceiling is the flat
+    /// fixed budget; raising it lets a productive turn extend past the soft start.
+    pub tool_call_budget_max: usize,
     /// When set, the no-unsupported-claim gate reviews the final reply: an
     /// action-completion claim that no `Verified` call supports is flagged.
     /// Off by default until the benchmark shows a low false-positive rate.
@@ -160,6 +172,7 @@ impl Default for SessionConfig {
             summarizer_tuning: SummarizerTuning::default(),
             enforce_prior_read: false,
             tool_call_budget: 50,
+            tool_call_budget_max: 50,
             enforce_claim_gate: false,
         }
     }
@@ -302,6 +315,18 @@ fn same_error_hint(tool: &str) -> String {
          so instead of working around it; otherwise read the relevant file or inputs before \
          retrying."
     )
+}
+
+/// A strategy-change hint appended to a tool result when the turn is making no
+/// forward progress — the same successful calls repeating, or a tiny cycle of
+/// calls — so the model breaks out before the budget controller stops the turn.
+/// First-party text; mirrors [`same_error_hint`].
+fn no_progress_hint() -> String {
+    "\n\n[recovery] These tool calls are not making forward progress — the same \
+     calls keep returning the same results. Do not repeat them: either act on \
+     what you already have and answer, or change approach (read a different \
+     input, try a different tool, or state what is blocking you)."
+        .to_string()
 }
 
 /// The agent-mode runtime.
@@ -1037,8 +1062,16 @@ impl SessionRuntime {
         // estimate believed it fit. The first overflow forces a tighter
         // compaction and one retry; a second overflow this turn is terminal.
         let mut overflow_retried = false;
-        // Total tool calls executed this turn, bounded by the cost ceiling.
+        // Total tool calls executed this turn, bounded by the budget controller.
         let mut tool_calls_used = 0usize;
+        // Progress-aware ceiling: a productive turn extends to the hard max; a
+        // turn detected as spinning stops at the soft start; the hard max always
+        // stops the loop. Both reset per turn (these are fresh per `run_turn`).
+        let budget = BudgetController::new(
+            self.config.tool_call_budget,
+            self.config.tool_call_budget_max,
+        );
+        let mut no_progress = NoProgressDetector::default();
 
         loop {
             if cancel.is_cancelled() {
@@ -1339,19 +1372,36 @@ impl SessionRuntime {
 
             // Execute tool calls through the permission-gated registry.
             for (id, name, input) in &calls {
-                // Cost ceiling: a runaway tool loop stops cleanly with a
-                // model-visible, recorded reason before the next call runs.
-                if tool_calls_used >= self.config.tool_call_budget {
-                    let notice = format!(
-                        "tool-call budget of {} reached this turn; stopping to bound cost",
-                        self.config.tool_call_budget
-                    );
-                    let _ = events.send(RuntimeEvent::Warning(notice.clone()));
-                    self.append(
-                        Message::text(Role::User, notice)
-                            .into_synthetic("tool-call budget exceeded"),
-                    );
-                    return self.stop(events, StopReason::BudgetExceeded);
+                // Progress-aware ceiling: a runaway or spinning tool loop stops
+                // cleanly with a model-visible, recorded reason before the next
+                // call runs. The hard cost ceiling always wins; a no-progress
+                // stop is distinct so it is diagnosable.
+                match budget.decide(tool_calls_used, no_progress.is_tripped()) {
+                    BudgetDecision::Continue => {}
+                    BudgetDecision::StopCostMax => {
+                        let notice = format!(
+                            "tool-call budget of {} reached this turn; stopping to bound cost",
+                            budget.hard_max()
+                        );
+                        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+                        self.append(
+                            Message::text(Role::User, notice)
+                                .into_synthetic("tool-call budget exceeded"),
+                        );
+                        return self.stop(events, StopReason::BudgetExceeded);
+                    }
+                    BudgetDecision::StopNoProgress => {
+                        let notice = format!(
+                            "no forward progress across {tool_calls_used} tool calls this turn; \
+                             stopping instead of spinning"
+                        );
+                        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+                        self.append(
+                            Message::text(Role::User, notice)
+                                .into_synthetic("no tool-call progress"),
+                        );
+                        return self.stop(events, StopReason::NoProgress);
+                    }
                 }
                 tool_calls_used += 1;
 
@@ -1430,6 +1480,15 @@ impl SessionRuntime {
                     return self.stop(events, StopReason::Cancelled);
                 };
 
+                // Scrub raw control bytes from tool output before it reaches the
+                // model context, the event stream, or the same-error breaker.
+                // Binary-laden output (e.g. a parser error echoing raw `.glb`
+                // bytes) otherwise carries NUL and other control characters that
+                // can derail local models into a degenerate echo loop.
+                if let Some(scrubbed) = scrub_control_chars(&result.output) {
+                    result.output = scrubbed;
+                }
+
                 // Track per-tool failure counts for the safeguard.
                 if result.is_error {
                     let count = self.tool_failure_guard.record_failure(name);
@@ -1471,6 +1530,20 @@ impl SessionRuntime {
                 } else {
                     self.tool_failure_guard.record_success(name);
                     self.error_breaker.reset();
+                    // No-progress breaker: a successful call that keeps repeating
+                    // with the same result, or a turn cycling a tiny set of calls,
+                    // gets one strategy-change nudge before the budget controller
+                    // may stop the turn. The signature pairs the tool with its
+                    // arguments; the output is the observable state, so a re-read
+                    // after a real change (different output) is not flagged.
+                    let signature = format!("{name}\u{1f}{input}");
+                    if no_progress.observe(&signature, &result.output) {
+                        let _ = events.send(RuntimeEvent::Warning(
+                            "tool calls are not making forward progress; nudging a strategy change"
+                                .to_string(),
+                        ));
+                        result.output.push_str(&no_progress_hint());
+                    }
                 }
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),
@@ -1535,6 +1608,40 @@ fn tool_error_message(id: &str, output: &str) -> Message {
             localpilot_core::ToolResult::error(ToolUseId::from(id), output),
         )],
     )
+}
+
+/// Replace raw control characters (other than tab, newline, carriage return)
+/// with a printable `\xNN` escape before tool output enters the model context.
+///
+/// Output captured via `String::from_utf8_lossy` keeps NUL and other C0/C1
+/// control bytes verbatim — only invalid UTF-8 becomes `U+FFFD`. A tool that
+/// prints raw binary (e.g. a JSON parser error echoing the bytes of a `.glb`
+/// file: `glTF\x02\x00\x00\x00...`) thus injects control characters straight
+/// into the prompt. Some local models degenerate when those reach the context,
+/// looping on a fragment of the input ("...is not valid JSON") instead of
+/// answering. Escaping preserves the visible meaning while removing the trigger.
+///
+/// Returns `None` when nothing needs escaping, so the common case allocates
+/// nothing.
+fn scrub_control_chars(text: &str) -> Option<String> {
+    if !text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        if matches!(c, '\t' | '\n' | '\r') {
+            out.push(c);
+        } else if c.is_control() {
+            use std::fmt::Write as _;
+            let _ = write!(out, "\\x{:02x}", c as u32);
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 fn trim_blank_boundary_lines(mut text: String) -> String {
@@ -1666,6 +1773,21 @@ mod tests {
             trim_blank_boundary_lines("\r\n\nThe answer\n\n".to_string()),
             "The answer"
         );
+    }
+
+    #[test]
+    fn scrub_control_chars_escapes_binary_and_keeps_whitespace() {
+        // The exact byte pattern from the .glb parser-error loop.
+        let poisoned =
+            "Unexpected token 'g', \"glTF\u{02}\u{00}\u{00}\u{00}\"... is not valid JSON";
+        let scrubbed = scrub_control_chars(poisoned).expect("control chars present");
+        assert_eq!(
+            scrubbed,
+            "Unexpected token 'g', \"glTF\\x02\\x00\\x00\\x00\"... is not valid JSON"
+        );
+        assert!(!scrubbed.contains('\u{00}'));
+        // Ordinary whitespace is preserved verbatim, and clean text is untouched.
+        assert_eq!(scrub_control_chars("line1\n\tline2\r\n"), None);
     }
 
     #[test]

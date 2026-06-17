@@ -424,5 +424,6 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::Degraded => "degraded",
         StopReason::ProviderError => "provider_error",
         StopReason::BudgetExceeded => "budget_exceeded",
+        StopReason::NoProgress => "no_progress",
     }
 }

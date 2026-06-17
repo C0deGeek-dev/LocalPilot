@@ -76,6 +76,8 @@ pub async fn run(
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
                 &config.compaction,
             ),
+            tool_call_budget: config.harness.tool_call_budget,
+            tool_call_budget_max: config.harness.tool_call_budget_max,
             ..SessionConfig::default()
         },
         Vec::new(),
