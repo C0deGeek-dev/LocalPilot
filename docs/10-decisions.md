@@ -2,6 +2,83 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0027: The Skill Model — Invocation × Authority, Two Artifact Types, Pull-Based Discovery
+
+Status: accepted. Generalizes ADR-0020 (skills are read-only advisory prompt
+modules), and applies ADR-0016 (knowledge is pulled on demand, not pushed every turn)
+and ADR-0017 (retrieval context is a request-time projection) to skills; related to
+ADR-0028 (the handoff artifact). Source consulted clean-room: the `mattpocock/skills`
+comparison in LocalHub research (§5, §16) — concepts reimplemented, no file vendored.
+
+"Skill" had drifted into an overloaded word across the stack. This record names the
+model so the later runtime work (frontmatter invocation parsing, loader wiring,
+handoff) builds on fixed terms. A skill-shaped artifact is placed on **two
+independent axes**:
+
+- **Invocation — *who can reach it*:** **user-only** (reached only by a human typing
+  its name) or **discoverable** (the model can also reach it on its own — *and* the
+  human can still type its name; discoverable always includes user reach). Invocation
+  is carried in a `SKILL.md` by the `disable-model-invocation` flag (present ⇒
+  user-only; absent ⇒ discoverable).
+- **Authority — *what reaching it does*:** **advisory** (the artifact is *content the
+  agent reads* — guidance it may apply or ignore; reaching it performs no effect
+  beyond a workspace read) or **enforced** (the artifact is a *rule the runtime
+  applies* — it can block or gate an action).
+
+**Two artifact types** occupy this space (an earlier draft proposed a third,
+"user-invoked command"; it was dropped as redundant — a typed, user-only invocation is
+just a *user-invoked skill*. See plan decision D001):
+
+1. **Harness rule / quality-gate check** — *authority: enforced*, invocation:
+   runtime-triggered (cadence/event, not a human or model name). Owned by the rule
+   engine and the discovered quality gate (ADR-0009); it can refuse or gate an effect
+   and never bypasses the permission engine.
+2. **Advisory skill** — *authority: advisory*, invocation: user-only or discoverable.
+   The read-only prompt module of ADR-0020 (LocalMind-distilled or project-local
+   `SKILL.md`), surfaced as content. Reading one never installs, enables, disables, or
+   runs anything. A *user-invoked* skill is simply this with invocation set to
+   user-only.
+
+Discovery is **pull-based, not push-based** (decision D002): a discoverable skill is
+**not** loaded into the turn context just because it exists. The model finds skills the
+same way it finds knowledge — an on-demand **search**: a `skill_search` surface returns
+lean ranked locators (name + one-line summary + score), and only the **chosen** skill
+body is loaded into context. This applies ADR-0016/0017 to skills: a discoverable skill
+costs ~no standing context (at most a small fixed cue that skills exist and can be
+searched), and the always-loaded-description model is explicitly rejected as the
+default — it taxes every turn and hurts small local models.
+
+Load-bearing rules:
+
+- **User invocation is deterministic and needs no model judgement.** A human typing a
+  skill's name loads that skill's body directly — no search, no ranking, no autonomy.
+  This works for *every* skill regardless of its invocation flag.
+- **Model discovery is search-on-demand and opt-in.** The model reaches a discoverable
+  skill only by searching for it and then loading the chosen body; **autonomous**
+  (model-initiated) search-and-load is config-gated and **off by default**, so a small
+  local model never auto-injects a skill unless the project opts in. The candidate set
+  is the *discoverable* skills only; user-only skills are never returned by search.
+- **No-silent-execution is reaffirmed, not weakened.** Nothing here executes, installs,
+  enables, or auto-fires a skill without an explicit human step or a disclosed config
+  opt-in. Enabling/disabling/retiring stay deliberate human steps (ADR-0020). Loading a
+  skill injects *content* the agent reads; any script/asset a skill declares still runs
+  only through the permission engine (never a side channel).
+
+Reason:
+
+- one durable vocabulary (two axes, two types) stops "skill" from meaning a harness
+  rule and an advisory module interchangeably across LocalPilot and LocalMind — the
+  later subjects parse, wire, and document against fixed terms;
+- **pull-based discovery** keeps the local-model-first posture structural: skill
+  guidance is fetched when relevant rather than taxing every turn, reusing the proven
+  `knowledge_search`→`knowledge_fetch` pattern (the ranking primitive already exists as
+  `SkillSet::relevant`);
+- both types share a safety floor (no silent execution; permission engine never
+  bypassed), so naming them adds clarity without adding a new risk surface.
+
+The cross-engine half of this decision (LocalMind skills stay advisory/read-only) is
+recorded as LocalMind `D-LM-0013`, which points here as the single source of truth.
+
 ## ADR-0026: The Cold-Start Repo Primer Is A Review-Gated, Always-On Context Block
 
 Status: accepted. Builds on ADR-0013 (disposable project-local artifacts) and the
