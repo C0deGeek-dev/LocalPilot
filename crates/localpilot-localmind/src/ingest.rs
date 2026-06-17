@@ -1141,6 +1141,38 @@ fn task_names_path(task_lower: &str, path: &str) -> bool {
         .is_some_and(|name| name.len() >= 3 && task_lower.contains(name))
 }
 
+/// Fetch full chunk records for an explicit set of ids — the layer-3 "fetch"
+/// step of the layered retrieval contract. Read-only; returns only the requested
+/// ids (never the whole store), and an empty vec when the project has no index.
+///
+/// # Errors
+/// Returns [`IngestError`] when the chunk store cannot be opened or queried.
+pub fn fetch_chunks(project_root: &Path, ids: &[String]) -> Result<Vec<ChunkRecord>, IngestError> {
+    let root = canonical_root(project_root)?;
+    let ingest_dir = root.join(INGEST_DIR);
+    if ids.is_empty() || !crate::chunk_store::exists(&ingest_dir) {
+        return Ok(Vec::new());
+    }
+    let store = ChunkStore::open(&ingest_dir)?;
+    store.fetch_by_ids(ids)
+}
+
+/// Sibling chunk ids of the same file as `id` — the layer-2 "expand" neighbours.
+/// Read-only and cheap (ids only, no bodies). Empty when the id is unknown or the
+/// file has a single chunk.
+///
+/// # Errors
+/// Returns [`IngestError`] when the chunk store cannot be opened or queried.
+pub fn sibling_chunk_ids(project_root: &Path, id: &str) -> Result<Vec<String>, IngestError> {
+    let root = canonical_root(project_root)?;
+    let ingest_dir = root.join(INGEST_DIR);
+    if !crate::chunk_store::exists(&ingest_dir) {
+        return Ok(Vec::new());
+    }
+    let store = ChunkStore::open(&ingest_dir)?;
+    store.sibling_ids(id)
+}
+
 /// Format relevant derived ingestion chunks as compact turn context.
 ///
 /// # Errors

@@ -44,6 +44,11 @@ impl McpTools {
         // every turn. Harmless when no project is ingested (it returns an empty
         // result), and present on every session path that builds a registry.
         registry.register(Box::new(localpilot_localmind::KnowledgeSearch));
+        // The expand and fetch layers of the same knowledge base: locate
+        // neighbours cheaply, then pay for full bodies only for chosen ids, so a
+        // turn spends a bounded number of tokens to find the right context.
+        registry.register(Box::new(localpilot_localmind::KnowledgeExpand));
+        registry.register(Box::new(localpilot_localmind::KnowledgeFetch));
         // The agent can propose a durable lesson for human review as it works.
         // Enqueue-only — never a direct accepted-memory write.
         registry.register(Box::new(localpilot_localmind::Remember));
@@ -96,6 +101,8 @@ mod tests {
         let names = registry.names();
         for expected in [
             "knowledge_search",
+            "knowledge_expand",
+            "knowledge_fetch",
             "remember",
             "localmind_review_list",
             "localmind_memory_search",

@@ -366,6 +366,72 @@ impl ChunkStore {
         Ok(removed)
     }
 
+    /// Fetch full chunk rows for an explicit set of ids — the layer-3 "fetch"
+    /// step. Returns only rows whose id is in `ids` (never the whole store), so a
+    /// batch fetch costs only what the caller asked for. Order is stable
+    /// (path, chunk_index) for deterministic packing.
+    pub(crate) fn fetch_by_ids(&self, ids: &[String]) -> Result<Vec<ChunkRecord>, IngestError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"
+            SELECT id, path, chunk_index, start_line, end_line, start_byte, end_byte,
+                   content_hash, text, token_estimate, stale, context_prefix, summary,
+                   redaction_status, original_bytes, preview_bytes, superseded_by
+            FROM ingest_chunks WHERE id IN ({placeholders})
+            ORDER BY path, chunk_index
+            "#
+        );
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|source| self.sqlite_err(source))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(ids), row_to_chunk)
+            .map_err(|source| self.sqlite_err(source))?;
+        let mut chunks = Vec::new();
+        for row in rows {
+            chunks.push(row.map_err(|source| self.sqlite_err(source))?);
+        }
+        Ok(chunks)
+    }
+
+    /// The other chunk ids of the same file as `id`, in document order — the
+    /// layer-2 "expand" neighbours. Empty when the id is unknown or the file has
+    /// only one chunk. Cheap: ids only, no bodies loaded.
+    pub(crate) fn sibling_ids(&self, id: &str) -> Result<Vec<String>, IngestError> {
+        let path: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT path FROM ingest_chunks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.sqlite_err(source))?;
+        let Some(path) = path else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id FROM ingest_chunks WHERE path = ?1 AND id != ?2 ORDER BY chunk_index",
+            )
+            .map_err(|source| self.sqlite_err(source))?;
+        let rows = statement
+            .query_map(params![path, id], |row| row.get::<_, String>(0))
+            .map_err(|source| self.sqlite_err(source))?;
+        let mut siblings = Vec::new();
+        for row in rows {
+            siblings.push(row.map_err(|source| self.sqlite_err(source))?);
+        }
+        Ok(siblings)
+    }
+
     /// Total rows, including stale tombstones — the index size reported as
     /// `chunks_written`.
     pub(crate) fn count(&self) -> Result<usize, IngestError> {

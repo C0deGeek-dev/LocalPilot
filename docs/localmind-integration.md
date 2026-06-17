@@ -227,6 +227,24 @@ pulled when relevant instead of riding in every turn's context. A missing index
 returns "not indexed yet"; a present-but-unreadable one is reported distinctly
 ("rebuild") rather than masked as empty.
 
+### Layered retrieval contract (index → expand → fetch)
+
+Retrieval is staged so a turn spends a small, bounded number of tokens to
+*locate* the right knowledge before paying for any body:
+
+- **Index** (`knowledge_search`) — the cheap layer: ranked locators (id +
+  one-line summary + score).
+- **Expand** (`knowledge_expand`) — cheap: the document neighbours (other chunks
+  of the same file) around chosen ids, ids only.
+- **Fetch** (`knowledge_fetch`) — the only expensive layer: full bodies for an
+  explicit set of ids, and only those ids.
+
+Each layer reports the token cost it spent, so the budget stays visible. The
+budgeted packing path lays down cheap index summaries first and upgrades the
+top entries to full bodies only while they fit a configurable budget; a tight
+budget degrades gracefully to index-only and the packed total never exceeds the
+budget. All three are read-only over the derived index and auto-allowed.
+
 Two more agent tools close the learning loop in-session. `remember` lets the agent
 propose a durable lesson, enqueuing a review candidate it never accepts itself.
 `skill_drafts` lists or inspects generated skill drafts read-only without enabling
