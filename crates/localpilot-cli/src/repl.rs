@@ -623,9 +623,7 @@ fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestA
         IngestAction::Pause => {
             crate::ingest_cmd::control(cwd, crate::ingest_cmd::ControlAction::Pause, &mut output)
         }
-        IngestAction::Resume => {
-            crate::ingest_cmd::control(cwd, crate::ingest_cmd::ControlAction::Resume, &mut output)
-        }
+        IngestAction::Resume => crate::ingest_cmd::resume(cwd, &mut output),
         IngestAction::Cancel => {
             crate::ingest_cmd::control(cwd, crate::ingest_cmd::ControlAction::Cancel, &mut output)
         }
