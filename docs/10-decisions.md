@@ -90,7 +90,7 @@ independent axes**:
 
 **Two artifact types** occupy this space (an earlier draft proposed a third,
 "user-invoked command"; it was dropped as redundant — a typed, user-only invocation is
-just a *user-invoked skill*. See plan decision D001):
+just a *user-invoked skill*):
 
 1. **Harness rule / quality-gate check** — *authority: enforced*, invocation:
    runtime-triggered (cadence/event, not a human or model name). Owned by the rule
@@ -102,7 +102,7 @@ just a *user-invoked skill*. See plan decision D001):
    runs anything. A *user-invoked* skill is simply this with invocation set to
    user-only.
 
-Discovery is **pull-based, not push-based** (decision D002): a discoverable skill is
+Discovery is **pull-based, not push-based**: a discoverable skill is
 **not** loaded into the turn context just because it exists. The model finds skills the
 same way it finds knowledge — an on-demand **search**: a `skill_search` surface returns
 lean ranked locators (name + one-line summary + score), and only the **chosen** skill
