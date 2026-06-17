@@ -11,6 +11,7 @@ use localpilot_store::Store;
 
 mod context_inject;
 mod doctor;
+mod handoff_cmd;
 mod harness_cmd;
 mod ingest_cmd;
 #[cfg(feature = "tui")]
@@ -185,6 +186,26 @@ enum Command {
     Skills {
         #[command(subcommand)]
         command: ProjectSkillsCommand,
+    },
+    /// Write a cross-context handoff, or check one before resuming work.
+    Handoff {
+        #[command(subcommand)]
+        command: Option<HandoffCommand>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HandoffCommand {
+    /// Write a handoff for the most recent session (the default action).
+    Write {
+        /// Optional objective for the next session; derived from the harness
+        /// documents when omitted.
+        objective: Option<String>,
+    },
+    /// Run the deterministic resume check for a handoff against the current repo.
+    Resume {
+        /// The handoff id (see the writer's output).
+        id: String,
     },
 }
 
@@ -873,6 +894,24 @@ async fn main() -> anyhow::Result<()> {
             match command {
                 ProjectSkillsCommand::List => skills_cmd::list(&cwd, &mut stdout)?,
                 ProjectSkillsCommand::Show { name } => skills_cmd::show(&cwd, &name, &mut stdout)?,
+            }
+            stdout.flush()?;
+        }
+        Command::Handoff { command } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            match command {
+                None | Some(HandoffCommand::Write { objective: None }) => {
+                    handoff_cmd::write(&cwd, None, &mut stdout)?;
+                }
+                Some(HandoffCommand::Write {
+                    objective: Some(objective),
+                }) => {
+                    handoff_cmd::write(&cwd, Some(&objective), &mut stdout)?;
+                }
+                Some(HandoffCommand::Resume { id }) => {
+                    handoff_cmd::resume(&cwd, &id, &mut stdout)?;
+                }
             }
             stdout.flush()?;
         }

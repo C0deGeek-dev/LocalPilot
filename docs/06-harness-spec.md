@@ -263,6 +263,44 @@ Read-only summary:
 - ratified quality gate
 - provider config status
 
+### `localpilot handoff`
+
+Write a cross-context handoff for the most recent session in the workspace.
+`localpilot handoff` derives the objective from the harness documents;
+`localpilot handoff write "<objective>"` sets it explicitly. The artifact is
+written redacted to `.localpilot/handoffs/<id>.md` (git-ignored) and the command
+prints the id and the `handoff resume` line to continue with.
+
+### `localpilot handoff resume <id>`
+
+Run the deterministic resume check for a handoff against the current repo and print
+the result, before a fresh agent acts on it. See §Handoff.
+
+## Handoff
+
+A **handoff** is the cross-context bridge between one session ending and another
+picking the work up. It is an *execution record*, not memory.
+
+- **Format.** A machine-checkable header (schema, id, repo, branch, commit, dirty,
+  session, references, suggested skills, confidence, created) followed by a
+  human-readable Markdown body that separates **confirmed facts** (what the event log
+  and git record) from **assumptions** (the inferred objective and next action). The
+  resume check reads the header fields, not the prose.
+- **Sources.** The writer reads the session event log (committed steps) and the
+  harness documents (`brief.md` / `PROGRESS.md` / `DECISIONS.md`) — never the raw
+  transcript — and **references** those documents by path rather than duplicating
+  them. The whole artifact is redacted through the canonical host redactor before it
+  is written.
+- **Location.** `.localpilot/handoffs/<id>.md`: git-ignored, never committed, distinct
+  from the root-level `brief.md` / `PROGRESS.md` runtime files. **Never** promoted to
+  LocalMind accepted memory — close-out reads the transcript, not the handoff.
+- **Resume check.** Deterministic and warning-not-failure: it verifies branch
+  identity, that the recorded commit exists, dirty-state match, that referenced paths
+  and the referenced session are present, and surfaces any mismatch as a *flag to
+  re-verify* rather than a hard stop. No model judges the prose.
+
+See ADR-0028 for the decision.
+
 ## Rule Engine
 
 ### Trigger Types

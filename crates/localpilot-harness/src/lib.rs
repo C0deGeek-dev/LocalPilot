@@ -13,6 +13,7 @@ mod decisions;
 mod discipline;
 mod error;
 mod evidence;
+mod handoff;
 mod hooks;
 mod planning;
 mod precondition;
@@ -33,6 +34,10 @@ pub use decisions::{today, Decision, Decisions};
 pub use discipline::DisciplineMetrics;
 pub use error::HarnessError;
 pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
+pub use handoff::{
+    check_handoff, evaluate_resume, write_handoff, Handoff, HandoffHeader, HandoffSummary,
+    ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
+};
 pub use hooks::{ContextHook, HookEvent, HookFabric, SessionObserver};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};

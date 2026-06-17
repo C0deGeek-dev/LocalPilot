@@ -2,6 +2,69 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0028: The Handoff Is A Redacted, Git-Ignored Execution Record, Checked Deterministically, Never Memory
+
+Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` is the execution
+record, `.localmind/` is memory), ADR-0003 (project files are the harness source of
+truth), and ADR-0012 (`.localpilot/` is local, disposable, never committed). Related
+to ADR-0027 (skills; a handoff suggests skills for the next session).
+
+A session that ends mid-task leaves no first-class way for a fresh agent to pick it
+up: the transcript is long and unredacted-for-sharing, and the harness documents
+describe the plan but not "where we are right now." A **handoff** fills that gap.
+
+Shape:
+
+- **A small machine-checkable header + a human-readable Markdown body.** The header
+  carries every field the resume check needs — schema, id, repo, branch, commit,
+  dirty, session, references, suggested skills, confidence, created — so the check
+  reads structured fields, not prose (the "query-time fields live in the header, not
+  the source body" lesson from the retrieval work). The body separates **confirmed
+  facts** (what the event log and git actually record) from **assumptions** (the
+  inferred objective and next action).
+- **Reference, don't duplicate.** The handoff points at `brief.md` / `PROGRESS.md` /
+  `DECISIONS.md` by path and tells the reader to read them, rather than copying their
+  contents — they stay the source of truth (ADR-0003).
+- **Written from durable state, not the raw transcript.** The writer reads the session
+  event log (committed steps) and the harness documents — the facts LocalPilot already
+  recorded — never the conversation buffer.
+- **Redacted through the canonical host redactor** (ADR-0011) over the *whole*
+  artifact before it touches disk.
+
+Storage and boundary:
+
+- It lives at `.localpilot/handoffs/<id>.md` — an **execution record**, git-ignored
+  and never committed (ADR-0012), distinct in name and location from the harness
+  `brief.md` / `PROGRESS.md` runtime files (which live at the repo root and are
+  committed plan state).
+- It is **never promoted to LocalMind accepted memory.** Session close-out reads the
+  transcript, never the handoff file, so a handoff body cannot become a review
+  candidate or accepted memory. Close-out may still extract durable *lessons* from the
+  session itself as evidence; the full handoff stays transient.
+
+Resume check:
+
+- `handoff resume <id>` runs a **deterministic** check before a fresh agent acts:
+  branch identity, whether the recorded commit still exists, dirty-state match,
+  referenced paths present, referenced session present. No model judges the prose.
+- A mismatch is a **flag to re-verify, not a hard failure** — stale facts are surfaced
+  as warnings, never silently dropped (the *flag-don't-drop* precedent from the
+  change-aware staleness work).
+
+Reason:
+
+- the cross-context win is a small, honest, *checkable* snapshot the next agent
+  verifies against the live repo — not a large unverified context dump or a second
+  memory store;
+- keeping the handoff an execution record (git-ignored, redacted, never memory) means
+  it inherits the store split's privacy and disposability guarantees and adds no new
+  long-term-storage surface;
+- a deterministic, warning-not-failure resume check matches the local-first posture: no
+  model in the verification path, and a moved repo degrades to "re-verify," never to a
+  false "all good." Rollback is to stop writing handoffs; nothing else depends on them.
+
+The runtime shape is documented in `docs/06-harness-spec.md` (§Handoff).
+
 ## ADR-0027: The Skill Model — Invocation × Authority, Two Artifact Types, Pull-Based Discovery
 
 Status: accepted. Generalizes ADR-0020 (skills are read-only advisory prompt

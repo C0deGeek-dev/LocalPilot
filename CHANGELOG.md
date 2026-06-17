@@ -5,6 +5,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- Added a cross-context **handoff**: `localpilot handoff` writes a redacted,
+  git-ignored snapshot (`.localpilot/handoffs/<id>.md`) of the latest session's
+  durable state — a machine-checkable header plus a body separating confirmed facts
+  from assumptions, referencing `brief.md`/`PROGRESS.md`/`DECISIONS.md` by path rather
+  than copying them. `localpilot handoff resume <id>` runs a deterministic check
+  (branch, commit, dirty-state, referenced paths/session) and surfaces mismatches as
+  warnings before a fresh agent acts. A handoff is an execution record — never
+  committed and never promoted into LocalMind memory.
 - Project-local skills (advisory prompt modules under `.localpilot/skills/` or
   `.agents/skills/`) are now a live, pull-based surface. `localpilot skills list`
   and `localpilot skills show <name>` read them deterministically; with `[skills]

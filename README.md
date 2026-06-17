@@ -127,6 +127,7 @@ the runtime in-process or driving it headless over RPC/ACP.
 | `ingest` | Project-local folder ingestion: `preview`, run, `refresh`, `review`, and clean up |
 | `knowledge` | Search and package project-local ingested knowledge |
 | `skills list \| show <name>` | List project skills (advisory prompt modules under `.localpilot/skills` / `.agents/skills`) and read one by name |
+| `handoff [write <objective>] \| resume <id>` | Write a redacted, git-ignored handoff for the latest session, or run the deterministic resume check before a fresh agent continues |
 | `export` | Export a redacted session bundle |
 
 ### Chat controls
