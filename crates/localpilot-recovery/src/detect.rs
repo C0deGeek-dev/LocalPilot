@@ -831,6 +831,26 @@ mod tests {
     }
 
     #[test]
+    fn no_progress_observe_is_cheap() {
+        // The detector hashes the signature and output once per call — no
+        // filesystem walk — so its per-call cost is negligible. Time a large
+        // batch and assert a generous ceiling to catch a pathological regression.
+        let mut detector = NoProgressDetector::default();
+        let iterations = 100_000u32;
+        let start = std::time::Instant::now();
+        for i in 0..iterations {
+            let signature = format!("read_file\u{1f}{{\"path\":\"f{}.rs\"}}", i % 64);
+            detector.observe(&signature, "some representative tool output line");
+        }
+        let elapsed = start.elapsed();
+        eprintln!("no-progress observe: {iterations} calls in {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "100k observes took {elapsed:?}; expected well under 2s"
+        );
+    }
+
+    #[test]
     fn budget_continues_below_the_soft_start_even_when_stuck() {
         let controller = BudgetController::new(50, 200);
         assert_eq!(controller.decide(0, false), BudgetDecision::Continue);

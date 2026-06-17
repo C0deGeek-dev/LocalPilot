@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use localpilot_harness::{SessionConfig, SessionRuntime, StopReason};
+use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
@@ -149,5 +149,132 @@ fn a_spinning_turn_stops_on_no_progress_before_the_max() {
         reason,
         StopReason::NoProgress,
         "a spinning turn stops on no progress, distinct from the cost ceiling"
+    );
+}
+
+// --- A/B measurement: adaptive controller vs the flat fixed ceiling ----------
+
+/// One scenario's outcome: the stop reason and whether the no-progress nudge
+/// fired during the turn.
+struct AbOutcome {
+    reason: StopReason,
+    nudged: bool,
+}
+
+/// Run `provider` to completion under a `(soft, max)` budget and report the stop
+/// reason plus whether the no-progress strategy-change nudge was emitted.
+fn run_ab(root: &std::path::Path, provider: FakeProvider, soft: usize, max: usize) -> AbOutcome {
+    let mut runtime = runtime_budgets(root, provider, soft, max);
+    let (events, mut rx) = broadcast::channel(4096);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("task", &events, &cancel));
+    let mut nudged = false;
+    while let Ok(event) = rx.try_recv() {
+        if let RuntimeEvent::Warning(text) = event {
+            if text.contains("not making forward progress") {
+                nudged = true;
+            }
+        }
+    }
+    AbOutcome { reason, nudged }
+}
+
+/// A provider that reads `count` *distinct* files (each written with unique
+/// contents), then answers — a turn that keeps making progress.
+fn distinct_reads(root: &std::path::Path, count: usize) -> FakeProvider {
+    let mut provider = FakeProvider::new();
+    for i in 0..count {
+        let name = format!("f{i}.txt");
+        std::fs::write(root.join(&name), format!("contents {i}\n")).unwrap();
+        provider = provider.tool_call(&format!("c{i}"), "read_file", json!({ "path": name }));
+    }
+    provider.text("read them all")
+}
+
+/// A provider that reads the *same* file `count` times — a spinning turn that
+/// makes no forward progress.
+fn identical_reads(root: &std::path::Path, count: usize) -> FakeProvider {
+    std::fs::write(root.join("f.txt"), "x\n").unwrap();
+    let mut provider = FakeProvider::new();
+    for _ in 0..count {
+        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
+    }
+    provider.text("done")
+}
+
+/// Compare the adaptive controller against the flat fixed ceiling across three
+/// scenarios, print the delta, and assert the wins: a productive turn the fixed
+/// ceiling would cut now completes; a spinning turn stops on a distinct
+/// `NoProgress` reason after a nudge; a runaway that defeats the no-progress
+/// signal is still bounded by the hard cost ceiling.
+#[test]
+fn adaptive_vs_fixed_ceiling_ab() {
+    const SOFT: usize = 8;
+    const MAX: usize = 50;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // (a) Productive: 12 distinct reads — more than the soft start, all progress.
+    let prod_root = dir.path().join("productive");
+    std::fs::create_dir_all(&prod_root).unwrap();
+    let fixed_prod = run_ab(&prod_root, distinct_reads(&prod_root, 12), SOFT, SOFT);
+    let adaptive_prod = run_ab(&prod_root, distinct_reads(&prod_root, 12), SOFT, MAX);
+
+    // (b) Spinning: 12 identical reads — no forward progress.
+    let spin_root = dir.path().join("spinning");
+    std::fs::create_dir_all(&spin_root).unwrap();
+    let fixed_spin = run_ab(&spin_root, identical_reads(&spin_root, 12), SOFT, SOFT);
+    let adaptive_spin = run_ab(&spin_root, identical_reads(&spin_root, 12), SOFT, MAX);
+
+    // (c) Runaway that defeats the no-progress signal: 60 distinct reads.
+    let run_root = dir.path().join("runaway");
+    std::fs::create_dir_all(&run_root).unwrap();
+    let adaptive_runaway = run_ab(&run_root, distinct_reads(&run_root, 60), SOFT, MAX);
+
+    eprintln!("adaptive-budget A/B (soft={SOFT}, max={MAX}):");
+    eprintln!(
+        "  productive(12 distinct): fixed={:?} adaptive={:?}",
+        fixed_prod.reason, adaptive_prod.reason
+    );
+    eprintln!(
+        "  spinning(12 identical):  fixed={:?} adaptive={:?} (nudged={})",
+        fixed_spin.reason, adaptive_spin.reason, adaptive_spin.nudged
+    );
+    eprintln!(
+        "  runaway(60 distinct):    adaptive={:?}",
+        adaptive_runaway.reason
+    );
+
+    // False stops of a productive turn: the fixed ceiling cuts it; the adaptive
+    // controller does not.
+    let fixed_false_stops = usize::from(fixed_prod.reason != StopReason::Done);
+    let adaptive_false_stops = usize::from(adaptive_prod.reason != StopReason::Done);
+    eprintln!(
+        "  productive false-stops: fixed={fixed_false_stops} adaptive={adaptive_false_stops}"
+    );
+
+    // The win on a productive turn: fixed cuts it at the ceiling, adaptive runs.
+    assert_eq!(fixed_prod.reason, StopReason::BudgetExceeded);
+    assert_eq!(adaptive_prod.reason, StopReason::Done);
+    assert_eq!(
+        adaptive_false_stops, 0,
+        "adaptive must not cut a productive turn"
+    );
+
+    // The spinning turn: fixed stops on the generic ceiling; adaptive stops on a
+    // distinct, diagnosable reason and nudged a strategy change first.
+    assert_eq!(fixed_spin.reason, StopReason::BudgetExceeded);
+    assert_eq!(adaptive_spin.reason, StopReason::NoProgress);
+    assert!(
+        adaptive_spin.nudged,
+        "a spinning turn gets a strategy-change nudge"
+    );
+
+    // The cost contract holds even when the no-progress signal is defeated.
+    assert_eq!(
+        adaptive_runaway.reason,
+        StopReason::BudgetExceeded,
+        "a runaway that defeats the no-progress signal is still bounded by the cost ceiling"
     );
 }
