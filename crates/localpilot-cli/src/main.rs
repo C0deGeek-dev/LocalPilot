@@ -408,6 +408,14 @@ enum ReviewCommand {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Back up the store, then delete every pending candidate (a one-time
+    /// cleanup of an un-reviewed backlog). Decided items and accepted memory are
+    /// untouched.
+    Purge {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -686,6 +694,9 @@ async fn main() -> anyhow::Result<()> {
                             note,
                             &mut stdout,
                         )?;
+                    }
+                    ReviewCommand::Purge { yes } => {
+                        learning_cmd::review_purge(&cwd, yes, &mut stdout)?;
                     }
                 },
                 LearningCommand::Promote { id } => learning_cmd::promote(&cwd, &id, &mut stdout)?,

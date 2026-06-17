@@ -45,10 +45,11 @@ pub use ingest::{
 pub use knowledge_tool::KnowledgeSearch;
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
-    audit, context_for, memory_delete, memory_disable_injection, memory_injection_enabled,
-    memory_list, promote, review_decide, review_list, review_show, search, skill_activate,
-    skill_body, skill_show, skills_active, skills_generate, skills_list, ActiveSkillInfo,
-    AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict, SearchHit, SkillDraftInfo,
+    audit, cluster_by_similarity, context_for, memory_delete, memory_disable_injection,
+    memory_injection_enabled, memory_list, promote, review_decide, review_list, review_purge,
+    review_show, search, skill_activate, skill_body, skill_show, skills_active, skills_generate,
+    skills_list, ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict,
+    SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
 pub use remember_tool::Remember;

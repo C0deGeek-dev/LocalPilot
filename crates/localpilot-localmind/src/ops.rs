@@ -23,6 +23,9 @@ pub struct ReviewSummary {
     pub confidence: f32,
     pub note: Option<String>,
     pub replacement: Option<String>,
+    /// How many times this candidate (or a near-duplicate) was proposed; dedup at
+    /// enqueue bumps this instead of stacking rows.
+    pub seen_count: i64,
 }
 
 /// A reviewer's verdict on a queue item.
@@ -85,6 +88,7 @@ fn summarize(item: &ReviewQueueItem) -> ReviewSummary {
         confidence: item.candidate.confidence.value(),
         note: item.note.clone(),
         replacement: item.replacement_summary.clone(),
+        seen_count: item.seen_count,
     }
 }
 
@@ -125,6 +129,50 @@ pub fn review_show(
     let queue = open_queue(project_root)?;
     let item = queue.get(&ReviewItemId::new(item_id)).map_err(review_err)?;
     Ok(item.as_ref().map(summarize))
+}
+
+/// Delete every pending review candidate, returning how many rows were removed.
+/// Accepted/rejected/edited items and all accepted-memory tables are untouched —
+/// this clears only the un-reviewed backlog. Back up the store first (the CLI
+/// does) since this is irreversible.
+///
+/// # Errors
+/// Returns [`LearningError::Review`] if the queue cannot be opened or purged.
+pub fn review_purge(project_root: &Path) -> Result<usize, LearningError> {
+    let queue = open_queue(project_root)?;
+    queue.purge_pending().map_err(review_err)
+}
+
+/// Cluster pending review candidates by lexical similarity so near-duplicates
+/// can be triaged together. Each returned group holds the indices (into a
+/// caller-held list) of summaries that are mutual near-duplicates; singletons
+/// form their own group. Deterministic and offline.
+#[must_use]
+pub fn cluster_by_similarity(summaries: &[String]) -> Vec<Vec<usize>> {
+    let token_sets: Vec<_> = summaries
+        .iter()
+        .map(|summary| localmind_store::token_set(summary))
+        .collect();
+    let mut assigned = vec![false; summaries.len()];
+    let mut clusters = Vec::new();
+    for seed in 0..summaries.len() {
+        if assigned[seed] {
+            continue;
+        }
+        assigned[seed] = true;
+        let mut cluster = vec![seed];
+        for other in (seed + 1)..summaries.len() {
+            if !assigned[other]
+                && localmind_store::similarity(&token_sets[seed], &token_sets[other])
+                    >= localmind_store::NEAR_DUP_THRESHOLD
+            {
+                assigned[other] = true;
+                cluster.push(other);
+            }
+        }
+        clusters.push(cluster);
+    }
+    clusters
 }
 
 /// Record a reviewer's verdict on a queue item, returning the new state.
@@ -527,4 +575,31 @@ fn injection_disabled_path(project_root: &Path) -> std::path::PathBuf {
     project_root
         .join(".localmind")
         .join("context-injection-disabled")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clusters_group_near_duplicates_and_isolate_distinct_lessons() {
+        let summaries = vec![
+            "run the integration suite after every exporter change".to_string(),
+            "after an exporter change, run the integration suite".to_string(),
+            "prefer ripgrep over grep when searching".to_string(),
+        ];
+        let clusters = cluster_by_similarity(&summaries);
+        // The two restatements share a cluster; the distinct lesson stands alone.
+        assert_eq!(clusters.len(), 2, "got {clusters:?}");
+        let sizes: Vec<usize> = clusters.iter().map(Vec::len).collect();
+        assert!(
+            sizes.contains(&2) && sizes.contains(&1),
+            "expected one pair and one singleton, got {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_queue_clusters_to_nothing() {
+        assert!(cluster_by_similarity(&[]).is_empty());
+    }
 }

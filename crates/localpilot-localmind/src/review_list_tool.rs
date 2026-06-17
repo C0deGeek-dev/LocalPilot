@@ -13,7 +13,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::path::Path;
 
 use crate::ops::ReviewSummary;
 
@@ -175,6 +174,7 @@ mod tests {
     use localmind_store::ReviewQueue;
     use localpilot_sandbox::{Interactivity, Workspace};
     use serde_json::json;
+    use std::path::Path;
 
     fn context(workspace: &Workspace) -> ToolContext<'_> {
         ToolContext {
