@@ -1,0 +1,67 @@
+name: wiki-sync
+
+# One-way mirror of the in-repo docs/wiki/ source to this repo's GitHub Wiki.
+# The in-repo source is authoritative; the published wiki is generated, never
+# hand-edited. Requires the Wiki feature enabled and a first page bootstrapped
+# once (see the wiki Home page banner).
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/wiki/**']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Mirror and show the diff without pushing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Mirror docs/wiki to the GitHub Wiki
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ ! -d docs/wiki ]; then
+            echo "::error::docs/wiki/ does not exist; nothing to sync."
+            exit 1
+          fi
+          wiki="$(mktemp -d)"
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git clone --quiet "$url" "$wiki" 2>/dev/null; then
+            echo "::error::Could not clone ${GITHUB_REPOSITORY}.wiki.git. Enable the Wiki feature and create the first page once, then re-run."
+            exit 1
+          fi
+          # Mirror: clear tracked wiki content (keep .git), copy docs/wiki verbatim.
+          find "$wiki" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+          cp -R docs/wiki/. "$wiki"/
+          cd "$wiki"
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY_RUN: changes that would be pushed:"
+            git status --short
+            exit 0
+          fi
+          git commit --quiet -m "Sync wiki from docs/wiki@${GITHUB_SHA:0:12}"
+          git push --quiet origin HEAD
+          echo "Wiki synced."

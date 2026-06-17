@@ -1,0 +1,29 @@
+name: docs-links
+
+# Internal link integrity for the docs and the in-repo wiki source. Offline
+# mode validates that relative/file links resolve; it does not hit the network,
+# so external link rot does not flake this gate.
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'README.md', '.github/workflows/docs-links.yml']
+  pull_request:
+    paths: ['docs/**', 'README.md', '.github/workflows/docs-links.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        with:
+          args: --no-progress --offline docs README.md
+          fail: true
