@@ -3,7 +3,8 @@ name: wiki-sync
 # One-way mirror of the in-repo docs/wiki/ source to this repo's GitHub Wiki.
 # The in-repo source is authoritative; the published wiki is generated, never
 # hand-edited. Requires the Wiki feature enabled and a first page bootstrapped
-# once (see the wiki Home page banner).
+# once (see the wiki Home page banner). Until that bootstrap happens this job
+# skips cleanly rather than failing.
 
 on:
   push:
@@ -43,8 +44,8 @@ jobs:
           wiki="$(mktemp -d)"
           url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
           if ! git clone --quiet "$url" "$wiki" 2>/dev/null; then
-            echo "::error::Could not clone ${GITHUB_REPOSITORY}.wiki.git. Enable the Wiki feature and create the first page once, then re-run."
-            exit 1
+            echo "::warning::Wiki not initialized for ${GITHUB_REPOSITORY}. Enable the Wiki feature and create the first page once; this job will publish on the next run. Skipping."
+            exit 0
           fi
           # Mirror: clear tracked wiki content (keep .git), copy docs/wiki verbatim.
           find "$wiki" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
