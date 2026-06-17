@@ -292,6 +292,79 @@ where
     false
 }
 
+/// Default number of consecutive identical tool errors that trips the
+/// same-error breaker. Kept below the per-tool failure budget so a strategy
+/// change is forced *before* the budget is exhausted.
+pub const SAME_ERROR_THRESHOLD: usize = 3;
+
+/// Normalize a tool error into a signature so cosmetically-different repeats of
+/// the *same* failure compare equal: lowercased, with internal whitespace runs
+/// collapsed and the ends trimmed. Keys on the error class, not exact bytes.
+#[must_use]
+pub fn error_signature(error: &str) -> String {
+    error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Detects a tool failing repeatedly with the *same* error within a turn — a
+/// futile loop the model should break by changing approach (write a script file,
+/// confirm a tool exists), distinct from the call-signature loop
+/// [`ToolLoopDetector`] catches. It fires when the same `(tool, normalized error)`
+/// signature recurs `threshold` times in a row, and only on that crossing, so a
+/// sustained loop surfaces one strategy-change hint rather than a flood.
+#[derive(Debug, Clone)]
+pub struct RepeatedErrorBreaker {
+    threshold: usize,
+    last: Option<String>,
+    streak: usize,
+}
+
+impl Default for RepeatedErrorBreaker {
+    fn default() -> Self {
+        Self::new(SAME_ERROR_THRESHOLD)
+    }
+}
+
+impl RepeatedErrorBreaker {
+    /// A breaker that fires after `threshold` consecutive identical errors
+    /// (clamped to at least 1).
+    #[must_use]
+    pub fn new(threshold: usize) -> Self {
+        Self {
+            threshold: threshold.max(1),
+            last: None,
+            streak: 0,
+        }
+    }
+
+    /// Record one tool *failure*. Returns `true` exactly when the consecutive
+    /// streak of an identical `(tool, error)` signature reaches the threshold —
+    /// the moment to force a strategy change. A different signature restarts the
+    /// streak, so distinct errors never trip it.
+    pub fn observe(&mut self, tool: &str, error: &str) -> bool {
+        // The unit separator cannot appear in a tool name, so it cleanly
+        // delimits tool from error in the combined signature.
+        let signature = format!("{tool}\u{1f}{}", error_signature(error));
+        if self.last.as_deref() == Some(signature.as_str()) {
+            self.streak += 1;
+        } else {
+            self.last = Some(signature);
+            self.streak = 1;
+        }
+        self.streak == self.threshold
+    }
+
+    /// Reset after a successful call or at a turn boundary, so progress (or a new
+    /// turn) clears the streak and only genuinely consecutive failures count.
+    pub fn reset(&mut self) {
+        self.last = None;
+        self.streak = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +477,61 @@ mod tests {
         assert!(!detector.observe("edit_file|{\"old\":\"y\"}", true));
         // And a success never seeds a loop.
         assert!(!detector.observe("edit_file|{\"old\":\"z\"}", false));
+    }
+
+    #[test]
+    fn same_error_breaker_fires_after_three_identical_errors() {
+        let mut breaker = RepeatedErrorBreaker::new(SAME_ERROR_THRESHOLD);
+        let err = "no closing quotation mark";
+        assert!(!breaker.observe("run_shell", err), "1st identical error");
+        assert!(!breaker.observe("run_shell", err), "2nd identical error");
+        assert!(
+            breaker.observe("run_shell", err),
+            "3rd identical error trips it"
+        );
+        // It fires once on the crossing, not on every later repeat.
+        assert!(
+            !breaker.observe("run_shell", err),
+            "no re-fire while still stuck"
+        );
+    }
+
+    #[test]
+    fn same_error_breaker_normalizes_cosmetic_differences() {
+        let mut breaker = RepeatedErrorBreaker::new(2);
+        assert!(!breaker.observe("run_shell", "No closing  quote"));
+        // Different whitespace/case is the same error class → trips on the repeat.
+        assert!(breaker.observe("run_shell", "no closing quote"));
+    }
+
+    #[test]
+    fn distinct_errors_do_not_trip_the_breaker() {
+        let mut breaker = RepeatedErrorBreaker::new(SAME_ERROR_THRESHOLD);
+        assert!(!breaker.observe("run_shell", "missing quote"));
+        assert!(!breaker.observe("run_shell", "file not found"));
+        assert!(!breaker.observe("run_shell", "permission denied"));
+        // A different tool with the same text is a different signature, too.
+        let mut breaker = RepeatedErrorBreaker::new(2);
+        assert!(!breaker.observe("run_shell", "boom"));
+        assert!(!breaker.observe("edit_file", "boom"));
+    }
+
+    #[test]
+    fn a_success_resets_the_breaker_streak() {
+        let mut breaker = RepeatedErrorBreaker::new(SAME_ERROR_THRESHOLD);
+        let err = "same error";
+        assert!(!breaker.observe("run_shell", err));
+        assert!(!breaker.observe("run_shell", err));
+        breaker.reset(); // a clean call landed in between
+        assert!(
+            !breaker.observe("run_shell", err),
+            "streak restarts after reset"
+        );
+        assert!(!breaker.observe("run_shell", err));
+        assert!(
+            breaker.observe("run_shell", err),
+            "trips on the new run of three"
+        );
     }
 
     proptest::proptest! {

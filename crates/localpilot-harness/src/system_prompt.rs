@@ -97,6 +97,14 @@ Tool use loop:
 - continue until the task is complete, blocked by a concrete reason, or the user
   cancels.
 
+Shell discipline. For a multiline or heavily-quoted command, do not fight inline
+quote escaping across the shell-to-interpreter boundary: write the body to a
+script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a command
+fails the same way twice, stop and change approach rather than re-sending it — a
+repeated identical error will keep failing. If a needed command-line tool is
+missing, say so plainly and surface the gap instead of silently working around
+it.
+
 Keep reasoning separate from the final answer. When no more tool calls are
 needed, respond with a concise final answer that states what changed and how it
 was verified. If stuck, say exactly what blocks progress.",
@@ -170,5 +178,30 @@ mod tests {
         }
         assert!(!prompt.contains("-Plan.md"));
         assert!(!prompt.contains("tasks/"));
+    }
+
+    #[test]
+    fn prompt_carries_shell_and_missing_tool_discipline() {
+        let prompt = build_prompt(&["read_file"]);
+        // Steer multiline/quoted shell to a script file rather than fighting
+        // inline escaping.
+        assert!(
+            prompt.contains("script file"),
+            "missing script-file guidance"
+        );
+        assert!(
+            prompt.contains(".ps1"),
+            "missing concrete script extensions"
+        );
+        // Stop repeating an identical failing command.
+        assert!(
+            prompt.contains("same way twice"),
+            "missing repeated-error guidance"
+        );
+        // Surface a missing tool instead of working around it.
+        assert!(
+            prompt.contains("missing"),
+            "missing the absent-tool guidance"
+        );
     }
 }

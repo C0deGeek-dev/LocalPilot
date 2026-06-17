@@ -17,7 +17,9 @@ use localpilot_core::{
 use localpilot_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
 };
-use localpilot_recovery::{detect, ModelHealth, RecoveryEngine, StreamMonitor};
+use localpilot_recovery::{
+    detect, ModelHealth, RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
+};
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
 use localpilot_tools::{ToolContext, ToolRegistry};
@@ -289,6 +291,19 @@ impl ToolFailureGuard {
     }
 }
 
+/// A strategy-change hint appended to a tool result when the same error has
+/// repeated, so a weak model breaks the loop instead of re-sending the failing
+/// call. First-party text; mirrors the system prompt's shell discipline.
+fn same_error_hint(tool: &str) -> String {
+    format!(
+        "\n\n[recovery] `{tool}` has now failed the same way several times. Do not re-send the \
+         same call — change approach: for a multiline or heavily-quoted shell command, write the \
+         body to a script file (.py/.ps1/.sh) and run that file; if a required tool is missing, say \
+         so instead of working around it; otherwise read the relevant file or inputs before \
+         retrying."
+    )
+}
+
 /// The agent-mode runtime.
 pub struct SessionRuntime {
     provider: Arc<dyn ModelProvider>,
@@ -318,6 +333,10 @@ pub struct SessionRuntime {
     hooks: HookFabric,
     /// Per-tool failure counts within the current turn.
     tool_failure_guard: ToolFailureGuard,
+    /// Detects a tool failing repeatedly with the *same* error within the turn,
+    /// so the model is nudged to change approach before the failure budget is
+    /// spent. Reset each turn alongside `tool_failure_guard`.
+    error_breaker: RepeatedErrorBreaker,
     /// Optional injected smart summarizer. When unset and smart mode is active,
     /// a provider-backed summarizer is built on demand from `provider`.
     summarizer: Option<Arc<dyn Summarizer>>,
@@ -363,6 +382,7 @@ impl SessionRuntime {
             steer: SteerQueue::default(),
             hooks: HookFabric::default(),
             tool_failure_guard: ToolFailureGuard::default(),
+            error_breaker: RepeatedErrorBreaker::default(),
             summarizer: None,
         };
         runtime.record_event(SessionEventKind::SessionOpened {
@@ -1002,6 +1022,7 @@ impl SessionRuntime {
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
         self.tool_failure_guard.reset();
+        self.error_breaker.reset();
         let mut tools_enabled = true;
         // A provider may reject a request as too large even when the local
         // estimate believed it fit. The first overflow forces a tighter
@@ -1378,7 +1399,7 @@ impl SessionRuntime {
                         ) => Some(result),
                     }
                 };
-                let Some(result) = result else {
+                let Some(mut result) = result else {
                     let aborted = localpilot_core::ToolResult::error(
                         ToolUseId::from(id.as_str()),
                         "cancelled by the user; execution aborted",
@@ -1427,8 +1448,20 @@ impl SessionRuntime {
                             )));
                         }
                     }
+                    // Same-error breaker: when a tool fails identically several
+                    // times in a row, force a strategy change *before* the failure
+                    // budget is spent by surfacing a hint in the model-visible
+                    // result, rather than letting it re-send the same call.
+                    if self.error_breaker.observe(name, &result.output) {
+                        let hint = same_error_hint(name);
+                        let _ = events.send(RuntimeEvent::Warning(format!(
+                            "tool `{name}` keeps failing the same way; nudging a strategy change"
+                        )));
+                        result.output.push_str(&hint);
+                    }
                 } else {
                     self.tool_failure_guard.record_success(name);
+                    self.error_breaker.reset();
                 }
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),

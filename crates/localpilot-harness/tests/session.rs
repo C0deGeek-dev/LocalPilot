@@ -119,6 +119,17 @@ fn message_text(messages: &[Message]) -> String {
         .join("\n")
 }
 
+fn tool_result_outputs(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult(result) => Some(result.output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn loop_reads_a_file_then_produces_a_final_answer() {
     let provider = FakeProvider::new()
@@ -139,6 +150,60 @@ async fn loop_reads_a_file_then_produces_a_final_answer() {
     let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
     // user, assistant(tool_use), tool(result), assistant(final).
     assert_eq!(transcript.len(), 4);
+}
+
+#[tokio::test]
+async fn a_repeated_identical_tool_error_injects_a_strategy_change_hint() {
+    // The same failing call three times in a row: the same-error breaker appends
+    // a strategy-change hint to the third tool result — before the per-tool
+    // failure budget (6) is spent — so a weak model stops re-sending it.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call("c3", "read_file", json!({ "path": "missing.txt" }))
+        .text("giving up");
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let outputs = tool_result_outputs(&h.store.read_transcript(h.runtime.session_id()).unwrap());
+    assert_eq!(outputs.len(), 3, "three tool calls ran, got {outputs:?}");
+    assert!(
+        !outputs[0].contains("[recovery]"),
+        "first failure carries no hint: {}",
+        outputs[0]
+    );
+    assert!(
+        !outputs[1].contains("[recovery]"),
+        "second failure carries no hint: {}",
+        outputs[1]
+    );
+    assert!(
+        outputs[2].contains("[recovery]") && outputs[2].contains("script file"),
+        "the third identical failure must carry the strategy-change hint: {}",
+        outputs[2]
+    );
+}
+
+#[tokio::test]
+async fn failures_below_the_threshold_inject_no_hint() {
+    // Two identical failures stay under the breaker's threshold, so no hint is
+    // injected — the breaker must not fire on a normal retry.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "read_file", json!({ "path": "missing.txt" }))
+        .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
+        .text("done");
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let outputs = tool_result_outputs(&h.store.read_transcript(h.runtime.session_id()).unwrap());
+    assert!(
+        outputs.iter().all(|o| !o.contains("[recovery]")),
+        "the breaker must not fire below its threshold: {outputs:?}"
+    );
 }
 
 #[tokio::test]
