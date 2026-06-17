@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0029: The Per-Turn Tool-Call Ceiling Is Progress-Aware, With A Hard Cost Contract
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and
+ADR-0023 (deterministic-first verification).
+
+The per-turn tool-call ceiling was a single fixed count: every turn stopped at
+the same number of calls. That number is a blunt proxy — it cuts a legitimately
+long turn (a large refactor that genuinely needs many calls) at the same point
+it would stop a runaway, and it is slow to catch the loop the failure breakers
+miss: *successful* calls that make no forward progress (re-reading the same file,
+re-running the same search) where every call returns success.
+
+The ceiling is now progress-aware. A deterministic detector flags no forward
+progress from two signals — an identical `(call signature, output)` succeeding
+repeatedly, and novelty decay (the share of distinct call signatures over a
+sliding window falling below a floor). A budget controller turns the ceiling into
+a bound with two numbers: a **soft start** and a **hard maximum**. A turn that
+keeps making progress runs up to the hard maximum; a turn the detector flags
+stops at the soft start; the hard maximum **always** stops the loop. When the
+detector first fires, a one-shot strategy-change hint is appended to the tool
+result, nudging the model to break out before any stop. The no-progress stop is a
+distinct `StopReason` from the cost-ceiling stop, so the two are diagnosable.
+
+Defaults are parity: the soft start and hard maximum both default to the previous
+fixed value, so absent or pre-existing configuration reproduces the old stop
+behaviour exactly. Raising the hard maximum above the soft start opts a deployment
+into the adaptive extension.
+
+Reason:
+
+- the hard maximum is an unconditional cost contract: a turn can never loop
+  unbounded regardless of any heuristic's confidence — the bound holds even if the
+  progress signal is wrong, which is what makes raising it safe
+- progress is judged by deterministic, offline-testable signals (no model in the
+  hot path), mirroring ADR-0023; a model-critic progress judge is a future
+  drop-in, not a dependency
+- the detector composes the existing per-turn breakers' philosophy rather than
+  duplicating their counters; it lives beside them in `localpilot-recovery`, and
+  the controller is a pure decision unit, so the loop gains a bound, not a second
+  control plane
+- shipping at parity and measuring the false-positive rate before tightening the
+  default honours the reliability contract: a control bound is tightened or
+  relaxed, never a permission or safety outcome
+
 ## ADR-0028: The Handoff Is A Redacted, Git-Ignored Execution Record, Checked Deterministically, Never Memory
 
 Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` is the execution

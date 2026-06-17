@@ -56,6 +56,8 @@ LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 | `attempts_per_step` | int | `3` | Max attempts per plan step |
 | `auto_commit` | bool | `true` | Commit each completed step |
 | `test_command` | string | none | Command run to gate step completion |
+| `tool_call_budget` | int | `50` | Soft start for the per-turn tool-call ceiling. A turn making forward progress runs past this up to `tool_call_budget_max`; a turn detected as making no progress stops here |
+| `tool_call_budget_max` | int | `50` | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Equal to `tool_call_budget` by default (a flat fixed ceiling); raise it above the soft start to let a productive turn extend |
 | `rules.<name>` | `off` \| `warn` \| `block` | — | Per-rule severity overrides |
 
 ### `[compaction]`

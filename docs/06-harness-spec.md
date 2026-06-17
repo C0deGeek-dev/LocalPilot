@@ -467,6 +467,31 @@ needs an ADR.
 The permission half of the contract lives in
 [`docs/07`](07-security-and-privacy.md) §Reliability Contract.
 
+## Per-Turn Tool-Call Budget
+
+Each turn bounds how many tool calls it runs, so an unattended loop cannot spend
+without limit. The bound is progress-aware (ADR-0029), set by two numbers in
+`[harness]`:
+
+- `tool_call_budget` — the **soft start**. A turn that keeps making forward
+  progress runs past this; a turn detected as making no progress stops here. An
+  ordinary task stays well under it.
+- `tool_call_budget_max` — the **hard cost ceiling**. The loop always stops at
+  this count, regardless of progress, so a turn can never run unbounded.
+
+"No forward progress" is judged deterministically: the same `(tool, arguments)`
+call returning the same output repeatedly, or a turn cycling a tiny set of calls.
+On the first such signal the runtime appends a one-shot strategy-change hint to
+the tool result (mirroring the repeated-error hint), nudging the model to act on
+what it has or change approach before any stop.
+
+The two stops are distinct, recorded exit reasons: a cost-ceiling stop
+(`BudgetExceeded`) and a no-progress stop (`NoProgress`). Both leave a
+model-visible synthetic message and honour the tool-pairing invariant above, like
+every other exit path. With `tool_call_budget_max == tool_call_budget` the bound
+is a flat fixed ceiling — the default, so behaviour is unchanged until an operator
+raises the maximum.
+
 ## Anti-Sunk-Cost Loop
 
 For each step:

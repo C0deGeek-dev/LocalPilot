@@ -5,6 +5,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- The per-turn tool-call ceiling is now **progress-aware** (ADR-0029). A turn that
+  keeps making forward progress runs up to a hard cost ceiling instead of stopping
+  at a single fixed count; a turn that spins on the same successful calls gets a
+  strategy-change nudge and then stops on a distinct `no_progress` reason at the
+  soft start, rather than wasting the rest of the budget. The hard ceiling always
+  stops the loop, so a turn can never run unbounded. Two new `[harness]` keys —
+  `tool_call_budget` (soft start) and `tool_call_budget_max` (hard ceiling) — both
+  default to `50`, so behaviour is unchanged until an operator raises the maximum.
 - Added a cross-context **handoff**: `localpilot handoff` writes a redacted,
   git-ignored snapshot (`.localpilot/handoffs/<id>.md`) of the latest session's
   durable state — a machine-checkable header plus a body separating confirmed facts
