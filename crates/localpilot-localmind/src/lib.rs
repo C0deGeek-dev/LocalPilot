@@ -28,8 +28,8 @@ use std::path::Path;
 
 pub use active_skills_tool::ActiveSkills;
 pub use codegraph::{
-    codegraph_export, codegraph_inspect, codegraph_reindex, CodeGraphSummary, ExportFormat,
-    SymbolReport,
+    codegraph_export, codegraph_impact, codegraph_inspect, codegraph_reindex, CodeGraphSummary,
+    ExportFormat, SymbolReport,
 };
 pub use context_hook::{register_context_hook, LocalMindContext};
 pub use ingest::{

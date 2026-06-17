@@ -217,6 +217,75 @@ pub fn codegraph_export(
     Ok(())
 }
 
+/// Reports the change impact of a unified diff against the indexed graph. The
+/// host already has git access, so it passes the diff text (`git diff
+/// --unified=0`); this adapter parses it into changed spans and asks the engine
+/// for the bounded, risk-tiered impact. Read-only: it opens the existing graph
+/// and adds no persistent state.
+pub fn codegraph_impact(
+    project_root: &Path,
+    unified_diff: &str,
+) -> Result<localmind_codegraph::ChangeImpact, LearningError> {
+    let spans = parse_unified_diff(unified_diff);
+    let store = GraphStore::open_project(project_root)
+        .map_err(|error| LearningError::Graph(error.to_string()))?;
+    localmind_codegraph::compute_impact(
+        &store,
+        &spans,
+        localmind_codegraph::ImpactOptions::default(),
+    )
+    .map_err(|error| LearningError::Graph(error.to_string()))
+}
+
+/// Parses a `git diff --unified=0` into the new-side changed spans, keyed by
+/// repo-relative forward-slash path. Pure (no git invocation), so the caller
+/// controls how the diff is produced. New files and renames flow through the
+/// `+++ b/<path>` header; pure deletions contribute the line they removed at.
+fn parse_unified_diff(unified_diff: &str) -> Vec<localmind_codegraph::ChangedSpan> {
+    let mut spans = Vec::new();
+    let mut current_path: Option<String> = None;
+    for line in unified_diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            current_path = new_side_path(rest);
+        } else if line.starts_with("@@ ") {
+            let (Some(path), Some((start, count))) = (current_path.as_ref(), hunk_new_range(line))
+            else {
+                continue;
+            };
+            spans.push(localmind_codegraph::ChangedSpan {
+                path: path.clone(),
+                line_start: start,
+                line_end: start + count.saturating_sub(1),
+            });
+        }
+    }
+    spans
+}
+
+/// The repo-relative path from a `+++ b/path` header, or `None` for `/dev/null`.
+fn new_side_path(header: &str) -> Option<String> {
+    let path = header.split('\t').next().unwrap_or(header).trim();
+    if path == "/dev/null" {
+        return None;
+    }
+    let path = path.strip_prefix("b/").unwrap_or(path);
+    Some(path.replace('\\', "/"))
+}
+
+/// The new-side `+start,count` of a `@@ -a,b +start,count @@` hunk header.
+/// `count` defaults to 1 when omitted.
+fn hunk_new_range(header: &str) -> Option<(u64, u64)> {
+    let plus = header.split('+').nth(1)?;
+    let range = plus.split([' ', '@']).next()?;
+    let mut parts = range.split(',');
+    let start: u64 = parts.next()?.parse().ok()?;
+    let count: u64 = match parts.next() {
+        Some(value) => value.parse().ok()?,
+        None => 1,
+    };
+    Some((start, count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{codegraph_export, codegraph_inspect, codegraph_reindex, ExportFormat};
@@ -328,6 +397,57 @@ mod tests {
         let html = fs::read_to_string(&html_path)?;
         assert!(!html.contains(secret));
         assert!(html.starts_with("<!doctype html>"));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_unified_diff_extracts_new_side_spans() {
+        let diff = "\
+diff --git a/src/core.rs b/src/core.rs
+--- a/src/core.rs
++++ b/src/core.rs
+@@ -1,0 +2,3 @@
+@@ -10 +12 @@
+";
+        let spans = super::parse_unified_diff(diff);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].path, "src/core.rs");
+        assert_eq!((spans[0].line_start, spans[0].line_end), (2, 4));
+        assert_eq!((spans[1].line_start, spans[1].line_end), (12, 12));
+    }
+
+    #[test]
+    fn impact_adapter_reports_callers_for_a_diff() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = tempfile::tempdir()?;
+        let root = temp_dir.path();
+        fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n")?;
+        fs::create_dir_all(root.join("src"))?;
+        // `hub` on line 1; `a` calls it on line 2.
+        fs::write(
+            root.join("src/core.rs"),
+            "pub fn hub() -> u8 { 1 }\nfn a() { hub(); }\n",
+        )?;
+        codegraph_reindex(root, usize::MAX)?;
+
+        // A diff that touches line 1 (hub) must surface `a` as an impacted caller.
+        let diff = "+++ b/src/core.rs\n@@ -1 +1 @@\n";
+        let impact = super::codegraph_impact(root, diff)?;
+        assert!(
+            impact
+                .changed
+                .iter()
+                .any(|symbol| symbol.qualified_name.ends_with("::hub")),
+            "hub must be a changed symbol; got {:?}",
+            impact.changed
+        );
+        assert!(
+            impact
+                .impacted
+                .iter()
+                .any(|symbol| symbol.qualified_name.ends_with("::a")),
+            "a must be an impacted caller; got {:?}",
+            impact.impacted
+        );
         Ok(())
     }
 }
