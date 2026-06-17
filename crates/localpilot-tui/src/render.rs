@@ -11,12 +11,12 @@
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::state::{
-    AppState, ApprovalRequest, FilePicker, Header, Profile, SlashPicker, TranscriptLine,
-    TrustPrompt,
+    AppState, ApprovalRequest, FilePicker, Header, MemoryPanel, Profile, SlashPicker,
+    TranscriptLine, TrustPrompt,
 };
 
 /// Most text rows the input box grows to before it starts scrolling.
@@ -174,6 +174,31 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_top(frame, rows[0], state);
     render_input(frame, rows[1], state);
     render_status(frame, rows[2], state);
+
+    // The memory inspector overlays the top section when shown, so "memories
+    // used this turn" can be inspected on demand without leaving the session.
+    if state.memory_panel.visible {
+        render_memory_panel(frame, rows[0], &state.memory_panel);
+    }
+}
+
+/// Render the "memories used this turn" inspector over `area`. The host supplies
+/// the rendered body; this only frames and wraps it.
+fn render_memory_panel(frame: &mut Frame, area: Rect, memory_panel: &MemoryPanel) {
+    let body = if memory_panel.body.is_empty() {
+        "No memories were recorded as used for the last turn."
+    } else {
+        memory_panel.body.as_str()
+    };
+    let lines: Vec<Line> = body
+        .split('\n')
+        .map(|line| Line::raw(line.to_string()))
+        .collect();
+    let widget = Paragraph::new(Text::from(lines))
+        .block(panel("Memories used this turn  (esc to close)"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(Clear, area);
+    frame.render_widget(widget, area);
 }
 
 // --- Top section --------------------------------------------------------------
@@ -639,6 +664,31 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
         buffer_to_string(&terminal)
+    }
+
+    #[test]
+    fn memory_panel_renders_the_inspector_body_when_visible() {
+        let mut state = state_with_input("");
+        state.memory_panel.visible = true;
+        state.memory_panel.body =
+            "Memories used this turn:\n- [memory] mem-1 (score 42)\n    status: decision · confidence: 0.80 · active"
+                .to_string();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 12)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        let rendered = buffer_to_string(&terminal);
+        assert!(rendered.contains("Memories used this turn"), "{rendered}");
+        assert!(rendered.contains("mem-1"), "{rendered}");
+        assert!(rendered.contains("decision"), "{rendered}");
+    }
+
+    #[test]
+    fn memory_panel_is_hidden_when_not_visible() {
+        let state = state_with_input("");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 12)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
+        assert!(!buffer_to_string(&terminal).contains("Memories used this turn"));
     }
 
     #[test]

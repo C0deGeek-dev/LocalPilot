@@ -44,6 +44,29 @@ pub fn search(root: &Path, query: &str, out: &mut dyn Write) -> anyhow::Result<(
     Ok(())
 }
 
+/// Render the "memories used this turn" inspector for the latest session: the
+/// memories the most recent turn retrieved, each with provenance, confidence,
+/// epistemic status, contradictions, and staleness. Fully local.
+///
+/// # Errors
+/// Returns an error if the store cannot be read or output written.
+pub fn used(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let store = localpilot_store::Store::open(root);
+    let Some(entry) = store.latest_session()? else {
+        writeln!(out, "No sessions recorded yet.")?;
+        return Ok(());
+    };
+    let events = store.read_events(entry.id)?;
+    let used = localpilot_localmind::last_turn_memories_used(&events);
+    let inspected = localpilot_localmind::inspect_memories(root, &used)?;
+    writeln!(
+        out,
+        "{}",
+        localpilot_localmind::render_inspection(&inspected)
+    )?;
+    Ok(())
+}
+
 /// Delete an entry by id.
 ///
 /// # Errors

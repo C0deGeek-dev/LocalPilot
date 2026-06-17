@@ -15,6 +15,7 @@ mod context_hook;
 mod context_prefix;
 mod error;
 mod ingest;
+mod inspector;
 mod knowledge_tool;
 mod layered;
 mod layered_tool;
@@ -47,6 +48,10 @@ pub use ingest::{
     skipped as ingest_skipped, status as ingest_status, BudgetEstimate, CandidateStatus,
     ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus, KnowledgeHit,
     ManifestEntry, PreviewManifest, RunMode, RunSummary,
+};
+pub use inspector::{
+    inspect as inspect_memories, last_turn_memories_used, render as render_inspection,
+    InspectedMemory, ProvenanceView,
 };
 pub use knowledge_tool::KnowledgeSearch;
 pub use layered::{

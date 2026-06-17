@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 pub use atomic::atomic_write;
 pub use error::StoreError;
 pub use events::{
-    origin_for, transcript_from_events, MessageOrigin, OpenReason, SessionEvent, SessionEventKind,
-    SESSION_EVENT_FORMAT_VERSION,
+    origin_for, transcript_from_events, MemoryUsed, MessageOrigin, OpenReason, SessionEvent,
+    SessionEventKind, SESSION_EVENT_FORMAT_VERSION,
 };
 
 const SESSIONS_DIR: &str = "sessions";

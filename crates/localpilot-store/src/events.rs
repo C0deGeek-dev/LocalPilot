@@ -16,7 +16,22 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 2;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 3;
+
+/// One memory surfaced and used to answer a turn, for the local inspector.
+/// Carries only the id, its retrieval score, and which layer surfaced it — never
+/// transcript or memory body content — so the record is safe to persist and
+/// replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryUsed {
+    /// The memory id (or knowledge-base chunk id) that was used.
+    pub id: String,
+    /// Its retrieval score at selection time.
+    pub score: i64,
+    /// Which retrieval layer or source surfaced it (e.g. `index`, `fetch`,
+    /// `memory`, `ingest`).
+    pub layer: String,
+}
 
 /// One durable entry in a session's event log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +173,12 @@ pub enum SessionEventKind {
         id: String,
         verdict: String,
     },
+    /// The memories surfaced and used to answer the most recent turn — the
+    /// "memories used this turn" record the local inspector renders. Additive
+    /// and replay-safe: ids/scores/layer only, no content.
+    MemoriesUsed {
+        memories: Vec<MemoryUsed>,
+    },
 }
 
 impl SessionEvent {
@@ -208,6 +229,15 @@ fn migrate(
             1 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(2));
+                }
+                value
+            }
+            // v2 -> v3: additive only. v3 introduced the `MemoriesUsed` event
+            // kind; existing v2 events keep their shape, so the migration only
+            // stamps the current version.
+            2 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(3));
                 }
                 value
             }
@@ -350,6 +380,20 @@ mod tests {
                 id: "c1".to_string(),
                 verdict: "verified".to_string(),
             },
+            SessionEventKind::MemoriesUsed {
+                memories: vec![
+                    MemoryUsed {
+                        id: "mem-1".to_string(),
+                        score: 42,
+                        layer: "memory".to_string(),
+                    },
+                    MemoryUsed {
+                        id: "chunk-7".to_string(),
+                        score: 10,
+                        layer: "index".to_string(),
+                    },
+                ],
+            },
         ];
         let mut parent = None;
         for kind in kinds {
@@ -359,6 +403,35 @@ mod tests {
             let back = SessionEvent::from_line(&line).unwrap();
             assert_eq!(original, back);
         }
+    }
+
+    #[test]
+    fn a_version_two_memories_used_line_is_unknown_kind_but_a_v2_event_still_loads() {
+        // A pre-v3 event (no MemoriesUsed) migrates forward cleanly: adding the
+        // new kind did not disturb existing events.
+        let mut value = serde_json::to_value(event(SessionEventKind::QuotaResumed, None)).unwrap();
+        value["v"] = serde_json::json!(2);
+        let line = serde_json::to_string(&value).unwrap();
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(loaded.v, SESSION_EVENT_FORMAT_VERSION);
+        assert_eq!(loaded.kind, SessionEventKind::QuotaResumed);
+    }
+
+    #[test]
+    fn memories_used_replays_through_the_log() {
+        let original = event(
+            SessionEventKind::MemoriesUsed {
+                memories: vec![MemoryUsed {
+                    id: "mem-1".to_string(),
+                    score: 5,
+                    layer: "fetch".to_string(),
+                }],
+            },
+            None,
+        );
+        let line = serde_json::to_string(&original).unwrap();
+        let back = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(original, back);
     }
 
     #[test]

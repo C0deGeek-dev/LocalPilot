@@ -75,6 +75,15 @@ pub struct ThinkingPanel {
     pub text: String,
 }
 
+/// The optional "memories used this turn" inspector panel. The host renders the
+/// inspector body (ids + provenance + epistemic status + contradictions +
+/// staleness) and pushes it in; the TUI only displays the text.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryPanel {
+    pub visible: bool,
+    pub body: String,
+}
+
 /// One task in the model's plan checklist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanItem {
@@ -176,6 +185,8 @@ pub struct AppState {
     history_draft: String,
     pub footer: FooterStats,
     pub thinking: ThinkingPanel,
+    /// The "memories used this turn" inspector panel.
+    pub memory_panel: MemoryPanel,
     pub mode: Mode,
     pub profile: Profile,
     pub approval: Option<ApprovalRequest>,
@@ -220,6 +231,7 @@ impl AppState {
             history_draft: String::new(),
             footer: FooterStats::default(),
             thinking: ThinkingPanel::default(),
+            memory_panel: MemoryPanel::default(),
             mode,
             profile,
             approval: None,
@@ -851,6 +863,13 @@ impl AppState {
             UiEvent::ApprovalRequested(request) => self.approval = Some(request),
             UiEvent::ApprovalResolved => self.approval = None,
             UiEvent::ToggleThinking => self.thinking.visible = !self.thinking.visible,
+            UiEvent::ShowMemoryPanel(body) => {
+                self.memory_panel.body = body;
+                self.memory_panel.visible = true;
+            }
+            UiEvent::ToggleMemoryPanel => {
+                self.memory_panel.visible = !self.memory_panel.visible;
+            }
             UiEvent::Quit => self.should_quit = true,
         }
     }
@@ -916,6 +935,11 @@ pub enum UiEvent {
     ApprovalRequested(ApprovalRequest),
     ApprovalResolved,
     ToggleThinking,
+    /// Show the "memories used this turn" inspector panel with the given rendered
+    /// body (the host computes it from the event log + LocalMind provenance).
+    ShowMemoryPanel(String),
+    /// Toggle the inspector panel's visibility.
+    ToggleMemoryPanel,
     Quit,
 }
 

@@ -238,6 +238,9 @@ enum MemoryCommand {
     Status,
     /// List all entries.
     Inspect,
+    /// Show the memories used to answer the latest session's most recent turn,
+    /// with provenance, confidence, epistemic status, contradictions, staleness.
+    Used,
     /// Search entries by query.
     Search { query: String },
     /// Delete an entry by id.
@@ -624,6 +627,7 @@ async fn main() -> anyhow::Result<()> {
             match command {
                 MemoryCommand::Status => memory_cmd::status(&cwd, &mut stdout)?,
                 MemoryCommand::Inspect => memory_cmd::inspect(&cwd, &mut stdout)?,
+                MemoryCommand::Used => memory_cmd::used(&cwd, &mut stdout)?,
                 MemoryCommand::Search { query } => {
                     memory_cmd::search(&cwd, &query, &mut stdout)?;
                 }
