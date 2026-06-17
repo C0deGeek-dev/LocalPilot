@@ -39,10 +39,10 @@ pub use ingest::{
     normalize_project_path, pause as ingest_pause, planned_run_mode, preview as ingest_preview,
     promote_for_review as ingest_promote, rebuild as ingest_rebuild, record_active_session,
     resume as ingest_resume, review_items as ingest_review_items, run as ingest_run,
-    search as knowledge_search, should_build_index, skipped as ingest_skipped,
-    status as ingest_status, BudgetEstimate, CandidateStatus, ChunkRecord, ContextPack,
-    IngestError, IngestJob, IngestReviewItem, JobStatus, KnowledgeHit, ManifestEntry,
-    PreviewManifest, RunMode, RunSummary,
+    search as knowledge_search, session_open_mode, should_build_index, should_refresh,
+    skipped as ingest_skipped, status as ingest_status, BudgetEstimate, CandidateStatus,
+    ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus, KnowledgeHit,
+    ManifestEntry, PreviewManifest, RunMode, RunSummary,
 };
 pub use knowledge_tool::KnowledgeSearch;
 pub use memory_search_tool::MemorySearch;

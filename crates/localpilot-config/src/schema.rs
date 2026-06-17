@@ -142,6 +142,11 @@ pub struct IngestConfig {
     /// Maximum model-backed calls for enrichment. The deterministic v1 path
     /// leaves this at zero unless the user opts in later.
     pub max_model_calls: u64,
+    /// Minimum seconds between session-open auto-refreshes of a completed index.
+    /// Once the index is built, a later session re-runs a refresh only when
+    /// source files have changed and at least this long has passed since the last
+    /// run — a debounce so quick successive sessions do not re-walk repeatedly.
+    pub refresh_min_interval_secs: u64,
 }
 
 impl Default for IngestConfig {
@@ -173,6 +178,7 @@ impl Default for IngestConfig {
             max_tokens: 1_000_000,
             max_elapsed_secs: 600,
             max_model_calls: 0,
+            refresh_min_interval_secs: 600,
         }
     }
 }

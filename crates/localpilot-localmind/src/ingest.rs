@@ -35,6 +35,9 @@ const JOB_FILE: &str = "job.json";
 const REVIEW_FILE: &str = "review.json";
 const PACK_FILE: &str = "last-pack.json";
 const CHUNK_BYTES: usize = 8 * 1024;
+/// How many manifest entries the session-open staleness check stat-samples, so
+/// change detection stays bounded on the hot path (it never re-walks the tree).
+const REFRESH_SAMPLE_CAP: usize = 256;
 
 /// Folder ingestion errors.
 #[derive(Debug, Error)]
@@ -532,6 +535,99 @@ pub fn has_chunk_index(project_root: &Path) -> bool {
             crate::chunk_store::exists(&ingest_dir) || ingest_dir.join(CHUNKS_FILE).exists()
         })
         .unwrap_or(false)
+}
+
+/// Whether a **completed** index should self-refresh on session open, given a
+/// cheap "sources changed" signal and the cadence floor. A pure decision so the
+/// trigger is unit-testable. Non-completed jobs are the first-build/resume path
+/// ([`planned_run_mode`]) and never refresh here; a completed job refreshes only
+/// when sources changed and at least `min_interval_secs` has passed since the
+/// last run (a debounce against re-walking on quick successive sessions).
+#[must_use]
+pub fn should_refresh(
+    job: Option<&IngestJob>,
+    sources_changed: bool,
+    now_unix: u64,
+    min_interval_secs: u64,
+) -> bool {
+    match job {
+        Some(job) if job.status == JobStatus::Completed => {
+            sources_changed && now_unix.saturating_sub(job.updated_unix) >= min_interval_secs
+        }
+        _ => false,
+    }
+}
+
+/// The run mode the session-open background trigger should use, or `None` to do
+/// nothing: a first-ever build or an interrupted-job resume
+/// ([`planned_run_mode`]), or a staleness [`RunMode::Refresh`] when a completed
+/// index's sources changed and the cadence window is open. Read-only — it only
+/// inspects persisted job/manifest state and stat-samples the tracked files.
+///
+/// Returns `None` immediately when ingest is disabled, so a disabled project
+/// never triggers a background run.
+#[must_use]
+pub fn session_open_mode(project_root: &Path, config: &IngestConfig) -> Option<RunMode> {
+    if !config.enabled {
+        return None;
+    }
+    let job = status(project_root).ok().flatten();
+    if let Some(mode) = planned_run_mode(job.as_ref(), has_chunk_index(project_root)) {
+        return Some(mode);
+    }
+    // Completed index: self-refresh when sources changed and the cadence window is
+    // open. The cheap window check gates the (bounded) filesystem sampling.
+    let now = unix_now();
+    let interval = config.refresh_min_interval_secs;
+    let window_open = job
+        .as_ref()
+        .is_some_and(|job| now.saturating_sub(job.updated_unix) >= interval);
+    let sources_changed =
+        window_open && sources_changed_since_completed(project_root, REFRESH_SAMPLE_CAP);
+    should_refresh(job.as_ref(), sources_changed, now, interval).then_some(RunMode::Refresh)
+}
+
+/// Whether any tracked source file changed since the last completed run, sampled
+/// from the persisted manifest so this stays cheap on the session-open hot path:
+/// it reuses the manifest's file list (no fresh tree walk) and stats at most
+/// `cap` candidate entries, spread evenly across the manifest. A file whose mtime
+/// is newer than the manifest recorded — or that has vanished — counts as a
+/// change. Best-effort: a missing/unreadable manifest reports no change.
+fn sources_changed_since_completed(project_root: &Path, cap: usize) -> bool {
+    let Ok(root) = canonical_root(project_root) else {
+        return false;
+    };
+    let manifest_path = root.join(INGEST_DIR).join(MANIFEST_FILE);
+    let Ok(manifest) = read_json::<PreviewManifest>(&manifest_path) else {
+        return false;
+    };
+    let candidates: Vec<&ManifestEntry> = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.status == CandidateStatus::Candidate)
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let cap = cap.max(1);
+    // Stride so the bounded sample spans the whole manifest, not just its head.
+    let step = candidates.len().div_ceil(cap).max(1);
+    for entry in candidates.iter().step_by(step).take(cap) {
+        let absolute = root.join(platform_path(&entry.path));
+        match fs::metadata(&absolute)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+        {
+            Some(modified) => {
+                let current = system_time_to_unix(modified).unwrap_or(0);
+                if current > entry.modified_unix {
+                    return true;
+                }
+            }
+            None => return true,
+        }
+    }
+    false
 }
 
 /// Mark the current job paused.
@@ -2140,6 +2236,114 @@ mod tests {
             chunks.iter().any(|chunk| chunk.path == "b.md"),
             "resume must complete the not-yet-done file"
         );
+    }
+
+    fn job_at(status: JobStatus, updated_unix: u64) -> IngestJob {
+        IngestJob {
+            schema_version: INGEST_SCHEMA_VERSION,
+            run_id: "run-test".to_string(),
+            status,
+            mode: "full".to_string(),
+            queued_files: 1,
+            completed_files: 1,
+            failed_files: 0,
+            skipped_files: 0,
+            started_unix: updated_unix,
+            updated_unix,
+            message: None,
+        }
+    }
+
+    /// Make a just-completed run look old and its manifest mtimes stale, so the
+    /// files on disk read as newer than the last run recorded.
+    fn age_completed_run(root: &Path) {
+        let ingest_dir = canonical_root(root).unwrap().join(INGEST_DIR);
+        let mut job = read_json::<IngestJob>(&ingest_dir.join(JOB_FILE)).unwrap();
+        job.updated_unix = 1;
+        write_json(&ingest_dir.join(JOB_FILE), &job).unwrap();
+        let mut manifest = read_json::<PreviewManifest>(&ingest_dir.join(MANIFEST_FILE)).unwrap();
+        for entry in &mut manifest.entries {
+            entry.modified_unix = 0;
+        }
+        write_json(&ingest_dir.join(MANIFEST_FILE), &manifest).unwrap();
+    }
+
+    #[test]
+    fn should_refresh_only_when_completed_changed_and_past_cadence() {
+        let now = 10_000;
+        let interval = 600;
+        let done = job_at(JobStatus::Completed, 1_000); // 9000s ago — past cadence
+        assert!(should_refresh(Some(&done), true, now, interval));
+        // No change → no refresh.
+        assert!(!should_refresh(Some(&done), false, now, interval));
+        // Inside the cadence window → no refresh even if sources changed.
+        let recent = job_at(JobStatus::Completed, now - 100);
+        assert!(!should_refresh(Some(&recent), true, now, interval));
+        // A non-completed job is the resume path, not the staleness path.
+        assert!(!should_refresh(
+            Some(&job_at(JobStatus::Paused, 1_000)),
+            true,
+            now,
+            interval
+        ));
+        // No job at all → nothing to refresh.
+        assert!(!should_refresh(None, true, now, interval));
+    }
+
+    #[test]
+    fn session_open_mode_refreshes_a_completed_index_when_sources_change() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "alpha\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+        let cfg = config();
+
+        // A just-completed, current index: nothing to do.
+        assert_eq!(session_open_mode(dir.path(), &cfg), None);
+
+        // Once the run is old and its sources read as changed, the trigger picks
+        // a background Refresh (reusing subject 01's resume path).
+        age_completed_run(dir.path());
+        assert_eq!(session_open_mode(dir.path(), &cfg), Some(RunMode::Refresh));
+    }
+
+    #[test]
+    fn staleness_detection_only_inspects_a_bounded_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in 'a'..='j' {
+            fs::write(dir.path().join(format!("{name}.md")), "x\n").unwrap();
+        }
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // a.md is recorded as already-newer-than-disk (never "changed"); every
+        // other file is recorded stale (would read as changed if it were sampled).
+        let ingest_dir = canonical_root(dir.path()).unwrap().join(INGEST_DIR);
+        let mut manifest = read_json::<PreviewManifest>(&ingest_dir.join(MANIFEST_FILE)).unwrap();
+        for entry in &mut manifest.entries {
+            if entry.status == CandidateStatus::Candidate {
+                entry.modified_unix = if entry.path == "a.md" { u64::MAX } else { 0 };
+            }
+        }
+        write_json(&ingest_dir.join(MANIFEST_FILE), &manifest).unwrap();
+
+        // cap = 1 samples only the head (a.md), so the many changed files beyond
+        // the sample are never inspected — detection is bounded.
+        assert!(!sources_changed_since_completed(dir.path(), 1));
+        // A larger sample reaches a changed file.
+        assert!(sources_changed_since_completed(dir.path(), 10));
+    }
+
+    #[test]
+    fn session_open_mode_is_inert_when_ingest_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "alpha\n").unwrap();
+        let cfg = IngestConfig {
+            enabled: false,
+            ..config()
+        };
+        // Even with no index (which would otherwise be a first Full build),
+        // disabled ingest never triggers and never writes `.localmind`.
+        assert_eq!(session_open_mode(dir.path(), &cfg), None);
+        assert!(!dir.path().join(".localmind").exists());
     }
 
     #[test]

@@ -236,13 +236,12 @@ pub async fn run_chat(
     // Interactive REPL only (non-interactive paths never create project files),
     // and only once the workspace is trusted, so we never write `.localmind`
     // before the user has consented. Detached: the ingest is bounded by its own
-    // budgets and writes its index atomically at the end. A run interrupted by
-    // its time budget is resumed (Refresh) on the next session — reusing the
-    // chunks already persisted — rather than restarted from scratch.
-    if config.ingest.enabled && state.trusted {
-        let status = localpilot_localmind::ingest_status(&cwd).ok().flatten();
-        let has_index = localpilot_localmind::has_chunk_index(&cwd);
-        if let Some(mode) = localpilot_localmind::planned_run_mode(status.as_ref(), has_index) {
+    // budgets and writes its index atomically at the end. `session_open_mode`
+    // decides what to do — a first build, a resume of an interrupted run, or a
+    // staleness refresh when a completed index's sources changed — and returns
+    // nothing when ingest is disabled or the index is already current.
+    if state.trusted {
+        if let Some(mode) = localpilot_localmind::session_open_mode(&cwd, &config.ingest) {
             let ingest_root = cwd.clone();
             let ingest_config = config.ingest.clone();
             tokio::task::spawn_blocking(move || {

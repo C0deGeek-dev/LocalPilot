@@ -1,4 +1,4 @@
-﻿//! Configuration loading and precedence.
+//! Configuration loading and precedence.
 //!
 //! Precedence, highest first: CLI flags, environment variables, the project
 //! `.localpilot.toml`, the user config file, then built-in defaults. Credentials
@@ -268,5 +268,31 @@ mod tests {
     fn validate_rejects_empty_name_or_program() {
         assert!(validate_checks(&[check("", "cargo")]).is_err());
         assert!(validate_checks(&[check("fmt", "  ")]).is_err());
+    }
+
+    #[test]
+    fn ingest_refresh_interval_defaults_and_loads_from_project_toml() {
+        // Documented default: a 10-minute debounce between auto-refreshes.
+        assert_eq!(
+            crate::schema::IngestConfig::default().refresh_min_interval_secs,
+            600
+        );
+
+        // A project may override it; the rest of the ingest config keeps defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(".localpilot.toml");
+        std::fs::write(&project, "[ingest]\nrefresh_min_interval_secs = 30\n").unwrap();
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+
+        let config = load(&paths, &CliOverrides::default()).expect("load config");
+
+        assert_eq!(config.ingest.refresh_min_interval_secs, 30);
+        assert_eq!(
+            config.ingest.max_files,
+            crate::schema::IngestConfig::default().max_files
+        );
     }
 }
