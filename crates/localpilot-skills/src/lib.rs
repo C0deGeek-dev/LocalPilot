@@ -13,9 +13,11 @@ mod loader;
 mod manifest;
 mod suggest;
 mod templates;
+mod tools;
 
 pub use error::SkillError;
 pub use loader::{standard_skill_dirs, Skill, SkillSet};
 pub use manifest::{Invocation, SkillManifest, SkillTriggers};
 pub use suggest::{SkillDraft, SuggestionEngine};
 pub use templates::{standard_template_dirs, PromptTemplate, TemplateSet};
+pub use tools::{discover_trusted, SkillLoad, SkillSearch};

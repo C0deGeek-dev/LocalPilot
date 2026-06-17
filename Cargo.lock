@@ -1255,6 +1255,7 @@ dependencies = [
  "localpilot-recovery",
  "localpilot-rpc",
  "localpilot-sandbox",
+ "localpilot-skills",
  "localpilot-store",
  "localpilot-tools",
  "localpilot-tui",
@@ -1434,11 +1435,18 @@ dependencies = [
 name = "localpilot-skills"
 version = "0.3.0-beta.2"
 dependencies = [
+ "async-trait",
  "figment",
+ "localpilot-core",
+ "localpilot-sandbox",
+ "localpilot-tools",
+ "schemars",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

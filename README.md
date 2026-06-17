@@ -126,6 +126,7 @@ the runtime in-process or driving it headless over RPC/ACP.
 | `learning` | LocalMind loop: `closeout`, `review`, `promote`, `search`, `skills`, `audit` |
 | `ingest` | Project-local folder ingestion: `preview`, run, `refresh`, `review`, and clean up |
 | `knowledge` | Search and package project-local ingested knowledge |
+| `skills list \| show <name>` | List project skills (advisory prompt modules under `.localpilot/skills` / `.agents/skills`) and read one by name |
 | `export` | Export a redacted session bundle |
 
 ### Chat controls

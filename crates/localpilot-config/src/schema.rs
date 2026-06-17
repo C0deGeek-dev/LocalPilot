@@ -20,6 +20,7 @@ pub struct Config {
     pub ingest: IngestConfig,
     pub compaction: CompactionConfig,
     pub storage: StorageConfig,
+    pub skills: SkillsConfig,
 }
 
 impl Default for Config {
@@ -34,8 +35,24 @@ impl Default for Config {
             ingest: IngestConfig::default(),
             compaction: CompactionConfig::default(),
             storage: StorageConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
+}
+
+/// Project-local skill surface configuration.
+///
+/// Skills are advisory prompt modules discovered on demand. The deterministic,
+/// user-typed load (`localpilot skills show`) is always available; this flag only
+/// governs **autonomous** model discovery — whether the agent may reach for
+/// `skill_search`/`skill_load` on its own. It is **off by default** so a small
+/// local model never auto-injects a skill unless the project opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Register `skill_search`/`skill_load` so the model can discover and read
+    /// project skills on its own. Default `false`.
+    pub autonomous_discovery: bool,
 }
 
 /// Retention for the project-local `.localpilot/` state. A conservative cap is on

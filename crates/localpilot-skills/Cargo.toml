@@ -9,10 +9,17 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+localpilot-core = { path = "../localpilot-core" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-tools = { path = "../localpilot-tools" }
+async-trait = { workspace = true }
 figment = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }

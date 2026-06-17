@@ -92,6 +92,16 @@ LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 
 See [mcp.md](mcp.md).
 
+### `[skills]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `autonomous_discovery` | bool | `false` | Register the `skill_search`/`skill_load` tools so the model may discover and read project skills on its own. Off by default, so a small local model never auto-injects a skill. The deterministic `localpilot skills list \| show` surface works regardless. |
+
+Project skills are advisory prompt modules under `.localpilot/skills/` or
+`.agents/skills/`; see [05-tool-system.md](05-tool-system.md) §Project Skill
+Discovery.
+
 ## Example
 
 ```toml

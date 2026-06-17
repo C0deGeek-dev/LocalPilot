@@ -3,6 +3,18 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## Unreleased
+
+- Project-local skills (advisory prompt modules under `.localpilot/skills/` or
+  `.agents/skills/`) are now a live, pull-based surface. `localpilot skills list`
+  and `localpilot skills show <name>` read them deterministically; with `[skills]
+  autonomous_discovery = true` (off by default) the model can also discover them on
+  demand via the read-only `skill_search` / `skill_load` tools. The loader now
+  respects a skill's `disable-model-invocation` flag — a user-only skill is reached
+  only by exact name, never auto-surfaced by search. Loading a skill runs nothing;
+  declared permissions are surfaced, not granted, and the workspace trust gate and
+  permission engine still apply.
+
 ## 2026-06-17 - Retrieval and learning
 
 - Ingested chunks are now prefixed with offline document context (front matter

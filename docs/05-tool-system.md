@@ -218,6 +218,33 @@ never grant what the engine refused. The permission engine is the always-on
 first link of the chain and is not removable. Hosts register gates through the
 session runtime's hook fabric (see [`docs/extending.md`](extending.md)).
 
+## Project Skill Discovery
+
+Project-local skills are advisory prompt modules (a `SKILL.md`, optionally a
+`skill.toml`) under `.localpilot/skills/` or `.agents/skills/`. They are reached
+**pull-based**, never pushed into context — a skill's text is loaded only when it
+is searched for and chosen (the skill model is ADR-0027).
+
+- **Deterministic, user-facing** (always available): `localpilot skills list`
+  shows the discovered skills with their invocation (`user-only` /
+  `discoverable`); `localpilot skills show <name>` prints one skill's body by exact
+  name, with no model in the loop.
+- **Model-callable** (opt-in, off by default): when `[skills]
+  autonomous_discovery = true`, two read-only tools are registered —
+  `skill_search` returns lean ranked locators (name + one-line summary + score)
+  over the *discoverable* skills only, and `skill_load` returns one skill's body by
+  exact name. A user-only skill (`disable-model-invocation: true`) is never
+  returned by search; it is reachable only by an exact typed name.
+
+Both tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
+skills load only when the workspace is trusted. Loading a skill injects *content
+the agent reads* — it runs, installs, and enables nothing. A skill's declared
+`required_tools`/`permissions` are surfaced when it is loaded for transparency,
+but loading grants nothing: any real action the guidance leads to still passes
+through the permission engine. This keeps the no-silent-execution contract intact
+(see [`docs/localmind-integration.md`](localmind-integration.md) for the parallel
+advisory-skill contract on the LocalMind side).
+
 ## Safety Invariants
 
 - The model cannot execute a tool outside the registry.

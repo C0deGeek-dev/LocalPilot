@@ -48,6 +48,18 @@ const SKILL_DRAFTS_CUE: &str = concat!(
     "never assume a draft is active.",
 );
 
+/// The cue, appended only when the `skill_search` tool is registered (autonomous
+/// skill discovery is enabled), that tells the model project skills are reachable
+/// on demand by search rather than carried in context.
+const SKILL_SEARCH_CUE: &str = concat!(
+    "\n\n",
+    "This project may define skills — advisory prompt modules for recurring tasks. They are not ",
+    "loaded into context; when a task looks like one, call `skill_search` to find relevant skills ",
+    "(you get back names and one-line summaries), then `skill_load` to read one and apply its ",
+    "guidance yourself. Loading a skill runs nothing; any action it suggests still goes through the ",
+    "normal permission gate.",
+);
+
 /// Render the prompt from the sorted tool names. Split from
 /// [`agent_system_prompt`] so the tool-driven cue is unit-testable without a live
 /// registry.
@@ -64,6 +76,11 @@ fn build_prompt(names: &[&str]) -> String {
     };
     let skill_drafts_cue = if names.contains(&"skill_drafts") {
         SKILL_DRAFTS_CUE
+    } else {
+        ""
+    };
+    let skill_search_cue = if names.contains(&"skill_search") {
+        SKILL_SEARCH_CUE
     } else {
         ""
     };
@@ -87,7 +104,7 @@ for it — `bypass` lifts the permission gate, but does not imply permission to
 mutate history or share work without being told to.
 
 Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}
+{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}
 
 Tool use loop:
 - inspect before acting;
@@ -161,6 +178,26 @@ mod cue_tests {
         assert!(
             !without.contains("skill drafts"),
             "the cue must be absent when skill_drafts is not registered"
+        );
+    }
+
+    #[test]
+    fn the_skill_search_cue_appears_only_when_the_tool_is_registered() {
+        let with = build_prompt(&["skill_search", "skill_load", "read_file"]);
+        assert!(
+            with.contains("call `skill_search`"),
+            "the cue must be present when skill_search is registered"
+        );
+        assert!(
+            with.contains("goes through the normal permission gate"),
+            "the cue must keep actions on the permission gate"
+        );
+        // Absent by default: autonomous discovery is off, so the tool is not
+        // registered and the model is not nudged to reach for skills on its own.
+        let without = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !without.contains("call `skill_search`"),
+            "the cue must be absent when skill_search is not registered"
         );
     }
 }

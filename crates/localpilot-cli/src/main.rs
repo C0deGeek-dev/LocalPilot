@@ -24,6 +24,7 @@ mod models_cmd;
 mod repl;
 mod rpc_cmd;
 mod session_cmd;
+mod skills_cmd;
 #[cfg(feature = "tui")]
 mod trust;
 mod update;
@@ -179,6 +180,22 @@ enum Command {
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+    /// Project-local skills: list and read advisory skill modules.
+    Skills {
+        #[command(subcommand)]
+        command: ProjectSkillsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectSkillsCommand {
+    /// List the project's discovered skills.
+    List,
+    /// Print one skill's body by exact name (a deterministic load).
+    Show {
+        /// The skill name (see `skills list`).
+        name: String,
     },
 }
 
@@ -850,6 +867,15 @@ async fn main() -> anyhow::Result<()> {
                 stdout.flush()?;
             }
         },
+        Command::Skills { command } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            match command {
+                ProjectSkillsCommand::List => skills_cmd::list(&cwd, &mut stdout)?,
+                ProjectSkillsCommand::Show { name } => skills_cmd::show(&cwd, &name, &mut stdout)?,
+            }
+            stdout.flush()?;
+        }
     }
 
     Ok(())

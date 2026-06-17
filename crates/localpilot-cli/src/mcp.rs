@@ -17,6 +17,11 @@ use localpilot_tools::ToolRegistry;
 #[derive(Default)]
 pub struct McpTools {
     entries: Vec<(McpToolDescriptor, Arc<dyn Transport>)>,
+    /// When set, the model-callable skill discovery tools (`skill_search`,
+    /// `skill_load`) are registered so the agent may reach project skills on its
+    /// own. Off by default — the deterministic `localpilot skills` surface and the
+    /// host-injected user load do not depend on it.
+    skills_autonomous: bool,
 }
 
 impl McpTools {
@@ -30,7 +35,10 @@ impl McpTools {
                 Err(error) => eprintln!("mcp: skipping server '{name}': {error}"),
             }
         }
-        Self { entries }
+        Self {
+            entries,
+            skills_autonomous: config.skills.autonomous_discovery,
+        }
     }
 
     /// Build a tool registry: the builtins plus every discovered MCP tool. An
@@ -64,6 +72,15 @@ impl McpTools {
         // The agent can read active (human-enabled) skills as advisory guidance,
         // read-only. Reading a skill never runs, installs, or changes it.
         registry.register(Box::new(localpilot_localmind::ActiveSkills));
+        // Pull-based project-skill discovery (ADR-0027): the agent can search for
+        // and load project-local skills on demand instead of carrying them in
+        // context. Registered only when autonomous discovery is enabled, so a
+        // small local model never reaches for a skill on its own by default; both
+        // tools are read-only and trust-gated regardless.
+        if self.skills_autonomous {
+            registry.register(Box::new(localpilot_skills::SkillSearch));
+            registry.register(Box::new(localpilot_skills::SkillLoad));
+        }
         for (descriptor, transport) in &self.entries {
             registry.register(Box::new(McpTool::new(
                 descriptor,
@@ -112,5 +129,24 @@ mod tests {
                 "expected `{expected}` in the built registry, got: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn skill_discovery_tools_are_gated_off_by_default_and_on_when_enabled() {
+        // Off by default: the model cannot reach project skills on its own.
+        let off = McpTools::default().registry();
+        let off_names = off.names();
+        assert!(!off_names.contains(&"skill_search"), "got: {off_names:?}");
+        assert!(!off_names.contains(&"skill_load"), "got: {off_names:?}");
+
+        // Opted in: both read-only discovery tools are registered.
+        let on = McpTools {
+            entries: Vec::new(),
+            skills_autonomous: true,
+        }
+        .registry();
+        let on_names = on.names();
+        assert!(on_names.contains(&"skill_search"), "got: {on_names:?}");
+        assert!(on_names.contains(&"skill_load"), "got: {on_names:?}");
     }
 }
