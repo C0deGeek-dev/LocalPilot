@@ -98,6 +98,22 @@ pub fn review_list(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningEr
     Ok(items.iter().map(summarize).collect())
 }
 
+/// List the project's review queue **without** creating any project files. A
+/// project that has never closed out (no `.localmind.toml`) has an empty queue,
+/// so this returns an empty list instead of initializing the store — keeping it
+/// safe to call from a read-only, model-facing surface on a bare prompt.
+///
+/// # Errors
+/// Returns [`LearningError::Review`] if an existing queue cannot be read.
+pub fn review_list_readonly(project_root: &Path) -> Result<Vec<ReviewSummary>, LearningError> {
+    if !project_root.join(crate::CONFIG_FILE).exists() {
+        return Ok(Vec::new());
+    }
+    let queue = ReviewQueue::open_project(project_root).map_err(review_err)?;
+    let items = queue.list().map_err(review_err)?;
+    Ok(items.iter().map(summarize).collect())
+}
+
 /// Inspect a single review-queue item.
 ///
 /// # Errors
@@ -177,6 +193,30 @@ pub fn promote(project_root: &Path, item_id: &str) -> Result<String, LearningErr
 /// Returns [`LearningError::Memory`] if the search fails.
 pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, LearningError> {
     let persistence = open_memory(project_root)?;
+    let results = persistence.search(query).map_err(memory_err)?;
+    Ok(results
+        .into_iter()
+        .map(|result| SearchHit {
+            memory_id: result.memory_id.to_string(),
+            score: result.score,
+            path: result.path.display().to_string(),
+            snippet: result.snippet,
+        })
+        .collect())
+}
+
+/// Search accepted memory **without** creating any project files. A project that
+/// has never closed out (no `.localmind.toml`) has no accepted memory, so this
+/// returns an empty list instead of initializing the store — safe to call from a
+/// read-only, model-facing surface on a bare prompt.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if an existing memory index cannot be read.
+pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, LearningError> {
+    if !project_root.join(crate::CONFIG_FILE).exists() {
+        return Ok(Vec::new());
+    }
+    let persistence = MemoryPersistence::open_project(project_root).map_err(memory_err)?;
     let results = persistence.search(query).map_err(memory_err)?;
     Ok(results
         .into_iter()

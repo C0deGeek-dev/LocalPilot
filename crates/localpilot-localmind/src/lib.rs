@@ -14,9 +14,11 @@ mod context_hook;
 mod error;
 mod ingest;
 mod knowledge_tool;
+mod memory_search_tool;
 mod ops;
 mod pack;
 mod remember_tool;
+mod review_list_tool;
 mod skill_drafts_tool;
 mod tool_use;
 
@@ -41,6 +43,7 @@ pub use ingest::{
     KnowledgeHit, ManifestEntry, PreviewManifest, RunMode, RunSummary,
 };
 pub use knowledge_tool::KnowledgeSearch;
+pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, context_for, memory_delete, memory_disable_injection, memory_injection_enabled,
     memory_list, promote, review_decide, review_list, review_show, search, skill_activate,
@@ -49,6 +52,7 @@ pub use ops::{
 };
 pub use pack::{PackEntry, PackSource};
 pub use remember_tool::Remember;
+pub use review_list_tool::ReviewList;
 pub use skill_drafts_tool::SkillDrafts;
 pub use tool_use::{tool_use_candidate, ToolUseSignal};
 

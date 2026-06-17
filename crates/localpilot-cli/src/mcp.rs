@@ -47,6 +47,11 @@ impl McpTools {
         // The agent can propose a durable lesson for human review as it works.
         // Enqueue-only — never a direct accepted-memory write.
         registry.register(Box::new(localpilot_localmind::Remember));
+        // The agent can read its own LocalMind store directly instead of
+        // reverse-engineering SQL: the review queue and accepted memory. Both are
+        // read-only — they list/search, never decide, promote, or write.
+        registry.register(Box::new(localpilot_localmind::ReviewList));
+        registry.register(Box::new(localpilot_localmind::MemorySearch));
         // The agent can surface generated skill drafts (candidate reusable
         // workflows) read-only. Listing a draft never enables it — activation
         // stays a deliberate human step.
@@ -77,4 +82,28 @@ async fn connect(
         .into_iter()
         .map(|descriptor| (descriptor, Arc::clone(&transport)))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_localmind_tools_are_registered_on_every_session_path() {
+        // Every session path (REPL, harness, RPC, one-shot) builds its registry
+        // through this method, so registering here is registering everywhere.
+        let registry = McpTools::default().registry();
+        let names = registry.names();
+        for expected in [
+            "knowledge_search",
+            "remember",
+            "localmind_review_list",
+            "localmind_memory_search",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected `{expected}` in the built registry, got: {names:?}"
+            );
+        }
+    }
 }
