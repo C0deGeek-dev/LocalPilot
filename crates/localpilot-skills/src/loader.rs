@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::SkillError;
-use crate::manifest::SkillManifest;
+use crate::manifest::{Invocation, SkillManifest};
 
 /// A loaded skill: its manifest, its instruction text, and where it lives.
 #[derive(Debug, Clone)]
@@ -88,8 +88,12 @@ impl SkillSet {
         self.skills.iter().find(|s| s.manifest.name == name)
     }
 
-    /// Skills relevant to `query`: a description keyword match or an explicit
-    /// command trigger. Description-based relevance is the default.
+    /// Skills relevant to `query`, for on-demand discovery (subject 04's
+    /// `skill_search`): a description keyword match or an explicit command trigger.
+    /// Only **discoverable** skills are candidates — user-only skills are reached
+    /// solely by [`SkillSet::by_name`] (a typed name), never by search — so a model
+    /// can never auto-surface a skill the author marked user-only. Description-based
+    /// relevance is the default.
     #[must_use]
     pub fn relevant(&self, query: &str) -> Vec<&Skill> {
         let query_lower = query.to_ascii_lowercase();
@@ -99,6 +103,7 @@ impl SkillSet {
             .collect();
         self.skills
             .iter()
+            .filter(|skill| skill.manifest.invocation == Invocation::Discoverable)
             .filter(|skill| {
                 let description = skill.manifest.description.to_ascii_lowercase();
                 let trigger_hit = skill
@@ -231,5 +236,35 @@ body
         let relevant = set.relevant("how do I run a harness step");
         assert_eq!(relevant.len(), 1);
         assert_eq!(relevant[0].manifest.name, "harness-helper");
+    }
+
+    #[test]
+    fn user_only_skills_are_excluded_from_search_but_found_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // A discoverable skill (skill.toml, no invocation field ⇒ discoverable).
+        write_skill(dir.path(), "provider-helper", "guide adding a provider", "");
+        // A user-only skill via SKILL.md frontmatter, with a description that would
+        // otherwise match the same query.
+        let user_dir = dir.path().join("secret-handoff");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::write(
+            user_dir.join("SKILL.md"),
+            "---\n\
+name: secret-handoff\n\
+description: guide adding a provider by hand\n\
+disable-model-invocation: true\n\
+---\n\
+body\n",
+        )
+        .unwrap();
+
+        let set = SkillSet::load(&[dir.path().to_path_buf()]).unwrap();
+        // Both descriptions match the query, but search returns only the
+        // discoverable skill — the user-only one is never auto-surfaced.
+        let relevant = set.relevant("how do I guide adding a provider");
+        assert_eq!(relevant.len(), 1);
+        assert_eq!(relevant[0].manifest.name, "provider-helper");
+        // The user-only skill is still reachable by its exact name (a typed load).
+        assert!(set.by_name("secret-handoff").is_some());
     }
 }

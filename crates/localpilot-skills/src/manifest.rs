@@ -4,12 +4,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SkillError;
 
+/// How a skill may be reached (the invocation axis of the skill model, ADR-0027).
+/// Independent of authority; carried in a `SKILL.md` by `disable-model-invocation`
+/// and in a `skill.toml` by an optional `invocation` field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Invocation {
+    /// Reachable only by a human typing the skill's name (deterministic load).
+    /// Set by `disable-model-invocation: true`. Never returned by skill search.
+    UserOnly,
+    /// Reachable by on-demand search (and still by name). The default when the
+    /// invocation field is absent, matching the `SKILL.md` convention that omitting
+    /// `disable-model-invocation` leaves a skill model-reachable.
+    #[default]
+    Discoverable,
+}
+
+impl Invocation {
+    /// Whether this skill may be surfaced by on-demand search (subject 04's
+    /// `skill_search`). User-only skills are excluded from the search candidate set.
+    #[must_use]
+    pub fn is_discoverable(self) -> bool {
+        matches!(self, Invocation::Discoverable)
+    }
+}
+
 /// A parsed `skill.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillManifest {
     pub name: String,
     pub description: String,
     pub version: String,
+    /// Who can reach the skill. Defaults to [`Invocation::Discoverable`] when absent.
+    #[serde(default)]
+    pub invocation: Invocation,
+    /// Optional hint describing the argument a user-invoked skill expects, carried
+    /// from the `SKILL.md` `argument-hint` frontmatter. Recorded, not yet consumed.
+    #[serde(
+        default,
+        rename = "argument-hint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub argument_hint: Option<String>,
     #[serde(default)]
     pub triggers: SkillTriggers,
     /// Builtin tools the skill needs.
@@ -90,6 +126,14 @@ impl SkillManifest {
                 .get("version")
                 .cloned()
                 .unwrap_or_else(|| "0.0.0".to_string()),
+            // The invocation axis the loader previously dropped: a skill marked
+            // `disable-model-invocation: true` is user-only; otherwise discoverable.
+            invocation: if front.disable_model_invocation {
+                Invocation::UserOnly
+            } else {
+                Invocation::Discoverable
+            },
+            argument_hint: front.argument_hint,
             triggers: SkillTriggers::default(),
             required_tools: Vec::new(),
             permissions: Vec::new(),
@@ -108,6 +152,13 @@ struct SkillFrontmatter {
     #[serde(default)]
     #[allow(dead_code)] // recorded, not yet consumed
     license: Option<String>,
+    /// `disable-model-invocation: true` makes the skill user-only (the invocation
+    /// axis the loader previously discarded on load).
+    #[serde(default, rename = "disable-model-invocation")]
+    disable_model_invocation: bool,
+    /// Optional hint describing the argument the skill expects.
+    #[serde(default, rename = "argument-hint")]
+    argument_hint: Option<String>,
     #[serde(default)]
     metadata: std::collections::BTreeMap<String, String>,
 }
@@ -144,5 +195,56 @@ file_globs = [\"**/*.rs\"]\n";
             SkillError::InvalidManifest(message) => assert!(message.contains("name"), "{message}"),
             other => panic!("expected InvalidManifest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn skill_md_disable_model_invocation_is_user_only() {
+        let content = "---\n\
+name: handoff\n\
+description: Compact the conversation into a handoff document.\n\
+argument-hint: \"What will the next session focus on?\"\n\
+disable-model-invocation: true\n\
+---\n\
+\n\
+Write the handoff.\n";
+        let (manifest, body) = SkillManifest::parse_skill_md(content).unwrap();
+        assert_eq!(manifest.invocation, Invocation::UserOnly);
+        assert!(!manifest.invocation.is_discoverable());
+        assert_eq!(
+            manifest.argument_hint.as_deref(),
+            Some("What will the next session focus on?")
+        );
+        assert!(body.starts_with("Write the handoff"));
+    }
+
+    #[test]
+    fn skill_md_without_the_flag_defaults_to_discoverable() {
+        let content = "---\n\
+name: add-provider\n\
+description: Guide adding a model provider.\n\
+---\n\
+\n\
+Steps.\n";
+        let (manifest, _body) = SkillManifest::parse_skill_md(content).unwrap();
+        assert_eq!(manifest.invocation, Invocation::Discoverable);
+        assert!(manifest.invocation.is_discoverable());
+        assert!(manifest.argument_hint.is_none());
+    }
+
+    #[test]
+    fn toml_invocation_round_trips_and_defaults_to_discoverable() {
+        // Absent ⇒ discoverable.
+        let absent = SkillManifest::parse(VALID).unwrap();
+        assert_eq!(absent.invocation, Invocation::Discoverable);
+
+        // Explicit user-only round-trips through the manifest.
+        let user_only = SkillManifest::parse(
+            "name = \"local-only\"\n\
+description = \"x\"\n\
+version = \"0.1.0\"\n\
+invocation = \"user-only\"\n",
+        )
+        .unwrap();
+        assert_eq!(user_only.invocation, Invocation::UserOnly);
     }
 }
