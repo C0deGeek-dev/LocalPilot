@@ -1,6 +1,6 @@
 //! Context-aware bad-output detection.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -365,6 +365,135 @@ impl RepeatedErrorBreaker {
     }
 }
 
+/// Default sliding-window size for the novelty signal: distinct successful-call
+/// signatures are counted over this many recent successful calls.
+pub const NO_PROGRESS_WINDOW: usize = 12;
+/// Default novelty floor: when the share of distinct signatures over a full
+/// window drops below this, the turn is cycling a tiny set of calls.
+pub const NO_PROGRESS_DISTINCT_FLOOR: f64 = 0.34;
+/// Default number of times an identical `(signature, output)` successful call
+/// may recur before it counts as no forward progress.
+pub const NO_PROGRESS_REPEAT_THRESHOLD: usize = 3;
+
+/// Stable 64-bit digest of one string, for compact within-turn keys.
+fn digest(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Stable 64-bit digest of a `(signature, output)` pair. The unit separator
+/// cannot collide with the signature's own bytes, so distinct pairs stay
+/// distinct even when one half is a prefix of the other.
+fn digest_pair(signature: &str, output: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    '\u{1f}'.hash(&mut hasher);
+    output.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Detects *successful* tool calls that make no forward progress — the case the
+/// failure breakers ([`ToolLoopDetector`], [`RepeatedErrorBreaker`]) cannot see
+/// because every call returns success. Two deterministic signals:
+///
+/// - **Stuck repeat:** the same `(signature, output)` succeeds `repeat_threshold`
+///   times. A call whose arguments differ (a new signature) or whose output
+///   differs (the world changed between calls — e.g. a re-read after an edit)
+///   resets that pair's count, so a legitimate re-read is not flagged.
+/// - **Novelty decay:** over the last `window` successful calls, the share of
+///   distinct signatures falls below `distinct_floor` — the turn is cycling a
+///   tiny set of calls even when their outputs vary.
+///
+/// The caller supplies an opaque signature (e.g. tool name + arguments) and the
+/// call's output text, keeping this detector free of any tool or JSON
+/// dependency, like [`ToolLoopDetector`].
+#[derive(Debug, Clone)]
+pub struct NoProgressDetector {
+    window: usize,
+    distinct_floor: f64,
+    repeat_threshold: usize,
+    /// Repeat count per `(signature, output)` digest seen this turn.
+    repeats: HashMap<u64, usize>,
+    /// Recent successful-call signature digests, newest at the back.
+    recent: VecDeque<u64>,
+    /// Latches once either signal first crosses, so the budget controller can
+    /// read a stable "stuck" state for the rest of the turn.
+    tripped: bool,
+}
+
+impl Default for NoProgressDetector {
+    fn default() -> Self {
+        Self::new(
+            NO_PROGRESS_WINDOW,
+            NO_PROGRESS_DISTINCT_FLOOR,
+            NO_PROGRESS_REPEAT_THRESHOLD,
+        )
+    }
+}
+
+impl NoProgressDetector {
+    /// A detector with explicit tuning. `window` is clamped to at least 1,
+    /// `distinct_floor` to `0.0..=1.0`, and `repeat_threshold` to at least 1.
+    #[must_use]
+    pub fn new(window: usize, distinct_floor: f64, repeat_threshold: usize) -> Self {
+        Self {
+            window: window.max(1),
+            distinct_floor: distinct_floor.clamp(0.0, 1.0),
+            repeat_threshold: repeat_threshold.max(1),
+            repeats: HashMap::new(),
+            recent: VecDeque::new(),
+            tripped: false,
+        }
+    }
+
+    /// Observe one *successful* tool call. Returns `true` only on the call that
+    /// first crosses a no-progress signal — the moment to surface a strategy-
+    /// change hint (fire-once, like [`RepeatedErrorBreaker`]). Read the latched
+    /// state with [`Self::is_tripped`].
+    pub fn observe(&mut self, signature: &str, output: &str) -> bool {
+        let pair = digest_pair(signature, output);
+        let count = self.repeats.entry(pair).or_insert(0);
+        *count += 1;
+        let stuck_repeat = *count >= self.repeat_threshold;
+
+        self.recent.push_back(digest(signature));
+        while self.recent.len() > self.window {
+            self.recent.pop_front();
+        }
+        let novelty_decayed =
+            self.recent.len() >= self.window && self.distinct_ratio() < self.distinct_floor;
+
+        let crossing = (stuck_repeat || novelty_decayed) && !self.tripped;
+        self.tripped = self.tripped || stuck_repeat || novelty_decayed;
+        crossing
+    }
+
+    /// Share of distinct signatures over the current window (`1.0` when empty).
+    fn distinct_ratio(&self) -> f64 {
+        if self.recent.is_empty() {
+            return 1.0;
+        }
+        let distinct = self.recent.iter().collect::<HashSet<_>>().len();
+        distinct as f64 / self.recent.len() as f64
+    }
+
+    /// Whether a no-progress signal has fired this turn (latched).
+    #[must_use]
+    pub fn is_tripped(&self) -> bool {
+        self.tripped
+    }
+
+    /// Reset at a turn boundary, mirroring the other per-turn breakers.
+    pub fn reset(&mut self) {
+        self.repeats.clear();
+        self.recent.clear();
+        self.tripped = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +681,86 @@ mod tests {
             let batch = has_tool_loop(calls.iter().map(|(sig, failed)| (sig.as_str(), *failed)));
             proptest::prop_assert_eq!(incremental, batch);
         }
+    }
+
+    #[test]
+    fn no_progress_trips_on_repeated_successful_signature() {
+        let mut detector = NoProgressDetector::new(12, 0.34, 3);
+        let sig = "read_file\u{1f}{\"path\":\"a.rs\"}";
+        let out = "the same file contents";
+        assert!(!detector.observe(sig, out), "1st identical success");
+        assert!(!detector.observe(sig, out), "2nd identical success");
+        assert!(
+            detector.observe(sig, out),
+            "3rd identical success crosses the no-progress threshold"
+        );
+        assert!(detector.is_tripped());
+        // Fires once on the crossing, not on every later repeat.
+        assert!(!detector.observe(sig, out), "no re-fire while still stuck");
+        assert!(detector.is_tripped(), "latched after the crossing");
+    }
+
+    #[test]
+    fn state_change_between_repeats_resets_no_progress() {
+        // A re-read after an edit returns *different* output: the read signature
+        // repeats, but the (signature, output) pair is new each time, so it is
+        // progress, not a loop.
+        let mut detector = NoProgressDetector::new(12, 0.34, 3);
+        let sig = "read_file\u{1f}{\"path\":\"a.rs\"}";
+        assert!(!detector.observe(sig, "version 1"));
+        assert!(!detector.observe(sig, "version 2"));
+        assert!(!detector.observe(sig, "version 3"));
+        assert!(
+            !detector.is_tripped(),
+            "changing output between repeats is forward progress"
+        );
+    }
+
+    #[test]
+    fn varied_signatures_do_not_trip_no_progress() {
+        let mut detector = NoProgressDetector::new(12, 0.34, 3);
+        for i in 0..20 {
+            let sig = format!("read_file\u{1f}{{\"path\":\"f{i}.rs\"}}");
+            assert!(!detector.observe(&sig, "contents"));
+        }
+        assert!(
+            !detector.is_tripped(),
+            "a high-novelty sequence of distinct calls is not a loop"
+        );
+    }
+
+    #[test]
+    fn novelty_decay_trips_on_a_small_cycle_with_varying_output() {
+        // Two signatures alternating, each with a unique output so the stuck-
+        // repeat signal never fires — only the novelty signal can trip here.
+        let mut detector = NoProgressDetector::new(12, 0.34, 100);
+        let mut tripped = false;
+        for i in 0..12 {
+            let sig = if i % 2 == 0 {
+                "tool_a\u{1f}{}"
+            } else {
+                "tool_b\u{1f}{}"
+            };
+            let out = format!("unique output {i}");
+            tripped |= detector.observe(sig, &out);
+        }
+        assert!(
+            tripped && detector.is_tripped(),
+            "cycling two calls over a full window decays novelty below the floor"
+        );
+    }
+
+    #[test]
+    fn no_progress_reset_clears_state() {
+        let mut detector = NoProgressDetector::new(12, 0.34, 2);
+        let sig = "read_file\u{1f}{\"path\":\"a.rs\"}";
+        assert!(!detector.observe(sig, "x"));
+        assert!(detector.observe(sig, "x"), "trips on the repeat");
+        detector.reset();
+        assert!(!detector.is_tripped(), "reset clears the latch");
+        assert!(
+            !detector.observe(sig, "x"),
+            "streak restarts after a turn boundary"
+        );
     }
 }
