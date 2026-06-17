@@ -298,6 +298,16 @@ pub struct HarnessConfig {
     /// Token budget the session keeps the conversation within (compaction trims
     /// older turns to stay under it). Set it to the model's usable context.
     pub context_token_limit: usize,
+    /// Soft start for the per-turn tool-call ceiling. A turn that keeps making
+    /// progress runs past this up to `tool_call_budget_max`; a turn detected as
+    /// making no forward progress stops here. This is the count an ordinary task
+    /// stays well under.
+    pub tool_call_budget: usize,
+    /// Hard cost-contract ceiling: the per-turn tool-call count that always stops
+    /// the loop, regardless of progress, so a turn can never run unbounded. With
+    /// `tool_call_budget_max == tool_call_budget` the ceiling is the flat fixed
+    /// budget; raise it above the soft start to let a productive turn extend.
+    pub tool_call_budget_max: usize,
 }
 
 impl Default for HarnessConfig {
@@ -310,6 +320,8 @@ impl Default for HarnessConfig {
             checks: Vec::new(),
             rules: IndexMap::new(),
             context_token_limit: 24_000,
+            tool_call_budget: 50,
+            tool_call_budget_max: 50,
         }
     }
 }
@@ -651,5 +663,25 @@ mod tests {
     #[test]
     fn resolved_checks_is_empty_without_checks_or_test_command() {
         assert!(HarnessConfig::default().resolved_checks().is_empty());
+    }
+
+    #[test]
+    fn default_tool_call_budget_bounds_are_parity() {
+        // max == soft start by default, so the adaptive ceiling reproduces the
+        // flat fixed-budget stop until an operator raises the max.
+        let harness = HarnessConfig::default();
+        assert_eq!(harness.tool_call_budget, 50);
+        assert_eq!(harness.tool_call_budget_max, harness.tool_call_budget);
+    }
+
+    #[test]
+    fn omitted_budget_fields_fall_back_to_defaults() {
+        // An existing config that predates these fields still loads: the
+        // struct-level serde default fills the missing budget fields.
+        let harness: HarnessConfig =
+            serde_json::from_str(r#"{"context_token_limit": 8000}"#).unwrap();
+        assert_eq!(harness.context_token_limit, 8000);
+        assert_eq!(harness.tool_call_budget, 50);
+        assert_eq!(harness.tool_call_budget_max, 50);
     }
 }

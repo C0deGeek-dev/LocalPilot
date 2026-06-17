@@ -494,6 +494,72 @@ impl NoProgressDetector {
     }
 }
 
+/// The budget controller's decision for whether the next tool call may run this
+/// turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetDecision {
+    /// The next call may run.
+    Continue,
+    /// Stop: the turn is making no forward progress and has reached the soft
+    /// start — the point a stuck turn is no longer worth extending.
+    StopNoProgress,
+    /// Stop: the hard cost-contract ceiling is reached, regardless of progress.
+    StopCostMax,
+}
+
+/// Turns the per-turn tool-call ceiling into a progress-aware bound. A turn that
+/// keeps making progress runs up to `hard_max`; a turn flagged as making no
+/// progress stops at `soft_start`. `hard_max` is always honoured, so a turn can
+/// never loop unbounded even when the progress signal is (wrongly) positive —
+/// the cost contract holds independent of any heuristic's confidence.
+///
+/// With `hard_max == soft_start` the controller stops at exactly the soft start
+/// regardless of progress: the flat fixed-ceiling behaviour. Raising `hard_max`
+/// above the soft start opts a deployment into the adaptive extension.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetController {
+    soft_start: usize,
+    hard_max: usize,
+}
+
+impl BudgetController {
+    /// `hard_max` is clamped up to `soft_start`, so a misconfigured
+    /// `max < start` never stops every turn below its soft start.
+    #[must_use]
+    pub fn new(soft_start: usize, hard_max: usize) -> Self {
+        Self {
+            soft_start,
+            hard_max: hard_max.max(soft_start),
+        }
+    }
+
+    /// Decide whether the next call may run, given how many calls this turn have
+    /// already executed (`calls_used`) and whether the turn is making no forward
+    /// progress. The cost-max ceiling is checked first, so it always wins.
+    #[must_use]
+    pub fn decide(&self, calls_used: usize, no_progress: bool) -> BudgetDecision {
+        if calls_used >= self.hard_max {
+            BudgetDecision::StopCostMax
+        } else if no_progress && calls_used >= self.soft_start {
+            BudgetDecision::StopNoProgress
+        } else {
+            BudgetDecision::Continue
+        }
+    }
+
+    /// The hard cost-contract ceiling (after clamping).
+    #[must_use]
+    pub fn hard_max(&self) -> usize {
+        self.hard_max
+    }
+
+    /// The soft start: the count past which a no-progress turn stops.
+    #[must_use]
+    pub fn soft_start(&self) -> usize {
+        self.soft_start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +827,65 @@ mod tests {
         assert!(
             !detector.observe(sig, "x"),
             "streak restarts after a turn boundary"
+        );
+    }
+
+    #[test]
+    fn budget_continues_below_the_soft_start_even_when_stuck() {
+        let controller = BudgetController::new(50, 200);
+        assert_eq!(controller.decide(0, false), BudgetDecision::Continue);
+        assert_eq!(
+            controller.decide(49, true),
+            BudgetDecision::Continue,
+            "a stuck turn still runs up to the soft start"
+        );
+    }
+
+    #[test]
+    fn budget_stops_a_stuck_turn_at_the_soft_start() {
+        let controller = BudgetController::new(50, 200);
+        assert_eq!(controller.decide(50, true), BudgetDecision::StopNoProgress);
+    }
+
+    #[test]
+    fn budget_lets_a_productive_turn_run_past_the_soft_start_to_the_max() {
+        let controller = BudgetController::new(50, 200);
+        assert_eq!(controller.decide(50, false), BudgetDecision::Continue);
+        assert_eq!(controller.decide(199, false), BudgetDecision::Continue);
+        assert_eq!(controller.decide(200, false), BudgetDecision::StopCostMax);
+    }
+
+    #[test]
+    fn cost_max_always_stops_regardless_of_progress() {
+        let controller = BudgetController::new(50, 200);
+        assert_eq!(controller.decide(200, false), BudgetDecision::StopCostMax);
+        assert_eq!(
+            controller.decide(200, true),
+            BudgetDecision::StopCostMax,
+            "the hard cost ceiling stops even a turn the signal still calls stuck"
+        );
+        assert_eq!(
+            controller.decide(10_000, false),
+            BudgetDecision::StopCostMax
+        );
+    }
+
+    #[test]
+    fn hard_max_is_clamped_up_to_the_soft_start() {
+        let controller = BudgetController::new(50, 10);
+        assert_eq!(controller.hard_max(), 50, "max below start is clamped up");
+        assert_eq!(controller.decide(50, false), BudgetDecision::StopCostMax);
+    }
+
+    #[test]
+    fn equal_bounds_reproduce_the_flat_fixed_ceiling() {
+        let controller = BudgetController::new(50, 50);
+        assert_eq!(controller.decide(49, true), BudgetDecision::Continue);
+        assert_eq!(controller.decide(50, false), BudgetDecision::StopCostMax);
+        assert_eq!(
+            controller.decide(50, true),
+            BudgetDecision::StopCostMax,
+            "with max == start the no-progress path never pre-empts the ceiling"
         );
     }
 }
