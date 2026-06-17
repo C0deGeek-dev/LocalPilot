@@ -13,7 +13,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::ingest::IngestError;
 use crate::pack::PackSource;
 
 /// Default number of hits returned when the caller does not ask for a count.
@@ -93,12 +92,18 @@ impl Tool for KnowledgeSearch {
             .clamp(1, MAX_HITS);
         let root = ctx.workspace.root();
 
-        // Compute a ranked cross-source pack on demand (read-only). A missing
-        // index is normal (project not ingested yet); a present-but-unreadable
-        // index is distinguished so a corrupt store is visible rather than masked
-        // as "no knowledge". Either way the turn never breaks on a knowledge miss.
-        // Exclude the live/in-progress session so the current conversation is not
-        // served back to itself as a "knowledge-base match".
+        // A missing index is normal (project not ingested yet) and is reported as
+        // such before any query runs. A present-but-unreadable index is
+        // distinguished so a corrupt store is visible rather than masked as "no
+        // knowledge". Either way the turn never breaks on a knowledge miss.
+        if !crate::ingest::has_chunk_index(root) {
+            return Ok(ToolOutput::ok(
+                "no indexed project knowledge yet (run `localpilot ingest` to build it)",
+            ));
+        }
+        // Compute a ranked cross-source pack on demand (read-only). Exclude the
+        // live/in-progress session so the current conversation is not served back
+        // to itself as a "knowledge-base match".
         let exclude = crate::ingest::active_session(root);
         let pack = match crate::ingest::compute_pack(
             root,
@@ -107,13 +112,6 @@ impl Tool for KnowledgeSearch {
             exclude.as_deref(),
         ) {
             Ok(pack) => pack,
-            Err(IngestError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(ToolOutput::ok(
-                    "no indexed project knowledge yet (run `localpilot ingest` to build it)",
-                ));
-            }
             Err(_) => {
                 return Ok(ToolOutput::ok(
                     "project knowledge index is unreadable; rebuild it with \
@@ -208,11 +206,11 @@ mod tests {
     #[tokio::test]
     async fn a_corrupt_index_is_reported_distinctly_not_masked_as_empty() {
         let dir = tempfile::tempdir().unwrap();
-        // Present-but-unreadable index: distinct from "not indexed yet".
+        // Present-but-unreadable store: distinct from "not indexed yet".
         std::fs::create_dir_all(dir.path().join(".localmind/ingest")).unwrap();
         std::fs::write(
-            dir.path().join(".localmind/ingest/chunks.json"),
-            "{ this is not valid json",
+            dir.path().join(".localmind/ingest/chunks.sqlite"),
+            "this is not a sqlite database",
         )
         .unwrap();
         let ws = Workspace::new(dir.path()).unwrap();

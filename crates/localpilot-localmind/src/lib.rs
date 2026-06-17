@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod active_skills_tool;
+mod chunk_store;
 mod codegraph;
 mod context_hook;
 mod error;

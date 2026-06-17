@@ -24,6 +24,7 @@ localpilot-harness = { path = "../localpilot-harness" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 

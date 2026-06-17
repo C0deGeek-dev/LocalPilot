@@ -1341,6 +1341,7 @@ dependencies = [
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

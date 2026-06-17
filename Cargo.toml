@@ -52,6 +52,10 @@ insta = "=1.47.2"
 parking_lot = "=0.12.3"
 proptest = "=1.5.0"
 regex = "=1.11.3"
+# `bundled` compiles SQLite (with FTS5) from the amalgamation, so the indexed
+# ingest chunk store needs no system SQLite and loads no runtime extension. Same
+# pin as the LocalMind store this reuses the pattern from.
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
 tempfile = "=3.14.0"
 reqwest = { version = "=0.12.11", features = ["json", "stream", "rustls-tls"], default-features = false }
 schemars = "=0.8.21"

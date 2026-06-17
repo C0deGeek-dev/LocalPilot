@@ -20,6 +20,7 @@ use localpilot_config::{redact, IngestConfig};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::chunk_store::ChunkStore;
 use crate::pack::{allocate, reserves, PackCandidate, PackEntry, PackSource};
 
 const INGEST_SCHEMA_VERSION: u32 = 1;
@@ -64,6 +65,11 @@ pub enum IngestError {
     TomlSerialize {
         path: PathBuf,
         source: Box<toml::ser::Error>,
+    },
+    #[error("chunk store error at {path}: {source}")]
+    Sqlite {
+        path: PathBuf,
+        source: rusqlite::Error,
     },
     #[error("localmind review queue: {0}")]
     Review(String),
@@ -353,16 +359,18 @@ pub fn run(
     let root = canonical_root(project_root)?;
     let ingest_dir = ensure_ingest_dir(&root)?;
     let manifest = preview(&root, config)?;
-    let previous_chunks = if mode == RunMode::Refresh {
-        read_json::<Vec<ChunkRecord>>(&ingest_dir.join(CHUNKS_FILE)).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let previous_hashes: BTreeSet<String> = previous_chunks
+    let store = ChunkStore::open(&ingest_dir)?;
+    // A full run rebuilds from scratch; a refresh updates incrementally,
+    // reusing unchanged files and tombstoning what changed or disappeared.
+    if mode == RunMode::Full {
+        store.clear()?;
+    }
+    let candidate_paths: BTreeSet<String> = manifest
+        .entries
         .iter()
-        .map(|chunk| format!("{}:{}", chunk.path, chunk.content_hash))
+        .filter(|entry| entry.status == CandidateStatus::Candidate)
+        .map(|entry| entry.path.clone())
         .collect();
-    let mut chunks = Vec::new();
     let started = Instant::now();
     let started_unix = unix_now();
     let mut job = IngestJob {
@@ -397,25 +405,21 @@ pub fn run(
             job.failed_files = job.failed_files.saturating_add(1);
             continue;
         };
-        let key = format!("{}:{hash}", entry.path);
-        if mode == RunMode::Refresh && previous_hashes.contains(&key) {
-            chunks.extend(
-                previous_chunks
-                    .iter()
-                    .filter(|chunk| chunk.path == entry.path && chunk.content_hash == *hash)
-                    .cloned()
-                    .map(|mut chunk| {
-                        chunk.stale = false;
-                        chunk
-                    }),
-            );
+        // Unchanged file on refresh: its rows are already fresh in the store, so
+        // it is reused untouched (no re-read, no re-chunk).
+        if mode == RunMode::Refresh && store.has_fresh(&entry.path, hash)? {
             job.completed_files = job.completed_files.saturating_add(1);
             continue;
         }
         let absolute = root.join(platform_path(&entry.path));
         match chunk_file(&absolute, &entry.path, hash) {
-            Ok(mut file_chunks) => {
-                chunks.append(&mut file_chunks);
+            Ok(file_chunks) => {
+                // Changed file: tombstone the path's prior fresh rows (kept,
+                // flagged, pointed at the new hash) before writing the new ones.
+                if mode == RunMode::Refresh {
+                    store.mark_path_changed(&entry.path, hash)?;
+                }
+                store.upsert_chunks(&file_chunks)?;
                 job.completed_files = job.completed_files.saturating_add(1);
             }
             Err(_) => {
@@ -425,30 +429,10 @@ pub fn run(
         job.updated_unix = unix_now();
         write_json(&ingest_dir.join(JOB_FILE), &job)?;
     }
+    // Files that vanished since the last run: their fresh rows become stale with
+    // no successor (kept as tombstones, like the old JSON behaviour).
     if mode == RunMode::Refresh {
-        let current_keys: BTreeSet<String> = chunks
-            .iter()
-            .map(|chunk| format!("{}:{}", chunk.path, chunk.content_hash))
-            .collect();
-        let latest_hash_by_path: std::collections::BTreeMap<String, String> = manifest
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .content_hash
-                    .as_ref()
-                    .map(|hash| (entry.path.clone(), hash.clone()))
-            })
-            .collect();
-        for mut chunk in previous_chunks {
-            let key = format!("{}:{}", chunk.path, chunk.content_hash);
-            if current_keys.contains(&key) {
-                continue;
-            }
-            chunk.stale = true;
-            chunk.superseded_by = latest_hash_by_path.get(&chunk.path).cloned();
-            chunks.push(chunk);
-        }
+        store.stale_removed_paths(&candidate_paths)?;
     }
 
     if job.status == JobStatus::Running {
@@ -459,16 +443,16 @@ pub fn run(
         };
     }
     job.updated_unix = unix_now();
-    let review = build_review_items(&manifest, &chunks);
+    let chunk_count = store.count()?;
+    let review = build_review_items(&manifest, chunk_count);
     write_json(&ingest_dir.join(MANIFEST_FILE), &manifest)?;
-    write_json(&ingest_dir.join(CHUNKS_FILE), &chunks)?;
     write_json(&ingest_dir.join(REVIEW_FILE), &review)?;
     write_json(&ingest_dir.join(JOB_FILE), &job)?;
 
     Ok(RunSummary {
         job,
         manifest,
-        chunks_written: chunks.len(),
+        chunks_written: chunk_count,
     })
 }
 
@@ -538,11 +522,15 @@ pub fn planned_run_mode(job: Option<&IngestJob>, has_index: bool) -> Option<RunM
 }
 
 /// Whether a persisted chunk index already exists for the project, so an
-/// interrupted run can Refresh-resume rather than rebuild from scratch.
+/// interrupted run can Refresh-resume rather than rebuild from scratch. True for
+/// the SQLite store or a not-yet-migrated legacy `chunks.json`.
 #[must_use]
 pub fn has_chunk_index(project_root: &Path) -> bool {
     canonical_root(project_root)
-        .map(|root| root.join(INGEST_DIR).join(CHUNKS_FILE).exists())
+        .map(|root| {
+            let ingest_dir = root.join(INGEST_DIR);
+            crate::chunk_store::exists(&ingest_dir) || ingest_dir.join(CHUNKS_FILE).exists()
+        })
         .unwrap_or(false)
 }
 
@@ -592,15 +580,11 @@ pub fn skipped(project_root: &Path) -> Result<Vec<ManifestEntry>, IngestError> {
 pub fn forget(project_root: &Path, target: &str) -> Result<usize, IngestError> {
     let root = canonical_root(project_root)?;
     let ingest_dir = root.join(INGEST_DIR);
-    let chunks_path = ingest_dir.join(CHUNKS_FILE);
     let review_path = ingest_dir.join(REVIEW_FILE);
     let mut removed = 0;
-    if chunks_path.exists() {
-        let mut chunks = read_json::<Vec<ChunkRecord>>(&chunks_path)?;
-        let before = chunks.len();
-        chunks.retain(|chunk| chunk.path != target && chunk.id != target);
-        removed += before.saturating_sub(chunks.len());
-        write_json(&chunks_path, &chunks)?;
+    if crate::chunk_store::exists(&ingest_dir) {
+        let store = ChunkStore::open(&ingest_dir)?;
+        removed += store.forget(target)?;
     }
     if review_path.exists() {
         let mut items = read_json::<Vec<IngestReviewItem>>(&review_path)?;
@@ -638,22 +622,26 @@ pub fn exclude_path(project_root: &Path, path: &Path) -> Result<String, IngestEr
 
 /// Search deterministic chunk records.
 ///
+/// The FTS index narrows to the candidate rows for the query; the existing
+/// term-count + path-name-boost score is then recomputed over just those rows,
+/// so the ranking is unchanged while the whole index is never loaded into RAM.
+///
 /// # Errors
-/// Returns [`IngestError`] when chunks cannot be read.
+/// Returns [`IngestError`] when the chunk store cannot be opened or queried.
 pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, IngestError> {
     let root = canonical_root(project_root)?;
-    let chunks_path = root.join(INGEST_DIR).join(CHUNKS_FILE);
-    let chunks = read_json::<Vec<ChunkRecord>>(&chunks_path)?;
+    let ingest_dir = root.join(INGEST_DIR);
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|term| term.to_ascii_lowercase())
         .filter(|term| !term.is_empty())
         .collect();
-    if terms.is_empty() {
+    if terms.is_empty() || !crate::chunk_store::exists(&ingest_dir) {
         return Ok(Vec::new());
     }
+    let store = ChunkStore::open(&ingest_dir)?;
     let mut hits = Vec::new();
-    for chunk in chunks {
+    for chunk in store.search(&terms)? {
         let text = chunk.text.to_ascii_lowercase();
         let path = chunk.path.to_ascii_lowercase();
         let mut score = 0_u64;
@@ -719,14 +707,13 @@ pub fn compute_pack(
     let mut candidates = Vec::new();
     let mut hit_by_id: BTreeMap<String, KnowledgeHit> = BTreeMap::new();
     for hit in search(&root, task)? {
-        let chunk = find_chunk(&ingest_dir, &hit.chunk_id)?;
         let file_match = task_names_path(&task_lower, &hit.path);
         candidates.push(PackCandidate {
             source: PackSource::Ingest,
             id: hit.chunk_id.clone(),
             path: Some(hit.path.clone()),
             score: hit.score,
-            token_estimate: chunk.token_estimate,
+            token_estimate: hit.token_estimate,
             snippet: hit.snippet.clone(),
             stale: hit.stale,
             recency: 0,
@@ -1375,8 +1362,11 @@ fn push_chunk(
 ) {
     let redacted = redact::redact(text);
     let chunk_index = chunks.len() as u32;
+    // The id is path-qualified so two files with identical content (and thus the
+    // same content hash) get distinct ids — the chunk store keys rows by id.
+    let path_hash = fnv_hash_hex(path.as_bytes());
     chunks.push(ChunkRecord {
-        id: format!("chunk-{content_hash}-{chunk_index}"),
+        id: format!("chunk-{path_hash}-{content_hash}-{chunk_index}"),
         path: path.to_string(),
         chunk_index,
         start_line: span.start_line,
@@ -1395,17 +1385,16 @@ fn push_chunk(
     });
 }
 
-fn build_review_items(manifest: &PreviewManifest, chunks: &[ChunkRecord]) -> Vec<IngestReviewItem> {
+fn build_review_items(manifest: &PreviewManifest, chunk_count: usize) -> Vec<IngestReviewItem> {
     let mut items = Vec::new();
-    if !chunks.is_empty() {
+    if chunk_count > 0 {
         items.push(IngestReviewItem {
             id: format!("summary-{}", fnv_hash_hex(manifest.project_root.as_bytes())),
             kind: "summary".to_string(),
             title: "Project ingestion summary".to_string(),
             body: redact::redact(&format!(
-                "Indexed {} file(s) into {} redacted chunk(s).",
+                "Indexed {} file(s) into {chunk_count} redacted chunk(s).",
                 manifest.estimates.candidate_files,
-                chunks.len()
             )),
             source_path: None,
             content_hash: Some(fnv_hash_hex(manifest.project_root.as_bytes())),
@@ -1500,13 +1489,6 @@ fn tooling_review_item(manifest: &PreviewManifest) -> Option<IngestReviewItem> {
         content_hash: Some(fnv_hash_hex(labels.as_bytes())),
         stale: false,
     })
-}
-
-fn find_chunk(ingest_dir: &Path, id: &str) -> Result<ChunkRecord, IngestError> {
-    read_json::<Vec<ChunkRecord>>(&ingest_dir.join(CHUNKS_FILE))?
-        .into_iter()
-        .find(|chunk| chunk.id == id)
-        .ok_or_else(|| IngestError::Review(format!("chunk {id} not found")))
 }
 
 fn summarize_snippet(text: &str, terms: &[String]) -> String {
@@ -1758,6 +1740,59 @@ mod tests {
         }
     }
 
+    /// Every chunk currently in the project's store, for assertions.
+    fn stored_chunks(root: &Path) -> Vec<ChunkRecord> {
+        let ingest_dir = canonical_root(root).unwrap().join(INGEST_DIR);
+        crate::chunk_store::ChunkStore::open(&ingest_dir)
+            .unwrap()
+            .all_chunks()
+            .unwrap()
+    }
+
+    /// Seed chunks directly into the store, as a prior run would have persisted.
+    fn seed_chunks(root: &Path, chunks: &[ChunkRecord]) {
+        let ingest_dir = ensure_ingest_dir(&canonical_root(root).unwrap()).unwrap();
+        crate::chunk_store::ChunkStore::open(&ingest_dir)
+            .unwrap()
+            .upsert_chunks(chunks)
+            .unwrap();
+    }
+
+    /// The pre-store scoring: a full linear scan over every chunk with the exact
+    /// term-count + path-name-boost formula and tie-break. The FTS-backed
+    /// `search` must reproduce this ranking for word queries.
+    fn linear_scan(chunks: &[ChunkRecord], query: &str) -> Vec<(String, u64)> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|term| term.to_ascii_lowercase())
+            .filter(|term| !term.is_empty())
+            .collect();
+        let mut hits: Vec<(String, u64, String)> = Vec::new();
+        for chunk in chunks {
+            let text = chunk.text.to_ascii_lowercase();
+            let path = chunk.path.to_ascii_lowercase();
+            let mut score = 0_u64;
+            for term in &terms {
+                score = score.saturating_add(text.matches(term.as_str()).count() as u64);
+                if path.contains(term.as_str()) {
+                    score = score.saturating_add(3);
+                }
+            }
+            if score == 0 {
+                continue;
+            }
+            hits.push((chunk.path.clone(), score, chunk.id.clone()));
+        }
+        hits.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        hits.into_iter()
+            .map(|(path, score, _)| (path, score))
+            .collect()
+    }
+
     #[test]
     fn path_normalization_rejects_escapes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1917,9 +1952,12 @@ mod tests {
         let summary = run(dir.path(), &config(), RunMode::Full).unwrap();
 
         assert_eq!(summary.job.status, JobStatus::Completed);
-        let chunks = fs::read_to_string(dir.path().join(INGEST_DIR).join(CHUNKS_FILE)).unwrap();
-        assert!(!chunks.contains("abcdefghijklmnop"));
-        assert!(chunks.contains(redact::REDACTED));
+        let text = stored_chunks(dir.path())
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<String>();
+        assert!(!text.contains("abcdefghijklmnop"));
+        assert!(text.contains(redact::REDACTED));
 
         rebuild(dir.path()).unwrap();
         assert!(!dir.path().join(INGEST_DIR).exists());
@@ -2018,20 +2056,19 @@ mod tests {
 
         // Overwrite the persisted chunk's text with a sentinel the source file
         // does not contain, keeping the content_hash that matches the file. A
-        // reuse (keyed on path:content_hash) copies this record verbatim; a
-        // re-read would replace the sentinel with the file's real content.
-        let chunks_path = dir.path().join(INGEST_DIR).join(CHUNKS_FILE);
-        let mut chunks = read_json::<Vec<ChunkRecord>>(&chunks_path).unwrap();
+        // reuse (keyed on path:content_hash) leaves this row untouched; a re-read
+        // would replace the sentinel with the file's real content.
+        let mut chunks = stored_chunks(dir.path());
         let sentinel = "SENTINEL-REUSED-NOT-REREAD";
         for chunk in &mut chunks {
             chunk.text = sentinel.to_string();
         }
-        write_json(&chunks_path, &chunks).unwrap();
+        seed_chunks(dir.path(), &chunks);
 
         // Refresh without touching the file.
         run(dir.path(), &config(), RunMode::Refresh).unwrap();
 
-        let refreshed = read_json::<Vec<ChunkRecord>>(&chunks_path).unwrap();
+        let refreshed = stored_chunks(dir.path());
         assert!(
             refreshed
                 .iter()
@@ -2054,25 +2091,27 @@ mod tests {
         let ingest_dir = ensure_ingest_dir(&root).unwrap();
         let a_hash = fnv_hash_hex(b"alpha\n");
         let sentinel = "SENTINEL-A-ALREADY-DONE";
-        let seeded = vec![ChunkRecord {
-            id: format!("chunk-{a_hash}-0"),
-            path: "a.md".to_string(),
-            chunk_index: 0,
-            start_line: 1,
-            end_line: 1,
-            start_byte: 0,
-            end_byte: 6,
-            content_hash: a_hash,
-            text: sentinel.to_string(),
-            token_estimate: 1,
-            stale: false,
-            summary: String::new(),
-            redaction_status: "redacted".to_string(),
-            original_bytes: 6,
-            preview_bytes: sentinel.len() as u64,
-            superseded_by: None,
-        }];
-        write_json(&ingest_dir.join(CHUNKS_FILE), &seeded).unwrap();
+        seed_chunks(
+            dir.path(),
+            &[ChunkRecord {
+                id: format!("chunk-{a_hash}-0"),
+                path: "a.md".to_string(),
+                chunk_index: 0,
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 6,
+                content_hash: a_hash,
+                text: sentinel.to_string(),
+                token_estimate: 1,
+                stale: false,
+                summary: String::new(),
+                redaction_status: "redacted".to_string(),
+                original_bytes: 6,
+                preview_bytes: sentinel.len() as u64,
+                superseded_by: None,
+            }],
+        );
         write_json(&ingest_dir.join(JOB_FILE), &seed_job(JobStatus::Paused, 1)).unwrap();
 
         // The host trigger resolves this incomplete-with-index state to Refresh.
@@ -2090,7 +2129,7 @@ mod tests {
         let summary = run(dir.path(), &config(), RunMode::Refresh).unwrap();
         assert_eq!(summary.job.status, JobStatus::Completed);
         assert!(summary.job.completed_files >= 1);
-        let chunks = read_json::<Vec<ChunkRecord>>(&ingest_dir.join(CHUNKS_FILE)).unwrap();
+        let chunks = stored_chunks(dir.path());
         assert!(
             chunks
                 .iter()
@@ -2335,8 +2374,7 @@ mod tests {
         fs::write(dir.path().join("README.md"), "alpha\n").unwrap();
         fs::write(dir.path().join("notes.txt"), "stable\n").unwrap();
         run(dir.path(), &config(), RunMode::Full).unwrap();
-        let first =
-            read_json::<Vec<ChunkRecord>>(&dir.path().join(INGEST_DIR).join(CHUNKS_FILE)).unwrap();
+        let first = stored_chunks(dir.path());
         let stable_hash = first
             .iter()
             .find(|chunk| chunk.path == "notes.txt")
@@ -2346,8 +2384,7 @@ mod tests {
 
         fs::write(dir.path().join("README.md"), "beta\n").unwrap();
         let summary = run(dir.path(), &config(), RunMode::Refresh).unwrap();
-        let refreshed =
-            read_json::<Vec<ChunkRecord>>(&dir.path().join(INGEST_DIR).join(CHUNKS_FILE)).unwrap();
+        let refreshed = stored_chunks(dir.path());
 
         assert_eq!(summary.job.status, JobStatus::Completed);
         assert!(refreshed
@@ -2356,6 +2393,101 @@ mod tests {
         assert!(refreshed
             .iter()
             .any(|chunk| chunk.path == "README.md" && chunk.text.contains("beta")));
+    }
+
+    #[test]
+    fn fts_search_matches_the_linear_scan_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser parser guide\n").unwrap();
+        fs::write(
+            dir.path().join("notes.txt"),
+            "deployment notes about the parser\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("parser.md"), "an overview document\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        let all = stored_chunks(dir.path());
+        for query in ["parser", "deployment", "guide parser", "missing"] {
+            let new_hits: Vec<(String, u64)> = search(dir.path(), query)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.path, hit.score))
+                .collect();
+            assert_eq!(
+                new_hits,
+                linear_scan(&all, query),
+                "FTS-backed search must match the linear scan for {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_updates_only_changed_paths_and_tombstones_removed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("keep.md"), "unchanged keep\n").unwrap();
+        fs::write(dir.path().join("change.md"), "first version\n").unwrap();
+        fs::write(dir.path().join("drop.md"), "to be deleted\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // Tag the unchanged file's row with a sentinel so we can prove the refresh
+        // never rewrites it.
+        let mut chunks = stored_chunks(dir.path());
+        let sentinel = "SENTINEL-UNCHANGED-ROW";
+        for chunk in &mut chunks {
+            if chunk.path == "keep.md" {
+                chunk.text = sentinel.to_string();
+            }
+        }
+        seed_chunks(dir.path(), &chunks);
+
+        fs::write(dir.path().join("change.md"), "second version\n").unwrap();
+        fs::remove_file(dir.path().join("drop.md")).unwrap();
+        run(dir.path(), &config(), RunMode::Refresh).unwrap();
+
+        let after = stored_chunks(dir.path());
+        // Unchanged path: its row is untouched (sentinel intact, still fresh).
+        assert!(
+            after
+                .iter()
+                .any(|c| c.path == "keep.md" && c.text == sentinel && !c.stale),
+            "an unchanged file's rows must not be rewritten"
+        );
+        // Changed path: a fresh row with the new content, old row kept as a stale
+        // tombstone pointing at the new hash.
+        assert!(after
+            .iter()
+            .any(|c| c.path == "change.md" && c.text.contains("second") && !c.stale));
+        assert!(after.iter().any(|c| c.path == "change.md"
+            && c.text.contains("first")
+            && c.stale
+            && c.superseded_by.is_some()));
+        // Removed path: rows tombstoned with no successor.
+        assert!(after
+            .iter()
+            .any(|c| c.path == "drop.md" && c.stale && c.superseded_by.is_none()));
+    }
+
+    #[test]
+    fn search_retrieves_only_matching_rows_not_the_whole_index() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..50 {
+            fs::write(
+                dir.path().join(format!("noise{index}.md")),
+                format!("filler content number {index}\n"),
+            )
+            .unwrap();
+        }
+        fs::write(dir.path().join("target.md"), "a unique zebra marker\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // The whole index is large…
+        assert!(stored_chunks(dir.path()).len() >= 51);
+        // …but a query materializes only the rows the FTS index matched, not all
+        // of them — the bounded-memory guarantee.
+        let hits = search(dir.path(), "zebra").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "target.md");
     }
 
     #[test]

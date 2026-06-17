@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0025: Ingested Chunks Live In An Indexed SQLite Store
+
+Status: accepted. Builds on ADR-0013 (folder ingestion uses disposable
+project-local artifacts) and ADR-0017 (retrieval context is a request-time
+projection).
+
+Folder ingestion persisted every derived chunk in a single `chunks.json` under
+`.localmind/ingest/`. Every search and every refresh deserialized the whole file
+into memory and scanned it linearly, so a large repo paid a full-RAM load and an
+O(n) scan on each query — the opposite of the "lean on modest machines" goal.
+
+Derived chunks now live in an embedded SQLite store at
+`.localmind/ingest/chunks.sqlite` with an FTS5 virtual table, versioned by a
+`PRAGMA user_version` stepper — the same pattern the accepted-memory store uses.
+Search narrows to the matching rows through the FTS index (bounded by a
+relevance-ordered limit), then recomputes the existing term-count +
+path-name-boost score over just those rows, so ranking is unchanged while the
+whole index is never loaded. Refresh updates only the paths that changed:
+unchanged files are reused by `path:content_hash`, a changed file's prior rows
+are kept as stale tombstones pointing at the new hash, and a vanished file's rows
+are tombstoned with no successor. An existing `chunks.json` migrates into the
+database on first open and is then removed; `ingest rebuild` recreates the store
+from source. Only the large chunk index moved — the small manifest/job/review/
+last-pack files stay JSON.
+
+Reason:
+
+- the persisted index exists to keep retrieval lean on modest machines; a
+  full-RAM load plus linear scan on every query defeats that, and an indexed
+  store fixes it without changing the chunk model or the ranking contract
+- SQLite + FTS5 is already in the dependency tree and proven by the
+  accepted-memory store, so the chunk store reuses a known-good, offline,
+  extension-free pattern (rusqlite `bundled`) rather than inventing storage
+- the store is derived and disposable (ADR-0013): migration is one-way and
+  rebuild is always a valid fallback, so the change carries no durable-data risk
+
 ## ADR-0024: Session Store Has A Conservative Default Retention
 
 Status: accepted. Builds on ADR-0011 (store convergence: the execution record)
