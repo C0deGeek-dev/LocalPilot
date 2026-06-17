@@ -277,6 +277,31 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
         .collect())
 }
 
+/// The accepted memories that always-on context injection draws on for a prompt,
+/// as inspector records (id, retrieval score, `memory` layer). Empty when memory
+/// injection is disabled or the project has no memory store — never creates
+/// project files. This reports what was *used*; it does not change what is
+/// injected.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if an existing memory index cannot be read.
+pub fn context_used_memories(
+    project_root: &Path,
+    prompt: &str,
+) -> Result<Vec<localpilot_store::MemoryUsed>, LearningError> {
+    if !memory_injection_enabled(project_root) {
+        return Ok(Vec::new());
+    }
+    Ok(search_readonly(project_root, prompt)?
+        .into_iter()
+        .map(|hit| localpilot_store::MemoryUsed {
+            id: hit.memory_id,
+            score: hit.score,
+            layer: "memory".to_string(),
+        })
+        .collect())
+}
+
 /// List accepted LocalMind memory.
 ///
 /// # Errors

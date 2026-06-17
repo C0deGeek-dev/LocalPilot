@@ -1014,6 +1014,15 @@ impl SessionRuntime {
         // rather than riding the wire as a resent user message. Its token cost is
         // reserved from the compaction budget so the request still fits the limit.
         let retrieval_text = self.hooks.context_for(user_input).join("\n");
+        // Record which memories the context hooks used for this turn, for the
+        // local inspector. Pure observation: it never changes the injected
+        // context, and an empty set records nothing.
+        let memories_used = self.hooks.memories_used(user_input);
+        if !memories_used.is_empty() {
+            self.record_event(SessionEventKind::MemoriesUsed {
+                memories: memories_used,
+            });
+        }
         let turn_context = (!retrieval_text.is_empty())
             .then(|| Message::new(Role::System, vec![ContentBlock::text(retrieval_text)]));
         let context_reserve = turn_context

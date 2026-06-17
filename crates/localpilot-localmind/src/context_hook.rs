@@ -75,6 +75,12 @@ impl ContextHook for LocalMindContext {
             Some(blocks.join("\n"))
         }
     }
+
+    fn memories_used(&self, prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
+        // The accepted memories the always-on injection draws on this turn — the
+        // "memories used" the inspector renders. Best-effort and read-only.
+        crate::ops::context_used_memories(&self.root, prompt).unwrap_or_default()
+    }
 }
 
 /// Truncate `text` to at most `cap` characters, adding a marker when it was cut.
@@ -185,6 +191,51 @@ mod tests {
             .context_for("a prompt unrelated to the primer text")
             .expect("the accepted primer is always-on context");
         assert!(context.contains("Repository primer:"));
+    }
+
+    #[test]
+    fn memories_used_reports_a_relevant_accepted_memory() {
+        use localmind_core::{
+            Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
+            MemoryScope, MemoryStatus,
+        };
+        use localmind_store::MemoryPersistence;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let entry = MemoryEntry {
+            id: MemoryEntryId::new("mem-redact"),
+            scope: MemoryScope::Project,
+            body: "always redact secrets before persisting a transcript".to_string(),
+            category: LessonCategory::SecurityWarning,
+            confidence: Confidence::new(0.9).unwrap(),
+            source_session: None,
+            evidence: vec![EvidenceRef::new(EvidenceKind::ManualNote, "seeded")],
+            tags: Vec::new(),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+        };
+        MemoryPersistence::open_project(root)
+            .unwrap()
+            .persist_memory_entry(&entry)
+            .unwrap();
+
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(
+            used.iter()
+                .any(|m| m.id == "mem-redact" && m.layer == "memory"),
+            "the relevant accepted memory must be reported as used: {used:?}"
+        );
+
+        // An unrelated prompt surfaces nothing.
+        assert!(hook.memories_used("audio playback latency").is_empty());
     }
 
     #[test]

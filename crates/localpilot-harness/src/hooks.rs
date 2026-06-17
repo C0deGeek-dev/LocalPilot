@@ -69,6 +69,13 @@ pub trait ContextHook: Send + Sync {
     fn name(&self) -> &str;
     /// Optional system context for a turn that starts with `prompt`.
     fn context_for(&self, prompt: &str) -> Option<String>;
+    /// The memories this hook contributed for `prompt`, for the "memories used
+    /// this turn" inspector. Default none; a hook that retrieves memory
+    /// overrides it. Reporting these never changes what is injected — it only
+    /// records what was used.
+    fn memories_used(&self, _prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
+        Vec::new()
+    }
 }
 
 /// The registered hooks for one session runtime.
@@ -108,6 +115,15 @@ impl HookFabric {
         self.context_hooks
             .iter()
             .filter_map(|hook| hook.context_for(prompt))
+            .collect()
+    }
+
+    /// Collect the memories every context hook used for a turn, for the
+    /// inspector. Best-effort and side-effect-free.
+    pub(crate) fn memories_used(&self, prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
+        self.context_hooks
+            .iter()
+            .flat_map(|hook| hook.memories_used(prompt))
             .collect()
     }
 
