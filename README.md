@@ -124,6 +124,8 @@ the runtime in-process or driving it headless over RPC/ACP.
 | `harness intake \| plan \| feature \| resume \| wait-resume` | Rule-enforced mode: idea → `brief.md` → `PROGRESS.md` → worked, committed steps; pause/resume on quota |
 | `memory` | Inspect/search/manage local project memory |
 | `learning` | LocalMind loop: `closeout`, `review`, `promote`, `search`, `skills`, `audit` |
+| `ingest` | Project-local folder ingestion: `preview`, run, `refresh`, `review`, and clean up |
+| `knowledge` | Search and package project-local ingested knowledge |
 | `export` | Export a redacted session bundle |
 
 ### Chat controls
@@ -163,6 +165,7 @@ crates/
   localpilot-mcp/        Model Context Protocol client and stdio transport
   localpilot-skills/     Skill manifests and drafts (alpha bridge surface)
   localpilot-recovery/   Bad-output detection and recovery ladder
+  localpilot-verify/     Deterministic verification of tool calls against contracts
   localpilot-quota/      Quota window tracking and wait/resume policy
   localpilot-rpc/        Headless drive: stdio RPC protocol and ACP adapter
   localpilot-localmind/  Adapter to the bundled LocalMind learning engine

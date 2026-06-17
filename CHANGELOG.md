@@ -3,6 +3,14 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## 2026-06-17 - Documentation
+
+- README now documents the `ingest` and `knowledge` commands and the
+  `localpilot-verify` crate, which had shipped without a README entry.
+- Added an in-repo wiki source (`docs/wiki/`) one-way CI-synced to the GitHub
+  Wiki, a `docs/README.md` doc-ownership index, and an offline link check over
+  the docs.
+
 ## 0.3.0-beta.2 - 2026-06-15
 
 Coordinated LocalX beta release. The learning loop now closes end to end.
