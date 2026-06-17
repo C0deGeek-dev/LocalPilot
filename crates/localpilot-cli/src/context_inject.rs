@@ -40,19 +40,39 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
     // Keep the code graph current while the workspace is quiet. Bounded so a
     // large edit burst cannot stall shutdown; leftovers wait for the next
     // session close, and an up-to-date graph is a cheap no-op.
-    match localpilot_localmind::codegraph_reindex(cwd, CODEGRAPH_BATCH_LIMIT) {
-        Ok(summary) if summary.reindexed + summary.pruned > 0 => eprintln!(
-            "learning: code graph updated — {} file(s) reindexed, {} pruned{}",
-            summary.reindexed,
-            summary.pruned,
-            if summary.remaining > 0 {
-                ", more queued for next session"
-            } else {
-                ""
+    let graph_current = match localpilot_localmind::codegraph_reindex(cwd, CODEGRAPH_BATCH_LIMIT) {
+        Ok(summary) => {
+            if summary.reindexed + summary.pruned > 0 {
+                eprintln!(
+                    "learning: code graph updated — {} file(s) reindexed, {} pruned{}",
+                    summary.reindexed,
+                    summary.pruned,
+                    if summary.remaining > 0 {
+                        ", more queued for next session"
+                    } else {
+                        ""
+                    }
+                );
             }
-        ),
-        Ok(_) => {}
-        Err(error) => eprintln!("learning: code graph reindex skipped ({error})"),
+            // Only distil once the graph is fully current, so the primer reflects
+            // the whole repo rather than a partial batch.
+            summary.remaining == 0
+        }
+        Err(error) => {
+            eprintln!("learning: code graph reindex skipped ({error})");
+            false
+        }
+    };
+
+    // With a current graph, refresh the cold-start primer: distillation enqueues
+    // a review candidate (gated by the project's learning flag); it is injected
+    // only once a reviewer accepts it. Re-uses this existing close-out trigger.
+    if graph_current {
+        match localpilot_localmind::distill_primer_into_review(cwd) {
+            Ok(Some(_)) => eprintln!("learning: repo primer enqueued for review"),
+            Ok(None) => {}
+            Err(error) => eprintln!("learning: primer distillation skipped ({error})"),
+        }
     }
 }
 

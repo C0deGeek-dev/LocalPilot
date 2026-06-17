@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0026: The Cold-Start Repo Primer Is A Review-Gated, Always-On Context Block
+
+Status: accepted. Builds on ADR-0013 (disposable project-local artifacts) and the
+LocalMind engine decision D-LM-0009 (deterministic, review-gated, supersedable
+repo primer).
+
+A session starting on an unfamiliar repository should orient without spending its
+context window reading files. The engine distils a deterministic **repo primer**
+from the code-graph architecture overview (languages, packages, entry points,
+call hotspots) — no model in the path. The host's role is *when* and *whether* to
+surface it:
+
+- **Distillation** runs at session close-out, right after the code-graph reindex,
+  once the graph is fully current (`remaining == 0`). It reuses that existing
+  trigger — no new watcher — and is gated by the project's learning flag. It only
+  enqueues a review candidate; it never writes accepted memory.
+- **Injection** is the pre-turn context hook. The *accepted* primer (an active
+  `Project` memory whose id carries the `repo-primer-` marker) is contributed as
+  an always-on, token-bounded block — orientation, not prompt-relevance — ahead of
+  the relevance-filtered memory and any pushed ingest chunks. An unaccepted or
+  stale (superseded) primer is not active, so it is never injected.
+- **Staleness** rides the engine's content hash over the overview shape: a drifted
+  repo distils a primer with a new id the reviewer accepts as a supersede of the
+  prior one, retiring it.
+
+Reason: the cold-start win is an off-context, queryable index plus a small
+reviewed orientation — not a larger prompt. Keeping the primer review-gated and
+honestly heuristic (confidence < 1.0, `repo@commit` provenance) means the agent is
+never handed unverified "truth," and the host adds no graph logic of its own
+(it discovers, gates, drives, and injects).
+
 ## ADR-0025: Ingested Chunks Live In An Indexed SQLite Store
 
 Status: accepted. Builds on ADR-0013 (folder ingestion uses disposable

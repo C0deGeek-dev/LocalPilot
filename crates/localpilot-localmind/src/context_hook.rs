@@ -19,6 +19,10 @@ use localpilot_harness::{ContextHook, SessionRuntime};
 /// regardless of how large the memory store grows.
 const ACCEPTED_MEMORY_CHAR_CAP: usize = 1_200;
 
+/// Cap on the always-on repo-primer block, so session-start orientation stays
+/// a small, bounded token cost.
+const PRIMER_CHAR_CAP: usize = 1_000;
+
 /// LocalMind retrieval as a pre-turn context hook. Best-effort — a miss or error
 /// contributes nothing and never fails the turn.
 pub struct LocalMindContext {
@@ -45,6 +49,13 @@ impl ContextHook for LocalMindContext {
     }
 
     fn context_for(&self, prompt: &str) -> Option<String> {
+        // The accepted cold-start primer is always-on orientation (not prompt
+        // relevance), injected first and token-bounded. An unaccepted or stale
+        // primer is not active, so it is never returned here.
+        let primer = crate::primer::accepted_primer(&self.root)
+            .ok()
+            .flatten()
+            .map(|text| format!("Repository primer:\n{}", bound(&text, PRIMER_CHAR_CAP)));
         let accepted = crate::ops::context_for(&self.root, prompt)
             .ok()
             .flatten()
@@ -57,11 +68,11 @@ impl ContextHook for LocalMindContext {
             }
             _ => None,
         };
-        match (accepted, ingested) {
-            (Some(accepted), Some(ingested)) => Some(format!("{accepted}\n{ingested}")),
-            (Some(accepted), None) => Some(accepted),
-            (None, Some(ingested)) => Some(ingested),
-            (None, None) => None,
+        let blocks: Vec<String> = [primer, accepted, ingested].into_iter().flatten().collect();
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks.join("\n"))
         }
     }
 }
@@ -128,6 +139,52 @@ mod tests {
             context.contains("src/lib.rs"),
             "expected the ingested file in the pushed context, got: {context}"
         );
+    }
+
+    #[test]
+    fn an_accepted_primer_is_injected_into_session_context() {
+        use localmind_core::{ReviewAction, ReviewDecision, ReviewItemId};
+        use localmind_store::{MemoryPersistence, ReviewQueue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn hub() -> u8 { 1 }\nfn caller() { hub(); }\n",
+        )
+        .unwrap();
+        crate::codegraph_reindex(root, usize::MAX).unwrap();
+        let id = crate::distill_primer_into_review(root).unwrap().unwrap();
+
+        // Before acceptance the hook injects nothing.
+        let hook = LocalMindContext::new(root);
+        assert_eq!(hook.context_for("anything"), None);
+
+        // Accept + promote the primer, then the hook includes it always-on.
+        let queue = ReviewQueue::open_project(root).unwrap();
+        let item = ReviewItemId::new(&id);
+        queue
+            .decide(ReviewDecision {
+                item_id: item.clone(),
+                action: ReviewAction::Accept,
+                reviewer: "tester".to_string(),
+                decided_at: None,
+                note: None,
+                replacement_summary: None,
+                evidence: Vec::new(),
+            })
+            .unwrap();
+        MemoryPersistence::open_project(root)
+            .unwrap()
+            .promote_review_item(&item)
+            .unwrap();
+
+        let context = hook
+            .context_for("a prompt unrelated to the primer text")
+            .expect("the accepted primer is always-on context");
+        assert!(context.contains("Repository primer:"));
     }
 
     #[test]

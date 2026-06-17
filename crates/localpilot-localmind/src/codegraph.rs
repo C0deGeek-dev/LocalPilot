@@ -58,7 +58,10 @@ pub fn codegraph_reindex(
 }
 
 /// Source and documentation files under the project root, walked with the
-/// host's capture discipline: gitignore-aware and skipping hidden entries.
+/// host's capture discipline: gitignore-aware and skipping hidden entries. A
+/// file is a candidate when the engine recognizes its language (any supported
+/// grammar) or it is Markdown (kept for the doc-mention graph); the engine then
+/// routes each file to the right extractor.
 fn source_candidates(project_root: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for entry in ignore::WalkBuilder::new(project_root).build().flatten() {
@@ -66,11 +69,12 @@ fn source_candidates(project_root: &Path) -> Vec<PathBuf> {
         if !path.is_file() {
             continue;
         }
-        let indexable = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .map(|extension| matches!(extension, "rs" | "md"))
-            .unwrap_or(false);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let indexable =
+            localmind_codegraph::Language::from_path(name).is_some() || name.ends_with(".md");
         if indexable {
             candidates.push(path);
         }

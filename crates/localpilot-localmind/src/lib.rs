@@ -18,6 +18,7 @@ mod knowledge_tool;
 mod memory_search_tool;
 mod ops;
 mod pack;
+mod primer;
 mod remember_tool;
 mod review_list_tool;
 mod skill_drafts_tool;
@@ -54,6 +55,7 @@ pub use ops::{
     SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
+pub use primer::{accepted_primer, distill_primer_into_review};
 pub use remember_tool::Remember;
 pub use review_list_tool::ReviewList;
 pub use skill_drafts_tool::SkillDrafts;
