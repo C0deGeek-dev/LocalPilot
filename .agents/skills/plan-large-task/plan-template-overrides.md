@@ -51,6 +51,29 @@ column. Transient build-sequencing choices stay in the plan's decision log.
   paths, cross-platform path/shell discipline.
 - **Tier-1 parity.** Windows, Linux, and macOS are equal tier-1 (ADR-0007). A
   box that only works on one OS is not done.
+- **Doc-ownership map (which doc owns which area).** Match the change to its
+  owning doc before editing; do not duplicate an area across docs. The numbered
+  spec set is canonical — the routing table in `CLAUDE.md` ("## The specs") is
+  the index:
+  - `docs/00-clean-room.md` — provenance (read first)
+  - `docs/01-product-spec.md` — product definition, jobs, operating modes
+  - `docs/02-architecture.md` — system shape, per-crate responsibilities
+  - `docs/04-provider-contract.md` — provider contract; `docs/providers.md` — per-provider usage
+  - `docs/05-tool-system.md` — tool system; `docs/mcp.md` — MCP integration
+  - `docs/06-harness-spec.md` — harness runtime (`brief.md`/`PROGRESS.md` are runtime files, never plan files)
+  - `docs/07-security-and-privacy.md` + `SECURITY.md` — security/privacy
+  - `docs/08-testing.md` — testing; `docs/09-release-plan.md` — release
+  - `docs/10-decisions.md` — ADRs (durable decisions land here)
+  - `docs/13-rust-best-practices.md` — engineering style; `docs/14-dev-tooling.md` — dev tooling
+  - `docs/install.md`, `docs/configuration.md`, `docs/extending.md`, `docs/embedding.md`, `docs/localmind-integration.md` — task topics
+  - `README.md` — lean overview + entry points only; deep content lives in `docs/`
+- **Wiki source of truth is in-repo.** `docs/wiki/` is authoritative and
+  PR-reviewed; the published GitHub Wiki is a one-way generated mirror — never
+  hand-edited on github.com. Wiki Reference pages **link** the owned `docs/`,
+  they do not duplicate it.
+- **CHANGELOG + VERSION discipline.** Any user-facing change updates
+  `CHANGELOG.md` under an Unreleased/next-version heading in the same checkpoint;
+  no doc, README, or wiki page may claim behaviour beyond the current `VERSION`.
 
 ## §7 plan-specific gates
 
@@ -65,3 +88,6 @@ column. Transient build-sequencing choices stay in the plan's decision log.
 - Cross-platform parity (Windows/Linux/macOS) for anything OS-specific.
 - Whether a spec deviation is durable enough to promote to an ADR in
   `docs/10-decisions.md`.
+- Any `docs/`, `README.md`, or `docs/wiki/` claim that does not match shipped
+  behaviour at the current `VERSION`, and any wiki page hand-edited on
+  github.com instead of the in-repo `docs/wiki/` source.
