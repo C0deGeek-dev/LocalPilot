@@ -513,6 +513,39 @@ pub fn should_build_index(job: Option<&IngestJob>) -> bool {
     }
 }
 
+/// Which mode the session-open background build should run in, given the latest
+/// job state and whether a prior chunk index exists:
+/// - no job yet → [`RunMode::Full`] (first-ever build);
+/// - last job completed → `None` (nothing to do);
+/// - an incomplete job (paused/failed/cancelled/running) **with** a persisted
+///   index → [`RunMode::Refresh`], which reuses unchanged files by
+///   `path:content_hash` and so continues from the chunks already on disk
+///   instead of re-walking and re-chunking from scratch;
+/// - an incomplete job with no index yet → [`RunMode::Full`].
+///
+/// This is the fix for the pause→Full-restart loop: a run interrupted by the
+/// elapsed-time budget persists the chunks completed so far, and the next
+/// trigger resumes them via Refresh rather than discarding them. A pure decision
+/// so the host's session-open trigger stays unit-testable.
+#[must_use]
+pub fn planned_run_mode(job: Option<&IngestJob>, has_index: bool) -> Option<RunMode> {
+    match job {
+        None => Some(RunMode::Full),
+        Some(job) if job.status == JobStatus::Completed => None,
+        Some(_) if has_index => Some(RunMode::Refresh),
+        Some(_) => Some(RunMode::Full),
+    }
+}
+
+/// Whether a persisted chunk index already exists for the project, so an
+/// interrupted run can Refresh-resume rather than rebuild from scratch.
+#[must_use]
+pub fn has_chunk_index(project_root: &Path) -> bool {
+    canonical_root(project_root)
+        .map(|root| root.join(INGEST_DIR).join(CHUNKS_FILE).exists())
+        .unwrap_or(false)
+}
+
 /// Mark the current job paused.
 ///
 /// # Errors
@@ -1932,6 +1965,142 @@ mod tests {
         let built = build_pack(dir.path(), "parser", 100).unwrap();
         assert!(pack_path.exists(), "build_pack must persist last-pack.json");
         assert_eq!(built.entries, computed.entries);
+    }
+
+    fn seed_job(status: JobStatus, completed: u64) -> IngestJob {
+        let now = unix_now();
+        IngestJob {
+            schema_version: INGEST_SCHEMA_VERSION,
+            run_id: format!("run-{now}"),
+            status,
+            mode: "full".to_string(),
+            queued_files: 2,
+            completed_files: completed,
+            failed_files: 0,
+            skipped_files: 0,
+            started_unix: now,
+            updated_unix: now,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn planned_run_mode_resumes_an_incomplete_job_with_an_index() {
+        // No job yet → a first-ever full build.
+        assert_eq!(planned_run_mode(None, false), Some(RunMode::Full));
+        // A completed job → nothing to do.
+        assert_eq!(
+            planned_run_mode(Some(&seed_job(JobStatus::Completed, 2)), true),
+            None
+        );
+        // An incomplete job with a persisted index → resume via Refresh, not a
+        // full restart. This is the fix for the pause→Full-restart loop.
+        for status in [JobStatus::Paused, JobStatus::Failed, JobStatus::Cancelled] {
+            assert_eq!(
+                planned_run_mode(Some(&seed_job(status, 1)), true),
+                Some(RunMode::Refresh),
+                "{status:?} with an index must resume via Refresh"
+            );
+        }
+        // An incomplete job with no index yet → a full build (nothing to reuse).
+        assert_eq!(
+            planned_run_mode(Some(&seed_job(JobStatus::Paused, 0)), false),
+            Some(RunMode::Full)
+        );
+    }
+
+    #[test]
+    fn refresh_reuses_persisted_chunk_without_rereading_unchanged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "stable content line\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+        assert!(has_chunk_index(dir.path()));
+
+        // Overwrite the persisted chunk's text with a sentinel the source file
+        // does not contain, keeping the content_hash that matches the file. A
+        // reuse (keyed on path:content_hash) copies this record verbatim; a
+        // re-read would replace the sentinel with the file's real content.
+        let chunks_path = dir.path().join(INGEST_DIR).join(CHUNKS_FILE);
+        let mut chunks = read_json::<Vec<ChunkRecord>>(&chunks_path).unwrap();
+        let sentinel = "SENTINEL-REUSED-NOT-REREAD";
+        for chunk in &mut chunks {
+            chunk.text = sentinel.to_string();
+        }
+        write_json(&chunks_path, &chunks).unwrap();
+
+        // Refresh without touching the file.
+        run(dir.path(), &config(), RunMode::Refresh).unwrap();
+
+        let refreshed = read_json::<Vec<ChunkRecord>>(&chunks_path).unwrap();
+        assert!(
+            refreshed
+                .iter()
+                .any(|chunk| chunk.path == "notes.txt" && chunk.text == sentinel),
+            "an unchanged file must be reused from the persisted chunk, not re-read"
+        );
+    }
+
+    #[test]
+    fn resume_makes_monotonic_forward_progress_without_a_full_rewalk() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "alpha\n").unwrap();
+        fs::write(dir.path().join("b.md"), "bravo\n").unwrap();
+
+        // Hand-seed an interrupted run: only a.md is chunked (its text is a
+        // sentinel proving it gets reused, not redone), and the job is Paused —
+        // exactly the state run() persists when it stops at the elapsed budget
+        // mid-walk.
+        let root = canonical_root(dir.path()).unwrap();
+        let ingest_dir = ensure_ingest_dir(&root).unwrap();
+        let a_hash = fnv_hash_hex(b"alpha\n");
+        let sentinel = "SENTINEL-A-ALREADY-DONE";
+        let seeded = vec![ChunkRecord {
+            id: format!("chunk-{a_hash}-0"),
+            path: "a.md".to_string(),
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            start_byte: 0,
+            end_byte: 6,
+            content_hash: a_hash,
+            text: sentinel.to_string(),
+            token_estimate: 1,
+            stale: false,
+            summary: String::new(),
+            redaction_status: "redacted".to_string(),
+            original_bytes: 6,
+            preview_bytes: sentinel.len() as u64,
+            superseded_by: None,
+        }];
+        write_json(&ingest_dir.join(CHUNKS_FILE), &seeded).unwrap();
+        write_json(&ingest_dir.join(JOB_FILE), &seed_job(JobStatus::Paused, 1)).unwrap();
+
+        // The host trigger resolves this incomplete-with-index state to Refresh.
+        assert_eq!(
+            planned_run_mode(
+                status(dir.path()).unwrap().as_ref(),
+                has_chunk_index(dir.path())
+            ),
+            Some(RunMode::Refresh)
+        );
+
+        // Resume: a.md is reused (sentinel survives → no re-walk/re-chunk of a),
+        // b.md is finished, and the job reaches Completed. completed_files counts
+        // both, never regressing below the 1 already done.
+        let summary = run(dir.path(), &config(), RunMode::Refresh).unwrap();
+        assert_eq!(summary.job.status, JobStatus::Completed);
+        assert!(summary.job.completed_files >= 1);
+        let chunks = read_json::<Vec<ChunkRecord>>(&ingest_dir.join(CHUNKS_FILE)).unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.path == "a.md" && chunk.text == sentinel),
+            "resume must reuse already-completed work, not redo it"
+        );
+        assert!(
+            chunks.iter().any(|chunk| chunk.path == "b.md"),
+            "resume must complete the not-yet-done file"
+        );
     }
 
     #[test]

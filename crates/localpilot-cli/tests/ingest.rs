@@ -55,8 +55,11 @@ fn ingest_lifecycle_and_knowledge_commands_work() {
 
     let paused = run(dir.path(), &["ingest", "pause"]);
     assert!(paused.contains("paused"));
+    // Resume continues the incomplete job from the persisted chunks (Refresh),
+    // running it through to completion rather than only re-queueing it.
     let resumed = run(dir.path(), &["ingest", "resume"]);
-    assert!(resumed.contains("queued"));
+    assert!(resumed.contains("resumed in refresh mode"));
+    assert!(resumed.contains("status: completed"));
     let cancelled = run(dir.path(), &["ingest", "cancel"]);
     assert!(cancelled.contains("cancelled"));
 

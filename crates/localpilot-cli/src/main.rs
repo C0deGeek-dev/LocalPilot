@@ -301,7 +301,7 @@ enum IngestCommand {
     Status,
     /// Pause the current ingest job.
     Pause,
-    /// Mark a paused/cancelled job queued for resume.
+    /// Continue an incomplete job from the chunks already persisted.
     Resume,
     /// Cancel the current ingest job.
     Cancel,
@@ -726,9 +726,7 @@ async fn main() -> anyhow::Result<()> {
                 IngestCommand::Pause => {
                     ingest_cmd::control(&cwd, ingest_cmd::ControlAction::Pause, &mut stdout)?
                 }
-                IngestCommand::Resume => {
-                    ingest_cmd::control(&cwd, ingest_cmd::ControlAction::Resume, &mut stdout)?
-                }
+                IngestCommand::Resume => ingest_cmd::resume(&cwd, &mut stdout)?,
                 IngestCommand::Cancel => {
                     ingest_cmd::control(&cwd, ingest_cmd::ControlAction::Cancel, &mut stdout)?
                 }

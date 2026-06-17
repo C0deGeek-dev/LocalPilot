@@ -54,14 +54,55 @@ pub fn run(project_root: &Path, mode: RunMode, out: &mut dyn Write) -> anyhow::R
     Ok(())
 }
 
-/// Print current ingestion status.
+/// Print current ingestion status, including what the next run would do —
+/// resume an incomplete job, rebuild from scratch, or nothing when up to date.
 ///
 /// # Errors
 /// Returns an error if state cannot be read.
 pub fn status(project_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     match localpilot_localmind::ingest_status(project_root)? {
-        Some(job) => render_job(&job, out)?,
+        Some(job) => {
+            render_job(&job, out)?;
+            let has_index = localpilot_localmind::has_chunk_index(project_root);
+            let next = match localpilot_localmind::planned_run_mode(Some(&job), has_index) {
+                None => "up to date — next session does not rebuild",
+                Some(RunMode::Refresh) => "incomplete — next run resumes (refresh)",
+                Some(RunMode::Full) => "incomplete — next run rebuilds (full)",
+            };
+            writeln!(out, "next: {next}")?;
+        }
         None => writeln!(out, "no ingest job")?,
+    }
+    Ok(())
+}
+
+/// Continue an incomplete ingest job from the chunks already persisted, instead
+/// of restarting a full walk. Resolves the same resume-vs-fresh decision the
+/// session-open trigger uses, then runs it to completion in the foreground.
+///
+/// # Errors
+/// Returns an error if config cannot be loaded or ingestion fails.
+pub fn resume(project_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(job) = localpilot_localmind::ingest_status(project_root)? else {
+        writeln!(out, "no ingest job to resume")?;
+        return Ok(());
+    };
+    let has_index = localpilot_localmind::has_chunk_index(project_root);
+    match localpilot_localmind::planned_run_mode(Some(&job), has_index) {
+        None => {
+            writeln!(
+                out,
+                "ingest job already completed; run `localpilot ingest refresh` to update"
+            )?;
+        }
+        Some(mode) => {
+            let config = load_ingest_config(project_root)?;
+            let summary = localpilot_localmind::ingest_run(project_root, &config, mode)?;
+            writeln!(out, "resumed in {} mode", run_mode_label(mode))?;
+            writeln!(out, "status: {}", job_status(summary.job.status))?;
+            writeln!(out, "files: {}", summary.job.completed_files)?;
+            writeln!(out, "chunks: {}", summary.chunks_written)?;
+        }
     }
     Ok(())
 }
@@ -77,7 +118,6 @@ pub fn control(
 ) -> anyhow::Result<()> {
     let job = match action {
         ControlAction::Pause => localpilot_localmind::ingest_pause(project_root)?,
-        ControlAction::Resume => localpilot_localmind::ingest_resume(project_root)?,
         ControlAction::Cancel => localpilot_localmind::ingest_cancel(project_root)?,
     };
     match job {
@@ -250,7 +290,6 @@ fn pack_source_label(source: localpilot_localmind::PackSource) -> &'static str {
 #[derive(Debug, Clone, Copy)]
 pub enum ControlAction {
     Pause,
-    Resume,
     Cancel,
 }
 
@@ -297,6 +336,13 @@ fn rule_action(action: RuleAction) -> &'static str {
     match action {
         RuleAction::Include => "included",
         RuleAction::Exclude => "excluded",
+    }
+}
+
+fn run_mode_label(mode: RunMode) -> &'static str {
+    match mode {
+        RunMode::Full => "full",
+        RunMode::Refresh => "refresh",
     }
 }
 
