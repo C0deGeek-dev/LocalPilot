@@ -147,7 +147,7 @@ fn detect_local_inference_endpoint(project_root: &Path) -> Option<LocalInference
         localpilot_config::load(&paths, &localpilot_config::CliOverrides::default()).ok()?;
     let provider = config.providers.get(&config.provider.default)?;
     let base_url = provider.base_url.as_deref()?;
-    if !is_loopback_endpoint(base_url) {
+    if !endpoint_is_local(base_url) {
         return None;
     }
     let root = base_url
@@ -167,13 +167,6 @@ fn detect_local_inference_endpoint(project_root: &Path) -> Option<LocalInference
         base_url: root,
         model,
     })
-}
-
-/// Whether `url`'s host is a loopback address (the only endpoint auto-wired for
-/// learning; LAN/remote endpoints require explicit configuration).
-fn is_loopback_endpoint(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.contains("//127.0.0.1") || lower.contains("//localhost") || lower.contains("//[::1]")
 }
 
 /// The result of closing out a session into LocalMind.
@@ -224,24 +217,32 @@ pub fn closeout_session(
     )
     .map_err(|e| LearningError::Import(e.to_string()))?;
 
-    // Select the extractor from the project's inference config. When an
-    // `[inference]` endpoint is configured with extraction enabled, use the
-    // model-backed extractor — which itself falls back to the deterministic
-    // extractor when the endpoint is unreachable or returns malformed output —
-    // otherwise run the deterministic path directly. The default experience may
-    // depend on a local model for learning, but always degrades gracefully to
-    // the deterministic baseline.
-    let report = if uses_model_extraction(&config) {
-        CloseoutProcessor::closeout_project_session_with_configured_inference(
-            project_root,
-            &import.session_id,
-        )
-    } else {
-        CloseoutProcessor::closeout_project_session(
+    // Route the extractor through the egress gate. Model-backed extraction needs
+    // a configured `[inference]` endpoint with extraction enabled; an off-machine
+    // endpoint additionally sends the transcript away, so it is reachable only
+    // with the explicit opt-in and is audited. Without the opt-in an off-machine
+    // endpoint degrades to the deterministic extractor — the transcript never
+    // leaves the machine. The model path itself still falls back to deterministic
+    // when a (local) endpoint is unreachable.
+    let report = match extraction_route(&config, remote_learning_opted_in()) {
+        ExtractionRoute::Deterministic => CloseoutProcessor::closeout_project_session(
             project_root,
             &import.session_id,
             &DeterministicExtractor,
-        )
+        ),
+        ExtractionRoute::LocalModel => {
+            CloseoutProcessor::closeout_project_session_with_configured_inference(
+                project_root,
+                &import.session_id,
+            )
+        }
+        ExtractionRoute::RemoteModel => {
+            audit_remote_extraction(&config);
+            CloseoutProcessor::closeout_project_session_with_configured_inference(
+                project_root,
+                &import.session_id,
+            )
+        }
     }
     .map_err(|e| LearningError::Closeout(e.to_string()))?;
 
@@ -263,6 +264,108 @@ fn uses_model_extraction(config: &ProjectConfig) -> bool {
         .inference
         .as_ref()
         .is_some_and(|inference| inference.features.extraction)
+}
+
+/// Environment opt-in for sending session transcripts to an off-machine
+/// inference endpoint during learning. Kept out of repo config because it is a
+/// security-sensitive egress switch (a checked-in file would silently travel
+/// with the project); an env var is an explicit, per-machine choice.
+const REMOTE_LEARNING_ENV: &str = "LOCALPILOT_LEARNING_ALLOW_REMOTE";
+
+/// Whether off-machine learning egress is explicitly opted in for this run.
+fn remote_learning_opted_in() -> bool {
+    std::env::var(REMOTE_LEARNING_ENV)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// How session-closeout extraction is routed once the egress gate has spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractionRoute {
+    /// The deterministic, offline extractor — the default and the floor.
+    Deterministic,
+    /// Model-backed extraction against a local (loopback) endpoint.
+    LocalModel,
+    /// Model-backed extraction against an off-machine endpoint — reachable only
+    /// with the explicit opt-in, and audited.
+    RemoteModel,
+}
+
+/// Decide how to route extraction. Model-backed extraction needs a configured
+/// `[inference]` endpoint with `features.extraction`. An off-machine endpoint is
+/// an egress: it is reachable only when `remote_opt_in` is set; otherwise it
+/// degrades to the deterministic extractor so the transcript never leaves the
+/// machine. Pure (the env read happens at the call boundary) so it is testable.
+fn extraction_route(config: &ProjectConfig, remote_opt_in: bool) -> ExtractionRoute {
+    if !uses_model_extraction(config) {
+        return ExtractionRoute::Deterministic;
+    }
+    let endpoint = config
+        .config
+        .inference
+        .as_ref()
+        .and_then(|inference| inference.chat_base_url.as_deref());
+    match endpoint {
+        Some(url) if endpoint_is_local(url) => ExtractionRoute::LocalModel,
+        Some(_) if remote_opt_in => ExtractionRoute::RemoteModel,
+        // Off-machine endpoint without the opt-in: no egress, fall back local.
+        Some(_) => ExtractionRoute::Deterministic,
+        None => ExtractionRoute::Deterministic,
+    }
+}
+
+/// Whether `base_url`'s host is on this machine (loopback). Anything else is
+/// treated as off-machine and gated as an egress.
+fn endpoint_is_local(base_url: &str) -> bool {
+    match url_host(base_url) {
+        Some(host) => {
+            let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+            host == "localhost" || host == "::1" || host.starts_with("127.")
+        }
+        None => false,
+    }
+}
+
+/// The host component of an `http(s)://host[:port]/...` URL, without the port.
+fn url_host(base_url: &str) -> Option<String> {
+    let after_scheme = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Strip userinfo, then a trailing :port (but keep an IPv6 `[::1]`).
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if authority.starts_with('[') {
+        authority.split_once(']').map_or(authority, |(h, _)| h)
+    } else {
+        authority.split_once(':').map_or(authority, |(h, _)| h)
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Record an audit trail entry for an off-machine extraction egress. Host and
+/// model id only — never transcript content — so the audit is redaction-safe.
+fn audit_remote_extraction(config: &ProjectConfig) {
+    let host = config
+        .config
+        .inference
+        .as_ref()
+        .and_then(|inference| inference.chat_base_url.as_deref())
+        .and_then(url_host)
+        .unwrap_or_else(|| "unknown".to_string());
+    tracing::warn!(
+        target: "localpilot::egress",
+        endpoint_host = %host,
+        "model-backed extraction sent a session transcript to an off-machine endpoint (opt-in set)"
+    );
 }
 
 /// Render a session's messages as a plain-text transcript for import. The text
@@ -606,6 +709,142 @@ mod tests {
                 .iter()
                 .any(|item| item.summary.contains("guard clauses")),
             "fallback lesson missing: {items:?}"
+        );
+    }
+
+    /// Egress gate: a local endpoint routes to the model; an off-machine
+    /// endpoint is unreachable without the opt-in (falls back to deterministic)
+    /// and reachable with it.
+    #[test]
+    fn off_machine_extraction_is_gated_behind_the_opt_in() {
+        let (_d_local, local) = project_config_with(
+            "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://127.0.0.1:11435\"\nchat_model = \"m\"\n",
+        );
+        assert_eq!(extraction_route(&local, false), ExtractionRoute::LocalModel);
+        assert_eq!(extraction_route(&local, true), ExtractionRoute::LocalModel);
+
+        let (_d_remote, remote) = project_config_with(
+            "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"https://api.example.com\"\nchat_model = \"m\"\n",
+        );
+        // Without the opt-in, the off-machine endpoint is unreachable: extraction
+        // degrades to deterministic and the transcript never leaves the machine.
+        assert_eq!(
+            extraction_route(&remote, false),
+            ExtractionRoute::Deterministic
+        );
+        // With the explicit opt-in, the off-machine path is reachable (audited).
+        assert_eq!(
+            extraction_route(&remote, true),
+            ExtractionRoute::RemoteModel
+        );
+
+        // No inference configured → always deterministic regardless of opt-in.
+        let (_d_none, none) = project_config_with("[learning]\nenabled = true\n");
+        assert_eq!(
+            extraction_route(&none, true),
+            ExtractionRoute::Deterministic
+        );
+    }
+
+    #[test]
+    fn loopback_endpoints_are_classified_local() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:11435/v1",
+            "http://[::1]:8080",
+            "http://127.5.0.1",
+        ] {
+            assert!(endpoint_is_local(url), "should be local: {url}");
+        }
+        for url in [
+            "https://api.example.com",
+            "http://10.0.0.5:8080",
+            "http://example.com:11435",
+        ] {
+            assert!(!endpoint_is_local(url), "should be off-machine: {url}");
+        }
+    }
+
+    /// Reviewed-promotion: malformed model output is rejected and nothing reaches
+    /// the review queue or durable memory.
+    #[test]
+    fn closeout_rejects_malformed_model_output() {
+        let chat_body = serde_json::json!({
+            "choices": [{ "message": { "content": "this is not json at all" } }]
+        })
+        .to_string();
+        let base_url = mock_chat_server(chat_body);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"{base_url}\"\nchat_model = \"m\"\ntimeout_secs = 5\n"
+            ),
+        )
+        .unwrap();
+
+        let store = Store::open(root);
+        let session = SessionId::new();
+        store
+            .append_message(
+                session,
+                &Message::text(Role::User, "the parser test failed"),
+            )
+            .unwrap();
+
+        // Malformed model output is rejected (not silently promoted).
+        assert!(
+            closeout_session(root, &store, session).is_err(),
+            "malformed model output must be rejected"
+        );
+        // Nothing reached the review queue.
+        assert!(
+            review_list(root).unwrap().is_empty(),
+            "rejected model output must not reach the review queue"
+        );
+    }
+
+    /// Reviewed-promotion: an over-confident candidate (confidence > 1.0) is
+    /// rejected at the contract boundary and never reaches durable memory.
+    #[test]
+    fn closeout_rejects_overconfident_model_output() {
+        let content = "{\"summary_title\":\"T\",\"summary_body\":\"B\",\"candidates\":[\
+            {\"summary\":\"an impossibly certain lesson about pinning schemas\",\
+            \"category\":\"process\",\"confidence\":1.5,\"action\":\"promote_to_memory\"}]}";
+        let chat_body = serde_json::json!({
+            "choices": [{ "message": { "content": content } }]
+        })
+        .to_string();
+        let base_url = mock_chat_server(chat_body);
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"{base_url}\"\nchat_model = \"m\"\ntimeout_secs = 5\n"
+            ),
+        )
+        .unwrap();
+
+        let store = Store::open(root);
+        let session = SessionId::new();
+        store
+            .append_message(
+                session,
+                &Message::text(Role::User, "a session about schemas"),
+            )
+            .unwrap();
+
+        assert!(
+            closeout_session(root, &store, session).is_err(),
+            "an over-confident candidate must be rejected"
+        );
+        assert!(
+            review_list(root).unwrap().is_empty(),
+            "rejected candidate must not reach the review queue"
         );
     }
 

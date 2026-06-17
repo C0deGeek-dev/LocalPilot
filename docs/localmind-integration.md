@@ -142,9 +142,12 @@ one (heuristics over the redacted transcript) and a model-backed one that calls 
 configured OpenAI-compatible endpoint. The host selects per the project's
 `.localmind.toml`:
 
-- `[inference]` configured with `features.extraction` on → **model-backed**
-  extractor, which falls back to deterministic automatically if the endpoint is
-  unreachable or returns malformed output;
+- `[inference]` configured with `features.extraction` on **and** a loopback
+  endpoint → **model-backed** extractor, which falls back to deterministic
+  automatically if the endpoint is unreachable or returns malformed output;
+- `[inference]` configured against an **off-machine** endpoint → still
+  **deterministic** unless off-machine learning egress is explicitly opted in
+  (see below), so a session transcript never leaves the machine by default;
 - otherwise → **deterministic** extractor.
 
 **Local inference is wired by default, not by hand.** When a project is first
@@ -159,7 +162,14 @@ LocalBox internals (LocalMind decision D-LM-0002).
 
 Per the ecosystem remote-egress policy, a **remote** provider is never wired into
 learning automatically; pointing inference at a non-loopback endpoint is an
-explicit, disclosed choice.
+explicit, disclosed choice. Beyond config, the host enforces this at close-out:
+model-backed extraction against an off-machine endpoint is reachable only when
+the env opt-in `LOCALPILOT_LEARNING_ALLOW_REMOTE` is set (`1`/`true`). Without it
+the off-machine endpoint is unreachable for learning and close-out falls back to
+the deterministic extractor — the transcript stays local. When the opt-in is set,
+each off-machine extraction writes an audit trail entry (endpoint host and model
+only, never transcript content). The env-var form keeps this security-sensitive
+egress switch out of any checked-in config that could travel with the project.
 
 ## Skill semantics (active-skill consumption contract)
 
