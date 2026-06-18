@@ -2,7 +2,7 @@
 
 - [[Home]]
 - [[Getting-Started]]
-- [[How-To/Overview|How-To]]
-- [[Examples/Overview|Examples]]
+- [[How-To]]
+- [[Examples]]
 - [[Reference]]
 - [[Troubleshooting]]

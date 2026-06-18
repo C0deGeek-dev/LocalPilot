@@ -55,7 +55,7 @@ localpilot                      # no args: REPL, or doctor if unconfigured
 
 ## Next steps
 
-- [[How-To/Overview|How-To guides]] — configure providers, add MCP servers, use tools.
-- [[Examples/Overview|Examples]] — one-shot, pipeline, and headless drive.
+- [[How-To|How-To guides]] — configure providers, add MCP servers, use tools.
+- [[Examples]] — one-shot, pipeline, and headless drive.
 - [[Reference]] — the full product + technical specification.
 - [[Troubleshooting]] — common problems and fixes.
