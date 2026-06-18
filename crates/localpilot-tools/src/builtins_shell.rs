@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::builtins::cap;
+use crate::builtins::{binary_placeholder, cap, looks_binary};
 use crate::contract::{
     Idempotency, Postcondition, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
 };
@@ -184,6 +184,16 @@ fn command_output(code: i32, stdout: &str, stderr: &str) -> String {
     format!("exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}")
 }
 
+/// Render a captured stream as text, substituting a placeholder when the bytes
+/// look binary so raw control bytes never reach the model context.
+fn render_stream(bytes: &[u8]) -> String {
+    if looks_binary(bytes) {
+        binary_placeholder(bytes.len())
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
@@ -280,8 +290,8 @@ impl Tool for RunShell {
             }
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = render_stream(&output.stdout);
+        let stderr = render_stream(&output.stderr);
         let code = output.status.code().unwrap_or(-1);
         let text = command_output(code, &stdout, &stderr);
         let mut result = cap(text);

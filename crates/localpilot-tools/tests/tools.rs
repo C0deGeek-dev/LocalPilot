@@ -143,6 +143,33 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
 }
 
 #[tokio::test]
+async fn read_file_returns_a_placeholder_for_binary_content() {
+    let (_dir, ws) = workspace_with(&[]);
+    // GLB-style header: ASCII magic followed by raw NUL/control bytes — the
+    // shape that previously leaked control characters into the model context.
+    std::fs::write(
+        ws.root().join("race.glb"),
+        b"glTF\x02\x00\x00\x00\x10\x00\x00\x00rest",
+    )
+    .unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "read_file",
+        json!({ "path": "race.glb" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!result.is_error);
+    assert!(result.output.contains("binary data"));
+    // Raw NUL must never reach the model-visible output.
+    assert!(!result.output.contains('\u{00}'));
+}
+
+#[tokio::test]
 async fn write_file_in_workspace_and_denied_outside() {
     let (dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();

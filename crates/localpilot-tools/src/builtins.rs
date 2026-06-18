@@ -89,6 +89,35 @@ pub(crate) fn cap(text: String) -> ToolOutput {
     ToolOutput::truncated(capped)
 }
 
+/// Heuristic: does this byte slice look like binary (non-text) data?
+///
+/// Inlining binary into a tool result is never useful to the model and can
+/// poison the context — `String::from_utf8_lossy` keeps raw control bytes
+/// verbatim, and a `.glb`/image/executable dumped as text has derailed local
+/// models into degenerate loops. A single NUL byte is the strongest signal
+/// (text never contains them); otherwise a high share of non-text control
+/// bytes marks it binary. Only the head is sampled, and bytes `>= 0x80` are
+/// never counted so valid UTF-8 text is not misclassified.
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.contains(&0) {
+        return true;
+    }
+    let suspect = sample
+        .iter()
+        .filter(|&&b| matches!(b, 0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f))
+        .count();
+    suspect * 100 / sample.len() > 30
+}
+
+/// Stand-in shown to the model in place of binary content.
+pub(crate) fn binary_placeholder(len: usize) -> String {
+    format!("<binary data: {len} bytes, not shown>")
+}
+
 fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
     Effect::ReadPath {
         inside_workspace: ctx.workspace.contains(path),
@@ -174,7 +203,14 @@ impl Tool for ReadFile {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: ReadFileInput = parse_input(&input)?;
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
-        let text = std::fs::read_to_string(&path)
+        let bytes = std::fs::read(&path)
+            .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+        // Refuse to inline binary: emit a short placeholder instead of dumping
+        // lossy bytes that waste context and can derail the model.
+        if looks_binary(&bytes) {
+            return Ok(cap(binary_placeholder(bytes.len())));
+        }
+        let text = String::from_utf8(bytes)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
         let selected = match (input.start_line, input.end_line) {
             (None, None) => text,
@@ -1556,5 +1592,33 @@ impl Tool for UpdatePlan {
     }
     async fn invoke(&self, _input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("plan updated"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{binary_placeholder, looks_binary};
+
+    #[test]
+    fn looks_binary_flags_nul_and_control_heavy_bytes() {
+        // A NUL byte alone is decisive, even amid otherwise-printable text.
+        assert!(looks_binary(b"glTF\x02\x00\x00\x00\x10rest"));
+        assert!(looks_binary(&[0x01, 0x02, 0x03, 0x04, 0x05]));
+    }
+
+    #[test]
+    fn looks_binary_passes_text_including_utf8_and_whitespace() {
+        assert!(!looks_binary(b""));
+        assert!(!looks_binary(b"plain ascii\twith\ttabs\nand\r\nnewlines\n"));
+        // High bytes forming valid UTF-8 must not be mistaken for binary.
+        assert!(!looks_binary("café — naïve — \u{1F600}".as_bytes()));
+    }
+
+    #[test]
+    fn binary_placeholder_reports_the_byte_count() {
+        assert_eq!(
+            binary_placeholder(167_272),
+            "<binary data: 167272 bytes, not shown>"
+        );
     }
 }
