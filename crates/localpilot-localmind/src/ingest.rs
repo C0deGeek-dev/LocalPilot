@@ -1181,26 +1181,39 @@ pub fn context_for_prompt(
     project_root: &Path,
     prompt: &str,
 ) -> Result<Option<String>, IngestError> {
+    Ok(context_for_prompt_with_ids(project_root, prompt)?.map(|(text, _ids)| text))
+}
+
+/// As [`context_for_prompt`], but also returns the per-chunk locators
+/// (`path:start-end`) actually injected, so a push-mode host can record exactly
+/// which ingested chunks rode in the turn's context — the audit matches the
+/// injection chunk for chunk.
+///
+/// # Errors
+/// Returns [`IngestError`] when the derived index cannot be read.
+pub fn context_for_prompt_with_ids(
+    project_root: &Path,
+    prompt: &str,
+) -> Result<Option<(String, Vec<String>)>, IngestError> {
     let hits = search(project_root, prompt)?;
     if hits.is_empty() {
         return Ok(None);
     }
     let mut out = String::from("Relevant ingested project knowledge:\n");
+    let mut ids = Vec::new();
     for hit in hits.into_iter().take(5) {
+        let locator = format!("{}:{}-{}", hit.path, hit.start_line, hit.end_line);
         out.push_str("- ");
-        out.push_str(&hit.path);
-        out.push(':');
-        out.push_str(&hit.start_line.to_string());
-        out.push('-');
-        out.push_str(&hit.end_line.to_string());
+        out.push_str(&locator);
         if hit.stale {
             out.push_str(" (stale)");
         }
         out.push_str(" - ");
         out.push_str(&hit.snippet);
         out.push('\n');
+        ids.push(locator);
     }
-    Ok(Some(out))
+    Ok(Some((out, ids)))
 }
 
 /// List generated ingestion review items.

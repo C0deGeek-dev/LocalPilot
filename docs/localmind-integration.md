@@ -72,6 +72,13 @@ depends on LocalMind, never the reverse.
   event log, so it cannot accumulate and the stored transcript stays equal to the
   authored history (ADR-0017). Its token cost is reserved from the compaction
   budget so the request still fits the limit.
+- The turn's injected context and its **memories-used** audit (the
+  `MemoriesUsed` event the `localpilot memory inspect` inspector renders) come
+  from a *single* retrieval, so the audit lists exactly what was injected — never
+  a memory ranked past the injected cap, nor a snippet truncated out of the
+  block. Each injected block is recorded under its own layer: the repository
+  primer as `primer`, ranked accepted memory as `memory`, and (legacy push-mode)
+  ingested chunks as `ingest`.
 - Interactive sessions build the project ingest index in the background on first
   use (trust-gated, off the turn path), so `knowledge_search` has data without
   the first turn paying for a full walk; they close out into LocalMind on exit,

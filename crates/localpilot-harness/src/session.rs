@@ -1254,14 +1254,15 @@ impl SessionRuntime {
         // the authored history, and the block folds into the top-level system
         // rather than riding the wire as a resent user message. Its token cost is
         // reserved from the compaction budget so the request still fits the limit.
-        let retrieval_text = self.hooks.context_for(user_input).join("\n");
-        // Record which memories the context hooks used for this turn, for the
-        // local inspector. Pure observation: it never changes the injected
-        // context, and an empty set records nothing.
-        let memories_used = self.hooks.memories_used(user_input);
-        if !memories_used.is_empty() {
+        // One retrieval yields both the injected text and the exact memories it
+        // represents, so the "memories used" record cannot diverge from what was
+        // injected. Recording is pure observation — it never changes the context,
+        // and an empty set records nothing.
+        let contribution = self.hooks.contribute(user_input);
+        let retrieval_text = contribution.text.unwrap_or_default();
+        if !contribution.memories.is_empty() {
             self.record_event(SessionEventKind::MemoriesUsed {
-                memories: memories_used,
+                memories: contribution.memories,
             });
         }
         let turn_context = (!retrieval_text.is_empty())

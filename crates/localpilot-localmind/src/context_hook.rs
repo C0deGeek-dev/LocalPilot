@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use localpilot_config::{CliOverrides, ConfigPaths, IngestConfig, IngestMode};
-use localpilot_harness::{ContextHook, SessionRuntime};
+use localpilot_harness::{ContextContribution, ContextHook, SessionRuntime};
+use localpilot_store::MemoryUsed;
 
 /// Cap on the accepted-memory block, so the always-on context stays lean
 /// regardless of how large the memory store grows.
@@ -22,6 +23,10 @@ const ACCEPTED_MEMORY_CHAR_CAP: usize = 1_200;
 /// Cap on the always-on repo-primer block, so session-start orientation stays
 /// a small, bounded token cost.
 const PRIMER_CHAR_CAP: usize = 1_000;
+
+/// The audit id for the always-on repository primer block (it is one block, not
+/// a searchable memory row).
+const PRIMER_ID: &str = "<repository-primer>";
 
 /// LocalMind retrieval as a pre-turn context hook. Best-effort — a miss or error
 /// contributes nothing and never fails the turn.
@@ -49,37 +54,81 @@ impl ContextHook for LocalMindContext {
     }
 
     fn context_for(&self, prompt: &str) -> Option<String> {
-        // The accepted cold-start primer is always-on orientation (not prompt
-        // relevance), injected first and token-bounded. An unaccepted or stale
-        // primer is not active, so it is never returned here.
-        let primer = crate::primer::accepted_primer(&self.root)
-            .ok()
-            .flatten()
-            .map(|text| format!("Repository primer:\n{}", bound(&text, PRIMER_CHAR_CAP)));
-        let accepted = crate::ops::context_for(&self.root, prompt)
-            .ok()
-            .flatten()
-            .map(|text| bound(&text, ACCEPTED_MEMORY_CHAR_CAP));
-        let ingested = match self.ingest_config() {
-            Some(config) if config.enabled && config.mode == IngestMode::Push => {
-                crate::ingest::context_for_prompt(&self.root, prompt)
-                    .ok()
-                    .flatten()
-            }
-            _ => None,
-        };
-        let blocks: Vec<String> = [primer, accepted, ingested].into_iter().flatten().collect();
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(blocks.join("\n"))
-        }
+        self.contribute(prompt).text
     }
 
-    fn memories_used(&self, prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
-        // The accepted memories the always-on injection draws on this turn — the
-        // "memories used" the inspector renders. Best-effort and read-only.
-        crate::ops::context_used_memories(&self.root, prompt).unwrap_or_default()
+    fn memories_used(&self, prompt: &str) -> Vec<MemoryUsed> {
+        self.contribute(prompt).memories
+    }
+
+    /// The injected context and the exact memories it represents, from a single
+    /// retrieval, so the "memories used" record matches the injection block for
+    /// block. Each injected block contributes its records under its own layer
+    /// (`primer`, `memory`, `ingest`); a memory whose snippet does not fit the
+    /// char budget is neither injected nor recorded.
+    fn contribute(&self, prompt: &str) -> ContextContribution {
+        let mut blocks: Vec<String> = Vec::new();
+        let mut memories: Vec<MemoryUsed> = Vec::new();
+
+        // The accepted cold-start primer: always-on orientation (not prompt
+        // relevance), token-bounded. An unaccepted or stale primer is not active.
+        if let Some(text) = crate::primer::accepted_primer(&self.root).ok().flatten() {
+            blocks.push(format!(
+                "Repository primer:\n{}",
+                bound(&text, PRIMER_CHAR_CAP)
+            ));
+            memories.push(MemoryUsed {
+                id: PRIMER_ID.to_string(),
+                score: 0,
+                layer: "primer".to_string(),
+            });
+        }
+
+        // Accepted memory: one ranked, capped retrieval feeds both the injected
+        // block and the recorded set, line by line under the char budget.
+        if let Ok(hits) = crate::ops::context_hits(&self.root, prompt) {
+            let mut block = String::from("Relevant accepted project memory:\n");
+            let mut wrote = false;
+            for hit in hits {
+                let line = format!("- {}\n", hit.snippet.trim());
+                if block.chars().count() + line.chars().count() > ACCEPTED_MEMORY_CHAR_CAP {
+                    break;
+                }
+                block.push_str(&line);
+                wrote = true;
+                memories.push(MemoryUsed {
+                    id: hit.memory_id,
+                    score: hit.score,
+                    layer: "memory".to_string(),
+                });
+            }
+            if wrote {
+                blocks.push(block.trim_end().to_string());
+            }
+        }
+
+        // Ingested knowledge only in legacy push mode; record the exact chunks.
+        if let Some(config) = self.ingest_config() {
+            if config.enabled && config.mode == IngestMode::Push {
+                if let Ok(Some((text, ids))) =
+                    crate::ingest::context_for_prompt_with_ids(&self.root, prompt)
+                {
+                    blocks.push(text.trim_end().to_string());
+                    for id in ids {
+                        memories.push(MemoryUsed {
+                            id,
+                            score: 0,
+                            layer: "ingest".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        ContextContribution {
+            text: (!blocks.is_empty()).then(|| blocks.join("\n")),
+            memories,
+        }
     }
 }
 
@@ -191,6 +240,14 @@ mod tests {
             .context_for("a prompt unrelated to the primer text")
             .expect("the accepted primer is always-on context");
         assert!(context.contains("Repository primer:"));
+
+        // The injected primer block is recorded in the audit under its own layer,
+        // so the inspector reflects what actually rode in the turn's context.
+        let used = hook.memories_used("a prompt unrelated to the primer text");
+        assert!(
+            used.iter().any(|m| m.layer == "primer"),
+            "the injected primer must be recorded with the primer layer: {used:?}"
+        );
     }
 
     #[test]
@@ -249,5 +306,89 @@ mod tests {
         assert!(bounded.contains("memory truncated"));
         // Short input is returned unchanged.
         assert_eq!(bound("short", 1_200), "short");
+    }
+
+    fn seed_memory(root: &Path, id: &str, body: &str) {
+        use localmind_core::{
+            Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
+            MemoryScope, MemoryStatus,
+        };
+        use localmind_store::MemoryPersistence;
+        let entry = MemoryEntry {
+            id: MemoryEntryId::new(id),
+            scope: MemoryScope::Project,
+            body: body.to_string(),
+            category: LessonCategory::SecurityWarning,
+            confidence: Confidence::new(0.9).unwrap(),
+            source_session: None,
+            evidence: vec![EvidenceRef::new(EvidenceKind::ManualNote, "seeded")],
+            tags: Vec::new(),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+        };
+        MemoryPersistence::open_project(root)
+            .unwrap()
+            .persist_memory_entry(&entry)
+            .unwrap();
+    }
+
+    #[test]
+    fn memories_used_is_capped_to_the_injected_set() {
+        // More matches than are injected: the audit records at most the injected
+        // cap, never the full result set (the over-report this fix closes).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        for i in 0..8 {
+            seed_memory(
+                root,
+                &format!("mem-{i}"),
+                &format!("widget pipeline note number {i}"),
+            );
+        }
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("widget pipeline note");
+        let memory_layer = used.iter().filter(|m| m.layer == "memory").count();
+        assert!(memory_layer > 0, "expected matches to be recorded");
+        assert!(
+            memory_layer <= crate::ops::CONTEXT_MEMORY_LIMIT,
+            "audit must not exceed the injected cap: {memory_layer}"
+        );
+    }
+
+    #[test]
+    fn the_audit_records_exactly_the_injected_memory_lines() {
+        // The audit and the injection come from one retrieval under one budget,
+        // so the recorded memory-layer entries equal the injected `- ` lines
+        // exactly — never a memory that was not injected, nor one omitted.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        for i in 0..4 {
+            seed_memory(
+                root,
+                &format!("note-{i}"),
+                &format!("widget pipeline note number {i}"),
+            );
+        }
+        let hook = LocalMindContext::new(root);
+        let contribution = hook.contribute("widget pipeline note");
+        let recorded = contribution
+            .memories
+            .iter()
+            .filter(|m| m.layer == "memory")
+            .count();
+        let text = contribution.text.unwrap_or_default();
+        let injected_lines = text.lines().filter(|line| line.starts_with("- ")).count();
+        assert!(recorded >= 1, "expected matches");
+        assert_eq!(
+            recorded, injected_lines,
+            "every recorded memory is an injected line and vice versa"
+        );
     }
 }

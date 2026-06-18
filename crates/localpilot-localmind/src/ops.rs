@@ -277,30 +277,40 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
         .collect())
 }
 
-/// The accepted memories that always-on context injection draws on for a prompt,
-/// as inspector records (id, retrieval score, `memory` layer). Empty when memory
-/// injection is disabled or the project has no memory store — never creates
-/// project files. This reports what was *used*; it does not change what is
-/// injected.
+/// The accepted-memory hits that always-on context injection draws on for a
+/// prompt — the single ranked, capped retrieval that backs *both* the injected
+/// block and the "memories used" audit, so the two can never diverge. Capped at
+/// [`CONTEXT_MEMORY_LIMIT`] (the count actually injected). Empty when injection
+/// is disabled or the project has no memory store; never creates project files.
 ///
 /// # Errors
-/// Returns [`LearningError::Memory`] if an existing memory index cannot be read.
-pub fn context_used_memories(
-    project_root: &Path,
-    prompt: &str,
-) -> Result<Vec<localpilot_store::MemoryUsed>, LearningError> {
+/// Returns [`LearningError::Context`] if an existing memory index cannot be read.
+pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, LearningError> {
     if !memory_injection_enabled(project_root) {
         return Ok(Vec::new());
     }
-    Ok(search_readonly(project_root, prompt)?
+    let persistence = match MemoryPersistence::open_project(project_root) {
+        Ok(persistence) => persistence,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let hits = persistence
+        .search(query)
+        .map_err(|e| LearningError::Context(e.to_string()))?;
+    Ok(hits
         .into_iter()
-        .map(|hit| localpilot_store::MemoryUsed {
-            id: hit.memory_id,
+        .take(CONTEXT_MEMORY_LIMIT)
+        .map(|hit| SearchHit {
+            memory_id: hit.memory_id.to_string(),
             score: hit.score,
-            layer: "memory".to_string(),
+            path: hit.path.display().to_string(),
+            snippet: hit.snippet,
         })
         .collect())
 }
+
+/// The number of accepted-memory hits injected into a turn's context — the cap
+/// the audit record must share so it never lists a memory that was not injected.
+pub const CONTEXT_MEMORY_LIMIT: usize = 5;
 
 /// List accepted LocalMind memory.
 ///
@@ -352,21 +362,12 @@ pub fn memory_disable_injection(project_root: &Path) -> Result<(), LearningError
 /// Returns [`LearningError::Context`] if memory cannot be searched.
 pub fn context_for(project_root: &Path, query: &str) -> Result<Option<String>, LearningError> {
     use std::fmt::Write as _;
-    if !memory_injection_enabled(project_root) {
-        return Ok(None);
-    }
-    let persistence = match MemoryPersistence::open_project(project_root) {
-        Ok(persistence) => persistence,
-        Err(_) => return Ok(None),
-    };
-    let hits = persistence
-        .search(query)
-        .map_err(|e| LearningError::Context(e.to_string()))?;
+    let hits = context_hits(project_root, query)?;
     if hits.is_empty() {
         return Ok(None);
     }
     let mut context = String::from("Relevant accepted project memory:\n");
-    for hit in hits.iter().take(5) {
+    for hit in &hits {
         let _ = writeln!(context, "- {}", hit.snippet.trim());
     }
     Ok(Some(context))

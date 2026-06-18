@@ -5,6 +5,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Memory inspector accuracy.** The per-turn "memories used" record (shown by
+  `localpilot memory inspect`) is now derived from the same single retrieval that
+  builds the injected context, so it lists exactly what was injected — no longer
+  over-reporting memories ranked past the injected cap, and now including the
+  repository primer (`primer` layer) and push-mode ingested chunks (`ingest`
+  layer) that were previously omitted. Each turn does one memory search instead of
+  two.
 - **Security (command classification).** An inline Windows shell command —
   `cmd /c …`, `powershell`/`pwsh -Command …`, `-EncodedCommand`, `-File` — is now
   treated as opaque and classified `unknown` (gated), exactly like `bash -c`,

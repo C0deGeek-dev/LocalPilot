@@ -64,6 +64,20 @@ pub trait SessionObserver: Send + Sync {
 /// A pre-turn context hook: may contribute system context for the upcoming
 /// turn (the sanctioned context mutation). Returning `None` contributes
 /// nothing.
+/// What a context hook contributes for one turn: the system-context text that is
+/// injected, and the exact memory records that text represents (for the
+/// "memories used" inspector). Deriving both from one value is what keeps the
+/// audit equal to the injection — the audit can never list a memory the turn did
+/// not actually inject, nor omit one it did.
+#[derive(Default)]
+pub struct ContextContribution {
+    /// The system-context text injected for the turn, or `None` to inject
+    /// nothing.
+    pub text: Option<String>,
+    /// The memory records the injected text represents, in injection order.
+    pub memories: Vec<localpilot_store::MemoryUsed>,
+}
+
 pub trait ContextHook: Send + Sync {
     /// A stable name for diagnostics.
     fn name(&self) -> &str;
@@ -75,6 +89,16 @@ pub trait ContextHook: Send + Sync {
     /// records what was used.
     fn memories_used(&self, _prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
         Vec::new()
+    }
+    /// The injected text *and* the exact memories it represents, as one value so
+    /// the injection and the audit cannot diverge. The default derives from
+    /// [`ContextHook::context_for`]/[`ContextHook::memories_used`]; a hook that
+    /// retrieves memory overrides this to compute both from a single retrieval.
+    fn contribute(&self, prompt: &str) -> ContextContribution {
+        ContextContribution {
+            text: self.context_for(prompt),
+            memories: self.memories_used(prompt),
+        }
     }
 }
 
@@ -110,21 +134,23 @@ impl HookFabric {
         }
     }
 
-    /// Collect context contributions for a turn.
-    pub(crate) fn context_for(&self, prompt: &str) -> Vec<String> {
-        self.context_hooks
-            .iter()
-            .filter_map(|hook| hook.context_for(prompt))
-            .collect()
-    }
-
-    /// Collect the memories every context hook used for a turn, for the
-    /// inspector. Best-effort and side-effect-free.
-    pub(crate) fn memories_used(&self, prompt: &str) -> Vec<localpilot_store::MemoryUsed> {
-        self.context_hooks
-            .iter()
-            .flat_map(|hook| hook.memories_used(prompt))
-            .collect()
+    /// Collect every hook's contribution for a turn as one value — the merged
+    /// injected text and the exact memories that text represents — in a single
+    /// pass, so the audit and the injection are derived from the same retrieval.
+    pub(crate) fn contribute(&self, prompt: &str) -> ContextContribution {
+        let mut texts = Vec::new();
+        let mut memories = Vec::new();
+        for hook in &self.context_hooks {
+            let contribution = hook.contribute(prompt);
+            if let Some(text) = contribution.text {
+                texts.push(text);
+            }
+            memories.extend(contribution.memories);
+        }
+        ContextContribution {
+            text: (!texts.is_empty()).then(|| texts.join("\n")),
+            memories,
+        }
     }
 
     /// The registered gates, for dispatch.

@@ -39,7 +39,7 @@ pub use handoff::{
     check_handoff, evaluate_resume, write_handoff, Handoff, HandoffHeader, HandoffSummary,
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
 };
-pub use hooks::{ContextHook, HookEvent, HookFabric, SessionObserver};
+pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use quality::{
