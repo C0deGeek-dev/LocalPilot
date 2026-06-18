@@ -3,7 +3,9 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
-## Unreleased
+## v0.3.0-beta.3 - 2026-06-18
+
+Coordinated LocalX beta release.
 
 - **RPC robustness.** The stdio line framer now caps an unterminated record
   (default 16 MiB) and returns a framing error instead of buffering without
