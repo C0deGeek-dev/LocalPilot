@@ -110,6 +110,27 @@ Project skills are advisory prompt modules under `.localpilot/skills/` or
 `.agents/skills/`; see [05-tool-system.md](05-tool-system.md) §Project Skill
 Discovery.
 
+### `[tools]`
+
+The pull-discovery broker (ADR-0031): narrow each turn's advertised tool schemas
+to a small working set and resolve a need to the right tool on demand. Every key
+defaults so an absent `[tools]` block reproduces prior behaviour exactly — the
+broker is off and the full tool set is advertised.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `broker` | bool | `false` | Enable the broker. Off advertises the full registry (the rollback path); on narrows advertised schemas to the working set and resolves/reveals on a miss. |
+| `core` | array of string | `[]` | The core working set always advertised when the broker is on. Empty uses the built-in default (a lean read/edit/search/shell set). |
+| `working_set_cap` | int | `24` | Maximum revealed tools retained before LRU eviction. |
+| `score_floor` | int | `1` | Minimum resolution score to reveal; below it a miss is a clean "no match". |
+| `marker` | bool | `false` | Enable the loose `NEED: <capability>` marker trigger. Off by default; the always-on failure-driven trigger does not need it. |
+| `learning` | bool | `false` | Re-rank by past success, graduate hot tools into the always-advertised set, and record redacted resolution telemetry. Off keeps the broker working with mechanical freshness only. |
+| `graduation_threshold` | int | `3` | Reveals of one tool before it graduates into the always-advertised set (when `learning`). |
+
+**Migration:** these defaults reproduce prior behaviour, so an existing config
+keeps working unchanged. Opt in with `[tools] broker = true`; see
+[05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
+
 ## Example
 
 ```toml

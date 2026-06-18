@@ -176,9 +176,11 @@ pub async fn run_chat(
     // Ask-gated actions suspend the turn and prompt in the TUI; the user's
     // y/n answer flows back through this channel to the permission engine.
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
+    let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     let mut runtime = SessionRuntime::new(
         provider,
-        crate::mcp::McpTools::load(&config).await.registry(),
+        registry,
         PermissionEngine::new(profile, Vec::new()),
         Box::new(TuiApprover {
             tx: approval_tx.clone(),
@@ -201,10 +203,12 @@ pub async fn run_chat(
             tool_call_budget: config.harness.tool_call_budget,
             tool_call_budget_max: config.harness.tool_call_budget_max,
             rules: config.harness.rules.clone(),
+            tool_marker_enabled: config.tools.marker,
             ..SessionConfig::default()
         },
         Vec::new(),
     );
+    runtime.set_broker(broker);
     // Relevant accepted LocalMind memory is contributed per turn through the
     // context-hook fabric; ingested folder knowledge is pulled on demand via the
     // knowledge_search tool rather than seeded here.

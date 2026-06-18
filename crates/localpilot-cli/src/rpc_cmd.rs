@@ -56,9 +56,11 @@ pub async fn run(
         provider.declaration().max_context_tokens,
         config.harness.context_token_limit,
     );
+    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
+    let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     let mut runtime = SessionRuntime::new(
         provider,
-        crate::mcp::McpTools::load(&config).await.registry(),
+        registry,
         PermissionEngine::new(profile, Vec::new()),
         Box::new(approver),
         Store::open(&cwd),
@@ -79,10 +81,12 @@ pub async fn run(
             tool_call_budget: config.harness.tool_call_budget,
             tool_call_budget_max: config.harness.tool_call_budget_max,
             rules: config.harness.rules.clone(),
+            tool_marker_enabled: config.tools.marker,
             ..SessionConfig::default()
         },
         Vec::new(),
     );
+    runtime.set_broker(broker);
 
     // The Native serve path moves `cwd` into the serve context; keep a copy so
     // the session can be closed out into LocalMind when the client disconnects.

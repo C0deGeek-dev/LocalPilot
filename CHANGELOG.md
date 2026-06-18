@@ -5,6 +5,24 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- Added a **pull-based tool surface** (ADR-0031), off by default. With `[tools]
+  broker = true`, each turn advertises only a small working-set of tool *schemas*
+  (a configurable core plus the broker's own tools plus what has been revealed)
+  instead of every tool's schema; tool names are still listed cheaply. Two
+  read-only tools, `tool_search` and `tool_load`, let the model find and reveal a
+  tool on demand. A call to a tool that is not advertised (unknown,
+  out-of-working-set, or retired) no longer returns a bare `unknown tool` error —
+  the broker resolves it to the closest available tool, reveals it, and asks the
+  model to retry, without running the attempted call. An opt-in `[tools] marker`
+  lets the model write a `NEED: <capability>` line to request a tool proactively.
+  **Reveal-never-grant:** revealing changes visibility only; a revealed
+  write/network tool still passes the full permission gate. The broker searches a
+  live, fingerprinted catalog of the registry (MCP tools attributed to their
+  server; a retired tool drops out, with an optional old→replacement overlay since
+  MCP carries no deprecation field). With `[tools] learning = true` the broker
+  re-ranks tools by past success, graduates frequently-revealed tools into the
+  always-advertised set (persisted across sessions), and records redacted
+  `tool_resolution` telemetry. All `[tools]` defaults reproduce prior behaviour.
 - Added a **look-before-launch** discipline (ADR-0030). The agent is now nudged to
   inspect a named target before standing up its own competing server. A new
   always-on system-prompt convention states it, and a deterministic

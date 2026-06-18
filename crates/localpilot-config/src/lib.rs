@@ -18,5 +18,5 @@ pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, HarnessConfig,
     IngestConfig, IngestMode, McpConfig, McpServerConfig, Mode, PermissionProfile,
     PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig,
-    RuleSeverity, SkillsConfig, StorageConfig,
+    RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
 };

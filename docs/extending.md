@@ -68,6 +68,18 @@ a session's registry).
 Never reach a side effect outside the declared effects — dispatch is the single
 authorized path. Contract: [05-tool-system.md](05-tool-system.md).
 
+### Pull-discovery broker (host-installed)
+
+A registry can carry many tools without taxing every turn: the host builds a
+pull-discovery broker (`localpilot_tools::Broker`), registers its read-only
+`tool_search`/`tool_load` tools, seeds its catalog from the registry, and installs
+it with `SessionRuntime::set_broker`. The session then narrows each turn's
+advertised schemas to the broker's working set and feeds the failure-driven
+re-resolution and the optional `NEED:` marker into it. This is a **host
+integration point**, not a third-party surface — it is wired in-process from
+`[tools]` config (see [configuration.md](configuration.md)); revealing a tool
+changes visibility only and never bypasses the permission engine (ADR-0031).
+
 ## Permissions and redaction
 
 Every extension is gated by the permission engine

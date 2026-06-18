@@ -252,6 +252,11 @@ const REPAIR_PROMPT: &str =
 /// intervenes.
 const DEFAULT_TOOL_FAILURE_THRESHOLD: u32 = 6;
 
+/// Stable store key under which the broker's graduated tools persist across
+/// sessions (local and disposable, ADR-0012). Keyed by no session id so it is
+/// shared by the project's sessions.
+const GRADUATION_KEY: &str = "tool-graduation";
+
 /// Inject per-turn context-hook output into the request message list.
 ///
 /// The block is placed immediately after a leading system prompt (so both fold
@@ -657,6 +662,7 @@ impl SessionRuntime {
 
     /// Record that this session is closing.
     pub fn close(&mut self) {
+        self.persist_graduation();
         self.record_event(SessionEventKind::SessionClosed);
     }
 
@@ -820,8 +826,36 @@ impl SessionRuntime {
     /// the failure-driven / marker triggers feed it. The host builds the broker,
     /// registers its `tool_search`/`tool_load` tools in the registry, and seeds its
     /// catalog before handing it here.
+    ///
+    /// When the broker learns, the graduated tools from prior sessions are seeded
+    /// from the local, disposable store so a common need is advertised from turn
+    /// one (ADR-0012). Best-effort: a missing or unreadable record is ignored.
     pub fn set_broker(&mut self, broker: Option<Broker>) {
+        if let Some(broker) = &broker {
+            if broker.learning_enabled() {
+                if let Ok(Some(json)) = self.store.get_tool_output(GRADUATION_KEY) {
+                    if let Ok(names) = serde_json::from_str::<Vec<String>>(&json) {
+                        broker.seed_graduated(&names);
+                    }
+                }
+            }
+        }
         self.broker = broker;
+    }
+
+    /// Persist the broker's graduated tools to the local, disposable store so the
+    /// next session advertises them from turn one. Best-effort and gated on broker
+    /// learning; a write failure is logged, never fatal.
+    fn persist_graduation(&self) {
+        if let Some(broker) = &self.broker {
+            if broker.learning_enabled() {
+                if let Ok(json) = serde_json::to_string(&broker.graduated_names()) {
+                    if let Err(err) = self.store.put_tool_output(GRADUATION_KEY, &json) {
+                        tracing::warn!(error = %err, "failed to persist tool graduation");
+                    }
+                }
+            }
+        }
     }
 
     /// Set the reasoning effort for subsequent turns — switchable from the

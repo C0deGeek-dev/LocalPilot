@@ -21,6 +21,7 @@ pub struct Config {
     pub compaction: CompactionConfig,
     pub storage: StorageConfig,
     pub skills: SkillsConfig,
+    pub tools: ToolsConfig,
 }
 
 impl Default for Config {
@@ -36,6 +37,53 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             storage: StorageConfig::default(),
             skills: SkillsConfig::default(),
+            tools: ToolsConfig::default(),
+        }
+    }
+}
+
+/// Pull-discovery broker configuration (ADR-0031). The broker narrows each turn's
+/// advertised tool *schemas* to a small working set and resolves a need to the
+/// right tool on demand, revealing its schema. Every field defaults so an absent
+/// `[tools]` block reproduces today's behaviour exactly: `broker = false`
+/// advertises the full registry (the rollback path), and the marker/learning
+/// triggers are off. The numeric defaults mirror `localpilot-tools`' own
+/// `BrokerConfig` defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Enable the broker (narrow advertised schemas + resolve/reveal on miss).
+    /// Default `false` — the full tool set is advertised, as before.
+    pub broker: bool,
+    /// The core working set always advertised when the broker is on, in addition
+    /// to the broker's own `tool_search`/`tool_load`. Empty uses the built-in
+    /// default (a lean read/edit/search/shell set).
+    pub core: Vec<String>,
+    /// Maximum revealed tools retained before LRU eviction.
+    pub working_set_cap: usize,
+    /// Minimum resolution score to reveal; below it, a miss is a clean "no match".
+    pub score_floor: u32,
+    /// Enable the loose `NEED: <capability>` marker trigger. Default `false` — the
+    /// always-on failure-driven trigger does not need it.
+    pub marker: bool,
+    /// Enable broker learning: re-rank by past success, graduate hot tools into the
+    /// always-advertised set, and record redacted resolution telemetry. Default
+    /// `false` — the broker still works (mechanical freshness) without it.
+    pub learning: bool,
+    /// Reveals of one tool before it graduates into the always-advertised set.
+    pub graduation_threshold: usize,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            broker: false,
+            core: Vec::new(),
+            working_set_cap: 24,
+            score_floor: 1,
+            marker: false,
+            learning: false,
+            graduation_threshold: 3,
         }
     }
 }
@@ -570,6 +618,34 @@ mod tests {
         assert_eq!(partial.max_sessions, 10);
         assert!(partial.auto_prune);
         assert_eq!(partial.max_age_days, 90);
+    }
+
+    #[test]
+    fn tools_config_defaults_reproduce_prior_behaviour() {
+        // Absent [tools] block ⇒ broker off ⇒ the full tool set is advertised,
+        // exactly as before, and the marker/learning triggers are off.
+        let tools = ToolsConfig::default();
+        assert!(!tools.broker);
+        assert!(!tools.marker);
+        assert!(!tools.learning);
+        assert!(tools.core.is_empty());
+        assert_eq!(tools.working_set_cap, 24);
+        assert_eq!(tools.score_floor, 1);
+        assert_eq!(tools.graduation_threshold, 3);
+
+        // A whole Config with no tools key fills the defaults.
+        let config: Config = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(config.tools, ToolsConfig::default());
+
+        // Partial config fills the rest from defaults and round-trips.
+        let partial: ToolsConfig = serde_json::from_value(json!({ "broker": true })).unwrap();
+        assert!(partial.broker);
+        assert_eq!(partial.working_set_cap, 24);
+        let value = serde_json::to_value(&partial).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ToolsConfig>(value).unwrap(),
+            partial
+        );
     }
 
     #[test]

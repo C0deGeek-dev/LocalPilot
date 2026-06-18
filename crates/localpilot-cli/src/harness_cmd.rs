@@ -479,6 +479,7 @@ where
             localpilot_harness::SummarizerTuning::from_config(&config.compaction),
             gate_allowance.clone(),
             config.harness.rules.clone(),
+            &config.tools,
             (run.approver)(),
         );
         localpilot_localmind::register_context_hook(root, &mut runtime);
@@ -663,11 +664,14 @@ fn build_runtime(
     summarizer_tuning: localpilot_harness::SummarizerTuning,
     allowlist: Vec<String>,
     rules: IndexMap<String, RuleSeverity>,
+    tools: &localpilot_config::ToolsConfig,
     approver: Box<dyn Approver>,
 ) -> SessionRuntime {
-    SessionRuntime::new(
+    let mut registry = mcp.registry();
+    let broker = crate::mcp::install_broker(tools, &mut registry);
+    let mut runtime = SessionRuntime::new(
         provider,
-        mcp.registry(),
+        registry,
         PermissionEngine::new(profile, allowlist),
         approver,
         Store::open(root),
@@ -683,10 +687,13 @@ fn build_runtime(
             compaction_mode,
             summarizer_tuning,
             rules,
+            tool_marker_enabled: tools.marker,
             ..SessionConfig::default()
         },
         Vec::new(),
-    )
+    );
+    runtime.set_broker(broker);
+    runtime
 }
 
 fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {

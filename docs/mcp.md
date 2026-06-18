@@ -1,4 +1,4 @@
-﻿# Connecting MCP servers
+# Connecting MCP servers
 
 LocalPilot can expose tools from [Model Context Protocol](https://modelcontextprotocol.io)
 servers to the model. Each server is launched as a local subprocess that speaks
@@ -37,3 +37,25 @@ the transcript, the model, or the logs.
 Only local servers launched over stdio are supported. The connection is used by
 the interactive REPL, `print`, and `harness` runs; harness connects each server
 once and reuses it across steps.
+
+## MCP as the catalog's volatile edge
+
+When the pull-discovery broker is enabled (`[tools] broker`, see
+[`docs/05-tool-system.md`](05-tool-system.md) and
+[`docs/configuration.md`](configuration.md)), each MCP tool is attributed to its
+server in the live, fingerprinted tool **catalog**. MCP is the catalog's volatile
+edge: a server's advertised `tools/list` is authoritative for that server's
+entries, so a tool a server stops advertising simply drops out of the next
+projection (a `removed` delta) and a schema bump shows up as a `changed` delta.
+The catalog is a derived projection of the registry — never a second source of
+truth.
+
+**Deprecation is overlay-only.** The MCP protocol carries no `deprecated` flag,
+version, or replacement field on a tool (spec rev 2025-06-18): a tool's
+*disappearance* from `tools/list` is the only removal signal. So a retired tool is
+handled two ways: a call to a name the registry no longer has routes through the
+broker's failure-driven re-resolution ("X retired; closest now: Y"), and an
+optional hand-maintained old→replacement **overlay** sharpens that hint when known.
+The overlay only annotates and de-ranks an entry; it grants and removes nothing. A
+server that volunteers a non-standard `_meta.deprecated`/`_meta.replacedBy` hint is
+read best-effort, but that is off the standard.

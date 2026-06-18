@@ -93,6 +93,15 @@ protocol, and resolve-and-run are explicit non-goals here; each is a future drop
 behind the same seam and would need its own decision (and, for any move toward
 auto-execution, a fresh security review against reveal-never-grant).
 
+As shipped: a `[tools]` config block (`broker`, `core`, `working_set_cap`,
+`score_floor`, `marker`, `learning`, `graduation_threshold`) gates the feature,
+all defaults reproducing prior behaviour. The catalog/broker live in
+`localpilot-tools` (the registry projects a fingerprinted catalog; the broker
+holds the working set and the `tool_search`/`tool_load` read-only tools); the
+session owns the advertise lever and the failure-driven/marker triggers; learning
+records a redacted `ToolResolution` session event and persists graduated tools in
+the disposable project store across sessions.
+
 ## ADR-0030: Inspect A Named Target Before Launching Your Own, Enforced As An Evidence-Grounded Rule
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and the

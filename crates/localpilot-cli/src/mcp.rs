@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use localpilot_config::{Config, McpServerConfig};
+use localpilot_config::{Config, McpServerConfig, ToolsConfig};
 use localpilot_mcp::{McpClient, McpError, McpTool, McpToolDescriptor, StdioTransport, Transport};
 use localpilot_sandbox::Effect;
-use localpilot_tools::{ToolRegistry, ToolSource};
+use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
 
 /// Connected MCP servers and the tools they advertise. The server processes stay
 /// alive for as long as this value is held, so a single connection backs many
@@ -100,6 +100,40 @@ impl McpTools {
         }
         registry
     }
+}
+
+/// Map the user-facing `[tools]` config into the broker's tuning, falling back to
+/// the broker's own defaults for an empty core.
+fn broker_config(tools: &ToolsConfig) -> BrokerConfig {
+    let defaults = BrokerConfig::default();
+    BrokerConfig {
+        core: if tools.core.is_empty() {
+            defaults.core
+        } else {
+            tools.core.clone()
+        },
+        working_set_cap: tools.working_set_cap,
+        score_floor: tools.score_floor,
+        learning_enabled: tools.learning,
+        graduation_threshold: tools.graduation_threshold,
+    }
+}
+
+/// Build the pull-discovery broker from `[tools]` config when enabled, register
+/// its read-only `tool_search`/`tool_load` tools into `registry`, and seed its
+/// catalog from the full registry. Returns the broker handle to install on the
+/// session via `SessionRuntime::set_broker`, or `None` when the broker is off (the
+/// full tool set is advertised as before — the rollback path).
+#[must_use]
+pub fn install_broker(tools: &ToolsConfig, registry: &mut ToolRegistry) -> Option<Broker> {
+    if !tools.broker {
+        return None;
+    }
+    let broker = Broker::new(broker_config(tools));
+    registry.register(Box::new(ToolSearch::new(broker.clone())));
+    registry.register(Box::new(ToolLoad::new(broker.clone())));
+    broker.set_catalog(registry.catalog());
+    Some(broker)
 }
 
 async fn connect(

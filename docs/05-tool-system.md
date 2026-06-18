@@ -260,6 +260,49 @@ through the permission engine. This keeps the no-silent-execution contract intac
 (see [`docs/localmind-integration.md`](localmind-integration.md) for the parallel
 advisory-skill contract on the LocalMind side).
 
+## Pull-Discovery Broker
+
+The tool surface can be made **pull-based** instead of advertising every tool's
+schema every turn (ADR-0031). It is **off by default** (`[tools] broker = false`),
+in which case the full registry is advertised exactly as before — the rollback
+path.
+
+When `[tools] broker = true`:
+
+- **Working set.** Each turn advertises only a small **working set** of tool
+  schemas — a configurable core default (a lean read/edit/search/shell set) plus
+  the broker's own tools plus any tools revealed this session. Tool *names* are
+  still listed in the prompt (cheap); only the *schemas* (the token cost) are
+  narrowed.
+- **`tool_search` / `tool_load`.** Two read-only (`Effect::ReadPath`) tools, like
+  `skill_search`/`skill_load`. `tool_search` returns lean ranked locators (name,
+  one-line summary, score) for a need; `tool_load` reveals one tool by exact name —
+  adding it to the working set and returning its schema plus a one-line example.
+- **Failure-driven trigger (always on with the broker).** A call to a tool that is
+  not advertised — unknown, out-of-working-set, or retired — does not return a bare
+  `unknown tool` error. The broker resolves the attempt to the closest available
+  tool, reveals it, and asks the model to retry. The attempted call **does not
+  run**.
+- **Loose `NEED:` marker (opt-in, `[tools] marker = true`).** The model may write a
+  `NEED: <capability>` line; the harness reveals the closest tool proactively.
+- **Reveal-never-grant.** Revealing changes *visibility only*. Dispatch is
+  unchanged: the permission engine and the tighten-only gate chain remain the sole
+  execution authority, so a freshly revealed write/network tool still resolves to
+  `Ask`/`Deny` exactly as if it had always been advertised. The broker never
+  translates the model's arguments and runs a tool itself (no resolve-and-run).
+- **Catalog.** The broker searches a live, fingerprinted projection of the
+  registry, rebuilt on the registry-change signal (see [`docs/mcp.md`](mcp.md) for
+  the MCP volatile edge and the deprecation overlay).
+- **Learning (opt-in, `[tools] learning = true`).** The broker records a redacted
+  `tool_resolution` session event per resolution, re-ranks tools that have resolved
+  and succeeded before above equal-text peers, and graduates a frequently-revealed
+  tool into the always-advertised set (persisted across sessions in the disposable
+  project store). With learning off, the broker still works — it just does not
+  learn.
+
+Configuration: [`docs/configuration.md`](configuration.md). Host integration of
+the failure-driven seam / marker parse: [`docs/extending.md`](extending.md).
+
 ## Safety Invariants
 
 - The model cannot execute a tool outside the registry.
@@ -270,3 +313,5 @@ advisory-skill contract on the LocalMind side).
 - A failed tool call is represented as data, not a process crash.
 - A cancelled tool execution is aborted (child processes killed), answered
   with a synthesized error result, and recorded in the session event log.
+- Revealing a tool (pull-discovery broker) changes only what is advertised; it
+  grants no authority, so a revealed tool still passes the full permission gate.
