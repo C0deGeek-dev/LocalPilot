@@ -75,7 +75,7 @@ impl<R: AsyncRead + Unpin> RecordReader<R> {
                 self.eof = true;
                 continue;
             }
-            self.queued.extend(self.framing.push(&chunk[..read]));
+            self.queued.extend(self.framing.push(&chunk[..read])?);
         }
     }
 }

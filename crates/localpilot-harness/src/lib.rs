@@ -48,7 +48,7 @@ pub use quality::{
     QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
-pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, Trigger, Verdict};
+pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
     SessionRuntime, SteerQueue, StopReason,

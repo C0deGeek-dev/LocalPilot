@@ -1,11 +1,11 @@
-﻿//! The worker: step selection, the step-completion gate, and the anti-sunk-cost
+//! The worker: step selection, the step-completion gate, and the anti-sunk-cost
 //! retry/discard/replan loop.
 
 use serde::{Deserialize, Serialize};
 
 use crate::progress::{Progress, Step};
 use crate::quality::CheckOutcome;
-use crate::rules::{RuleContext, RuleEngine, Trigger, Verdict};
+use crate::rules::{RuleContext, RuleEngine, RuleVerdict, Trigger};
 
 /// Select the next step to work on: the first incomplete step.
 #[must_use]
@@ -157,9 +157,11 @@ pub fn decide_step(
     for trigger in [Trigger::PostTest, Trigger::PreCommit, Trigger::StepComplete] {
         for (name, verdict) in engine.evaluate(trigger, &ctx) {
             let candidate = match verdict {
-                Verdict::Allow | Verdict::Warn(_) => continue,
-                Verdict::Retry(reason) | Verdict::Discard(reason) => StepAction::Retry(reason),
-                Verdict::Block(reason) => StepAction::Block(format!("{name}: {reason}")),
+                RuleVerdict::Allow | RuleVerdict::Warn(_) => continue,
+                RuleVerdict::Retry(reason) | RuleVerdict::Discard(reason) => {
+                    StepAction::Retry(reason)
+                }
+                RuleVerdict::Block(reason) => StepAction::Block(format!("{name}: {reason}")),
             };
             if action_rank(&candidate) > action_rank(&action) {
                 action = candidate;

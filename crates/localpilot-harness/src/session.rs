@@ -36,7 +36,7 @@ use crate::compaction::{
 use crate::hooks::{HookEvent, HookFabric};
 use crate::launch_targets::{self, LocalTarget};
 use crate::quality::{CheckOutcome, CheckRunner};
-use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, Trigger, Verdict as RuleVerdict};
+use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
 /// Why a turn loop stopped.

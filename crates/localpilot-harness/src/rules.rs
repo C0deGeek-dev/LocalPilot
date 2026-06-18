@@ -30,7 +30,7 @@ pub enum Trigger {
 
 /// A rule's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
+pub enum RuleVerdict {
     /// Continue.
     Allow,
     /// Continue and surface a message.
@@ -43,21 +43,22 @@ pub enum Verdict {
     Block(String),
 }
 
-impl Verdict {
+impl RuleVerdict {
     /// Whether the verdict stops progress (block) or merely warns/continues.
     #[must_use]
     pub fn is_blocking(&self) -> bool {
-        matches!(self, Verdict::Block(_))
+        matches!(self, RuleVerdict::Block(_))
     }
 
     /// The attached message, if any.
     #[must_use]
     pub fn message(&self) -> Option<&str> {
         match self {
-            Verdict::Allow => None,
-            Verdict::Warn(m) | Verdict::Retry(m) | Verdict::Discard(m) | Verdict::Block(m) => {
-                Some(m)
-            }
+            RuleVerdict::Allow => None,
+            RuleVerdict::Warn(m)
+            | RuleVerdict::Retry(m)
+            | RuleVerdict::Discard(m)
+            | RuleVerdict::Block(m) => Some(m),
         }
     }
 }
@@ -101,15 +102,15 @@ pub trait Rule: Send + Sync {
         false
     }
     /// Evaluate the rule at the given (already-clamped) severity.
-    fn evaluate(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict;
+    fn evaluate(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict;
 }
 
 /// Map a violation to a verdict at a severity. `Off` disables (allow).
-fn at(severity: RuleSeverity, reason: impl Into<String>) -> Verdict {
+fn at(severity: RuleSeverity, reason: impl Into<String>) -> RuleVerdict {
     match severity {
-        RuleSeverity::Off => Verdict::Allow,
-        RuleSeverity::Warn => Verdict::Warn(reason.into()),
-        RuleSeverity::Block => Verdict::Block(reason.into()),
+        RuleSeverity::Off => RuleVerdict::Allow,
+        RuleSeverity::Warn => RuleVerdict::Warn(reason.into()),
+        RuleSeverity::Block => RuleVerdict::Block(reason.into()),
     }
 }
 
@@ -127,7 +128,7 @@ macro_rules! rule {
             fn applies_to(&self, trigger: Trigger) -> bool { self.fires(trigger) }
             fn default_severity(&self) -> RuleSeverity { $sev }
             fn critical(&self) -> bool { $crit }
-            fn evaluate(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+            fn evaluate(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
                 $ty::check(self, ctx, severity)
             }
         }
@@ -208,78 +209,78 @@ rule!(
 const PROHIBITED_COMMIT_TERMS: &[&str] = &["leaked", "source-map", "private endpoint"];
 
 impl NoStaleUncommitted {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.uncommitted_unrelated {
             at(
                 severity,
                 "unrelated uncommitted changes are present; commit or stash them first",
             )
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl WorkspaceBoundary {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.path_inside_workspace == Some(false) {
             at(
                 severity,
                 "the target path is outside the workspace boundary",
             )
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl SecretFileGuard {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.path_secret_like {
             at(severity, "the target looks like a secret-bearing file")
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl TestFirstWhenConfigured {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.test_first_required && ctx.editing_impl_before_tests {
             at(severity, "implementation is being edited before its test")
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl SuiteGreen {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.tests_passed == Some(false) {
             at(severity, "the configured test command did not pass")
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl ProgressUpdated {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.progress_reflects_completion == Some(false) {
             at(
                 severity,
                 "PROGRESS.md does not yet reflect the completed step",
             )
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl CommitMessageClean {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         let Some(message) = &ctx.commit_message else {
-            return Verdict::Allow;
+            return RuleVerdict::Allow;
         };
         let lower = message.to_ascii_lowercase();
         if contains_secret(message) || PROHIBITED_COMMIT_TERMS.iter().any(|t| lower.contains(t)) {
@@ -288,29 +289,29 @@ impl CommitMessageClean {
                 "the commit message contains a secret or a prohibited reference",
             )
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl AttemptLimit {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.max_attempts > 0 && ctx.attempts >= ctx.max_attempts {
             at(severity, "the per-step attempt limit was reached")
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
 
 impl QualityGate {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         gate_verdict(&ctx.gate_outcomes, severity)
     }
 }
 
 impl CheckBeforeLaunch {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
         if ctx.named_local_target_unprobed && ctx.launch_or_scaffold_attempt {
             at(
                 severity,
@@ -319,7 +320,7 @@ impl CheckBeforeLaunch {
                  probe fails",
             )
         } else {
-            Verdict::Allow
+            RuleVerdict::Allow
         }
     }
 }
@@ -330,11 +331,11 @@ impl CheckBeforeLaunch {
 /// `off` is ignored, and the default (no override) is `retry`, the actionable
 /// path the loop feeds back to the model. The rule's own severity is a ceiling:
 /// `warn` softens everything to a warning, `off` disables the gate.
-fn gate_verdict(outcomes: &[CheckOutcome], rule_severity: RuleSeverity) -> Verdict {
+fn gate_verdict(outcomes: &[CheckOutcome], rule_severity: RuleSeverity) -> RuleVerdict {
     if rule_severity == RuleSeverity::Off {
-        return Verdict::Allow;
+        return RuleVerdict::Allow;
     }
-    let mut worst = Verdict::Allow;
+    let mut worst = RuleVerdict::Allow;
     for outcome in outcomes {
         let verdict = outcome_verdict(outcome);
         if rank(&verdict) > rank(&worst) {
@@ -344,23 +345,23 @@ fn gate_verdict(outcomes: &[CheckOutcome], rule_severity: RuleSeverity) -> Verdi
     apply_ceiling(worst, rule_severity)
 }
 
-fn outcome_verdict(outcome: &CheckOutcome) -> Verdict {
+fn outcome_verdict(outcome: &CheckOutcome) -> RuleVerdict {
     let name = &outcome.name;
     match outcome.status {
-        CheckStatus::Passed => Verdict::Allow,
-        CheckStatus::Denied => Verdict::Block(format!(
+        CheckStatus::Passed => RuleVerdict::Allow,
+        CheckStatus::Denied => RuleVerdict::Block(format!(
             "quality check `{name}` was denied by the permission engine"
         )),
-        CheckStatus::Errored => Verdict::Block(format!("quality check `{name}` could not run")),
+        CheckStatus::Errored => RuleVerdict::Block(format!("quality check `{name}` could not run")),
         CheckStatus::Failed => match outcome.severity {
-            Some(RuleSeverity::Off) => Verdict::Allow,
+            Some(RuleSeverity::Off) => RuleVerdict::Allow,
             Some(RuleSeverity::Warn) => {
-                Verdict::Warn(format!("quality check `{name}` reported findings"))
+                RuleVerdict::Warn(format!("quality check `{name}` reported findings"))
             }
             Some(RuleSeverity::Block) => {
-                Verdict::Block(format!("quality check `{name}` reported blocking findings"))
+                RuleVerdict::Block(format!("quality check `{name}` reported blocking findings"))
             }
-            None => Verdict::Retry(format!(
+            None => RuleVerdict::Retry(format!(
                 "quality check `{name}` failed; fix the findings and retry"
             )),
         },
@@ -368,24 +369,24 @@ fn outcome_verdict(outcome: &CheckOutcome) -> Verdict {
 }
 
 /// Severity ordering for reducing many outcomes to the most severe verdict.
-fn rank(verdict: &Verdict) -> u8 {
+fn rank(verdict: &RuleVerdict) -> u8 {
     match verdict {
-        Verdict::Allow => 0,
-        Verdict::Warn(_) => 1,
-        Verdict::Retry(_) => 2,
-        Verdict::Discard(_) => 3,
-        Verdict::Block(_) => 4,
+        RuleVerdict::Allow => 0,
+        RuleVerdict::Warn(_) => 1,
+        RuleVerdict::Retry(_) => 2,
+        RuleVerdict::Discard(_) => 3,
+        RuleVerdict::Block(_) => 4,
     }
 }
 
 /// Apply the rule-level severity as a ceiling on the reduced verdict.
-fn apply_ceiling(verdict: Verdict, rule_severity: RuleSeverity) -> Verdict {
+fn apply_ceiling(verdict: RuleVerdict, rule_severity: RuleSeverity) -> RuleVerdict {
     match rule_severity {
         RuleSeverity::Block => verdict,
-        RuleSeverity::Off => Verdict::Allow,
+        RuleSeverity::Off => RuleVerdict::Allow,
         RuleSeverity::Warn => match verdict {
-            Verdict::Allow => Verdict::Allow,
-            other => Verdict::Warn(
+            RuleVerdict::Allow => RuleVerdict::Allow,
+            other => RuleVerdict::Warn(
                 other
                     .message()
                     .unwrap_or("the quality gate reported findings")
@@ -453,7 +454,11 @@ impl RuleEngine {
 
     /// Evaluate every rule for `trigger`, returning the non-allow verdicts.
     #[must_use]
-    pub fn evaluate(&self, trigger: Trigger, ctx: &RuleContext) -> Vec<(&'static str, Verdict)> {
+    pub fn evaluate(
+        &self,
+        trigger: Trigger,
+        ctx: &RuleContext,
+    ) -> Vec<(&'static str, RuleVerdict)> {
         let mut outcomes = Vec::new();
         for rule in &self.rules {
             if !rule.applies_to(trigger) {
@@ -461,7 +466,7 @@ impl RuleEngine {
             }
             let severity = self.effective_severity(rule.as_ref());
             let verdict = rule.evaluate(ctx, severity);
-            if verdict != Verdict::Allow {
+            if verdict != RuleVerdict::Allow {
                 outcomes.push((rule.name(), verdict));
             }
         }
@@ -504,7 +509,7 @@ mod tests {
                 },
                 RuleSeverity::Block
             ),
-            Verdict::Block(_)
+            RuleVerdict::Block(_)
         ));
         // secret_file_guard
         assert!(matches!(
@@ -515,7 +520,7 @@ mod tests {
                 },
                 RuleSeverity::Warn
             ),
-            Verdict::Warn(_)
+            RuleVerdict::Warn(_)
         ));
         // test_first_when_configured
         assert!(matches!(
@@ -527,7 +532,7 @@ mod tests {
                 },
                 RuleSeverity::Warn
             ),
-            Verdict::Warn(_)
+            RuleVerdict::Warn(_)
         ));
         // suite_green
         assert!(matches!(
@@ -538,7 +543,7 @@ mod tests {
                 },
                 RuleSeverity::Block
             ),
-            Verdict::Block(_)
+            RuleVerdict::Block(_)
         ));
         // progress_updated
         assert!(matches!(
@@ -549,7 +554,7 @@ mod tests {
                 },
                 RuleSeverity::Block
             ),
-            Verdict::Block(_)
+            RuleVerdict::Block(_)
         ));
         // commit_message_clean
         assert!(matches!(
@@ -560,7 +565,7 @@ mod tests {
                 },
                 RuleSeverity::Block
             ),
-            Verdict::Block(_)
+            RuleVerdict::Block(_)
         ));
         // attempt_limit
         assert!(matches!(
@@ -572,7 +577,7 @@ mod tests {
                 },
                 RuleSeverity::Block
             ),
-            Verdict::Block(_)
+            RuleVerdict::Block(_)
         ));
     }
 
@@ -586,7 +591,7 @@ mod tests {
             .evaluate(Trigger::SessionStart, &ctx);
         assert!(outcomes
             .iter()
-            .any(|(n, v)| *n == "no_stale_uncommitted" && matches!(v, Verdict::Warn(_))));
+            .any(|(n, v)| *n == "no_stale_uncommitted" && matches!(v, RuleVerdict::Warn(_))));
     }
 
     #[test]
@@ -625,7 +630,7 @@ mod tests {
                 &[gate_outcome("fmt", CheckStatus::Passed, None)],
                 RuleSeverity::Block
             ),
-            Verdict::Allow
+            RuleVerdict::Allow
         );
     }
 
@@ -635,7 +640,7 @@ mod tests {
             &[gate_outcome("clippy", CheckStatus::Failed, None)],
             RuleSeverity::Block,
         );
-        assert!(matches!(verdict, Verdict::Retry(_)));
+        assert!(matches!(verdict, RuleVerdict::Retry(_)));
     }
 
     #[test]
@@ -667,7 +672,7 @@ mod tests {
             &[gate_outcome("clippy", CheckStatus::Failed, None)],
             RuleSeverity::Warn,
         );
-        assert!(matches!(verdict, Verdict::Warn(_)));
+        assert!(matches!(verdict, RuleVerdict::Warn(_)));
     }
 
     #[test]
@@ -713,7 +718,7 @@ mod tests {
     fn check_before_launch_warns_on_an_unprobed_named_target_launch() {
         let verdict = CheckBeforeLaunch.evaluate(&launch_ctx(true, true), RuleSeverity::Warn);
         match verdict {
-            Verdict::Warn(reason) => assert!(reason.contains("probe it first")),
+            RuleVerdict::Warn(reason) => assert!(reason.contains("probe it first")),
             other => panic!("expected Warn, got {other:?}"),
         }
     }
@@ -724,7 +729,7 @@ mod tests {
         // clears RequiresPriorRead.
         assert_eq!(
             CheckBeforeLaunch.evaluate(&launch_ctx(false, true), RuleSeverity::Warn),
-            Verdict::Allow
+            RuleVerdict::Allow
         );
     }
 
@@ -732,12 +737,12 @@ mod tests {
     fn check_before_launch_allows_when_no_target_named_or_no_launch() {
         assert_eq!(
             CheckBeforeLaunch.evaluate(&launch_ctx(false, false), RuleSeverity::Warn),
-            Verdict::Allow
+            RuleVerdict::Allow
         );
         // A named-but-unprobed target with no launch/scaffold action does not fire.
         assert_eq!(
             CheckBeforeLaunch.evaluate(&launch_ctx(true, false), RuleSeverity::Warn),
-            Verdict::Allow
+            RuleVerdict::Allow
         );
     }
 
@@ -761,7 +766,7 @@ mod tests {
         assert!(default_engine
             .evaluate(Trigger::PreShell, &ctx)
             .iter()
-            .any(|(n, v)| *n == "check_before_launch" && matches!(v, Verdict::Warn(_))));
+            .any(|(n, v)| *n == "check_before_launch" && matches!(v, RuleVerdict::Warn(_))));
 
         // `block` tightens it to a hard stop; `off` disables it (non-critical).
         let blocking = engine(&[("check_before_launch", RuleSeverity::Block)]);
@@ -787,7 +792,7 @@ mod tests {
             assert!(
                 matches!(
                     verdict,
-                    Verdict::Allow | Verdict::Warn(_) | Verdict::Block(_)
+                    RuleVerdict::Allow | RuleVerdict::Warn(_) | RuleVerdict::Block(_)
                 ),
                 "rule produced a non-tightening verdict: {verdict:?}"
             );

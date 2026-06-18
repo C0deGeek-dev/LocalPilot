@@ -18,7 +18,7 @@ use crate::decisions::{today, Decisions};
 use crate::error::HarnessError;
 use crate::progress::{Progress, Step};
 use crate::quality::CheckOutcome;
-use crate::rules::{RuleContext, RuleEngine, Trigger, Verdict};
+use crate::rules::{RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::session::{RuntimeEvent, SessionRuntime, StopReason};
 use crate::worker::{
     decide_step, AttemptResult, CompletionInputs, StepAction, StepDecision, StepLoop,
@@ -435,7 +435,7 @@ fn first_blocking_reason(
         .evaluate(trigger, ctx)
         .into_iter()
         .find_map(|(name, verdict)| match verdict {
-            Verdict::Block(reason) => Some(format!("{name}: {reason}")),
+            RuleVerdict::Block(reason) => Some(format!("{name}: {reason}")),
             _ => None,
         })
 }

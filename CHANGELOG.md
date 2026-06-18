@@ -5,6 +5,9 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **RPC robustness.** The stdio line framer now caps an unterminated record
+  (default 16 MiB) and returns a framing error instead of buffering without
+  bound, so a peer that never sends a newline cannot exhaust memory.
 - **Memory inspector accuracy.** The per-turn "memories used" record (shown by
   `localpilot memory inspect`) is now derived from the same single retrieval that
   builds the injected context, so it lists exactly what was injected — no longer

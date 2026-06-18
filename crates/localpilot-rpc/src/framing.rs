@@ -7,16 +7,45 @@
 //! level guarantees the Unicode rule structurally: no multi-byte UTF-8
 //! sequence contains the 0x0A byte.
 
+/// Default cap on a single unterminated record, so a peer that never sends an
+/// LF cannot grow the buffer without bound (a memory-exhaustion guard). Generous
+/// — a JSON-RPC record is kilobytes; this is 16 MiB.
+pub const DEFAULT_MAX_RECORD_LEN: usize = 16 * 1024 * 1024;
+
 /// Incremental LF-record framer over raw bytes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LineFraming {
     buf: Vec<u8>,
+    max_record_len: usize,
+}
+
+impl Default for LineFraming {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            max_record_len: DEFAULT_MAX_RECORD_LEN,
+        }
+    }
 }
 
 impl LineFraming {
+    /// A framer with a custom maximum unterminated-record length.
+    #[must_use]
+    pub fn with_max_record_len(max_record_len: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            max_record_len,
+        }
+    }
+
     /// Feed a chunk; returns every complete record it finishes, as raw bytes
     /// without the LF (and without a trailing CR).
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+    ///
+    /// # Errors
+    /// Returns an [`std::io::ErrorKind::InvalidData`] error when the unterminated
+    /// remainder exceeds the maximum record length, so a peer cannot exhaust
+    /// memory by never sending a delimiter.
+    pub fn push(&mut self, bytes: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
         self.buf.extend_from_slice(bytes);
         let mut records = Vec::new();
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
@@ -27,7 +56,13 @@ impl LineFraming {
             }
             records.push(record);
         }
-        records
+        if self.buf.len() > self.max_record_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "framing: unterminated record exceeds the maximum length",
+            ));
+        }
+        Ok(records)
     }
 
     /// Any buffered bytes of an unterminated final record.
@@ -41,8 +76,9 @@ impl LineFraming {
 mod tests {
     use super::*;
 
-    fn strings(records: Vec<Vec<u8>>) -> Vec<String> {
+    fn strings(records: std::io::Result<Vec<Vec<u8>>>) -> Vec<String> {
         records
+            .unwrap()
             .into_iter()
             .map(|r| String::from_utf8(r).unwrap())
             .collect()
@@ -84,8 +120,8 @@ mod tests {
     #[test]
     fn records_split_across_chunks_reassemble() {
         let mut framing = LineFraming::default();
-        assert!(framing.push(b"{\"a\":").is_empty());
-        assert!(framing.push(b"\"hello\"").is_empty());
+        assert!(framing.push(b"{\"a\":").unwrap().is_empty());
+        assert!(framing.push(b"\"hello\"").unwrap().is_empty());
         let records = strings(framing.push(b"}\n{\"b\":2}"));
         assert_eq!(records, vec!["{\"a\":\"hello\"}"]);
         assert_eq!(framing.remainder(), b"{\"b\":2}");
@@ -98,8 +134,19 @@ mod tests {
         let mut framing = LineFraming::default();
         let line = "{\"a\":\"\u{65e5}\u{672c}\"}\n".as_bytes();
         let split = 8; // inside the first multi-byte character
-        assert!(framing.push(&line[..split]).is_empty());
+        assert!(framing.push(&line[..split]).unwrap().is_empty());
         let records = strings(framing.push(&line[split..]));
         assert_eq!(records, vec!["{\"a\":\"\u{65e5}\u{672c}\"}"]);
+    }
+
+    #[test]
+    fn an_unterminated_record_past_the_cap_errors_instead_of_buffering() {
+        let mut framing = LineFraming::with_max_record_len(64);
+        // No LF: the buffer would grow without bound. Past the cap it errors.
+        let err = framing.push(&[b'x'; 128]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // A terminated record under the cap still frames normally.
+        let mut ok = LineFraming::with_max_record_len(64);
+        assert_eq!(strings(ok.push(b"{\"a\":1}\n")), vec!["{\"a\":1}"]);
     }
 }

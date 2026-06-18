@@ -403,7 +403,7 @@ impl<R: AsyncRead + Unpin> Reader<R> {
                 self.eof = true;
                 continue;
             }
-            self.queued.extend(self.framing.push(&chunk[..read]));
+            self.queued.extend(self.framing.push(&chunk[..read])?);
         }
     }
 }
