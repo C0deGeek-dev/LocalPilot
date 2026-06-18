@@ -29,6 +29,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   extraction helper that surfaces fix-commit candidates as reviewable fixture
   stubs. Offline-deterministic by default; a live model path is gated behind
   `LOCALPILOT_LIVE_TESTS`.
+- **LLM-as-judge quality rubric.** Added an original, blinded, calibrated
+  LLM-as-judge that scores the quality dimensions static signals cannot see
+  (readability, idiomatic style, abstraction fit, latent-bug risk) into the
+  scorecard's optional `judge` block. Single-solution scoring is blind by
+  construction; comparative judging randomizes solution order and maps the verdict
+  back; a prompt-addressed cache makes scoring offline-deterministic; and
+  `cohens_kappa` reports agreement against a human-labelled sample. See
+  [docs/08-testing.md](docs/08-testing.md) §LLM-as-judge quality rubric.
 
 ## v0.3.0-beta.3 - 2026-06-18
 

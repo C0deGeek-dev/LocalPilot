@@ -125,6 +125,7 @@ fn build_scorecard(
         quality,
         process: extract_process(events, &ledger),
         speed: SpeedBlock::from_events(events, wall_ms),
+        judge: None,
     }
 }
 

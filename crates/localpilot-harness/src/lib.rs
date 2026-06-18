@@ -15,6 +15,7 @@ mod error;
 mod evidence;
 mod handoff;
 mod hooks;
+mod judge;
 mod launch_targets;
 mod planning;
 mod precondition;
@@ -41,6 +42,11 @@ pub use handoff::{
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
 };
 pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
+pub use judge::{
+    blind, cohens_kappa, judge_prompt, parse_judge_block, parse_preference, preference_prompt,
+    resolve_preference, BlindedPair, Judge, JudgeBlock, JudgeCache, JudgeError, JudgeInput,
+    Preferred, RUBRIC,
+};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use quality::{

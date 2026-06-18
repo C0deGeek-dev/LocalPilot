@@ -26,6 +26,7 @@ use localpilot_store::{SessionEvent, SessionEventKind};
 
 use crate::discipline::DisciplineMetrics;
 use crate::evidence::{CallOutcome, EvidenceLedger};
+use crate::judge::JudgeBlock;
 use crate::quality::CheckOutcome;
 
 /// The scorecard contract version. Bump on any breaking shape change (a removed
@@ -56,6 +57,9 @@ pub struct Scorecard {
     pub process: ProcessBlock,
     /// Reported speed/cost guardrail. Never the headline score.
     pub speed: SpeedBlock,
+    /// Optional LLM-as-judge scores for the quality dimensions static signals
+    /// cannot see. `null` when no judge ran (the offline static path).
+    pub judge: Option<JudgeBlock>,
 }
 
 impl Scorecard {
@@ -512,6 +516,7 @@ mod tests {
                 input_tokens: 500,
                 output_tokens: 200,
             },
+            judge: None,
         }
     }
 
@@ -528,10 +533,11 @@ mod tests {
         let json = sample_scorecard().to_json().expect("serialize");
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         for key in [
-            "schema", "task", "arm", "model", "results", "quality", "process", "speed",
+            "schema", "task", "arm", "model", "results", "quality", "process", "speed", "judge",
         ] {
             assert!(value.get(key).is_some(), "scorecard must carry `{key}`");
         }
+        assert!(value["judge"].is_null(), "no judge ran for this sample");
         // Nullable contract fields serialize as present (null), not omitted.
         let mut minimal = sample_scorecard();
         minimal.quality.vs_gold_ratio = None;

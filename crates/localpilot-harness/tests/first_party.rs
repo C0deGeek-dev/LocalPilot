@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use localpilot_config::{load, CliOverrides, ConfigPaths};
 use localpilot_harness::{
-    complexity_delta_in_diff, extract_process, resume_one_step, tests_added_in_diff, DiffStat,
-    EvidenceLedger, QualityBlock, ResultsBlock, RuleEngine, Scorecard, SessionConfig,
-    SessionRuntime, SpeedBlock, SCORECARD_SCHEMA,
+    complexity_delta_in_diff, extract_process, judge_prompt, resume_one_step, tests_added_in_diff,
+    DiffStat, EvidenceLedger, Judge, JudgeCache, JudgeInput, QualityBlock, ResultsBlock,
+    RuleEngine, Scorecard, SessionConfig, SessionRuntime, SpeedBlock, SCORECARD_SCHEMA,
 };
 use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -189,6 +189,23 @@ fn gold_diff_stat(task: &FirstPartyTask) -> DiffStat {
     DiffStat::from_unified(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Attach an offline judge block from a seeded cache, proving the LLM-as-judge
+/// integrates with the scorecard deterministically. The cached response stands in
+/// for a real judgment (which comes from the live judge model), so CI needs no
+/// model. The scores are blind by construction — the prompt carries no arm id.
+fn offline_judge(diff_text: &str) -> Option<localpilot_harness::JudgeBlock> {
+    let input = JudgeInput {
+        diff: diff_text,
+        trajectory: None,
+    };
+    let mut cache = JudgeCache::default();
+    cache.insert(
+        &judge_prompt(&input),
+        "{\"readability\":4,\"idiomaticity\":4,\"abstraction_fit\":4,\"bug_resistance\":4}",
+    );
+    Judge::new("offline-judge-fixture", cache).score_offline(&input)
+}
+
 /// Drive one task offline: materialize the base workspace, confirm it is red,
 /// run the loop (the fake provider applies the gold fix), confirm it is green,
 /// and emit the capability scorecard.
@@ -299,6 +316,7 @@ fn run_offline(task: &FirstPartyTask) -> Scorecard {
         ),
         process: extract_process(&events, &ledger),
         speed: SpeedBlock::from_events(&events, wall_ms),
+        judge: offline_judge(&diff_text),
     }
 }
 
@@ -323,6 +341,18 @@ fn first_party_corpus_offline_scorecards() {
         assert!(card.results.passed, "offline gold fix solves `{}`", task.id);
         assert!(card.results.tests_total > 0, "graded by real tests");
         assert!(card.quality.diff_added > 0, "the fix changed code");
+        let judge = card
+            .judge
+            .as_ref()
+            .expect("an offline judge block is attached");
+        assert!(
+            (1..=5).contains(&judge.readability),
+            "judge scores are in range"
+        );
+        assert!(
+            judge.blinded,
+            "single-solution judging is blind by construction"
+        );
         // The offline run applies the gold patch verbatim, so churn matches gold.
         assert_eq!(
             card.quality.vs_gold_ratio,
@@ -509,6 +539,7 @@ async fn run_live(
         ),
         process: extract_process(&events, &ledger),
         speed: SpeedBlock::from_events(&events, wall_ms),
+        judge: None,
     }
 }
 
