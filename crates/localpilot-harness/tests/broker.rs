@@ -80,7 +80,7 @@ fn advertised(requests: &[ModelRequest]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// --- the advertise lever (03.4) ---
+// --- the advertise lever ---
 
 #[tokio::test]
 async fn the_broker_narrows_advertised_tools_to_the_working_set() {
@@ -150,7 +150,7 @@ fn finished_tools(rx: &mut broadcast::Receiver<RuntimeEvent>) -> Vec<(String, bo
     out
 }
 
-// --- failure-driven re-resolution (04.1–04.3) ---
+// --- failure-driven re-resolution ---
 
 #[tokio::test]
 async fn a_call_to_an_unadvertised_tool_reveals_it_without_running_it() {
@@ -250,7 +250,7 @@ async fn an_unresolvable_tool_is_a_clean_terminal_message() {
     );
 }
 
-// --- loose NL marker (04.4, 04.5) ---
+// --- loose NL marker ---
 
 #[tokio::test]
 async fn a_need_marker_reveals_a_tool_when_the_marker_trigger_is_on() {
@@ -303,7 +303,7 @@ async fn a_need_marker_does_nothing_when_the_trigger_is_off() {
     );
 }
 
-// --- end-to-end behaviour, the offline inline-vs-broker spike (04.6, 00.8) ---
+// --- end-to-end behaviour, the offline inline-vs-broker spike ---
 
 #[tokio::test]
 async fn the_broker_recovers_an_unadvertised_tool_where_the_baseline_errors() {
@@ -378,7 +378,7 @@ async fn without_the_broker_an_unknown_tool_just_errors() {
     );
 }
 
-// --- telemetry + graduation (05.1, 05.3, 05.4) ---
+// --- telemetry + graduation ---
 
 fn resolution_events(store: &Store, id: localpilot_core::SessionId) -> usize {
     store

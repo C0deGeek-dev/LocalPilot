@@ -607,7 +607,7 @@ impl SessionRuntime {
 
     /// Record a broker resolution to the durable session event log (redacted on
     /// append, ADR-0011; local and disposable, ADR-0012), gated on broker learning
-    /// being enabled. With learning off, no telemetry is written (05.4).
+    /// being enabled. With learning off, no telemetry is written.
     fn record_resolution(&mut self, resolution: &localpilot_tools::Resolution, trigger: &str) {
         if self
             .broker

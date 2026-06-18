@@ -124,7 +124,7 @@ pub struct ResolutionRecord {
 }
 
 /// The learned re-rank boost for `name`: how many *successful* prior resolutions
-/// chose it, capped. A pure function over the resolution history (05.2), so a tool
+/// chose it, capped. A pure function over the resolution history, so a tool
 /// that has resolved and succeeded for similar needs outranks an equal-text peer.
 #[must_use]
 pub fn learned_boost(history: &[ResolutionRecord], name: &str) -> u32 {
@@ -138,7 +138,7 @@ pub fn learned_boost(history: &[ResolutionRecord], name: &str) -> u32 {
 }
 
 /// Whether `name` has been resolved at least `threshold` times in `history` — the
-/// graduation predicate (05.3). Pure.
+/// graduation predicate. Pure.
 #[must_use]
 fn graduates(history: &[ResolutionRecord], name: &str, threshold: usize) -> bool {
     threshold > 0
@@ -808,7 +808,7 @@ mod tests {
         broker
     }
 
-    // --- resolution (03.1) ---
+    // --- resolution ---
 
     #[test]
     fn resolve_ranks_the_relevant_tool_first() {
@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(hits[1].deprecated_replacement.as_deref(), Some("new_fetch"));
     }
 
-    // --- working set + reveal (03.2, 03.3) ---
+    // --- working set + reveal ---
 
     #[test]
     fn reveal_adds_to_the_working_set_and_returns_schema_and_example() {
@@ -902,7 +902,7 @@ mod tests {
         assert!(broker.is_advertised("c"));
     }
 
-    // --- failure-driven re-resolution (04.1–04.3) ---
+    // --- failure-driven re-resolution ---
 
     #[test]
     fn reresolve_reveals_the_closest_tool_and_asks_to_retry() {
@@ -963,7 +963,7 @@ mod tests {
         );
     }
 
-    // --- telemetry: re-rank + graduation (05.2, 05.3, 05.4) ---
+    // --- telemetry: re-rank + graduation ---
 
     fn learning_broker() -> Broker {
         let broker = Broker::new(BrokerConfig {
@@ -1073,7 +1073,7 @@ mod tests {
         assert!(!broker.is_advertised("no_such"));
     }
 
-    // --- advertised set composition (03.4 lever input) ---
+    // --- advertised set composition ---
 
     #[test]
     fn core_and_broker_tools_are_always_advertised() {
@@ -1084,7 +1084,7 @@ mod tests {
         assert!(!broker.is_advertised("git_commit"), "non-core, unrevealed");
     }
 
-    // --- read-only effect (03.6) ---
+    // --- read-only effect ---
 
     #[tokio::test]
     async fn the_broker_tools_are_read_only() {
@@ -1110,7 +1110,7 @@ mod tests {
         );
     }
 
-    // --- reveal-never-grant (03.5, the §7 invariant gate) ---
+    // --- reveal-never-grant ---
 
     #[tokio::test]
     async fn a_revealed_write_tool_still_asks_permission() {
