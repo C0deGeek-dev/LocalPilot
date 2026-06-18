@@ -1472,6 +1472,7 @@ dependencies = [
  "localpilot-config",
  "localpilot-core",
  "localpilot-sandbox",
+ "parking_lot",
  "regex",
  "reqwest",
  "schemars",

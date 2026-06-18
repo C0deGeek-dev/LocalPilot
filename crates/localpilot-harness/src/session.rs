@@ -24,7 +24,7 @@ use localpilot_recovery::{
 };
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
-use localpilot_tools::{ToolContext, ToolRegistry};
+use localpilot_tools::{Broker, ToolContext, ToolRegistry};
 use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -378,6 +378,10 @@ pub struct SessionRuntime {
     /// Local serveable targets named in the task prompt(s) this session, against
     /// which a launch/scaffold action is checked for a prior probe.
     named_targets: Vec<LocalTarget>,
+    /// The pull-discovery broker (ADR-0031), when enabled. `None` advertises the
+    /// full registry every turn (today's behaviour, the rollback path). When set,
+    /// the per-turn tool specs are narrowed to the broker's working set.
+    broker: Option<Broker>,
 }
 
 impl SessionRuntime {
@@ -426,6 +430,7 @@ impl SessionRuntime {
             summarizer: None,
             rule_engine,
             named_targets: Vec::new(),
+            broker: None,
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -711,6 +716,15 @@ impl SessionRuntime {
         self.engine = PermissionEngine::new(profile, allowlist);
     }
 
+    /// Install the pull-discovery broker (ADR-0031). When set, the per-turn tool
+    /// specs are narrowed to the broker's working set (the advertise lever) and
+    /// the failure-driven / marker triggers feed it. The host builds the broker,
+    /// registers its `tool_search`/`tool_load` tools in the registry, and seeds its
+    /// catalog before handing it here.
+    pub fn set_broker(&mut self, broker: Option<Broker>) {
+        self.broker = broker;
+    }
+
     /// Set the reasoning effort for subsequent turns — switchable from the
     /// REPL, and overridable per harness step (high for planning, low for
     /// mechanical edits).
@@ -978,6 +992,13 @@ impl SessionRuntime {
         self.tools
             .specs()
             .into_iter()
+            // The advertise lever: with the broker on, only the working set's
+            // schemas reach the provider (core ∪ broker tools ∪ revealed); with it
+            // off, every registered tool is advertised (today's behaviour).
+            .filter(|(name, _, _)| match &self.broker {
+                Some(broker) => broker.is_advertised(name),
+                None => true,
+            })
             .map(|(name, description, input_schema)| ToolSpec {
                 name: name.to_string(),
                 description: description.to_string(),

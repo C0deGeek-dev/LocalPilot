@@ -7,6 +7,7 @@
 //! `localpilot-sandbox`, and the registry never bypasses them.
 #![forbid(unsafe_code)]
 
+mod broker;
 mod builtins;
 mod builtins_shell;
 mod catalog;
@@ -15,6 +16,10 @@ mod error;
 mod registry;
 mod tool;
 
+pub use broker::{
+    resolve, Broker, BrokerConfig, Locator, RevealOutcome, ToolLoad, ToolSearch, TOOL_LOAD,
+    TOOL_SEARCH,
+};
 pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
     ReplaceInFile, SearchText, WriteFile,

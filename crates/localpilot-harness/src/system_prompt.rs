@@ -60,6 +60,20 @@ const SKILL_SEARCH_CUE: &str = concat!(
     "normal permission gate.",
 );
 
+/// The cue, appended only when the `tool_search` tool is registered (the
+/// pull-discovery broker is enabled), that tells the model the advertised tool set
+/// is a working subset and the rest are reachable on demand by search.
+const TOOL_SEARCH_CUE: &str = concat!(
+    "\n\n",
+    "The tools listed above are a working subset, not every tool available. When you need a ",
+    "capability you do not see advertised, call `tool_search` to find the right tool (you get back ",
+    "names and one-line summaries), then `tool_load` with a name to reveal its schema and call it. ",
+    "If you call a tool that is not currently advertised, the system resolves it to the closest ",
+    "available tool, reveals it, and asks you to retry. Revealing a tool only changes what is ",
+    "advertised — it runs nothing and grants nothing, so any action still goes through the normal ",
+    "permission gate.",
+);
+
 /// Render the prompt from the sorted tool names. Split from
 /// [`agent_system_prompt`] so the tool-driven cue is unit-testable without a live
 /// registry.
@@ -84,6 +98,11 @@ fn build_prompt(names: &[&str]) -> String {
     } else {
         ""
     };
+    let tool_search_cue = if names.contains(&"tool_search") {
+        TOOL_SEARCH_CUE
+    } else {
+        ""
+    };
     format!(
         "\
 You are LocalPilot's coding agent running in agent mode.
@@ -104,7 +123,7 @@ for it — `bypass` lifts the permission gate, but does not imply permission to
 mutate history or share work without being told to.
 
 Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}
+{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}
 
 Look before you launch. If a task names an existing target you can reach — a URL,
 a running service, a `host:port` — inspect or probe it first (for example fetch or
@@ -204,6 +223,29 @@ mod cue_tests {
         assert!(
             !without.contains("call `skill_search`"),
             "the cue must be absent when skill_search is not registered"
+        );
+    }
+
+    #[test]
+    fn the_tool_search_cue_appears_only_when_the_tool_is_registered() {
+        let with = build_prompt(&["tool_search", "tool_load", "read_file"]);
+        assert!(
+            with.contains("call `tool_search`"),
+            "the cue must be present when tool_search is registered"
+        );
+        assert!(
+            with.contains("working subset"),
+            "the cue must say the advertised set is a subset"
+        );
+        assert!(
+            with.contains("goes through the normal permission gate"),
+            "the cue must keep actions on the permission gate"
+        );
+        // Absent by default: the broker is off, so the tool is not registered.
+        let without = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !without.contains("call `tool_search`"),
+            "the cue must be absent when tool_search is not registered"
         );
     }
 }
