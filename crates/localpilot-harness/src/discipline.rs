@@ -12,7 +12,7 @@
 /// The per-capability discipline rates, each in `0.0..=1.0` unless noted. A rate
 /// with no applicable scenarios is reported as the vacuous-best value (`1.0` for
 /// a capability, `0.0` for a violation), so an absent case never penalizes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DisciplineMetrics {
     /// Number of scenarios the rates were computed over.
     pub scenarios: usize,

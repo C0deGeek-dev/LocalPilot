@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Capability scorecard.** The golden-task evals now emit a machine-readable
+  JSON scorecard per task run, widening the previous pass/fail line into three
+  measured layers — `results` (pass/fail, regression-safety, partial credit),
+  `quality` (diff size, vs-gold ratio, format/lint/type-check clean, complexity,
+  tests-added), and `process` (tool-call count, redundant calls,
+  reproduce-before-fix, test-before-done, retrieval utilization, exit reason,
+  recovery) — read deterministically from the captured diff and the session event
+  trace. A reported `speed` block (wall time, tokens) is a guardrail, never the
+  headline. The one-line discipline scorecard is unchanged. See
+  [docs/08-testing.md](docs/08-testing.md) §Golden-Task Evals.
 - **Per-turn tool-call budget is now opt-in (behavior change).** The
   `[harness] tool_call_budget` / `tool_call_budget_max` keys default to **unset**,
   so a turn runs unbounded unless an operator configures a budget — previously
