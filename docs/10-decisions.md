@@ -2,6 +2,97 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0031: The Tool Surface Is Pull-Based — A Per-Session Working Set, A Broker That Reveals, Reveal-Never-Grant
+
+Status: accepted. The tool-surface sibling of ADR-0027 (the skill model:
+pull-based discovery via `skill_search`/`skill_load`); applies ADR-0016 (project
+knowledge is pulled on demand, not pushed every turn) and ADR-0017 (retrieval
+context is a request-time projection) to *tools*; builds on ADR-0010 (the runtime
+validates and controls). Source consulted clean-room: the change-aware-invalidation
+and layered-retrieval findings in the LocalHub comparison research — concepts
+reimplemented, nothing vendored.
+
+Every registered tool's full schema was advertised to the model on every turn.
+That is the tool-surface analogue of the always-loaded-skill-description model
+ADR-0027 rejected: it taxes every turn's context and hurts small local models,
+and it grows linearly as MCP servers add tools. This record makes the tool surface
+**pull-based**, the same shape skills and knowledge already use.
+
+The model holds a small per-session **working set** — the bounded subset of tools
+whose specs are advertised this turn, seeded from a core default plus the broker's
+own tools. When the model needs a capability the working set does not contain it
+**signals** a need, and a **broker** resolves that need to the best tool(s) over a
+**live, fingerprinted catalog** of the current registry, then **reveals** the
+resolved tool: it adds the tool to the working set and returns the tool's exact
+current schema plus a one-line usage example. The model then calls the tool
+normally.
+
+**Reveal changes visibility only — reveal-never-grant.** Revealing a tool mutates
+the advertised set and nothing else. Dispatch is unchanged: the permission engine
+(`Allow`/`Ask`/`Deny`) runs first on every call, then the tighten-only gate chain,
+exactly as before. A freshly revealed write or network tool therefore hits the
+*same* `Ask`/`Deny` it would have hit had it always been advertised. The broker's
+own surface (`tool_search`, `tool_load`) is read-only (`Effect::ReadPath`), like
+`skill_search`/`skill_load`: searching and revealing inject *content the model
+reads*; they enable nothing.
+
+**Two triggers feed one broker core.** *Failure-driven* (always built, needs no new
+model behaviour): a call to a tool the working set does not contain — unknown,
+out-of-working-set, or retired (an MCP tool that vanished from `tools/list`) —
+returns a re-resolution ("closest available: Y — schema, example; now available,
+retry") instead of a bare `unknown tool` error, reveals Y, and lets the model
+retry. The attempted call does **not** execute. *Loose NL marker* (secondary,
+config-gated **off by default**): the model writes a short marker (`NEED:
+<capability>`) and the harness parses assistant output, resolves, and reveals
+proactively. The marker needs new model behaviour, so it ships off until a live
+small-model reliability run validates it; failure-driven carries the feature
+meanwhile.
+
+**The catalog is live, fingerprinted, and change-aware.** It is a projection over
+the registry (`registry.specs()`), rebuilt on the registry-change signal
+(registration / MCP (re)connect), never a second source of truth. Each entry
+carries a content fingerprint — a stable hash of (name + description + schema +
+source version) — so adds, removals, and schema bumps produce an index delta with
+no manual upkeep. MCP is the volatile edge: a server's advertised list is
+authoritative for its entries on each enumeration, and a tool absent from the new
+list is removed. MCP carries no deprecation field (spec rev 2025-06-18), so
+deprecation is an **overlay only** — an optional hand-maintained old→replacement
+map that annotates and de-ranks an entry; it grants and removes nothing.
+
+**Ranking is deterministic-first.** Need→tool resolution uses an in-process
+word-overlap scorer (the `skill_search` primitive applied to catalog entries), so
+the change set stays LocalPilot-only and the path stays fast and offline. A
+model/LocalMind ranker is a future drop-in behind the same `resolve()` seam.
+
+**Defaults reproduce today's behaviour.** The broker is config-gated and **off by
+default**: with it off, the full registry is advertised exactly as before — the
+rollback path. Cross-session persistence of the live working set is out of scope;
+only graduation-derived core defaults persist (a separate, opt-in learned-freshness
+tier). Resolve-and-run is explicitly out of scope: the broker reveals and the model
+retries; it never translates the model's args and executes a tool the model did not
+itself call.
+
+Reason:
+
+- **structural local-model-first posture:** tool guidance is fetched when relevant
+  rather than taxing every turn, mirroring `knowledge_search` and ADR-0027 — the
+  same proven pull pattern, now over tools;
+- **reveal-never-grant keeps the safety floor intact:** the permission engine and
+  tighten-only gates remain the sole execution authority; reveal is a visibility
+  hint and dispatch is truth, so a stale revealed schema costs at most one
+  correction round-trip and can never execute with wrong params;
+- **change-aware by construction:** a metadata fingerprint computed on the
+  registry-change signal (not polled, not a filesystem walk) tracks a surface that
+  MCP servers mutate, so LocalPilot evolves as the surface evolves;
+- **failure-driven needs zero new model behaviour:** the model already attempts
+  tool calls; the re-resolution only makes the miss helpful, so the feature pays
+  off even on a small model that never learns the marker convention.
+
+Supersedes nothing. A model-judged relevance scorer, a hard MCP rename-continuity
+protocol, and resolve-and-run are explicit non-goals here; each is a future drop-in
+behind the same seam and would need its own decision (and, for any move toward
+auto-execution, a fresh security review against reveal-never-grant).
+
 ## ADR-0030: Inspect A Named Target Before Launching Your Own, Enforced As An Evidence-Grounded Rule
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and the
