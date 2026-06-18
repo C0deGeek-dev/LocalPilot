@@ -163,6 +163,12 @@ pub struct SessionConfig {
     /// session-level rule engine — currently the `check_before_launch` discipline
     /// rule. Empty leaves every rule at its own default.
     pub rules: IndexMap<String, RuleSeverity>,
+    /// When set (and the pull-discovery broker is installed), the harness parses
+    /// assistant output for a `NEED: <capability>` marker and reveals the closest
+    /// tool proactively. Off by default — the marker needs new model behaviour, so
+    /// it ships opt-in (ADR-0031); failure-driven re-resolution carries the feature
+    /// without it.
+    pub tool_marker_enabled: bool,
 }
 
 impl Default for SessionConfig {
@@ -181,6 +187,7 @@ impl Default for SessionConfig {
             tool_call_budget_max: 50,
             enforce_claim_gate: false,
             rules: IndexMap::new(),
+            tool_marker_enabled: false,
         }
     }
 }
@@ -276,6 +283,31 @@ fn inject_turn_context(messages: Vec<Message>, context: Option<Message>) -> Vec<
         }
     };
     crate::compaction::merge_consecutive_system(combined)
+}
+
+/// Extract `NEED: <capability>` markers from assistant output (ADR-0031). One per
+/// line that begins — after trimming any leading list/bold punctuation — with a
+/// case-insensitive `need:` prefix; the capability is the non-empty remainder.
+/// Bounded so a runaway response cannot enqueue unbounded reveals.
+fn parse_need_markers(text: &str) -> Vec<String> {
+    const MAX_MARKERS: usize = 3;
+    let mut needs = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', ' ']);
+        if line
+            .get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case("need:"))
+        {
+            let need = line[5..].trim();
+            if !need.is_empty() {
+                needs.push(need.to_string());
+                if needs.len() >= MAX_MARKERS {
+                    break;
+                }
+            }
+        }
+    }
+    needs
 }
 
 /// Tracks per-tool failure counts within a single turn. Resets at every turn
@@ -402,7 +434,7 @@ impl SessionRuntime {
         let mut messages = Vec::with_capacity(seed.len() + 1);
         messages.push(Message::text(
             Role::System,
-            crate::system_prompt::agent_system_prompt(&tools),
+            crate::system_prompt::agent_system_prompt(&tools, config.tool_marker_enabled),
         ));
         messages.extend(seed);
 
@@ -517,6 +549,47 @@ impl SessionRuntime {
             .evaluate(trigger, &ctx)
             .into_iter()
             .find_map(|(rule, verdict)| (rule == "check_before_launch").then_some(verdict))
+    }
+
+    /// Failure-driven re-resolution (ADR-0031): when the broker is on and `name`
+    /// is not advertised (unknown to the registry, out of the working set, or
+    /// retired), reveal the closest available tool and return the model-visible
+    /// resolution to surface *in place of* dispatch — the attempted call never
+    /// runs and the model retries. `None` when no broker is installed or the tool
+    /// is already advertised (dispatch normally).
+    fn broker_reresolution(&self, name: &str) -> Option<localpilot_tools::Resolution> {
+        let broker = self.broker.as_ref()?;
+        if broker.is_advertised(name) {
+            return None;
+        }
+        Some(broker.reresolve(name))
+    }
+
+    /// Loose NL marker trigger (ADR-0031), gated on `tool_marker_enabled` and a
+    /// live broker: parse assistant `text` for `NEED: <capability>` markers and
+    /// reveal the closest tool for each, returning the revealed names. A no-op
+    /// (empty) when disabled, so the marker costs nothing unless opted in.
+    fn reveal_for_markers(
+        &self,
+        text: &str,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> Vec<String> {
+        if !self.config.tool_marker_enabled {
+            return Vec::new();
+        }
+        let Some(broker) = self.broker.as_ref() else {
+            return Vec::new();
+        };
+        let mut revealed = Vec::new();
+        for need in parse_need_markers(text) {
+            if let Some(name) = broker.reresolve(&need).revealed {
+                let _ = events.send(RuntimeEvent::Warning(format!(
+                    "revealed `{name}` for stated need: {need}"
+                )));
+                revealed.push(name);
+            }
+        }
+        revealed
     }
 
     /// Verify an executed call against its contract and return the verdict label
@@ -1399,6 +1472,11 @@ impl SessionRuntime {
                 text
             };
 
+            // Loose NL marker trigger (ADR-0031, gated): act on any `NEED:` marker
+            // in the assistant text now, while it is still owned, revealing the
+            // closest tool so the next turn advertises it. Empty unless opted in.
+            let marker_revealed = self.reveal_for_markers(&text, events);
+
             if !reasoning.trim().is_empty() {
                 content.push(ContentBlock::Reasoning {
                     text: reasoning,
@@ -1441,6 +1519,24 @@ impl SessionRuntime {
             }
 
             if calls.is_empty() {
+                // The marker trigger may have revealed tools for a stated need
+                // even though the model made no call this turn: keep the turn going
+                // so it can use them, instead of ending. Without a reveal, a
+                // call-free turn is the final answer.
+                if !marker_revealed.is_empty() {
+                    self.append(
+                        Message::text(
+                            Role::User,
+                            format!(
+                                "Revealed for your stated need: {}. They are now advertised — \
+                                 call one to continue, or say you are done.",
+                                marker_revealed.join(", ")
+                            ),
+                        )
+                        .into_synthetic("tool marker reveal"),
+                    );
+                    continue;
+                }
                 return self.stop(events, StopReason::Done);
             }
 
@@ -1525,7 +1621,20 @@ impl SessionRuntime {
                 // scaffolds a competing page, the rule warns (model-visible, the
                 // call still runs) or, when configured to block, refuses it.
                 let launch_verdict = self.check_before_launch_verdict(name, input);
-                let result = if let Some(reason) = self.precondition_block(name, input) {
+                let result = if let Some(resolution) = self.broker_reresolution(name) {
+                    // The broker narrowed the surface and this tool is not
+                    // advertised (unknown, out-of-working-set, or retired): reveal
+                    // the closest available tool and ask the model to retry. The
+                    // attempted call does not run (reveal-never-grant; no
+                    // resolve-and-run). Surfaced as a non-error redirect.
+                    let _ = events.send(RuntimeEvent::Warning(format!(
+                        "tool `{name}` is not advertised; resolving to the closest available tool"
+                    )));
+                    Some(localpilot_core::ToolResult::success(
+                        ToolUseId::from(id.as_str()),
+                        resolution.message,
+                    ))
+                } else if let Some(reason) = self.precondition_block(name, input) {
                     // A contract precondition (e.g. RequiresPriorRead) refused the
                     // call before permission. Tighten-only: surface it as an error
                     // result so the model sees why and can recover.
@@ -1879,6 +1988,26 @@ mod tests {
         assert_eq!(effective_context_limit(None, 24_000), 24_000);
         // A tiny window never collapses below the reserve floor.
         assert_eq!(effective_context_limit(Some(1_024), 24_000), 4_096);
+    }
+
+    #[test]
+    fn need_markers_parse_only_from_marker_lines() {
+        // A bare NEED line, and one behind a list bullet, both parse.
+        let needs = parse_need_markers("some thought\nNEED: fetch a web page\n- need: run a query");
+        assert_eq!(
+            needs,
+            vec!["fetch a web page".to_string(), "run a query".to_string()]
+        );
+        // Prose that merely mentions a capability is not a marker.
+        assert!(parse_need_markers("I might need to fetch a page").is_empty());
+        // An empty capability after the prefix is ignored.
+        assert!(parse_need_markers("NEED:   ").is_empty());
+    }
+
+    #[test]
+    fn need_markers_are_bounded() {
+        let many = "NEED: a\nNEED: b\nNEED: c\nNEED: d\nNEED: e";
+        assert_eq!(parse_need_markers(many).len(), 3);
     }
 
     #[test]

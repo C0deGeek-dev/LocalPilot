@@ -211,6 +211,20 @@ pub enum RevealOutcome {
     NotInCatalog,
 }
 
+/// The outcome of a failure-driven re-resolution: a model-visible message and, if
+/// a tool was revealed, its name (so the caller can record the resolution).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    /// The tool name revealed (added to the working set), if any.
+    pub revealed: Option<String>,
+    /// The model-visible text to return in place of a bare `unknown tool` error.
+    pub message: String,
+    /// The need the resolution ran against (for telemetry).
+    pub need: String,
+    /// The resolution score of the revealed tool, if any (for telemetry).
+    pub score: u32,
+}
+
 /// The broker's per-session state: tuning, the live catalog, the revealed working
 /// set, and the deprecation overlay.
 struct BrokerState {
@@ -239,6 +253,66 @@ impl BrokerState {
                 }
             }
             None => RevealOutcome::NotInCatalog,
+        }
+    }
+
+    /// Re-resolve an attempted-but-unavailable tool (unknown, out-of-working-set,
+    /// or retired) to the closest available tool and reveal it. Never executes
+    /// anything; the model retries with the revealed tool. Returns a terminal
+    /// "no tool matches" when nothing scores at or above the floor (the
+    /// resolve-loop guard).
+    fn reresolve(&mut self, attempted: &str) -> Resolution {
+        // A known deprecation replacement (the overlay) sharpens a retired-tool
+        // hint: "X retired; closest now: Y".
+        if let Some(replacement) = self.overlay.replacement_for(attempted).map(str::to_string) {
+            if self.catalog.get(&replacement).is_some() {
+                if let RevealOutcome::Revealed { name, rendered } = self.reveal(&replacement) {
+                    return Resolution {
+                        message: format!(
+                            "tool `{attempted}` is retired; closest available now: `{name}`.\n\
+                             {rendered}\nNow advertised — retry with `{name}`.",
+                        ),
+                        revealed: Some(name),
+                        need: attempted.to_string(),
+                        score: u32::MAX, // an explicit overlay hit is the strongest signal
+                    };
+                }
+            }
+        }
+
+        let hits = resolve(&self.catalog, &self.overlay, attempted);
+        match hits.into_iter().next() {
+            Some(top) if top.score >= self.config.score_floor => {
+                let score = top.score;
+                let message = match self.reveal(&top.name) {
+                    RevealOutcome::Revealed { name, rendered } if name == attempted => format!(
+                        "tool `{attempted}` was not advertised; it is now revealed.\n\
+                         {rendered}\nRetry the call.",
+                    ),
+                    RevealOutcome::Revealed { name, rendered } => format!(
+                        "tool `{attempted}` is not available; closest available: `{name}`.\n\
+                         {rendered}\nNow advertised — retry with `{name}`.",
+                    ),
+                    RevealOutcome::NotInCatalog => {
+                        format!("no available tool matches `{attempted}`.",)
+                    }
+                };
+                Resolution {
+                    revealed: Some(top.name),
+                    message,
+                    need: attempted.to_string(),
+                    score,
+                }
+            }
+            _ => Resolution {
+                revealed: None,
+                message: format!(
+                    "no available tool matches `{attempted}`. Describe the capability differently \
+                     and call `tool_search`, or proceed without it.",
+                ),
+                need: attempted.to_string(),
+                score: 0,
+            },
         }
     }
 }
@@ -364,6 +438,13 @@ impl Broker {
     /// Reveal a tool by exact name, adding it to the working set.
     pub fn reveal(&self, name: &str) -> RevealOutcome {
         self.0.lock().reveal(name)
+    }
+
+    /// Re-resolve an attempted-but-unavailable tool (the failure-driven trigger):
+    /// reveal the closest available tool and return the model-visible message, or a
+    /// terminal "no tool matches" when nothing scores at or above the floor.
+    pub fn reresolve(&self, attempted: &str) -> Resolution {
+        self.0.lock().reresolve(attempted)
     }
 
     /// The revealed tool names, most-recently-revealed last (for tests/inspection).
@@ -673,6 +754,67 @@ mod tests {
         assert!(!broker.is_advertised("a"), "a should have been evicted");
         assert!(broker.is_advertised("b"));
         assert!(broker.is_advertised("c"));
+    }
+
+    // --- failure-driven re-resolution (04.1–04.3) ---
+
+    #[test]
+    fn reresolve_reveals_the_closest_tool_and_asks_to_retry() {
+        let broker = broker();
+        // The model attempted "web_fetch", which does not exist; the closest
+        // available tool is "fetch".
+        let resolution = broker.reresolve("web_fetch");
+        assert_eq!(resolution.revealed.as_deref(), Some("fetch"));
+        assert!(
+            resolution.message.contains("fetch"),
+            "{}",
+            resolution.message
+        );
+        assert!(
+            resolution.message.contains("retry"),
+            "{}",
+            resolution.message
+        );
+        assert!(
+            broker.is_advertised("fetch"),
+            "closest tool is now advertised"
+        );
+    }
+
+    #[test]
+    fn reresolve_of_an_out_of_set_tool_by_its_own_name_reveals_it() {
+        let broker = broker();
+        // "git_commit" exists but is not advertised; resolving its own name
+        // reveals it for retry.
+        let resolution = broker.reresolve("git_commit");
+        assert_eq!(resolution.revealed.as_deref(), Some("git_commit"));
+        assert!(broker.is_advertised("git_commit"));
+    }
+
+    #[test]
+    fn reresolve_routes_a_retired_tool_to_its_replacement() {
+        let broker = broker();
+        broker.deprecate("legacy_fetch", "fetch");
+        let resolution = broker.reresolve("legacy_fetch");
+        assert_eq!(resolution.revealed.as_deref(), Some("fetch"));
+        assert!(
+            resolution.message.contains("retired"),
+            "{}",
+            resolution.message
+        );
+        assert!(broker.is_advertised("fetch"));
+    }
+
+    #[test]
+    fn reresolve_with_no_match_is_terminal() {
+        let broker = broker();
+        let resolution = broker.reresolve("xyzzy plugh frobnicate");
+        assert_eq!(resolution.revealed, None);
+        assert!(
+            resolution.message.contains("no available tool matches"),
+            "{}",
+            resolution.message
+        );
     }
 
     // --- advertised set composition (03.4 lever input) ---

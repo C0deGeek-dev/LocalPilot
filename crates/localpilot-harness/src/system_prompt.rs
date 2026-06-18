@@ -7,11 +7,15 @@
 use localpilot_tools::ToolRegistry;
 
 /// Build the agent-mode system prompt for the active tool registry.
+///
+/// `marker_enabled` adds the `NEED:` marker convention (ADR-0031) when the
+/// pull-discovery broker's marker trigger is on; it is gated together with the
+/// `tool_search` tool being registered.
 #[must_use]
-pub fn agent_system_prompt(tools: &ToolRegistry) -> String {
+pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    build_prompt(&names)
+    build_prompt_with(&names, marker_enabled)
 }
 
 /// The cue, appended only when a knowledge-base search tool is registered, that
@@ -74,10 +78,28 @@ const TOOL_SEARCH_CUE: &str = concat!(
     "permission gate.",
 );
 
-/// Render the prompt from the sorted tool names. Split from
-/// [`agent_system_prompt`] so the tool-driven cue is unit-testable without a live
-/// registry.
+/// The marker nudge, appended only when the marker trigger is enabled *and* the
+/// broker's `tool_search` is registered: teaches the model it can name a
+/// capability it lacks on a line of its own so the harness reveals a tool
+/// proactively (ADR-0031). Off by default — the marker needs new model behaviour.
+const TOOL_MARKER_CUE: &str = concat!(
+    "\n\n",
+    "If you realize you need a capability you do not have advertised, you may write a line ",
+    "`NEED: <capability>` (for example `NEED: fetch a web page`) and stop; the system will reveal ",
+    "the closest available tool so you can call it on your next turn. This is optional — you can ",
+    "also just call `tool_search` directly.",
+);
+
+/// Render the prompt from the sorted tool names with the marker nudge off. A
+/// test-only convenience over [`build_prompt_with`] so the existing cue tests stay
+/// terse; production code calls [`agent_system_prompt`].
+#[cfg(test)]
 fn build_prompt(names: &[&str]) -> String {
+    build_prompt_with(names, false)
+}
+
+/// Render the prompt, optionally adding the `NEED:` marker convention.
+fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
     } else {
@@ -103,6 +125,13 @@ fn build_prompt(names: &[&str]) -> String {
     } else {
         ""
     };
+    // The marker convention only makes sense when the broker can act on it, so it
+    // is gated on both the flag and `tool_search` being registered.
+    let tool_marker_cue = if marker_enabled && names.contains(&"tool_search") {
+        TOOL_MARKER_CUE
+    } else {
+        ""
+    };
     format!(
         "\
 You are LocalPilot's coding agent running in agent mode.
@@ -123,7 +152,7 @@ for it — `bypass` lifts the permission gate, but does not imply permission to
 mutate history or share work without being told to.
 
 Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}
+{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}
 
 Look before you launch. If a task names an existing target you can reach — a URL,
 a running service, a `host:port` — inspect or probe it first (for example fetch or
@@ -248,6 +277,29 @@ mod cue_tests {
             "the cue must be absent when tool_search is not registered"
         );
     }
+
+    #[test]
+    fn the_marker_cue_is_gated_on_both_the_flag_and_tool_search() {
+        // Enabled + tool_search registered: the marker convention appears.
+        let on = build_prompt_with(&["tool_search", "tool_load", "read_file"], true);
+        assert!(
+            on.contains("NEED:"),
+            "the marker cue must be present when enabled"
+        );
+        // Flag off: no marker convention, even with tool_search present.
+        let off = build_prompt_with(&["tool_search", "tool_load"], false);
+        assert!(
+            !off.contains("NEED:"),
+            "the marker cue must be off by default"
+        );
+        // Flag on but no broker (no tool_search): the marker would be inert, so
+        // it is not emitted.
+        let inert = build_prompt_with(&["read_file", "write_file"], true);
+        assert!(
+            !inert.contains("NEED:"),
+            "the marker cue needs tool_search to be actionable"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -257,7 +309,7 @@ mod tests {
     #[test]
     fn prompt_names_every_builtin_tool() {
         let tools = ToolRegistry::with_builtins();
-        let prompt = agent_system_prompt(&tools);
+        let prompt = agent_system_prompt(&tools, false);
         for name in tools.names() {
             assert!(prompt.contains(name), "prompt omitted {name}");
         }
