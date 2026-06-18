@@ -17,8 +17,8 @@ mod registry;
 mod tool;
 
 pub use broker::{
-    resolve, Broker, BrokerConfig, Locator, Resolution, RevealOutcome, ToolLoad, ToolSearch,
-    TOOL_LOAD, TOOL_SEARCH,
+    learned_boost, resolve, Broker, BrokerConfig, Locator, Resolution, ResolutionRecord,
+    RevealOutcome, ToolLoad, ToolSearch, DEFAULT_GRADUATION_THRESHOLD, TOOL_LOAD, TOOL_SEARCH,
 };
 pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,

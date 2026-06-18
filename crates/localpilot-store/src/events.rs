@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 3;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 4;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -179,6 +179,20 @@ pub enum SessionEventKind {
     MemoriesUsed {
         memories: Vec<MemoryUsed>,
     },
+    /// A pull-discovery broker resolution (ADR-0031): a need was resolved to a
+    /// tool and revealed. The durable, redacted audit of the learning loop's
+    /// input; the retry outcome is the paired `ToolFinished` for `chosen`.
+    /// Recorded only when broker learning is enabled.
+    ToolResolution {
+        /// The need (the attempted tool name, or the marker capability text).
+        need: String,
+        /// The tool revealed, if any (`None` for a terminal no-match).
+        chosen: Option<String>,
+        /// The resolution score of the chosen tool.
+        score: u32,
+        /// Which trigger drove the resolution (`failure_driven` or `marker`).
+        trigger: String,
+    },
 }
 
 impl SessionEvent {
@@ -238,6 +252,15 @@ fn migrate(
             2 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(3));
+                }
+                value
+            }
+            // v3 -> v4: additive only. v4 introduced the `ToolResolution` event
+            // kind; existing v3 events keep their shape, so the migration only
+            // stamps the current version.
+            3 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(4));
                 }
                 value
             }
@@ -393,6 +416,12 @@ mod tests {
                         layer: "index".to_string(),
                     },
                 ],
+            },
+            SessionEventKind::ToolResolution {
+                need: "web_fetch".to_string(),
+                chosen: Some("fetch".to_string()),
+                score: 3,
+                trigger: "failure_driven".to_string(),
             },
         ];
         let mut parent = None;

@@ -76,6 +76,13 @@ pub struct BrokerConfig {
     pub working_set_cap: usize,
     /// Minimum resolution score to reveal.
     pub score_floor: u32,
+    /// Learn from resolutions: re-rank by past success and graduate hot tools into
+    /// the always-advertised set. Off by default — the broker works with purely
+    /// mechanical freshness when this is off (it just does not learn), honouring
+    /// the same opt-in posture as the learning loop (ADR-0018).
+    pub learning_enabled: bool,
+    /// Reveals of one tool before it graduates into the always-advertised set.
+    pub graduation_threshold: usize,
 }
 
 impl Default for BrokerConfig {
@@ -84,6 +91,8 @@ impl Default for BrokerConfig {
             core: DEFAULT_CORE.iter().map(|s| (*s).to_string()).collect(),
             working_set_cap: DEFAULT_WORKING_SET_CAP,
             score_floor: DEFAULT_SCORE_FLOOR,
+            learning_enabled: false,
+            graduation_threshold: DEFAULT_GRADUATION_THRESHOLD,
         }
     }
 }
@@ -97,6 +106,47 @@ pub struct Locator {
     pub score: u32,
     pub deprecated_replacement: Option<String>,
     pub deprecated: bool,
+}
+
+/// The cap on the learned re-rank boost, so history nudges ranking without ever
+/// swamping the text-relevance score.
+const LEARNED_BOOST_CAP: u32 = 3;
+/// Default reveals of one tool before it graduates into the always-advertised set.
+pub const DEFAULT_GRADUATION_THRESHOLD: usize = 3;
+
+/// One resolution outcome in the broker's in-session history: which tool was
+/// chosen, and whether a subsequent call to it succeeded. The materialized,
+/// replay-safe form of the durable `ToolResolution` event the host records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionRecord {
+    pub chosen: String,
+    pub succeeded: bool,
+}
+
+/// The learned re-rank boost for `name`: how many *successful* prior resolutions
+/// chose it, capped. A pure function over the resolution history (05.2), so a tool
+/// that has resolved and succeeded for similar needs outranks an equal-text peer.
+#[must_use]
+pub fn learned_boost(history: &[ResolutionRecord], name: &str) -> u32 {
+    let succeeded = history
+        .iter()
+        .filter(|record| record.chosen == name && record.succeeded)
+        .count();
+    u32::try_from(succeeded)
+        .unwrap_or(LEARNED_BOOST_CAP)
+        .min(LEARNED_BOOST_CAP)
+}
+
+/// Whether `name` has been resolved at least `threshold` times in `history` — the
+/// graduation predicate (05.3). Pure.
+#[must_use]
+fn graduates(history: &[ResolutionRecord], name: &str, threshold: usize) -> bool {
+    threshold > 0
+        && history
+            .iter()
+            .filter(|record| record.chosen == name)
+            .count()
+            >= threshold
 }
 
 /// Collapse text to a single bounded line for a locator summary.
@@ -226,12 +276,19 @@ pub struct Resolution {
 }
 
 /// The broker's per-session state: tuning, the live catalog, the revealed working
-/// set, and the deprecation overlay.
+/// set, the deprecation overlay, and (when learning is on) the resolution history
+/// and the graduated set.
 struct BrokerState {
     config: BrokerConfig,
     catalog: Catalog,
     revealed: WorkingSet,
     overlay: DeprecationOverlay,
+    /// The in-session resolution history that feeds re-rank and graduation. Empty
+    /// when learning is off.
+    history: Vec<ResolutionRecord>,
+    /// Tools graduated into the always-advertised set this session (and seeded
+    /// from prior sessions when the host persists them). Bounded by the cap.
+    graduated: Vec<String>,
 }
 
 impl BrokerState {
@@ -239,6 +296,7 @@ impl BrokerState {
         name == TOOL_SEARCH
             || name == TOOL_LOAD
             || self.config.core.iter().any(|c| c == name)
+            || self.graduated.iter().any(|g| g == name)
             || self.revealed.contains(name)
     }
 
@@ -247,12 +305,60 @@ impl BrokerState {
             Some(entry) => {
                 let rendered = render_reveal(entry, &self.overlay);
                 self.revealed.reveal(name);
+                if self.config.learning_enabled {
+                    self.history.push(ResolutionRecord {
+                        chosen: name.to_string(),
+                        succeeded: false,
+                    });
+                    // Graduate a frequently-revealed tool so it is advertised from
+                    // turn one (bounded; LRU age-out, like the working set).
+                    if graduates(&self.history, name, self.config.graduation_threshold)
+                        && !self.graduated.iter().any(|g| g == name)
+                    {
+                        self.graduated.push(name.to_string());
+                        if self.config.working_set_cap > 0
+                            && self.graduated.len() > self.config.working_set_cap
+                        {
+                            self.graduated.remove(0);
+                        }
+                    }
+                }
                 RevealOutcome::Revealed {
                     name: name.to_string(),
                     rendered,
                 }
             }
             None => RevealOutcome::NotInCatalog,
+        }
+    }
+
+    /// Resolve a need to ranked locators, applying the learned re-rank boost when
+    /// learning is on so a tool with past successful resolutions outranks an
+    /// equal-text peer. Pure given the state.
+    fn ranked(&self, need: &str) -> Vec<Locator> {
+        let mut hits = resolve(&self.catalog, &self.overlay, need);
+        if self.config.learning_enabled {
+            for hit in &mut hits {
+                hit.score += learned_boost(&self.history, &hit.name);
+            }
+            hits.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| a.deprecated.cmp(&b.deprecated))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+        hits
+    }
+
+    /// Record that a revealed tool was subsequently used successfully, so it ranks
+    /// higher next time. A no-op when learning is off or the tool was not revealed.
+    fn note_success(&mut self, name: &str) {
+        if self.config.learning_enabled && self.revealed.contains(name) {
+            self.history.push(ResolutionRecord {
+                chosen: name.to_string(),
+                succeeded: true,
+            });
         }
     }
 
@@ -274,13 +380,15 @@ impl BrokerState {
                         ),
                         revealed: Some(name),
                         need: attempted.to_string(),
-                        score: u32::MAX, // an explicit overlay hit is the strongest signal
+                        // An explicit overlay hit clears the bar by fiat; record a
+                        // sane non-text score for telemetry rather than a sentinel.
+                        score: self.config.score_floor.max(1),
                     };
                 }
             }
         }
 
-        let hits = resolve(&self.catalog, &self.overlay, attempted);
+        let hits = self.ranked(attempted);
         match hits.into_iter().next() {
             Some(top) if top.score >= self.config.score_floor => {
                 let score = top.score;
@@ -391,6 +499,8 @@ impl Broker {
             catalog: Catalog::default(),
             revealed: WorkingSet::new(cap),
             overlay: DeprecationOverlay::new(),
+            history: Vec::new(),
+            graduated: Vec::new(),
         })))
     }
 
@@ -428,11 +538,46 @@ impl Broker {
         self.0.lock().is_advertised(name)
     }
 
-    /// Resolve a need to ranked locators over the current catalog.
+    /// Resolve a need to ranked locators over the current catalog, with the
+    /// learned re-rank applied when learning is on.
     #[must_use]
     pub fn resolve(&self, need: &str) -> Vec<Locator> {
-        let state = self.0.lock();
-        resolve(&state.catalog, &state.overlay, need)
+        self.0.lock().ranked(need)
+    }
+
+    /// Whether broker learning (telemetry re-rank + graduation) is enabled.
+    #[must_use]
+    pub fn learning_enabled(&self) -> bool {
+        self.0.lock().config.learning_enabled
+    }
+
+    /// Record that a (previously revealed) tool was used successfully, feeding the
+    /// learned re-rank. A no-op when learning is off or the tool was not revealed.
+    pub fn note_success(&self, name: &str) {
+        self.0.lock().note_success(name);
+    }
+
+    /// The tools graduated into the always-advertised set, for persistence across
+    /// sessions (the host seeds them back via [`Broker::seed_graduated`]).
+    #[must_use]
+    pub fn graduated_names(&self) -> Vec<String> {
+        self.0.lock().graduated.clone()
+    }
+
+    /// Seed graduated tools from a prior session so they are advertised from turn
+    /// one (bounded by the working-set cap). Unknown names are ignored.
+    pub fn seed_graduated(&self, names: &[String]) {
+        let mut state = self.0.lock();
+        let cap = state.config.working_set_cap;
+        for name in names {
+            if state.catalog.get(name).is_some() && !state.graduated.iter().any(|g| g == name) {
+                state.graduated.push(name.clone());
+            }
+        }
+        if cap > 0 && state.graduated.len() > cap {
+            let overflow = state.graduated.len() - cap;
+            state.graduated.drain(0..overflow);
+        }
     }
 
     /// Reveal a tool by exact name, adding it to the working set.
@@ -742,6 +887,7 @@ mod tests {
             core: Vec::new(),
             working_set_cap: 2,
             score_floor: 1,
+            ..BrokerConfig::default()
         });
         broker.set_catalog(Catalog::project([
             ("a", "alpha", schema(&[]), ToolSource::Builtin),
@@ -817,6 +963,116 @@ mod tests {
         );
     }
 
+    // --- telemetry: re-rank + graduation (05.2, 05.3, 05.4) ---
+
+    fn learning_broker() -> Broker {
+        let broker = Broker::new(BrokerConfig {
+            learning_enabled: true,
+            graduation_threshold: 2,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(catalog());
+        broker
+    }
+
+    #[test]
+    fn learned_boost_counts_capped_successful_resolutions() {
+        let history = vec![
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: true,
+            },
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: true,
+            },
+            ResolutionRecord {
+                chosen: "fetch".into(),
+                succeeded: false,
+            },
+            ResolutionRecord {
+                chosen: "git_commit".into(),
+                succeeded: true,
+            },
+        ];
+        assert_eq!(learned_boost(&history, "fetch"), 2); // two successes
+        assert_eq!(learned_boost(&history, "git_commit"), 1);
+        assert_eq!(learned_boost(&history, "read_file"), 0);
+    }
+
+    #[test]
+    fn a_past_success_reranks_a_tool_above_an_equal_text_peer() {
+        let cat = Catalog::project([
+            (
+                "fetch_a",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+            (
+                "fetch_b",
+                "fetch a url",
+                schema(&["url"]),
+                ToolSource::Builtin,
+            ),
+        ]);
+        let broker = Broker::new(BrokerConfig {
+            learning_enabled: true,
+            ..BrokerConfig::default()
+        });
+        broker.set_catalog(cat);
+        // Tie on text before any history (fetch_a wins by name order).
+        assert_eq!(broker.resolve("fetch a url")[0].name, "fetch_a");
+        // fetch_b reveals and succeeds; now it outranks the equal-text peer.
+        broker.reveal("fetch_b");
+        broker.note_success("fetch_b");
+        assert_eq!(broker.resolve("fetch a url")[0].name, "fetch_b");
+    }
+
+    #[test]
+    fn a_hot_tool_graduates_into_the_always_advertised_set() {
+        let broker = learning_broker(); // threshold 2
+        assert!(!broker.is_advertised("git_commit"));
+        broker.reveal("git_commit");
+        assert!(broker.is_advertised("git_commit"), "revealed once");
+        // Even after the reveal would age out of the working set, a graduated tool
+        // stays advertised. Reveal it a second time to cross the threshold, then
+        // evict the working set past its cap.
+        broker.reveal("git_commit");
+        assert!(
+            broker.graduated_names().contains(&"git_commit".to_string()),
+            "should have graduated after {} reveals",
+            2
+        );
+    }
+
+    #[test]
+    fn with_learning_off_nothing_is_learned_but_resolution_still_works() {
+        let broker = broker(); // learning off (default)
+                               // Resolution and reveal work (mechanical freshness).
+        assert!(matches!(
+            broker.reveal("fetch"),
+            RevealOutcome::Revealed { .. }
+        ));
+        broker.reveal("fetch");
+        broker.note_success("fetch");
+        // No history, no graduation — the broker did not learn.
+        assert!(broker.graduated_names().is_empty());
+        assert!(!broker.learning_enabled());
+        // Scores carry no learned boost (fetch's score is purely text-based).
+        let hits = broker.resolve("fetch a url over the network");
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn graduated_tools_can_be_seeded_from_a_prior_session() {
+        let broker = learning_broker();
+        broker.seed_graduated(&["git_commit".to_string(), "no_such".to_string()]);
+        assert!(broker.is_advertised("git_commit"), "seeded graduate");
+        // An unknown name is ignored, not advertised.
+        assert!(!broker.is_advertised("no_such"));
+    }
+
     // --- advertised set composition (03.4 lever input) ---
 
     #[test]
@@ -869,6 +1125,7 @@ mod tests {
             core: Vec::new(),
             working_set_cap: DEFAULT_WORKING_SET_CAP,
             score_floor: 1,
+            ..BrokerConfig::default()
         });
         broker.set_catalog(registry.catalog());
         assert!(

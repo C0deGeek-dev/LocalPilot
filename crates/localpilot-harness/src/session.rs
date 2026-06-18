@@ -570,26 +570,52 @@ impl SessionRuntime {
     /// reveal the closest tool for each, returning the revealed names. A no-op
     /// (empty) when disabled, so the marker costs nothing unless opted in.
     fn reveal_for_markers(
-        &self,
+        &mut self,
         text: &str,
         events: &broadcast::Sender<RuntimeEvent>,
     ) -> Vec<String> {
         if !self.config.tool_marker_enabled {
             return Vec::new();
         }
-        let Some(broker) = self.broker.as_ref() else {
-            return Vec::new();
+        // Resolve every marker first (this borrows the broker), then record the
+        // events (which needs `&mut self`), so the two borrows do not overlap.
+        let resolutions: Vec<localpilot_tools::Resolution> = match self.broker.as_ref() {
+            Some(broker) => parse_need_markers(text)
+                .iter()
+                .map(|need| broker.reresolve(need))
+                .collect(),
+            None => return Vec::new(),
         };
         let mut revealed = Vec::new();
-        for need in parse_need_markers(text) {
-            if let Some(name) = broker.reresolve(&need).revealed {
+        for resolution in resolutions {
+            self.record_resolution(&resolution, "marker");
+            if let Some(name) = resolution.revealed.clone() {
                 let _ = events.send(RuntimeEvent::Warning(format!(
-                    "revealed `{name}` for stated need: {need}"
+                    "revealed `{name}` for stated need: {}",
+                    resolution.need
                 )));
                 revealed.push(name);
             }
         }
         revealed
+    }
+
+    /// Record a broker resolution to the durable session event log (redacted on
+    /// append, ADR-0011; local and disposable, ADR-0012), gated on broker learning
+    /// being enabled. With learning off, no telemetry is written (05.4).
+    fn record_resolution(&mut self, resolution: &localpilot_tools::Resolution, trigger: &str) {
+        if self
+            .broker
+            .as_ref()
+            .is_some_and(localpilot_tools::Broker::learning_enabled)
+        {
+            self.record_event(SessionEventKind::ToolResolution {
+                need: resolution.need.clone(),
+                chosen: resolution.revealed.clone(),
+                score: resolution.score,
+                trigger: trigger.to_string(),
+            });
+        }
     }
 
     /// Verify an executed call against its contract and return the verdict label
@@ -1630,6 +1656,7 @@ impl SessionRuntime {
                     let _ = events.send(RuntimeEvent::Warning(format!(
                         "tool `{name}` is not advertised; resolving to the closest available tool"
                     )));
+                    self.record_resolution(&resolution, "failure_driven");
                     Some(localpilot_core::ToolResult::success(
                         ToolUseId::from(id.as_str()),
                         resolution.message,
@@ -1752,6 +1779,12 @@ impl SessionRuntime {
                     }
                 } else {
                     self.tool_failure_guard.record_success(name);
+                    // Feed the broker's learned re-rank: a revealed tool that ran
+                    // successfully ranks higher next time (no-op when learning off
+                    // or the tool was not revealed).
+                    if let Some(broker) = &self.broker {
+                        broker.note_success(name);
+                    }
                     self.error_breaker.reset();
                     // No-progress breaker: a successful call that keeps repeating
                     // with the same result, or a turn cycling a tiny set of calls,

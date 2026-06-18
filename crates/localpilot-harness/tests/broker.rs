@@ -21,6 +21,7 @@ struct BrokerHarness {
     runtime: SessionRuntime,
     broker: Broker,
     provider: Arc<FakeProvider>,
+    store: Store,
     events: broadcast::Sender<RuntimeEvent>,
     cancel: CancellationToken,
 }
@@ -61,6 +62,7 @@ fn build_broker_harness_with(
 
     let (events, _rx) = broadcast::channel(256);
     BrokerHarness {
+        store: Store::open(dir.path()),
         _dir: dir,
         runtime,
         broker,
@@ -373,6 +375,88 @@ async fn without_the_broker_an_unknown_tool_just_errors() {
         c1.2.contains("unknown tool"),
         "expected the bare unknown-tool error, got: {}",
         c1.2
+    );
+}
+
+// --- telemetry + graduation (05.1, 05.3, 05.4) ---
+
+fn resolution_events(store: &Store, id: localpilot_core::SessionId) -> usize {
+    store
+        .read_events(id)
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                localpilot_store::SessionEventKind::ToolResolution { .. }
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn with_learning_on_a_resolution_is_recorded_to_the_event_log() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "git_log", serde_json::json!({}))
+        .text("done");
+    let mut h = build_broker_harness(
+        provider,
+        BrokerConfig {
+            learning_enabled: true,
+            ..BrokerConfig::default()
+        },
+    );
+    let _ = h.runtime.run_turn("history", &h.events, &h.cancel).await;
+    assert_eq!(
+        resolution_events(&h.store, h.runtime.session_id()),
+        1,
+        "a failure-driven resolution should be recorded once"
+    );
+}
+
+#[tokio::test]
+async fn with_learning_off_no_resolution_telemetry_is_written() {
+    let provider = FakeProvider::new()
+        .tool_call("c1", "git_log", serde_json::json!({}))
+        .text("done");
+    let mut h = build_broker_harness(provider, BrokerConfig::default()); // learning off
+    let _ = h.runtime.run_turn("history", &h.events, &h.cancel).await;
+    // The broker still works (git_log was revealed) but nothing was learned.
+    assert!(
+        h.broker.is_advertised("git_log"),
+        "mechanical freshness still works"
+    );
+    assert_eq!(
+        resolution_events(&h.store, h.runtime.session_id()),
+        0,
+        "no telemetry with learning off"
+    );
+}
+
+#[tokio::test]
+async fn a_hot_tool_graduates_across_repeated_reveals() {
+    // With learning on and a low threshold, repeated failure-driven reveals of the
+    // same tool graduate it into the always-advertised set.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "git_log", serde_json::json!({}))
+        .tool_call("c2", "git_log", serde_json::json!({}))
+        .text("done");
+    let mut h = build_broker_harness(
+        provider,
+        BrokerConfig {
+            learning_enabled: true,
+            graduation_threshold: 2,
+            ..BrokerConfig::default()
+        },
+    );
+    // First reveal happens via the failed call; reveal a second time directly to
+    // cross the threshold (the second turn's c2 call dispatches the now-advertised
+    // tool, so drive the count via the broker to keep the test deterministic).
+    let _ = h.runtime.run_turn("history", &h.events, &h.cancel).await;
+    h.broker.reveal("git_log");
+    assert!(
+        h.broker.graduated_names().contains(&"git_log".to_string()),
+        "git_log should graduate after crossing the threshold"
     );
 }
 
