@@ -13,7 +13,7 @@
 [![issues](https://img.shields.io/github/issues/C0deGeek-dev/LocalPilot?style=flat-square&label=issues&color=4c1)](https://github.com/C0deGeek-dev/LocalPilot/issues)
 [![agent loop](https://img.shields.io/badge/agent%20loop-alpha-orange?style=flat-square)](#commands)
 [![harness](https://img.shields.io/badge/harness-mode-555?style=flat-square)](#commands)
-[![rules](https://img.shields.io/badge/rules-9%20gates-4c1?style=flat-square)](docs/06-harness-spec.md)
+[![rules](https://img.shields.io/badge/rules-10%20gates-4c1?style=flat-square)](docs/06-harness-spec.md)
 
 LocalPilot is a Rust-native, provider-neutral coding-agent harness.
 

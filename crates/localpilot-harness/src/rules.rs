@@ -1,4 +1,4 @@
-﻿//! The deterministic harness rule engine.
+//! The deterministic harness rule engine.
 //!
 //! Rules layer on top of the permission engine — they can stop or warn about a
 //! step, but they never grant a side effect the permission engine would deny.
@@ -78,6 +78,13 @@ pub struct RuleContext {
     /// Outcomes of the quality-gate checks that ran for this trigger, consumed by
     /// the `quality_gate` rule.
     pub gate_outcomes: Vec<CheckOutcome>,
+    /// A local serveable target was named in the task prompt and has not been
+    /// probed this session (computed from the evidence ledger). Consumed by the
+    /// `check_before_launch` rule.
+    pub named_local_target_unprobed: bool,
+    /// The action being gated starts a local HTTP server or scaffolds a competing
+    /// entry file. Consumed by the `check_before_launch` rule.
+    pub launch_or_scaffold_attempt: bool,
 }
 
 /// A harness rule.
@@ -190,6 +197,13 @@ rule!(
     default = RuleSeverity::Block,
     triggers = [StepComplete, PhaseComplete]
 );
+rule!(
+    CheckBeforeLaunch,
+    "check_before_launch",
+    critical = false,
+    default = RuleSeverity::Warn,
+    triggers = [PreShell, PreTool]
+);
 
 const PROHIBITED_COMMIT_TERMS: &[&str] = &["leaked", "source-map", "private endpoint"];
 
@@ -295,6 +309,21 @@ impl QualityGate {
     }
 }
 
+impl CheckBeforeLaunch {
+    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> Verdict {
+        if ctx.named_local_target_unprobed && ctx.launch_or_scaffold_attempt {
+            at(
+                severity,
+                "a target URL or host was named in the task but has not been probed this session; \
+                 probe it first (e.g. fetch or curl it) and only launch your own server if the \
+                 probe fails",
+            )
+        } else {
+            Verdict::Allow
+        }
+    }
+}
+
 /// Reduce quality-gate outcomes to one verdict. A passing check contributes
 /// `Allow`; a denied or un-runnable check blocks; a failing check maps by its
 /// configured severity — explicit `block` (e.g. `audit`) blocks, `warn` warns,
@@ -396,6 +425,7 @@ impl RuleEngine {
             Box::new(CommitMessageClean),
             Box::new(AttemptLimit),
             Box::new(QualityGate),
+            Box::new(CheckBeforeLaunch),
         ];
         Self {
             rules,
@@ -669,5 +699,98 @@ mod tests {
     fn cadence_maps_to_its_trigger() {
         assert_eq!(trigger_for_cadence(Cadence::Step), Trigger::StepComplete);
         assert_eq!(trigger_for_cadence(Cadence::Phase), Trigger::PhaseComplete);
+    }
+
+    fn launch_ctx(named_unprobed: bool, attempting: bool) -> RuleContext {
+        RuleContext {
+            named_local_target_unprobed: named_unprobed,
+            launch_or_scaffold_attempt: attempting,
+            ..RuleContext::default()
+        }
+    }
+
+    #[test]
+    fn check_before_launch_warns_on_an_unprobed_named_target_launch() {
+        let verdict = CheckBeforeLaunch.evaluate(&launch_ctx(true, true), RuleSeverity::Warn);
+        match verdict {
+            Verdict::Warn(reason) => assert!(reason.contains("probe it first")),
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_before_launch_allows_once_the_target_is_probed() {
+        // A satisfied probe clears the unprobed signal, exactly like a prior read
+        // clears RequiresPriorRead.
+        assert_eq!(
+            CheckBeforeLaunch.evaluate(&launch_ctx(false, true), RuleSeverity::Warn),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn check_before_launch_allows_when_no_target_named_or_no_launch() {
+        assert_eq!(
+            CheckBeforeLaunch.evaluate(&launch_ctx(false, false), RuleSeverity::Warn),
+            Verdict::Allow
+        );
+        // A named-but-unprobed target with no launch/scaffold action does not fire.
+        assert_eq!(
+            CheckBeforeLaunch.evaluate(&launch_ctx(true, false), RuleSeverity::Warn),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn check_before_launch_fires_on_pre_shell_and_pre_tool_only() {
+        assert!(CheckBeforeLaunch.applies_to(Trigger::PreShell));
+        assert!(CheckBeforeLaunch.applies_to(Trigger::PreTool));
+        assert!(!CheckBeforeLaunch.applies_to(Trigger::PreCommit));
+        assert!(!CheckBeforeLaunch.applies_to(Trigger::StepComplete));
+    }
+
+    #[test]
+    fn check_before_launch_defaults_to_warn_and_respects_overrides() {
+        // Absent config: the rule's own default (Warn) is in effect.
+        let default_engine = engine(&[]);
+        assert_eq!(
+            default_engine.effective_severity(&CheckBeforeLaunch),
+            RuleSeverity::Warn
+        );
+        let ctx = launch_ctx(true, true);
+        assert!(default_engine
+            .evaluate(Trigger::PreShell, &ctx)
+            .iter()
+            .any(|(n, v)| *n == "check_before_launch" && matches!(v, Verdict::Warn(_))));
+
+        // `block` tightens it to a hard stop; `off` disables it (non-critical).
+        let blocking = engine(&[("check_before_launch", RuleSeverity::Block)]);
+        assert!(blocking
+            .evaluate(Trigger::PreShell, &ctx)
+            .iter()
+            .any(|(n, v)| *n == "check_before_launch" && v.is_blocking()));
+        let disabled = engine(&[("check_before_launch", RuleSeverity::Off)]);
+        assert!(disabled.evaluate(Trigger::PreShell, &ctx).is_empty());
+    }
+
+    #[test]
+    fn check_before_launch_is_tighten_only() {
+        // The rule can only Allow, Warn, or Block — it never returns a verdict that
+        // grants an action, so it cannot turn a denied launch into an allowed one.
+        for (named, attempting, severity) in [
+            (true, true, RuleSeverity::Warn),
+            (true, true, RuleSeverity::Block),
+            (false, true, RuleSeverity::Block),
+            (true, false, RuleSeverity::Block),
+        ] {
+            let verdict = CheckBeforeLaunch.evaluate(&launch_ctx(named, attempting), severity);
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Allow | Verdict::Warn(_) | Verdict::Block(_)
+                ),
+                "rule produced a non-tightening verdict: {verdict:?}"
+            );
+        }
     }
 }

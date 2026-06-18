@@ -383,6 +383,28 @@ implementation names.
 
 After `attempts_per_step` failures, stop or replan depending on config.
 
+#### `check_before_launch`
+
+Before a shell command (`pre_shell`) or file tool (`pre_tool`), if the task prompt
+named a local serveable target (a loopback host, or any `host:port` with an
+explicit port) that has **not** been probed this session, and the call launches a
+local HTTP server or scaffolds a competing entry file (an `index.html`-family
+page), surface a verdict steering the model to probe the target first and only
+launch its own server if the probe fails.
+
+The probe state is read from the session evidence ledger — a successful `fetch`,
+or a probe shell command (`curl`, `wget`, `Invoke-WebRequest`/`iwr`,
+`Test-NetConnection`) whose arguments hit the target — never from the model's
+claim, exactly like `RequiresPriorRead`. Named targets are auto-extracted from the
+prompt; an external reference URL without a port is not a serveable target and is
+ignored.
+
+Advisory and best-effort: non-critical, default `Warn` (the call still runs and
+the nudge reaches the model), tunable to `block` (refuses the launch before it
+runs) or `off`. It is tighten-only — it never grants a side effect the permission
+engine would deny — and the launch/probe pattern set is curated and extensible, so
+an unrecognised launcher is a documented miss, not a guarantee. See ADR-0030.
+
 ## Quality Gate
 
 The quality gate is the discovered, language-specific set of inspection checks

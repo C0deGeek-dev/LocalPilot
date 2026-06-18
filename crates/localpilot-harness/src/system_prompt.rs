@@ -106,6 +106,12 @@ mutate history or share work without being told to.
 Use tools when local information or side effects are needed. Available tools:
 {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}
 
+Look before you launch. If a task names an existing target you can reach — a URL,
+a running service, a `host:port` — inspect or probe it first (for example fetch or
+curl it) before assuming you must create or launch your own. Only stand up your
+own server, or scaffold a competing entry page, if that target turns out to be
+absent.
+
 Tool use loop:
 - inspect before acting;
 - call one or more tools with valid JSON inputs;
@@ -215,6 +221,21 @@ mod tests {
         }
         assert!(!prompt.contains("-Plan.md"));
         assert!(!prompt.contains("tasks/"));
+    }
+
+    #[test]
+    fn prompt_carries_the_look_before_launch_convention() {
+        // Always-on: probing a named target uses core tools (fetch/run_shell), so
+        // the convention is not gated on an optional tool.
+        let prompt = build_prompt(&["read_file", "run_shell"]);
+        assert!(
+            prompt.contains("Look before you launch"),
+            "missing the look-before-launch convention"
+        );
+        assert!(
+            prompt.contains("probe it first"),
+            "the convention must steer the model to probe first"
+        );
     }
 
     #[test]

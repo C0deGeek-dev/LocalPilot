@@ -218,6 +218,21 @@ never grant what the engine refused. The permission engine is the always-on
 first link of the chain and is not removable. Hosts register gates through the
 session runtime's hook fabric (see [`docs/extending.md`](extending.md)).
 
+### Look Before You Launch
+
+The session runtime evaluates the `check_before_launch` rule at the dispatch gate
+(see [`docs/06-harness-spec.md`](06-harness-spec.md)). When the task prompt named a
+local serveable target (a loopback host, or any `host:port` with an explicit port)
+that has not been probed this session, an attempt to launch a local HTTP server
+(`python -m http.server`, `npx serve`, `php -S`, `vite`, …) or scaffold a competing
+`index.html` surfaces a verdict nudging the model to probe the target first — *only
+launch your own server if the probe fails*. A satisfied probe in the evidence
+ledger (a successful `fetch`, or a `curl`/`Invoke-WebRequest`-style shell command
+that hits the target) clears it, exactly like `RequiresPriorRead`. It is advisory
+and best-effort: default `Warn` (the call still runs), tunable to `block` or `off`,
+tighten-only, and grounded in evidence rather than the model's claim. The system
+prompt carries the same look-before-launch convention as an always-on nudge.
+
 ## Project Skill Discovery
 
 Project-local skills are advisory prompt modules (a `SKILL.md`, optionally a

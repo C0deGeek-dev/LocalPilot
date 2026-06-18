@@ -60,6 +60,12 @@ LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 | `tool_call_budget_max` | int | `50` | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Equal to `tool_call_budget` by default (a flat fixed ceiling); raise it above the soft start to let a productive turn extend |
 | `rules.<name>` | `off` \| `warn` \| `block` | — | Per-rule severity overrides |
 
+Notable rule key:
+
+| Rule | Default | Meaning |
+| --- | --- | --- |
+| `check_before_launch` | `warn` | When the task prompt named a local serveable target (a loopback host, or any `host:port` with an explicit port) that has not been probed this session, an attempt to launch a local server or scaffold a competing `index.html` is nudged (`warn`, the call still runs), refused (`block`), or ignored (`off`). Auto-extracted from the prompt — an external reference URL without a port is not a target. Advisory, tighten-only, best-effort. See [06-harness-spec.md](06-harness-spec.md). |
+
 ### `[compaction]`
 
 | Key | Type | Default | Meaning |

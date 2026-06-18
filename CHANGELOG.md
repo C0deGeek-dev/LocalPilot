@@ -5,6 +5,20 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- Added a **look-before-launch** discipline (ADR-0030). The agent is now nudged to
+  inspect a named target before standing up its own competing server. A new
+  always-on system-prompt convention states it, and a deterministic
+  `check_before_launch` rule enforces it: when the task prompt named a local
+  serveable target (a loopback host, or any `host:port` with an explicit port) that
+  has not been probed this session, an attempt to launch a local HTTP server
+  (`python -m http.server`, `npx serve`, `php -S`, `vite`, …) or scaffold a
+  competing `index.html` surfaces a model-visible verdict — *probe it first; only
+  launch your own server if the probe fails*. The probe state is read from the
+  session evidence ledger (a successful `fetch`, or a `curl`/`Invoke-WebRequest`
+  probe command), never the model's claim. It is advisory and tighten-only: default
+  `warn` (the call still runs), tunable via `[harness.rules] check_before_launch` to
+  `block` (refuses the launch) or `off`. Auto-extracted targets ignore external
+  reference URLs without a port.
 - The per-turn tool-call ceiling is now **progress-aware** (ADR-0029). A turn that
   keeps making forward progress runs up to a hard cost ceiling instead of stopping
   at a single fixed count; a turn that spins on the same successful calls gets a

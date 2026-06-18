@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use localpilot_config::{CliOverrides, Config, ConfigPaths};
+use indexmap::IndexMap;
+use localpilot_config::{CliOverrides, Config, ConfigPaths, RuleSeverity};
 use localpilot_harness::{
     propose_gate, ratify_gate, resume_one_step_with_events, run_intake, run_plan,
     summarize_proposal, Brief, CheckOutcome, CheckStatus, Progress, RuleEngine, RuntimeEvent,
@@ -477,6 +478,7 @@ where
             compaction_mode(config.compaction.mode),
             localpilot_harness::SummarizerTuning::from_config(&config.compaction),
             gate_allowance.clone(),
+            config.harness.rules.clone(),
             (run.approver)(),
         );
         localpilot_localmind::register_context_hook(root, &mut runtime);
@@ -660,6 +662,7 @@ fn build_runtime(
     compaction_mode: localpilot_harness::CompactionMode,
     summarizer_tuning: localpilot_harness::SummarizerTuning,
     allowlist: Vec<String>,
+    rules: IndexMap<String, RuleSeverity>,
     approver: Box<dyn Approver>,
 ) -> SessionRuntime {
     SessionRuntime::new(
@@ -679,6 +682,7 @@ fn build_runtime(
             tool_call_budget_max,
             compaction_mode,
             summarizer_tuning,
+            rules,
             ..SessionConfig::default()
         },
         Vec::new(),

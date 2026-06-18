@@ -732,3 +732,175 @@ fn live_discipline_scorecard_is_gated() {
     }
     eprintln!("live {}", metrics.scorecard_line());
 }
+
+// --- look-before-launch benchmark --------------------------------------------
+//
+// Measures the check-before-launch discipline offline: a task that names a local
+// target and then scaffolds its own competing entry page without probing is
+// caught, while a task with no named target — or one that probes the target
+// first — is not. The "create your own" action is a harmless `write_file` of
+// `index.html`, so a scenario never stands up a real server. A real loopback
+// listener provides genuinely successful probes, and the false-positive rate over
+// the negative set is computed and printed.
+
+/// One labeled scenario for the benchmark.
+struct LaunchScenario {
+    name: &'static str,
+    prompt: String,
+    /// When set, the model probes this loopback port (a real successful fetch)
+    /// before scaffolding.
+    probe_port: Option<u16>,
+    /// Whether the discipline nudge is expected to fire.
+    expect_flagged: bool,
+}
+
+/// A one-shot loopback HTTP responder on a free port. Returns the bound port.
+fn spawn_probe_target() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    port
+}
+
+/// Run one scenario offline and report whether the nudge fired.
+fn run_launch_scenario(scenario: &LaunchScenario) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let mut provider = FakeProvider::new();
+    if let Some(port) = scenario.probe_port {
+        provider = provider.tool_call(
+            "p1",
+            "fetch",
+            json!({ "url": format!("http://127.0.0.1:{port}/") }),
+        );
+    }
+    provider = provider
+        .tool_call(
+            "s1",
+            "write_file",
+            json!({ "path": "index.html", "content": "<html>mine</html>" }),
+        )
+        .text("done");
+
+    let mut runtime = SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let (events, mut rx) = broadcast::channel(256);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async { runtime.run_turn(&scenario.prompt, &events, &cancel).await });
+    drop(events);
+
+    let mut flagged = false;
+    while let Ok(event) = rx.try_recv() {
+        if let localpilot_harness::RuntimeEvent::Warning(message) = event {
+            if message.contains("probe it first") {
+                flagged = true;
+            }
+        }
+    }
+    flagged
+}
+
+#[test]
+fn look_before_launch_benchmark() {
+    let probed_port = spawn_probe_target();
+    let scenarios = vec![
+        // Positive: a named local target, scaffolded without a prior probe.
+        LaunchScenario {
+            name: "named target, unprobed scaffold",
+            prompt: "The site is already running at http://localhost:8080 — show its home page"
+                .to_string(),
+            probe_port: None,
+            expect_flagged: true,
+        },
+        LaunchScenario {
+            name: "named loopback ip target, unprobed scaffold",
+            prompt: "Open the dashboard at 127.0.0.1:3000 and tweak it".to_string(),
+            probe_port: None,
+            expect_flagged: true,
+        },
+        // Negative: no local target is named at all.
+        LaunchScenario {
+            name: "no named target",
+            prompt: "Build me a brand-new landing page from scratch".to_string(),
+            probe_port: None,
+            expect_flagged: false,
+        },
+        // Negative: an external reference URL is not a local serveable target.
+        LaunchScenario {
+            name: "external reference url only",
+            prompt: "Match the visual design of https://example.com on a new page".to_string(),
+            probe_port: None,
+            expect_flagged: false,
+        },
+        // Negative: the named target is probed before scaffolding.
+        LaunchScenario {
+            name: "named target probed first",
+            prompt: format!(
+                "Check the service at http://127.0.0.1:{probed_port}/ then build a page"
+            ),
+            probe_port: Some(probed_port),
+            expect_flagged: false,
+        },
+    ];
+
+    let mut caught = 0usize;
+    let mut positives = 0usize;
+    let mut false_positives = 0usize;
+    let mut negatives = 0usize;
+    for scenario in &scenarios {
+        let flagged = run_launch_scenario(scenario);
+        if scenario.expect_flagged {
+            positives += 1;
+            if flagged {
+                caught += 1;
+            }
+        } else {
+            negatives += 1;
+            if flagged {
+                false_positives += 1;
+            }
+        }
+        eprintln!(
+            "  {:40} expected={} flagged={}",
+            scenario.name, scenario.expect_flagged, flagged
+        );
+    }
+
+    let fp_rate = false_positives as f64 / negatives as f64;
+    eprintln!(
+        "look-before-launch: caught {caught}/{positives} positives; false-positive rate \
+         {false_positives}/{negatives} = {fp_rate:.2}"
+    );
+
+    assert_eq!(
+        caught, positives,
+        "every named-but-unprobed launch must be caught"
+    );
+    assert_eq!(
+        false_positives, 0,
+        "a no-target / external-only / probed-first task must not be flagged"
+    );
+}

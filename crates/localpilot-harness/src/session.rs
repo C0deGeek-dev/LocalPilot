@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use indexmap::IndexMap;
 use localpilot_config::redact::redact;
-use localpilot_config::CheckConfig;
+use localpilot_config::{CheckConfig, RuleSeverity};
 use localpilot_core::{
     ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
 };
@@ -33,8 +34,9 @@ use crate::compaction::{
     CompactionResult,
 };
 use crate::hooks::{HookEvent, HookFabric};
+use crate::launch_targets::{self, LocalTarget};
 use crate::quality::{CheckOutcome, CheckRunner};
-use crate::rules::{trigger_for_cadence, Trigger};
+use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, Trigger, Verdict as RuleVerdict};
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
 /// Why a turn loop stopped.
@@ -157,6 +159,10 @@ pub struct SessionConfig {
     /// action-completion claim that no `Verified` call supports is flagged.
     /// Off by default until the benchmark shows a low false-positive rate.
     pub enforce_claim_gate: bool,
+    /// Per-rule severity overrides (`[harness.rules]`) consulted by the
+    /// session-level rule engine — currently the `check_before_launch` discipline
+    /// rule. Empty leaves every rule at its own default.
+    pub rules: IndexMap<String, RuleSeverity>,
 }
 
 impl Default for SessionConfig {
@@ -174,6 +180,7 @@ impl Default for SessionConfig {
             tool_call_budget: 50,
             tool_call_budget_max: 50,
             enforce_claim_gate: false,
+            rules: IndexMap::new(),
         }
     }
 }
@@ -365,6 +372,12 @@ pub struct SessionRuntime {
     /// Optional injected smart summarizer. When unset and smart mode is active,
     /// a provider-backed summarizer is built on demand from `provider`.
     summarizer: Option<Arc<dyn Summarizer>>,
+    /// The deterministic rule engine, consulted at the tool-dispatch gate for the
+    /// `check_before_launch` discipline rule.
+    rule_engine: RuleEngine,
+    /// Local serveable targets named in the task prompt(s) this session, against
+    /// which a launch/scaffold action is checked for a prior probe.
+    named_targets: Vec<LocalTarget>,
 }
 
 impl SessionRuntime {
@@ -389,6 +402,8 @@ impl SessionRuntime {
         ));
         messages.extend(seed);
 
+        let rule_engine = RuleEngine::with_baseline(&config.rules);
+
         let mut runtime = Self {
             provider,
             tools,
@@ -409,6 +424,8 @@ impl SessionRuntime {
             tool_failure_guard: ToolFailureGuard::default(),
             error_breaker: RepeatedErrorBreaker::default(),
             summarizer: None,
+            rule_engine,
+            named_targets: Vec::new(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -450,6 +467,51 @@ impl SessionRuntime {
         let events = self.store.read_events(self.session_id).ok()?;
         let ledger = crate::evidence::EvidenceLedger::project(&events);
         crate::precondition::evaluate(contract.preconditions, input, &ledger, &self.workspace).err()
+    }
+
+    /// Evaluate the `check_before_launch` discipline rule for a tool call. When
+    /// the prompt named a local serveable target that has **not** been probed this
+    /// session and this call launches a local server or scaffolds a competing
+    /// entry file, the rule's verdict (`Warn`/`Block`) is returned; otherwise
+    /// `None`. Evidence-grounded — the probe state is read from the session ledger,
+    /// never the model's claim — and tighten-only: it can refuse or warn, never
+    /// grant. Returns `None` (no objection) when no target was named.
+    fn check_before_launch_verdict(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<RuleVerdict> {
+        if self.named_targets.is_empty() {
+            return None;
+        }
+        let launch_or_scaffold_attempt = match name {
+            "run_shell" => launch_targets::shell_command_line(input)
+                .is_some_and(|command| launch_targets::is_launch_command(&command)),
+            "write_file" | "apply_patch" => launch_targets::is_scaffold_write(name, input),
+            _ => false,
+        };
+        if !launch_or_scaffold_attempt {
+            return None;
+        }
+        let events = self.store.read_events(self.session_id).ok()?;
+        let ledger = crate::evidence::EvidenceLedger::project(&events);
+        let ctx = RuleContext {
+            named_local_target_unprobed: launch_targets::any_target_unprobed(
+                &self.named_targets,
+                &ledger,
+            ),
+            launch_or_scaffold_attempt: true,
+            ..RuleContext::default()
+        };
+        let trigger = if name == "run_shell" {
+            Trigger::PreShell
+        } else {
+            Trigger::PreTool
+        };
+        self.rule_engine
+            .evaluate(trigger, &ctx)
+            .into_iter()
+            .find_map(|(rule, verdict)| (rule == "check_before_launch").then_some(verdict))
     }
 
     /// Verify an executed call against its contract and return the verdict label
@@ -1053,6 +1115,13 @@ impl SessionRuntime {
         let context_reserve = turn_context
             .as_ref()
             .map_or(0, |message| estimate_tokens(std::slice::from_ref(message)));
+        // Record any local serveable target this turn's prompt named, so a later
+        // launch/scaffold can be checked against a prior probe of it.
+        for target in launch_targets::extract_targets(user_input) {
+            if !self.named_targets.contains(&target) {
+                self.named_targets.push(target);
+            }
+        }
         self.append(Message::text(Role::User, user_input));
         self.last_quota = None;
         self.tool_failure_guard.reset();
@@ -1430,6 +1499,11 @@ impl SessionRuntime {
                 // the dispatch future drops spawned children, which are
                 // configured to die with it instead of waiting out their
                 // timeout. The aborted execution stays in the event log.
+                // The look-before-launch discipline: if the prompt named a local
+                // target not yet probed and this call launches its own server or
+                // scaffolds a competing page, the rule warns (model-visible, the
+                // call still runs) or, when configured to block, refuses it.
+                let launch_verdict = self.check_before_launch_verdict(name, input);
                 let result = if let Some(reason) = self.precondition_block(name, input) {
                     // A contract precondition (e.g. RequiresPriorRead) refused the
                     // call before permission. Tighten-only: surface it as an error
@@ -1437,6 +1511,14 @@ impl SessionRuntime {
                     Some(localpilot_core::ToolResult::error(
                         ToolUseId::from(id.as_str()),
                         reason,
+                    ))
+                } else if let Some(RuleVerdict::Block(reason)) = &launch_verdict {
+                    // A blocking `check_before_launch` severity refuses the launch
+                    // before it runs, the same tighten-only path as a precondition.
+                    let _ = events.send(RuntimeEvent::Warning(reason.clone()));
+                    Some(localpilot_core::ToolResult::error(
+                        ToolUseId::from(id.as_str()),
+                        reason.clone(),
                     ))
                 } else {
                     let retention = StoreRetention(&self.store);
@@ -1487,6 +1569,17 @@ impl SessionRuntime {
                 // can derail local models into a degenerate echo loop.
                 if let Some(scrubbed) = scrub_control_chars(&result.output) {
                     result.output = scrubbed;
+                }
+
+                // A `Warn` from check-before-launch lets the call run but appends
+                // the nudge to its result so the model reads it and can probe the
+                // named target before launching again. (A `Block` already refused
+                // above and never reaches here as a Warn.)
+                if let Some(RuleVerdict::Warn(message)) = &launch_verdict {
+                    let _ = events.send(RuntimeEvent::Warning(message.clone()));
+                    result
+                        .output
+                        .push_str(&format!("\n\n[check-before-launch] {message}"));
                 }
 
                 // Track per-tool failure counts for the safeguard.

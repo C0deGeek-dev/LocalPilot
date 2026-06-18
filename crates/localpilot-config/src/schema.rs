@@ -666,6 +666,29 @@ mod tests {
     }
 
     #[test]
+    fn harness_rule_severity_overrides_round_trip() {
+        // `[harness.rules]` is a free-form severity map, so a rule key such as
+        // `check_before_launch` is carried without a dedicated schema field; an
+        // absent key leaves the rule at its own default.
+        let harness: HarnessConfig = serde_json::from_value(json!({
+            "rules": { "check_before_launch": "block" }
+        }))
+        .unwrap();
+        assert_eq!(
+            harness.rules.get("check_before_launch"),
+            Some(&RuleSeverity::Block)
+        );
+        for severity in [RuleSeverity::Off, RuleSeverity::Warn, RuleSeverity::Block] {
+            let value = serde_json::to_value(severity).unwrap();
+            assert_eq!(
+                serde_json::from_value::<RuleSeverity>(value).unwrap(),
+                severity
+            );
+        }
+        assert!(HarnessConfig::default().rules.is_empty());
+    }
+
+    #[test]
     fn default_tool_call_budget_bounds_are_parity() {
         // max == soft start by default, so the adaptive ceiling reproduces the
         // flat fixed-budget stop until an operator raises the max.

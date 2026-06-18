@@ -31,6 +31,7 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm = { workspace = true, optional = true }
 futures.workspace = true
+indexmap.workspace = true
 # Workspace file enumeration for the `@`-mention picker (TUI only).
 ignore = { workspace = true, optional = true }
 # Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:

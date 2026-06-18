@@ -15,6 +15,7 @@ mod error;
 mod evidence;
 mod handoff;
 mod hooks;
+mod launch_targets;
 mod planning;
 mod precondition;
 mod progress;

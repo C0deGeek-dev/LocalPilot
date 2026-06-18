@@ -2,6 +2,53 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0030: Inspect A Named Target Before Launching Your Own, Enforced As An Evidence-Grounded Rule
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and the
+`RequiresPriorRead` precondition lineage (a side effect grounded in current
+evidence, not the model's memory).
+
+A task that names an existing target the agent can reach — a local URL, a running
+service, a `host:port` — should be *inspected* before the agent assumes it must
+stand up its own competing server or scaffold a competing entry page. Prompt
+guidance alone did not hold: a model would ignore an explicit "test it at this
+URL" and launch its own server anyway. That is a model-behaviour drift the
+deterministic harness layer is meant to catch, exactly like an unread overwrite.
+
+Two complementary mechanisms ship. A system-prompt convention (the always-on
+nudge) states the look-before-launch discipline. A deterministic
+`check_before_launch` rule enforces it: when a local serveable target was named in
+the task prompt and **not** probed this session, an attempt to launch a local HTTP
+server or scaffold a competing entry file surfaces a model-visible verdict —
+*probe it first; only launch your own server if the probe fails*. The probe state
+is read from the session evidence ledger (a real prior `fetch`, or a probe shell
+command such as `curl`/`Invoke-WebRequest` whose arguments hit the target), never
+from the model's claim that it "already checked" — the same doctrine as
+`RequiresPriorRead`. Named targets are auto-extracted from the prompt (loopback
+hosts, or any `host:port` with an explicit port); a bare external reference URL is
+not a serveable target and is ignored.
+
+Reason:
+
+- the rule is **evidence-grounded**, not memory-grounded: a satisfied probe in the
+  ledger clears it, exactly as a prior `read_file` clears `RequiresPriorRead`
+- it is **tighten-only and advisory**: non-critical, default `Warn` (the call
+  still runs, the nudge reaches the model), tunable to `Block` (refuses the launch
+  before it runs, like a precondition) or `off`. It never grants a side effect the
+  permission engine would deny; the permission engine stays the authority
+- the trigger is scoped to **local serveable targets** so an external reference URL
+  never nags, and the offline false-positive rate (0/3 over the negative set) is
+  measured before any move from the `Warn` default to a harder one — a control
+  signal is tightened on evidence, never shipped on faith, honouring the
+  reliability contract
+- launch and probe matching is a curated, **extensible, best-effort pattern set**
+  over Windows/Linux/macOS variants; an unrecognised launcher is a documented miss,
+  not a guarantee of completeness — the docs say so plainly
+
+Supersedes nothing. Config-declared target lists and auto-probe injection are
+explicit non-goals here: the rule *requires* a probe, never injects one, and a
+`[harness]` target list is a future drop-in behind the same signal.
+
 ## ADR-0029: The Per-Turn Tool-Call Ceiling Is Progress-Aware, With A Hard Cost Contract
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls) and

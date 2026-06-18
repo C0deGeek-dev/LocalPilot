@@ -76,6 +76,7 @@ pub async fn print_mode(
             ),
             tool_call_budget: config.harness.tool_call_budget,
             tool_call_budget_max: config.harness.tool_call_budget_max,
+            rules: config.harness.rules.clone(),
             ..SessionConfig::default()
         },
         Vec::new(),
