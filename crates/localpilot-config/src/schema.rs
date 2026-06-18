@@ -369,13 +369,17 @@ pub struct HarnessConfig {
     /// Soft start for the per-turn tool-call ceiling. A turn that keeps making
     /// progress runs past this up to `tool_call_budget_max`; a turn detected as
     /// making no forward progress stops here. This is the count an ordinary task
-    /// stays well under.
-    pub tool_call_budget: usize,
+    /// stays well under. Unset by default — the budget is opt-in, so an
+    /// unconfigured turn runs unbounded; set this to enable enforcement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_budget: Option<usize>,
     /// Hard cost-contract ceiling: the per-turn tool-call count that always stops
     /// the loop, regardless of progress, so a turn can never run unbounded. With
     /// `tool_call_budget_max == tool_call_budget` the ceiling is the flat fixed
     /// budget; raise it above the soft start to let a productive turn extend.
-    pub tool_call_budget_max: usize,
+    /// Unset by default (budget off); setting either budget field enables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_budget_max: Option<usize>,
     /// The no-unsupported-claim gate over the final reply. `off` (default) skips
     /// it; `warn` flags a completed-action claim no verified tool call supports.
     pub claim_gate: ClaimGate,
@@ -391,8 +395,8 @@ impl Default for HarnessConfig {
             checks: Vec::new(),
             rules: IndexMap::new(),
             context_token_limit: 24_000,
-            tool_call_budget: 50,
-            tool_call_budget_max: 50,
+            tool_call_budget: None,
+            tool_call_budget_max: None,
             claim_gate: ClaimGate::default(),
         }
     }
@@ -804,22 +808,22 @@ mod tests {
     }
 
     #[test]
-    fn default_tool_call_budget_bounds_are_parity() {
-        // max == soft start by default, so the adaptive ceiling reproduces the
-        // flat fixed-budget stop until an operator raises the max.
+    fn the_tool_call_budget_is_off_by_default() {
+        // The budget is opt-in: with nothing configured both bounds are unset,
+        // so a turn runs unbounded until an operator sets a budget.
         let harness = HarnessConfig::default();
-        assert_eq!(harness.tool_call_budget, 50);
-        assert_eq!(harness.tool_call_budget_max, harness.tool_call_budget);
+        assert_eq!(harness.tool_call_budget, None);
+        assert_eq!(harness.tool_call_budget_max, None);
     }
 
     #[test]
-    fn omitted_budget_fields_fall_back_to_defaults() {
-        // An existing config that predates these fields still loads: the
-        // struct-level serde default fills the missing budget fields.
+    fn omitted_budget_fields_leave_the_budget_off() {
+        // A config that omits the budget keys loads with the budget disabled
+        // rather than falling back to a built-in cap.
         let harness: HarnessConfig =
             serde_json::from_str(r#"{"context_token_limit": 8000}"#).unwrap();
         assert_eq!(harness.context_token_limit, 8000);
-        assert_eq!(harness.tool_call_budget, 50);
-        assert_eq!(harness.tool_call_budget_max, 50);
+        assert_eq!(harness.tool_call_budget, None);
+        assert_eq!(harness.tool_call_budget_max, None);
     }
 }

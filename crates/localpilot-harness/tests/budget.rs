@@ -31,8 +31,8 @@ fn runtime_budgets(
         SessionConfig {
             interactivity: Interactivity::NonInteractive,
             trusted: true,
-            tool_call_budget: soft_start,
-            tool_call_budget_max: hard_max,
+            tool_call_budget: Some(soft_start),
+            tool_call_budget_max: Some(hard_max),
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -73,17 +73,17 @@ fn a_runaway_tool_loop_hits_the_budget_and_stops() {
 }
 
 #[test]
-fn a_normal_task_stays_under_the_default_budget() {
+fn a_normal_task_stays_under_a_configured_budget() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
 
-    // One tool call then a final answer — far under the default ceiling.
+    // One tool call then a final answer — far under a configured ceiling of 50.
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "f.txt" }))
         .text("the file says x");
 
-    let mut runtime = runtime(root, provider, SessionConfig::default().tool_call_budget);
+    let mut runtime = runtime(root, provider, 50);
     let (events, _rx) = broadcast::channel(64);
     let cancel = CancellationToken::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -93,6 +93,49 @@ fn a_normal_task_stays_under_the_default_budget() {
         reason,
         StopReason::Done,
         "a normal task finishes normally, not on the budget"
+    );
+}
+
+#[test]
+fn an_unset_budget_runs_a_runaway_loop_to_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("f.txt"), "x\n").unwrap();
+
+    // The same read repeats many times — a loop that a budget of 3 would stop.
+    // With the budget left at its default (off), nothing pre-empts it: every
+    // scripted call runs and the turn ends on its own final answer.
+    let mut provider = FakeProvider::new();
+    for _ in 0..40 {
+        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
+    }
+    provider = provider.text("done");
+
+    let mut runtime = SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            // tool_call_budget / tool_call_budget_max left at their default None.
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("read it repeatedly", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::Done,
+        "with the budget off, the turn is unbounded and ends on its own answer"
     );
 }
 

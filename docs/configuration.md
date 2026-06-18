@@ -56,8 +56,8 @@ LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 | `attempts_per_step` | int | `3` | Max attempts per plan step |
 | `auto_commit` | bool | `true` | Commit each completed step |
 | `test_command` | string | none | Command run to gate step completion |
-| `tool_call_budget` | int | `50` | Soft start for the per-turn tool-call ceiling. A turn making forward progress runs past this up to `tool_call_budget_max`; a turn detected as making no progress stops here |
-| `tool_call_budget_max` | int | `50` | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Equal to `tool_call_budget` by default (a flat fixed ceiling); raise it above the soft start to let a productive turn extend |
+| `tool_call_budget` | int | off | Soft start for the per-turn tool-call ceiling. A turn making forward progress runs past this up to `tool_call_budget_max`; a turn detected as making no progress stops here. Unset by default — the budget is opt-in, so an unconfigured turn runs unbounded; set this to enable enforcement |
+| `tool_call_budget_max` | int | off | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Unset by default (budget off); setting either budget field enables it. When set alone it doubles as the soft start; raise it above `tool_call_budget` to let a productive turn extend |
 | `claim_gate` | `off` \| `warn` | `off` | The no-unsupported-claim gate over the final reply. `warn` appends a visible, non-destructive note to a completed-action claim no verified tool call this turn supports (matched per claim); `off` skips it. Default `off` while its false-positive rate is measured (ADR-0023) |
 | `rules.<name>` | `off` \| `warn` \| `block` | — | Per-rule severity overrides |
 

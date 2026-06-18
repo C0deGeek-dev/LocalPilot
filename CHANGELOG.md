@@ -3,6 +3,15 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## Unreleased
+
+- **Per-turn tool-call budget is now opt-in (behavior change).** The
+  `[harness] tool_call_budget` / `tool_call_budget_max` keys default to **unset**,
+  so a turn runs unbounded unless an operator configures a budget — previously
+  both defaulted to a fixed `50`. Setting either key enables enforcement (a single
+  configured bound serves as both the soft start and the hard ceiling); with the
+  budget off, neither the cost ceiling nor the no-progress stop fires.
+
 ## v0.3.0-beta.3 - 2026-06-18
 
 Coordinated LocalX beta release.

@@ -148,13 +148,16 @@ pub struct SessionConfig {
     /// Soft start for the per-turn tool-call ceiling. A turn that keeps making
     /// progress runs past this up to `tool_call_budget_max`; a turn detected as
     /// making no forward progress stops here. An ordinary task stays well under
-    /// it. Distinct from the attempt limit (which bounds retries).
-    pub tool_call_budget: usize,
+    /// it. Distinct from the attempt limit (which bounds retries). `None`
+    /// disables the budget — the default, so a turn runs unbounded unless an
+    /// operator opts in.
+    pub tool_call_budget: Option<usize>,
     /// Hard cost-contract ceiling: the per-turn tool-call count that always
     /// stops the loop regardless of progress, so a turn can never run unbounded.
     /// With `tool_call_budget_max == tool_call_budget` the ceiling is the flat
     /// fixed budget; raising it lets a productive turn extend past the soft start.
-    pub tool_call_budget_max: usize,
+    /// `None` disables the ceiling; setting either budget field enables the budget.
+    pub tool_call_budget_max: Option<usize>,
     /// When set, the no-unsupported-claim gate reviews the final reply: an
     /// action-completion claim that no `Verified` call supports is flagged.
     /// Off by default until the benchmark shows a low false-positive rate.
@@ -183,8 +186,8 @@ impl Default for SessionConfig {
             compaction_mode: CompactionMode::Deterministic,
             summarizer_tuning: SummarizerTuning::default(),
             enforce_prior_read: false,
-            tool_call_budget: 50,
-            tool_call_budget_max: 50,
+            tool_call_budget: None,
+            tool_call_budget_max: None,
             enforce_claim_gate: false,
             rules: IndexMap::new(),
             tool_marker_enabled: false,
@@ -1626,9 +1629,12 @@ impl SessionRuntime {
                 match budget.decide(tool_calls_used, no_progress.is_tripped()) {
                     BudgetDecision::Continue => {}
                     BudgetDecision::StopCostMax => {
+                        // Only `Bounded` returns `StopCostMax`, so the ceiling is
+                        // always present here; fall back to the count defensively.
+                        let ceiling = budget.hard_max().unwrap_or(tool_calls_used);
                         let notice = format!(
-                            "tool-call budget of {} reached this turn; stopping to bound cost",
-                            budget.hard_max()
+                            "tool-call budget of {ceiling} reached this turn; \
+                             stopping to bound cost"
                         );
                         let _ = events.send(RuntimeEvent::Warning(notice.clone()));
                         self.append(

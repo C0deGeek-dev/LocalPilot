@@ -492,15 +492,19 @@ The permission half of the contract lives in
 
 ## Per-Turn Tool-Call Budget
 
-Each turn bounds how many tool calls it runs, so an unattended loop cannot spend
-without limit. The bound is progress-aware (ADR-0029), set by two numbers in
-`[harness]`:
+The budget is **off by default**: with neither key set in `[harness]`, a turn
+runs unbounded — no cost ceiling and no no-progress stop — and is bounded only by
+its other exit paths. The bound is opt-in; set it to cap an unattended loop. When
+enabled it is progress-aware (ADR-0029), set by two numbers in `[harness]`:
 
 - `tool_call_budget` — the **soft start**. A turn that keeps making forward
   progress runs past this; a turn detected as making no progress stops here. An
   ordinary task stays well under it.
 - `tool_call_budget_max` — the **hard cost ceiling**. The loop always stops at
   this count, regardless of progress, so a turn can never run unbounded.
+
+Setting either key enables the budget; a single configured bound serves as both
+the soft start and the hard ceiling.
 
 "No forward progress" is judged deterministically: the same `(tool, arguments)`
 call returning the same output repeatedly, or a turn cycling a tiny set of calls.
@@ -512,8 +516,8 @@ The two stops are distinct, recorded exit reasons: a cost-ceiling stop
 (`BudgetExceeded`) and a no-progress stop (`NoProgress`). Both leave a
 model-visible synthetic message and honour the tool-pairing invariant above, like
 every other exit path. With `tool_call_budget_max == tool_call_budget` the bound
-is a flat fixed ceiling — the default, so behaviour is unchanged until an operator
-raises the maximum.
+is a flat fixed ceiling; raise the maximum above the soft start to let a
+productive turn extend.
 
 ## Anti-Sunk-Cost Loop
 
