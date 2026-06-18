@@ -323,7 +323,10 @@ impl DiffStat {
 }
 
 /// Whether the diff adds a test: an added line declares a test, or touches a
-/// conventional test path. A best-effort, language-agnostic proxy.
+/// conventional test path. A best-effort, language-agnostic proxy. Markers that
+/// are short common substrings (`it(`, `describe(`, `test(`) are matched only at
+/// the start of a trimmed added line, so a token like `digit()` does not falsely
+/// register as a JavaScript test.
 #[must_use]
 pub fn tests_added_in_diff(diff: &str) -> bool {
     diff.lines().any(|line| {
@@ -334,12 +337,14 @@ pub fn tests_added_in_diff(diff: &str) -> bool {
             return false; // the `+++` file header
         }
         let lower = added.to_lowercase();
+        let trimmed = lower.trim_start();
         lower.contains("#[test]")
-            || lower.contains("def test_")
-            || lower.contains("describe(")
-            || lower.contains("it(")
             || lower.contains("@test")
-            || (lower.contains("test") && lower.contains("fn "))
+            || trimmed.starts_with("def test_")
+            || trimmed.starts_with("describe(")
+            || trimmed.starts_with("it(")
+            || trimmed.starts_with("test(")
+            || (lower.contains("fn ") && lower.contains("test"))
     }) || diff.lines().any(|line| {
         line.starts_with("diff --git")
             && (line.contains("/tests/") || line.contains("test_") || line.contains(".test."))

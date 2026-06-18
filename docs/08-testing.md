@@ -80,6 +80,34 @@ unchanged; the JSON scorecard is the structured superset. Run it with:
 cargo test -p localpilot-harness --test evals -- --nocapture
 ```
 
+#### First-party capability corpus
+
+A second corpus of original tasks lives under
+`crates/localpilot-harness/tests/corpus/<id>/`. Each task is a small, buggy,
+self-contained Rust unit with its own failing→passing test:
+
+- `task.json` — `id`, `entry` file name, and a reworded `problem` statement;
+- `base/<entry>` — the workspace with the bug present (its test is red);
+- `gold/<entry>` — the reference fix (its test is green).
+
+These fixtures are **authored for this repository** — never copied from an
+external benchmark — so the corpus is clean-room-clean and contamination-proof.
+The runner materializes a task's base workspace, drives the harness loop
+headless to produce a fix, captures the diff and emits the scorecard, then grades
+by building and running the task's own test **in isolation** (a throwaway crate
+graded with `cargo test`, so grading never pollutes the loop's workspace). The
+`vs_gold_ratio` is computed against the gold patch.
+
+Offline (default) the loop is driven by the scripted fake provider applying the
+gold solution, which proves the runner mechanics deterministically; a live model
+path is gated behind `LOCALPILOT_LIVE_TESTS`. A companion extraction helper scans
+a repository's history for the commit that flips a grader red→green and emits a
+reviewable fixture stub for a human to curate into a task.
+
+```powershell
+cargo test -p localpilot-harness --test first_party -- --nocapture
+```
+
 ### Snapshot Tests
 
 Useful for:

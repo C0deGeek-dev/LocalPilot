@@ -21,6 +21,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   both defaulted to a fixed `50`. Setting either key enables enforcement (a single
   configured bound serves as both the soft start and the hard ceiling); with the
   budget off, neither the cost ceiling nor the no-progress stop fires.
+- **First-party capability corpus.** Added an original, clean-room corpus of
+  small buggy tasks (each with its own failing→passing test) under
+  `crates/localpilot-harness/tests/corpus/`, plus an in-repo runner that drives
+  the harness loop headless against each task, emits the scorecard, and grades by
+  building and running the task's own test in isolation. Includes a git-history
+  extraction helper that surfaces fix-commit candidates as reviewable fixture
+  stubs. Offline-deterministic by default; a live model path is gated behind
+  `LOCALPILOT_LIVE_TESTS`.
 
 ## v0.3.0-beta.3 - 2026-06-18
 
