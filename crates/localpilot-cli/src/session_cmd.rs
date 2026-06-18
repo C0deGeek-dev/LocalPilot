@@ -79,6 +79,7 @@ pub async fn print_mode(
             tool_call_budget: config.harness.tool_call_budget,
             tool_call_budget_max: config.harness.tool_call_budget_max,
             rules: config.harness.rules.clone(),
+            enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
             ..SessionConfig::default()
         },

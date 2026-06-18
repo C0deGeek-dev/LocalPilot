@@ -328,6 +328,26 @@ pub enum Mode {
     Harness,
 }
 
+/// The no-unsupported-claim gate over a final reply (the verification gate that
+/// flags a completed-action claim no verified tool call supports). Default `off`
+/// while its false-positive rate is being measured; `warn` appends a visible,
+/// non-destructive correction to an unsupported claim (it never drops content).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimGate {
+    #[default]
+    Off,
+    Warn,
+}
+
+impl ClaimGate {
+    /// Whether the gate reviews the final reply.
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, ClaimGate::Warn)
+    }
+}
+
 /// Harness behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -356,6 +376,9 @@ pub struct HarnessConfig {
     /// `tool_call_budget_max == tool_call_budget` the ceiling is the flat fixed
     /// budget; raise it above the soft start to let a productive turn extend.
     pub tool_call_budget_max: usize,
+    /// The no-unsupported-claim gate over the final reply. `off` (default) skips
+    /// it; `warn` flags a completed-action claim no verified tool call supports.
+    pub claim_gate: ClaimGate,
 }
 
 impl Default for HarnessConfig {
@@ -370,6 +393,7 @@ impl Default for HarnessConfig {
             context_token_limit: 24_000,
             tool_call_budget: 50,
             tool_call_budget_max: 50,
+            claim_gate: ClaimGate::default(),
         }
     }
 }
@@ -598,6 +622,21 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn claim_gate_defaults_off_and_parses_warn() {
+        // The reachable opt-in surface: unset is off; `warn` enables the gate.
+        assert_eq!(HarnessConfig::default().claim_gate, ClaimGate::Off);
+        assert!(!ClaimGate::Off.is_enabled());
+        assert!(ClaimGate::Warn.is_enabled());
+        assert_eq!(
+            serde_json::from_value::<ClaimGate>(json!("warn")).unwrap(),
+            ClaimGate::Warn
+        );
+        let harness: HarnessConfig =
+            serde_json::from_value(json!({ "claim_gate": "warn" })).unwrap();
+        assert!(harness.claim_gate.is_enabled());
     }
 
     #[test]

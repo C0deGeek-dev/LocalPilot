@@ -57,6 +57,7 @@ mode = "agent"
 attempts_per_step = 3
 auto_commit = true
 test_command = "cargo test"   # shorthand; equivalent to a single cadence="phase" check
+claim_gate = "off"            # "warn" flags a final-reply action claim no verified call backs (ADR-0023)
 
 [harness.rules]
 require_tests_before_impl = "warn"

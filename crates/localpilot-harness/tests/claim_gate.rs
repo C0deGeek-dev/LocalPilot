@@ -135,3 +135,143 @@ fn a_claim_backed_by_a_verified_write_is_left_alone() {
         "a verified action claim is left untouched"
     );
 }
+
+/// What the scripted turn does to the workspace before the final reply.
+enum Effect {
+    /// An in-workspace write whose postcondition verifies.
+    VerifiedWrite,
+    /// An out-of-workspace write the permission engine denies → a failed call.
+    FailedWrite,
+    /// No tool call at all.
+    NoTool,
+}
+
+struct BenchCase {
+    name: &'static str,
+    effect: Effect,
+    reply: &'static str,
+    should_flag: bool,
+}
+
+/// Offline false-positive / recall benchmark for the claim gate (D008: scored
+/// without a live model). Each case scripts a tool call the deterministic
+/// verifier judges plus a final reply; the gate's flag is scored against the
+/// label. A regression that flags a supported or analysis claim (false positive)
+/// or misses an unsupported completed-action claim (recall) fails here with the
+/// measured rates printed.
+#[test]
+fn claim_gate_false_positive_and_recall_benchmark() {
+    let cases = [
+        // Should flag: a completed-action claim no verified call backs.
+        BenchCase {
+            name: "failed-write-claims-created",
+            effect: Effect::FailedWrite,
+            reply: "I created the file.",
+            should_flag: true,
+        },
+        BenchCase {
+            name: "failed-write-claims-saved-and-committed",
+            effect: Effect::FailedWrite,
+            reply: "I saved and committed the changes.",
+            should_flag: true,
+        },
+        BenchCase {
+            name: "no-tool-claims-deleted",
+            effect: Effect::NoTool,
+            reply: "I deleted the old config.",
+            should_flag: true,
+        },
+        BenchCase {
+            name: "verified-write-but-claims-extra-delete",
+            effect: Effect::VerifiedWrite,
+            reply: "I created foo.txt. I deleted the database.",
+            should_flag: true,
+        },
+        BenchCase {
+            name: "no-tool-claims-ran-tests",
+            effect: Effect::NoTool,
+            reply: "I ran the test suite and it passed.",
+            should_flag: true,
+        },
+        // Should not flag: backed, analysis, or future/plan.
+        BenchCase {
+            name: "verified-write-claims-created",
+            effect: Effect::VerifiedWrite,
+            reply: "I created the file.",
+            should_flag: false,
+        },
+        BenchCase {
+            name: "verified-write-claims-updated",
+            effect: Effect::VerifiedWrite,
+            reply: "Updated the parser to handle the edge case.",
+            should_flag: false,
+        },
+        BenchCase {
+            name: "analysis-statement",
+            effect: Effect::VerifiedWrite,
+            reply: "The function returns 42 for empty input.",
+            should_flag: false,
+        },
+        BenchCase {
+            name: "future-plan",
+            effect: Effect::NoTool,
+            reply: "I will add the handler next.",
+            should_flag: false,
+        },
+        BenchCase {
+            name: "explanation-present-tense",
+            effect: Effect::NoTool,
+            reply: "The cache creates one entry per key.",
+            should_flag: false,
+        },
+    ];
+
+    let (mut tp, mut fnn, mut fp, mut tn) = (0u32, 0u32, 0u32, 0u32);
+    for case in &cases {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = match case.effect {
+            Effect::VerifiedWrite => FakeProvider::new()
+                .tool_call(
+                    "c1",
+                    "write_file",
+                    json!({ "path": "out.txt", "content": "x\n" }),
+                )
+                .text(case.reply),
+            Effect::FailedWrite => FakeProvider::new()
+                .tool_call(
+                    "c1",
+                    "write_file",
+                    json!({ "path": "../escape.txt", "content": "x\n" }),
+                )
+                .text(case.reply),
+            Effect::NoTool => FakeProvider::new().text(case.reply),
+        };
+        let reviewed = reply_with_gate(dir.path(), provider, true);
+        let flagged = reviewed.contains("[unverified]");
+        match (case.should_flag, flagged) {
+            (true, true) => tp += 1,
+            (true, false) => {
+                fnn += 1;
+                eprintln!("MISS (recall): {}", case.name);
+            }
+            (false, true) => {
+                fp += 1;
+                eprintln!("FALSE POSITIVE: {} -> {reviewed}", case.name);
+            }
+            (false, false) => tn += 1,
+        }
+    }
+    let should_flag = tp + fnn;
+    let should_pass = fp + tn;
+    eprintln!(
+        "claim-gate benchmark: recall {tp}/{should_flag}, false-positives {fp}/{should_pass} (TP={tp} FN={fnn} FP={fp} TN={tn})"
+    );
+    assert_eq!(
+        fp, 0,
+        "the gate must not flag supported, analysis, or plan claims"
+    );
+    assert_eq!(
+        fnn, 0,
+        "the gate must flag every unsupported completed-action claim"
+    );
+}

@@ -479,6 +479,7 @@ where
             localpilot_harness::SummarizerTuning::from_config(&config.compaction),
             gate_allowance.clone(),
             config.harness.rules.clone(),
+            config.harness.claim_gate.is_enabled(),
             &config.tools,
             (run.approver)(),
         );
@@ -664,6 +665,7 @@ fn build_runtime(
     summarizer_tuning: localpilot_harness::SummarizerTuning,
     allowlist: Vec<String>,
     rules: IndexMap<String, RuleSeverity>,
+    enforce_claim_gate: bool,
     tools: &localpilot_config::ToolsConfig,
     approver: Box<dyn Approver>,
 ) -> SessionRuntime {
@@ -687,6 +689,7 @@ fn build_runtime(
             compaction_mode,
             summarizer_tuning,
             rules,
+            enforce_claim_gate,
             tool_marker_enabled: tools.marker,
             ..SessionConfig::default()
         },

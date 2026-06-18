@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- The **no-unsupported-claim gate** is now reachable through configuration:
+  `[harness] claim_gate = "warn"` (default `"off"`) flags a completed-action
+  claim in the final reply that no verified tool call this turn supports. Matching
+  is now **per claim** — a verified action no longer excuses a different,
+  unverified one — and a verified shell command (opaque) backs any category while
+  the structured file tools match by kind. The expanded lexicon recognizes more
+  completions (added, implemented, generated, ran, pushed, merged, …) while
+  present-tense and plan phrasing stay untouched. An offline false-positive/recall
+  benchmark scores the gate without a live model (ADR-0023).
 - Added a **pull-based tool surface** (ADR-0031), off by default. With `[tools]
   broker = true`, each turn advertises only a small working-set of tool *schemas*
   (a configurable core plus the broker's own tools plus what has been revealed)

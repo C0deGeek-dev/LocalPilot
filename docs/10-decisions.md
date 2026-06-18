@@ -461,6 +461,17 @@ Reason:
   drifting into a second control plane; dropping the crate dependency returns the
   loop to its prior behaviour
 
+Update (later): the opt-in gate is reachable through configuration —
+`[harness] claim_gate = "off" | "warn"`, default `off` — so its false-positive
+rate can be measured in real use without recompiling, the precondition for any
+future default-on decision. The gate matches **per claim**: a completed-action
+claim is supported only by a verified call *capable of that effect* (a shell
+command is opaque and backs any category; the structured file tools are matched
+by kind), so one verified action no longer excuses a different, unverified one.
+An offline false-positive/recall benchmark scores the gate against a labelled
+corpus so a regression is caught without a live model (validation-evidence
+policy).
+
 ## ADR-0022: The Final Alternate-Screen TUI Is Preserved As An Annotated Tag
 
 Status: accepted. Supports ADR-0021.
