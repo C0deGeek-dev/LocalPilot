@@ -61,10 +61,13 @@ fn destructive_commands_are_never_runnable_without_a_human_on_any_shell() {
     ];
 
     for (index, class) in destructive_per_shell.into_iter().enumerate() {
-        assert_eq!(
-            class,
-            CommandClass::Destructive,
-            "shell case {index} was not classified destructive"
+        // POSIX `rm -rf` is classified destructive; an inline `cmd /c …` /
+        // `pwsh -Command …` is opaque to substring parsing and classified
+        // Unknown. Both are human-gated (never auto-allowed) — the property this
+        // test pins, proven by the permission decisions below.
+        assert!(
+            matches!(class, CommandClass::Destructive | CommandClass::Unknown),
+            "shell case {index} was auto-allowable: {class:?}"
         );
 
         // Non-interactive: denied outright, on every profile except bypass —

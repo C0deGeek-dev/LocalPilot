@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0032: Inline Shell Commands And Redirections Are Opaque To The Command Classifier
+
+Status: accepted. Builds on ADR-0007 (tri-platform tier-1) and the permission
+engine's command-class table.
+
+The `run_shell` permission decision rests on classifying a command into a risk
+class. The classifier reads the program and its arguments; it must never trust a
+substring of a command it cannot actually parse. Two Windows-specific gaps let a
+write masquerade as an auto-allowed read:
+
+- `cmd`/`powershell`/`pwsh` were routed to substring classifiers *before* the
+  opaque-wrapper check, so `cmd /c "echo data > file"` matched the `echo`
+  keyword and classified `read-only` — auto-allowed — while the shell honoured
+  the `>` and wrote the file (anywhere, since a command carries no contained
+  path). POSIX `bash -c` was already opaque; the Windows shells were not.
+- The substring classifiers ignored output redirection entirely.
+
+Decision: an invocation of `cmd`/`powershell`/`pwsh` that carries an inline
+command or script — `/c`, `/k`, `-Command` (and its prefix abbreviations),
+`-EncodedCommand`, `-File` — is **opaque**, exactly like `bash -c`, and
+classifies `unknown` (gated: ask interactive, deny non-interactive). Separately,
+any argument containing a redirection (`>`/`>>`) lifts a `read-only` verdict to
+at least `project-write`. The classifier always fails toward a prompt, never
+toward a silent allow.
+
+Reason:
+
+- a permission boundary must hold against a confused or prompt-injected model;
+  a false prompt costs a keystroke, a misclassified write costs a file
+- substring parsing of an opaque inline command is unreliable in both
+  directions (it missed `echo >` as a write and only caught `del` as destructive
+  by coincidence); treating the whole inline command as opaque is the honest,
+  parser-free position, identical to the long-standing `bash -c` rule
+- `unknown` and `destructive` share the same gate (`ask`/`deny`), so reclassifying
+  an inline destructive command as `unknown` changes the label, not the
+  protection — verified by the boundary tests and a proptest invariant that no
+  inline or redirected `cmd`/`powershell` argv is ever `read-only`
+
 ## ADR-0031: The Tool Surface Is Pull-Based — A Per-Session Working Set, A Broker That Reveals, Reveal-Never-Grant
 
 Status: accepted. The tool-surface sibling of ADR-0027 (the skill model:

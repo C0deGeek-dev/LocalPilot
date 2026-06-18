@@ -383,9 +383,12 @@ async fn run_shell_allows_read_only_and_denies_destructive_non_interactive() {
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
 
+    // A metachar-free shell command classifies by its leading program (`echo` →
+    // read-only); an inline `cmd /c …` is opaque and gated (Unknown → denied
+    // non-interactively), so it is the destructive case here.
     #[cfg(windows)]
     let (read_only, destructive) = (
-        json!({ "program": "cmd", "args": ["/c", "echo", "hello"] }),
+        json!({ "command": "echo hello" }),
         json!({ "program": "cmd", "args": ["/c", "del", "x"] }),
     );
     #[cfg(not(windows))]

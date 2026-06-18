@@ -99,7 +99,14 @@ executes an embedded command the classifier cannot see into — `bash`/`sh`/
 `zsh`/`dash`/`ksh -c …`, `env`-prefixed commands, `xargs`, `nohup`, `timeout`,
 interpreter `-c`/`-e` one-liners (python, node, perl, ruby), and their
 equivalents reachable on Windows (git-bash, WSL) — classifies as `unknown` at
-best, on every platform. Destructive flag forms of otherwise project-write
+best, on every platform. The Windows shells are no exception: a `cmd /c …`,
+`powershell`/`pwsh -Command …`, `-EncodedCommand`, or `-File` invocation carries
+an inline command or script the substring classifier cannot read, so it
+classifies as `unknown` (gated) rather than trusting a coincidental keyword — a
+`cmd /c "echo data > secrets"` is a write, not the read its `echo` looks like.
+Independently, any argument carrying an output redirection (`>`/`>>`) lifts a
+read-looking command to at least `project-write`, so a redirection can never be
+auto-allowed as a read. Destructive flag forms of otherwise project-write
 commands escalate: `git reset --hard`, `git clean -f`, and `git checkout`/
 `git restore` against pathspecs classify as `destructive`, so a raw shell
 command never faces a weaker gate than the purpose-built tool for the same

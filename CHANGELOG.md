@@ -5,6 +5,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Security (command classification).** An inline Windows shell command —
+  `cmd /c …`, `powershell`/`pwsh -Command …`, `-EncodedCommand`, `-File` — is now
+  treated as opaque and classified `unknown` (gated), exactly like `bash -c`,
+  instead of being substring-classified. This closes a path where
+  `cmd /c "echo data > file"` was auto-allowed as a read while the shell performed
+  the write. Independently, an argument with an output redirection (`>`/`>>`) can
+  no longer be classified `read-only`. The classifier fails toward a prompt, never
+  a silent allow (ADR-0032).
 - The **no-unsupported-claim gate** is now reachable through configuration:
   `[harness] claim_gate = "warn"` (default `"off"`) flags a completed-action
   claim in the final reply that no verified tool call this turn supports. Matching

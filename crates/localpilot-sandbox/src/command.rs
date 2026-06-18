@@ -129,11 +129,22 @@ pub fn classify_windows(program: &str, args: &[String]) -> CommandClass {
     if matches!(stem.as_str(), "reg" | "regedit") {
         return CommandClass::Privileged;
     }
-    if matches!(stem.as_str(), "powershell" | "pwsh") {
-        return classify_powershell(&args);
-    }
-    if stem == "cmd" {
-        return classify_cmd(&args);
+    // `powershell`/`pwsh`/`cmd` carrying an inline command or script are opaque:
+    // the embedded command is invisible to substring classification, exactly like
+    // `bash -c`. Auto-allowing them would be a clean classification bypass —
+    // `cmd /c "echo data > file"` is a write, not the read its `echo` looks like.
+    if matches!(stem.as_str(), "powershell" | "pwsh" | "cmd") {
+        if carries_inline_command(&stem, &args) {
+            return CommandClass::Unknown;
+        }
+        let class = if stem == "cmd" {
+            classify_cmd(&args)
+        } else {
+            classify_powershell(&args)
+        };
+        // A redirection turns a read-looking command into a write; never let the
+        // substring classifier hand one back as auto-allowable `ReadOnly`.
+        return redirection_floor(class, &args);
     }
     // POSIX-style shells and wrapper programs reachable on Windows (git-bash,
     // WSL, MSYS) are just as opaque here.
@@ -164,6 +175,42 @@ pub fn classify_windows(program: &str, args: &[String]) -> CommandClass {
         return CommandClass::ProjectWrite;
     }
     CommandClass::Unknown
+}
+
+/// Whether a `cmd`/`powershell`/`pwsh` invocation carries an inline command or
+/// script — `cmd /c "…"`, `powershell -Command "…"`, `-EncodedCommand`, or a
+/// `-File` script. Such an invocation is opaque to substring classification.
+/// `args` are already lowercased. PowerShell allows prefix-abbreviated switches
+/// (`-Command` → `-c`, `-EncodedCommand` → `-e`), so flags are matched as
+/// prefixes, erring toward opacity.
+fn carries_inline_command(stem: &str, args: &[String]) -> bool {
+    match stem {
+        "cmd" => any_arg(args, &["/c", "/k"]),
+        "powershell" | "pwsh" => args.iter().any(|a| {
+            a == "-c"
+                || is_switch_prefix(a, "-command")
+                || is_switch_prefix(a, "-encodedcommand")
+                || is_switch_prefix(a, "-file")
+        }),
+        _ => false,
+    }
+}
+
+/// Whether `arg` is a non-empty `-`-prefixed abbreviation of `full` (PowerShell
+/// switch prefix-matching), e.g. `-co`/`-comm`/`-command` all match `-command`.
+fn is_switch_prefix(arg: &str, full: &str) -> bool {
+    arg.len() >= 2 && arg.starts_with('-') && full.starts_with(arg)
+}
+
+/// Raise a `ReadOnly` verdict to `ProjectWrite` when the arguments contain an
+/// output redirection (`>`/`>>`), which produces a write the read-looking
+/// command name hides. Other classes are returned unchanged.
+fn redirection_floor(class: CommandClass, args: &[String]) -> CommandClass {
+    if class == CommandClass::ReadOnly && args.iter().any(|a| a.contains('>')) {
+        CommandClass::ProjectWrite
+    } else {
+        class
+    }
 }
 
 fn classify_powershell(args: &[String]) -> CommandClass {
@@ -468,9 +515,12 @@ mod tests {
             classify_windows("reg", &argv(&["add", "HKLM"])),
             CommandClass::Privileged
         );
+        // An inline `cmd /c …` command is opaque to substring classification, so
+        // it is `Unknown` (gated identically to `Destructive`: both `ask_or_deny`)
+        // rather than trusting a coincidental `del` substring match.
         assert_eq!(
             classify_windows("cmd", &argv(&["/c", "del", "x"])),
-            CommandClass::Destructive
+            CommandClass::Unknown
         );
         assert_eq!(
             classify_windows("del", &argv(&["x"])),
@@ -577,5 +627,65 @@ mod tests {
             assert!(classify_posix(wrapper, &args) != CommandClass::ReadOnly);
             assert!(classify_windows(wrapper, &args) != CommandClass::ReadOnly);
         }
+
+        // A `cmd`/`powershell` invocation carrying an inline command, or any
+        // argument list with a redirection, never classifies as auto-allowable
+        // `ReadOnly` — the bypass closed here, pinned across arbitrary args.
+        #[test]
+        fn windows_inline_or_redirected_shells_are_never_read_only(
+            shell in proptest::sample::select(vec!["cmd", "powershell", "pwsh"]),
+            args in proptest::collection::vec(".*", 0..4),
+        ) {
+            let inline_flag = if shell == "cmd" { "/c" } else { "-command" };
+            let mut inline = vec![inline_flag.to_string()];
+            inline.extend(args.clone());
+            assert!(classify_windows(shell, &inline) != CommandClass::ReadOnly);
+
+            let mut redirected = args.clone();
+            redirected.push(">".to_string());
+            redirected.push("out.txt".to_string());
+            assert!(classify_windows(shell, &redirected) != CommandClass::ReadOnly);
+        }
+    }
+
+    #[test]
+    fn windows_inline_shell_commands_are_opaque() {
+        // The bypass: `cmd /c "echo … > file"` is a write, not the read its
+        // `echo` looks like. An inline command/script is opaque → Unknown
+        // (gated), never auto-allowable.
+        assert_eq!(
+            classify_windows("cmd", &argv(&["/c", "echo data > out.txt"])),
+            CommandClass::Unknown
+        );
+        assert_eq!(
+            classify_windows("powershell", &argv(&["-Command", "Get-ChildItem"])),
+            CommandClass::Unknown
+        );
+        assert_eq!(
+            classify_windows("powershell", &argv(&["-c", "Remove-Item x"])),
+            CommandClass::Unknown
+        );
+        assert_eq!(
+            classify_windows("pwsh", &argv(&["-EncodedCommand", "ZQBjAGgAbwA="])),
+            CommandClass::Unknown
+        );
+        assert_eq!(
+            classify_windows("powershell", &argv(&["-File", "deploy.ps1"])),
+            CommandClass::Unknown
+        );
+    }
+
+    #[test]
+    fn windows_redirection_bumps_read_only_to_write() {
+        // A non-inline read-looking command with a redirection is really a write.
+        assert_eq!(
+            classify_windows("powershell", &argv(&["Get-Content", "x", ">", "out.txt"])),
+            CommandClass::ProjectWrite
+        );
+        // No redirection: the read classification stands.
+        assert_eq!(
+            classify_windows("powershell", &argv(&["Get-Content", "x"])),
+            CommandClass::ReadOnly
+        );
     }
 }
