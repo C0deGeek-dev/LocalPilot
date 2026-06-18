@@ -3,6 +3,19 @@
 Notable changes per release. This project is pre-1.0; the configuration schema
 stability policy is in [docs/configuration.md](docs/configuration.md).
 
+## Unreleased
+
+- **Capability scorecard.** The golden-task evals now emit a machine-readable
+  JSON scorecard per task run, widening the previous pass/fail line into three
+  measured layers — `results` (pass/fail, regression-safety, partial credit),
+  `quality` (diff size, vs-gold ratio, format/lint/type-check clean, complexity,
+  tests-added), and `process` (tool-call count, redundant calls,
+  reproduce-before-fix, test-before-done, retrieval utilization, exit reason,
+  recovery) — read deterministically from the captured diff and the session event
+  trace. A reported `speed` block (wall time, tokens) is a guardrail, never the
+  headline. The one-line discipline scorecard is unchanged. See
+  [docs/08-testing.md](docs/08-testing.md) §Golden-Task Evals.
+
 ## v0.3.0-beta.3 - 2026-06-18
 
 Coordinated LocalX beta release.

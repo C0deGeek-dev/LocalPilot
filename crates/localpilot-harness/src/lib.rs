@@ -22,6 +22,7 @@ mod progress;
 mod quality;
 mod resume;
 mod rules;
+mod scorecard;
 mod session;
 mod summarizer;
 mod system_prompt;
@@ -49,6 +50,10 @@ pub use quality::{
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
 pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
+pub use scorecard::{
+    complexity_delta_in_diff, extract_process, tests_added_in_diff, DiffStat, ProcessBlock,
+    QualityBlock, ResultsBlock, Scorecard, SpeedBlock, SCORECARD_SCHEMA,
+};
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
     SessionRuntime, SteerQueue, StopReason,

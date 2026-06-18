@@ -1,4 +1,4 @@
-﻿# Test Plan
+# Test Plan
 
 ## Test Layers
 
@@ -52,6 +52,33 @@ Each task records:
 
 The eval provider can be fake at first, then optional live-provider runs can be
 added behind credentials. The scorecard should be tracked over time.
+
+#### Machine-readable scorecard
+
+Each golden-task run emits a structured `Scorecard` (JSON) so a benchmark can
+grade the *harness* on more than a single pass/fail bit. It is the cross-corpus
+contract: an in-repo runner and an external runner both produce the same shape.
+The blocks are derived deterministically from artefacts the loop already
+produces — the captured diff and the session event trace — so the offline path
+stays reproducible.
+
+| Layer | Fields | Source |
+| --- | --- | --- |
+| `results` | `passed`, `regression_safe`, `partial_credit`, `tests_total`, `tests_passed` | the task's own grading |
+| `quality` | `diff_added`/`diff_removed`/`diff_files`, `vs_gold_ratio`, `format_clean`/`lint_clean`/`typecheck_clean`, `complexity_delta`, `tests_added` | the captured `git diff` + the quality gate's check outcomes |
+| `process` | `tool_calls`, `redundant_calls`, `reproduce_before_fix`, `test_before_done`, `retrieval_used`/`retrieval_count`, `exit_reason`, `recovered_after_failure`, `discipline` | the session event log via `EvidenceLedger` |
+| `speed` | `wall_ms`, `input_tokens`, `output_tokens` | runner-measured + reported usage |
+
+`speed` is a reported guardrail, never the headline metric — correctness gates,
+then quality and process rank. Nullable fields (`vs_gold_ratio`,
+`complexity_delta`, `discipline`) serialize as `null` rather than being omitted,
+so the shape is stable. The one-line discipline scorecard
+(`tool-discipline scorecard: …`, consumed by LocalBench's TDS pipeline) is
+unchanged; the JSON scorecard is the structured superset. Run it with:
+
+```powershell
+cargo test -p localpilot-harness --test evals -- --nocapture
+```
 
 ### Snapshot Tests
 

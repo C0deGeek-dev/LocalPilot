@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use localpilot_config::{load, AutoFix, Cadence, CheckConfig, CliOverrides, ConfigPaths};
 use localpilot_harness::{
-    ratify_gate, resume_one_step, CheckStatus, ProposedCheck, RuleEngine, SessionConfig,
-    SessionRuntime,
+    complexity_delta_in_diff, extract_process, ratify_gate, resume_one_step, tests_added_in_diff,
+    CheckStatus, DiffStat, EvidenceLedger, ProposedCheck, QualityBlock, ResultsBlock, RuleEngine,
+    Scorecard, SessionConfig, SessionRuntime, SpeedBlock, SCORECARD_SCHEMA,
 };
 use localpilot_llm::{FakeProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -61,7 +62,73 @@ fn git(root: &Path, args: &[&str]) {
         .success());
 }
 
-fn run_task(task: &GoldenTask) -> TaskScore {
+/// Run a git command and capture its stdout (for `rev-parse` / `diff`).
+fn git_out(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Capture the run's code diff (everything except the harness bookkeeping files)
+/// between the pre-run base commit and `HEAD`.
+fn run_diff(root: &Path, base: &str) -> String {
+    git_out(
+        root,
+        &[
+            "diff",
+            "--no-color",
+            base,
+            "HEAD",
+            "--",
+            ".",
+            ":!PROGRESS.md",
+            ":!DECISIONS.md",
+        ],
+    )
+}
+
+/// Build the machine-readable scorecard for a completed golden-task run, reading
+/// the three layers from the artefacts the loop already produced: the grading
+/// result, the captured diff + gate, and the session event trace.
+fn build_scorecard(
+    task: &GoldenTask,
+    score: &TaskScore,
+    diff_text: &str,
+    gate: &[localpilot_harness::CheckOutcome],
+    events: &[localpilot_store::SessionEvent],
+    wall_ms: u64,
+) -> Scorecard {
+    let ledger = EvidenceLedger::project(events);
+    let diff = DiffStat::from_unified(diff_text);
+    let quality = QualityBlock::from_signals(
+        &diff,
+        None,
+        gate,
+        Some(complexity_delta_in_diff(diff_text)),
+        tests_added_in_diff(diff_text),
+    );
+    Scorecard {
+        schema: SCORECARD_SCHEMA,
+        task: task.name.to_string(),
+        arm: "offline".to_string(),
+        model: "fake".to_string(),
+        results: ResultsBlock {
+            passed: score.success,
+            regression_safe: true,
+            partial_credit: if score.success { 1.0 } else { 0.0 },
+            tests_total: 1,
+            tests_passed: u32::from(score.success),
+        },
+        quality,
+        process: extract_process(events, &ledger),
+        speed: SpeedBlock::from_events(events, wall_ms),
+    }
+}
+
+fn run_task(task: &GoldenTask) -> (TaskScore, Scorecard) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     for (rel, contents) in &task.files {
@@ -85,6 +152,7 @@ fn run_task(task: &GoldenTask) -> TaskScore {
     git(root, &["config", "user.name", "Eval"]);
     git(root, &["add", "-A"]);
     git(root, &["commit", "-m", "initial"]);
+    let base = git_out(root, &["rev-parse", "HEAD"]).trim().to_string();
 
     let mut provider = FakeProvider::new();
     for (tool, id, input) in &task.script {
@@ -107,18 +175,25 @@ fn run_task(task: &GoldenTask) -> TaskScore {
         },
         Vec::new(),
     );
+    let session = runtime.session_id();
 
     let rules = RuleEngine::with_baseline(&Default::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let started = std::time::Instant::now();
     let outcome = rt
         .block_on(resume_one_step(&mut runtime, root, &rules, None, &[], 3))
         .unwrap();
+    let wall_ms = started.elapsed().as_millis() as u64;
 
-    TaskScore {
+    let score = TaskScore {
         name: task.name,
         success: outcome.committed && (task.expect)(root),
         committed: outcome.committed,
-    }
+    };
+    let diff_text = run_diff(root, &base);
+    let events = Store::open(root).read_events(session).unwrap();
+    let scorecard = build_scorecard(task, &score, &diff_text, &outcome.gate, &events, wall_ms);
+    (score, scorecard)
 }
 
 fn tasks() -> Vec<GoldenTask> {
@@ -202,34 +277,66 @@ fn live_tasks() -> Vec<GoldenTask> {
 
 #[test]
 fn golden_task_scorecard() {
-    let scores: Vec<TaskScore> = tasks().iter().map(run_task).collect();
-    let total = scores.len();
-    let passed = scores.iter().filter(|s| s.success).count();
+    let runs: Vec<(TaskScore, Scorecard)> = tasks().iter().map(run_task).collect();
+    let total = runs.len();
+    let passed = runs.iter().filter(|(s, _)| s.success).count();
     let rate = passed as f64 / total as f64;
 
-    // Print the scorecard (visible with --nocapture); track the rate over time.
+    // Print the one-line summary plus the full machine-readable scorecard JSON
+    // for each task (visible with --nocapture); track the rate over time.
     eprintln!(
         "golden-task scorecard: {passed}/{total} ({:.0}%)",
         rate * 100.0
     );
-    for score in &scores {
+    for (score, card) in &runs {
         eprintln!(
             "  {} success={} committed={}",
             score.name, score.success, score.committed
         );
+        eprintln!("    {}", card.to_json().unwrap());
     }
 
     // The three real tasks succeed; the negative control fails, so a regression in
     // any real task drops the rate below this expectation.
     assert_eq!(passed, 3, "expected exactly the three real tasks to pass");
     assert!(
-        !scores
+        !runs
             .iter()
-            .find(|s| s.name.starts_with("negative"))
+            .find(|(s, _)| s.name.starts_with("negative"))
             .unwrap()
+            .0
             .success,
         "the negative control must not score as a success"
     );
+
+    // The scorecard is the cross-corpus contract: every run emits all three
+    // layers, round-trips through JSON, and the process block reflects the trace.
+    for (score, card) in &runs {
+        assert_eq!(card.schema, SCORECARD_SCHEMA);
+        let json = card.to_json().unwrap();
+        let back: Scorecard = serde_json::from_str(&json).unwrap();
+        assert_eq!(card, &back, "scorecard must round-trip through JSON");
+        assert_eq!(card.results.passed, score.success);
+        assert_eq!(
+            card.process.exit_reason, "Done",
+            "the offline turn completes"
+        );
+        if score.name.starts_with("create") || score.name.starts_with("edit") {
+            assert!(
+                card.quality.diff_added > 0,
+                "a task that changed files records added lines: {}",
+                score.name
+            );
+        }
+    }
+
+    // The negative control made no change: its quality diff is empty.
+    let (_, control) = runs
+        .iter()
+        .find(|(s, _)| s.name.starts_with("negative"))
+        .unwrap();
+    assert_eq!(control.quality.diff_added, 0);
+    assert_eq!(control.quality.diff_removed, 0);
 }
 
 #[test]
