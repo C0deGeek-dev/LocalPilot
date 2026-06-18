@@ -37,6 +37,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   back; a prompt-addressed cache makes scoring offline-deterministic; and
   `cohens_kappa` reports agreement against a human-labelled sample. See
   [docs/08-testing.md](docs/08-testing.md) §LLM-as-judge quality rubric.
+- **Ablation, attribution, and composite scoring.** Added an ablation arm matrix
+  (`baseline`, `full`, and one arm per harness feature turned off, model pinned),
+  per-feature attribution that maps each feature to the process signal it should
+  move and flags a feature that is on but inert, and a composite score where
+  correctness gates first and passers rank by quality + process + regression-safety
+  (speed stays a reported guardrail). All deterministic and offline-testable, with
+  an original clean-room set of adversarial tasks.
 
 ## v0.3.0-beta.3 - 2026-06-18
 

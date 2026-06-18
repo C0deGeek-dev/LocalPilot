@@ -6,6 +6,7 @@
 //! engine layers on top of the permission engine and never bypasses it.
 #![forbid(unsafe_code)]
 
+mod ablation;
 mod brief;
 mod claim;
 mod compaction;
@@ -29,6 +30,10 @@ mod summarizer;
 mod system_prompt;
 mod worker;
 
+pub use ablation::{
+    ablation_matrix, attribute, composite_score, feature_signal, mean_std, rank, signal_value,
+    AblationArm, AttributionRow, CompositeOutcome, FeatureToggles,
+};
 pub use brief::Brief;
 pub use compaction::{
     compact, compact_with_summary, estimate_tokens, CompactionMetadata, CompactionMode,
