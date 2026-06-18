@@ -13,6 +13,11 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   the write. Independently, an argument with an output redirection (`>`/`>>`) can
   no longer be classified `read-only`. The classifier fails toward a prompt, never
   a silent allow (ADR-0032).
+- **Security (shell secret reads).** A read-only shell command (`cat`/`type`/
+  `head`) whose path argument is secret-like (`.env`, `*.pem`, `~/.ssh/…`,
+  `.aws/credentials`, …) or resolves outside the workspace now prompts, instead of
+  being auto-allowed to read the file into model context. Ordinary in-workspace
+  reads are unaffected (ADR-0032).
 - The **no-unsupported-claim gate** is now reachable through configuration:
   `[harness] claim_gate = "warn"` (default `"off"`) flags a completed-action
   claim in the final reply that no verified tool call this turn supports. Matching

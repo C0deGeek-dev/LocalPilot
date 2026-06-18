@@ -27,6 +27,15 @@ any argument containing a redirection (`>`/`>>`) lifts a `read-only` verdict to
 at least `project-write`. The classifier always fails toward a prompt, never
 toward a silent allow.
 
+A command also carries no contained path, so a `read-only` command
+(`cat`/`type`/`head`) could read a secret-bearing or out-of-workspace file and
+pull it into model context unprompted — the redaction stack runs at persistence,
+not on the live request. Each non-flag path argument of a read-only command is
+therefore inspected against the same secret-path table the file tools use and
+the workspace boundary; a secret-like or out-of-workspace argument adds an
+explicit read effect, so the command faces the same prompt the `read_file` tool
+would. Best-effort and conservative: ordinary in-workspace reads add no prompt.
+
 Reason:
 
 - a permission boundary must hold against a confused or prompt-injected model;

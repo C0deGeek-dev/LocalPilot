@@ -112,6 +112,15 @@ commands escalate: `git reset --hard`, `git clean -f`, and `git checkout`/
 command never faces a weaker gate than the purpose-built tool for the same
 effect.
 
+A shell command carries no contained path, so a `read-only` command
+(`cat`/`type`/`head`) could otherwise read a secret-bearing or out-of-workspace
+file and pull it into model context with no prompt. Each non-flag path argument
+of a read-only command is therefore inspected: one that is secret-like (the same
+table the file tools use — `.env`, `*.pem`, `~/.ssh/…`, `.aws/credentials`, …) or
+that resolves outside the workspace adds an explicit read effect, so it faces the
+same prompt the `read_file` tool would. The check is best-effort and
+conservative — ordinary in-workspace reads add no prompt.
+
 ## Discovered Tooling
 
 The harness quality gate discovers language-specific check commands from the
