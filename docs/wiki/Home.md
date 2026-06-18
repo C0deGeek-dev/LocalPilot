@@ -9,7 +9,7 @@ Provider-neutral, local-first terminal coding agent.
 ## Start here
 
 - **[[Getting-Started]]** — install and first run.
-- **[[How-To|How-To guides]]** — task-oriented recipes.
+- **[[How-To]]** — task-oriented recipes.
 - **[[Examples]]** — runnable, copy-pasteable samples.
 - **[[Reference]]** — index into the in-repo `docs/`.
 - **[[Troubleshooting]]** — common problems and fixes.
