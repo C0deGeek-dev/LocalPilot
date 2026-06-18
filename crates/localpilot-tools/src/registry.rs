@@ -13,6 +13,7 @@ use crate::builtins::{
     UpdatePlan, WriteFile,
 };
 use crate::builtins_shell::RunShell;
+use crate::catalog::{Catalog, ToolSource};
 use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
 
 /// Context-size bound on a tool result. Output beyond this is kept as head +
@@ -27,13 +28,19 @@ const CONTEXT_TAIL_BYTES: usize = 2 * 1024;
 /// so neither the model nor the harness can reach a side effect another way.
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    /// Provenance of each tool, kept in lockstep with `tools`, so the catalog
+    /// projection can discriminate a builtin from a specific MCP server's tool.
+    sources: Vec<ToolSource>,
 }
 
 impl ToolRegistry {
     /// An empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            sources: Vec::new(),
+        }
     }
 
     /// A registry with all builtin tools.
@@ -62,9 +69,32 @@ impl ToolRegistry {
         registry
     }
 
-    /// Add a tool.
+    /// Add a builtin tool.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
+        self.register_from(tool, ToolSource::Builtin);
+    }
+
+    /// Add a tool from a known source (a builtin, or a specific MCP server). The
+    /// source feeds the catalog projection and the content fingerprint; it does
+    /// not change dispatch or permission behaviour in any way.
+    pub fn register_from(&mut self, tool: Box<dyn Tool>, source: ToolSource) {
         self.tools.push(tool);
+        self.sources.push(source);
+    }
+
+    /// Project the current registry into a live, fingerprinted [`Catalog`] — the
+    /// searchable surface the pull-discovery broker resolves needs against. The
+    /// catalog is derived and disposable; the registry stays the source of truth.
+    #[must_use]
+    pub fn catalog(&self) -> Catalog {
+        Catalog::project(self.tools.iter().zip(&self.sources).map(|(tool, source)| {
+            (
+                tool.name().to_string(),
+                tool.description().to_string(),
+                tool.schema(),
+                source.clone(),
+            )
+        }))
     }
 
     /// Look up a tool by name.
@@ -277,4 +307,98 @@ impl Default for ToolRegistry {
 fn format_tool_output(tool: &str, output: &str, is_error: bool) -> String {
     let status = if is_error { "error" } else { "success" };
     format!("tool: {tool}\nstatus: {status}\noutput:\n{output}")
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use localpilot_sandbox::Effect;
+    use serde_json::json;
+
+    /// A minimal tool used to drive catalog projection without a live workspace.
+    struct FakeTool {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.description
+        }
+        fn schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        fn effects(
+            &self,
+            _input: &Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<Vec<Effect>, crate::error::ToolError> {
+            Ok(Vec::new())
+        }
+        async fn invoke(
+            &self,
+            _input: Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<crate::ToolOutput, crate::error::ToolError> {
+            Ok(crate::ToolOutput::ok(""))
+        }
+    }
+
+    #[test]
+    fn catalog_projects_one_entry_per_tool_and_tags_its_source() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeTool {
+            name: "alpha",
+            description: "first",
+        }));
+        registry.register_from(
+            Box::new(FakeTool {
+                name: "beta",
+                description: "second",
+            }),
+            ToolSource::Mcp("files".to_string()),
+        );
+
+        let catalog = registry.catalog();
+        assert_eq!(catalog.len(), registry.names().len());
+        assert_eq!(
+            catalog.get("alpha").map(|e| &e.source),
+            Some(&ToolSource::Builtin)
+        );
+        assert_eq!(
+            catalog.get("beta").map(|e| &e.source),
+            Some(&ToolSource::Mcp("files".to_string()))
+        );
+    }
+
+    #[test]
+    fn rebuilding_without_a_tool_drops_it_from_the_catalog() {
+        // A registry rebuild that no longer registers a tool (e.g. an MCP server
+        // that stopped advertising it) drops it; the catalog delta says `removed`.
+        let mut before = ToolRegistry::new();
+        before.register(Box::new(FakeTool {
+            name: "keep",
+            description: "stays",
+        }));
+        before.register(Box::new(FakeTool {
+            name: "gone",
+            description: "leaves",
+        }));
+
+        let mut after = ToolRegistry::new();
+        after.register(Box::new(FakeTool {
+            name: "keep",
+            description: "stays",
+        }));
+
+        let delta = before.catalog().delta(&after.catalog());
+        assert_eq!(delta.removed, vec!["gone".to_string()]);
+        assert!(delta.added.is_empty());
+        assert!(after.catalog().get("gone").is_none());
+    }
 }

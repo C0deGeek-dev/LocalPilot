@@ -9,6 +9,7 @@
 
 mod builtins;
 mod builtins_shell;
+mod catalog;
 mod contract;
 mod error;
 mod registry;
@@ -19,6 +20,9 @@ pub use builtins::{
     ReplaceInFile, SearchText, WriteFile,
 };
 pub use builtins_shell::RunShell;
+pub use catalog::{
+    fingerprint, Catalog, CatalogDelta, CatalogEntry, DeprecationOverlay, ToolSource,
+};
 pub use contract::{
     string_arg, Confirmation, ContentExpectation, FailureMode, Idempotency, PathEffectKind,
     Postcondition, Precondition, RetryPolicy, Reversibility, SideEffectClass, StatePredicate,

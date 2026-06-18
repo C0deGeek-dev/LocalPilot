@@ -9,14 +9,17 @@ use std::sync::Arc;
 use localpilot_config::{Config, McpServerConfig};
 use localpilot_mcp::{McpClient, McpError, McpTool, McpToolDescriptor, StdioTransport, Transport};
 use localpilot_sandbox::Effect;
-use localpilot_tools::ToolRegistry;
+use localpilot_tools::{ToolRegistry, ToolSource};
 
 /// Connected MCP servers and the tools they advertise. The server processes stay
 /// alive for as long as this value is held, so a single connection backs many
 /// freshly built registries (e.g. one per harness step).
 #[derive(Default)]
 pub struct McpTools {
-    entries: Vec<(McpToolDescriptor, Arc<dyn Transport>)>,
+    /// Each entry carries its server id, so the catalog projection can attribute
+    /// the tool to that source and a re-enumeration that drops it surfaces as a
+    /// catalog `removed` delta.
+    entries: Vec<(String, McpToolDescriptor, Arc<dyn Transport>)>,
     /// When set, the model-callable skill discovery tools (`skill_search`,
     /// `skill_load`) are registered so the agent may reach project skills on its
     /// own. Off by default — the deterministic `localpilot skills` surface and the
@@ -31,7 +34,11 @@ impl McpTools {
         let mut entries = Vec::new();
         for (name, server) in &config.mcp.servers {
             match connect(server).await {
-                Ok(mut discovered) => entries.append(&mut discovered),
+                Ok(discovered) => entries.extend(
+                    discovered
+                        .into_iter()
+                        .map(|(descriptor, transport)| (name.clone(), descriptor, transport)),
+                ),
                 Err(error) => eprintln!("mcp: skipping server '{name}': {error}"),
             }
         }
@@ -81,12 +88,15 @@ impl McpTools {
             registry.register(Box::new(localpilot_skills::SkillSearch));
             registry.register(Box::new(localpilot_skills::SkillLoad));
         }
-        for (descriptor, transport) in &self.entries {
-            registry.register(Box::new(McpTool::new(
-                descriptor,
-                vec![Effect::Network],
-                Arc::clone(transport),
-            )));
+        for (server, descriptor, transport) in &self.entries {
+            registry.register_from(
+                Box::new(McpTool::new(
+                    descriptor,
+                    vec![Effect::Network],
+                    Arc::clone(transport),
+                )),
+                ToolSource::Mcp(server.clone()),
+            );
         }
         registry
     }
