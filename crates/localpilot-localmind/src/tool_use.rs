@@ -2,7 +2,7 @@
 //! candidate.
 //!
 //! The verdict is a **fact taken from the event log** — the `ToolVerified`
-//! records subject 03/04 write — not re-parsed transcript prose (ADR-0018's
+//! records the host writes — not re-parsed transcript prose (ADR-0018's
 //! structured-signal import). The host fills [`ToolUseSignal`] from the session
 //! evidence and calls [`tool_use_candidate`]; promotion is gated on the verified
 //! trajectory by `localmind_core::promote_tool_use`, and the evidence is redacted

@@ -88,8 +88,8 @@ impl SkillSet {
         self.skills.iter().find(|s| s.manifest.name == name)
     }
 
-    /// Skills relevant to `query`, for on-demand discovery (subject 04's
-    /// `skill_search`): a description keyword match or an explicit command trigger.
+    /// Skills relevant to `query`, for on-demand discovery (the `skill_search`
+    /// tool): a description keyword match or an explicit command trigger.
     /// Only **discoverable** skills are candidates — user-only skills are reached
     /// solely by [`SkillSet::by_name`] (a typed name), never by search — so a model
     /// can never auto-surface a skill the author marked user-only. Description-based

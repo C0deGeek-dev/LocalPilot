@@ -2379,7 +2379,7 @@ mod tests {
         assert_eq!(session_open_mode(dir.path(), &cfg), None);
 
         // Once the run is old and its sources read as changed, the trigger picks
-        // a background Refresh (reusing subject 01's resume path).
+        // a background Refresh (reusing the incremental resume path).
         age_completed_run(dir.path());
         assert_eq!(session_open_mode(dir.path(), &cfg), Some(RunMode::Refresh));
     }

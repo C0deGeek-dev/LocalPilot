@@ -21,8 +21,8 @@ pub enum Invocation {
 }
 
 impl Invocation {
-    /// Whether this skill may be surfaced by on-demand search (subject 04's
-    /// `skill_search`). User-only skills are excluded from the search candidate set.
+    /// Whether this skill may be surfaced by on-demand search (the `skill_search`
+    /// tool). User-only skills are excluded from the search candidate set.
     #[must_use]
     pub fn is_discoverable(self) -> bool {
         matches!(self, Invocation::Discoverable)

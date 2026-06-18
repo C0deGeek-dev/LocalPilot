@@ -64,9 +64,9 @@ fn is_text(block: &ContentBlock) -> bool {
     matches!(block, ContentBlock::Text { .. })
 }
 
-/// A/B for subject 03: the same failed-write false-success claim is unflagged
-/// with the gate off (the measured behaviour from subject 01) and flagged with
-/// the gate on (enforcement). A deterministic, offline 1→0 drop on this scenario.
+/// The same failed-write false-success claim is unflagged with the gate off and
+/// flagged with the gate on (enforcement) — a deterministic, offline 1→0 drop on
+/// this scenario.
 #[test]
 fn the_gate_neutralizes_a_false_success_claim() {
     let provider = || {
