@@ -37,6 +37,10 @@ and nothing else:\n\
 ## Acceptance Criteria\n\
 - <observable, testable criterion>\n\
 \n\
+## Risks & Rollback\n\
+- <what could go wrong once this ships, and how it is undone: revert, feature \
+flag, config switch, or migration down>\n\
+\n\
 Be concrete and testable. Prefer fewer, sharper items over many vague ones.";
 
 /// The original LocalPilot planner prompt.

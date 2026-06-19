@@ -26,8 +26,9 @@ use crate::worker::{
 
 const WORKER_PROMPT: &str = "\
 You are completing exactly one step of an implementation plan. Make the change \
-using the available tools, then briefly confirm completion. Do not start any other \
-step.\n\nStep: ";
+using the available tools, then briefly confirm completion. If the change alters \
+observable behaviour, configuration, or interfaces, update the matching \
+documentation in the same step. Do not start any other step.\n\nStep: ";
 
 /// The store key under which a paused run is persisted (an inspectable file
 /// under `.localpilot/cache/`).
@@ -452,4 +453,19 @@ fn write(path: &Path, contents: &str) -> Result<(), HarnessError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WORKER_PROMPT;
+
+    #[test]
+    fn worker_prompt_carries_the_doc_currency_cue() {
+        // A step that changes observable behaviour must ship its docs in the same
+        // step; the worker prompt states that contract to the model.
+        assert!(
+            WORKER_PROMPT.contains("update the matching documentation in the same step"),
+            "doc-currency cue missing from the worker prompt"
+        );
+    }
 }
