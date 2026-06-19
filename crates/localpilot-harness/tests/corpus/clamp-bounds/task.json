@@ -1,0 +1,5 @@
+{
+  "id": "clamp-bounds",
+  "entry": "solution.rs",
+  "problem": "clamp_value(v, lo, hi) must return lo when v is below the range and hi when v is above it, but the upper bound is compared the wrong way, so values above hi are returned unchanged and the test clamps_above_range fails. Fix the comparison so the bundled tests pass."
+}

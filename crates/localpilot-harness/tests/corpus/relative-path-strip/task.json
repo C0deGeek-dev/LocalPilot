@@ -1,0 +1,5 @@
+{
+  "id": "relative-path-strip",
+  "entry": "solution.rs",
+  "problem": "relative_to(base, path) should return the part of path that follows base with no leading separator, but it keeps the separator, so relative_to('a/b', 'a/b/c.rs') yields '/c.rs' instead of 'c.rs' and the test strips_leading_sep fails. Trim the separator so the bundled tests pass."
+}

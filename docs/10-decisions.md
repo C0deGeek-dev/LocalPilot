@@ -2,6 +2,34 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0033: External Benchmark Corpora Never Enter The Clean-Room Tree
+
+Status: accepted. Builds on `docs/00-clean-room.md` (clean-room provenance) and
+the golden-task eval scorecard in `docs/08-testing.md`.
+
+Measuring this harness against public coding benchmarks (SWE-bench, the Aider
+polyglot set) is valuable, but those corpora are authored elsewhere and their task
+instances, fixtures, and prompts are exactly the kind of external material the
+clean-room policy forbids from entering this repository.
+
+Decision: a public benchmark corpus is **never** vendored into this repository or
+materialized under any checkout of it. Instead, an external runner (owned by the
+benchmarking tool, not this repo) drives the `localpilot` binary as the
+solver-under-test against workspaces materialized in a user-local, git-ignored
+cache **outside** this tree, and consumes the same machine-readable capability
+scorecard. The runner refuses to write task data under a path that contains this
+project's checkout. The first-party corpus mined from this repository's own git
+history (original, uncontaminated) stays in-repo and is the trusted bar.
+
+Reason:
+
+- keeps clean-room provenance intact — no copied corpus, fixture, or prompt enters
+  the tree, even for measurement
+- still lets the harness be graded against public benchmarks, reported as deltas
+  between harness arms (public absolute numbers are contamination-suspect)
+- the in-repo first-party corpus remains the contamination-proof, trusted measure
+- the boundary is enforced in code (a path guard), not by convention
+
 ## ADR-0032: Inline Shell Commands And Redirections Are Opaque To The Command Classifier
 
 Status: accepted. Builds on ADR-0007 (tri-platform tier-1) and the permission

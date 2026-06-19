@@ -32,6 +32,29 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   both defaulted to a fixed `50`. Setting either key enables enforcement (a single
   configured bound serves as both the soft start and the hard ceiling); with the
   budget off, neither the cost ceiling nor the no-progress stop fires.
+- **First-party capability corpus.** Added an original, clean-room corpus of
+  small buggy tasks (each with its own failing→passing test) under
+  `crates/localpilot-harness/tests/corpus/`, plus an in-repo runner that drives
+  the harness loop headless against each task, emits the scorecard, and grades by
+  building and running the task's own test in isolation. Includes a git-history
+  extraction helper that surfaces fix-commit candidates as reviewable fixture
+  stubs. Offline-deterministic by default; a live model path is gated behind
+  `LOCALPILOT_LIVE_TESTS`.
+- **LLM-as-judge quality rubric.** Added an original, blinded, calibrated
+  LLM-as-judge that scores the quality dimensions static signals cannot see
+  (readability, idiomatic style, abstraction fit, latent-bug risk) into the
+  scorecard's optional `judge` block. Single-solution scoring is blind by
+  construction; comparative judging randomizes solution order and maps the verdict
+  back; a prompt-addressed cache makes scoring offline-deterministic; and
+  `cohens_kappa` reports agreement against a human-labelled sample. See
+  [docs/08-testing.md](docs/08-testing.md) §LLM-as-judge quality rubric.
+- **Ablation, attribution, and composite scoring.** Added an ablation arm matrix
+  (`baseline`, `full`, and one arm per harness feature turned off, model pinned),
+  per-feature attribution that maps each feature to the process signal it should
+  move and flags a feature that is on but inert, and a composite score where
+  correctness gates first and passers rank by quality + process + regression-safety
+  (speed stays a reported guardrail). All deterministic and offline-testable, with
+  an original clean-room set of adversarial tasks.
 
 ## v0.3.0-beta.3 - 2026-06-18
 

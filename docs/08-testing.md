@@ -80,6 +80,63 @@ unchanged; the JSON scorecard is the structured superset. Run it with:
 cargo test -p localpilot-harness --test evals -- --nocapture
 ```
 
+#### First-party capability corpus
+
+A second corpus of original tasks lives under
+`crates/localpilot-harness/tests/corpus/<id>/`. Each task is a small, buggy,
+self-contained Rust unit with its own failing→passing test:
+
+- `task.json` — `id`, `entry` file name, and a reworded `problem` statement;
+- `base/<entry>` — the workspace with the bug present (its test is red);
+- `gold/<entry>` — the reference fix (its test is green).
+
+These fixtures are **authored for this repository** — never copied from an
+external benchmark — so the corpus is clean-room-clean and contamination-proof.
+The runner materializes a task's base workspace, drives the harness loop
+headless to produce a fix, captures the diff and emits the scorecard, then grades
+by building and running the task's own test **in isolation** (a throwaway crate
+graded with `cargo test`, so grading never pollutes the loop's workspace). The
+`vs_gold_ratio` is computed against the gold patch.
+
+Offline (default) the loop is driven by the scripted fake provider applying the
+gold solution, which proves the runner mechanics deterministically; a live model
+path is gated behind `LOCALPILOT_LIVE_TESTS`. A companion extraction helper scans
+a repository's history for the commit that flips a grader red→green and emits a
+reviewable fixture stub for a human to curate into a task.
+
+```powershell
+cargo test -p localpilot-harness --test first_party -- --nocapture
+```
+
+#### LLM-as-judge quality rubric
+
+A judge model scores the quality dimensions static signals cannot see —
+readability, idiomatic style, the right abstraction, and latent-bug risk — and
+records the result in the scorecard's optional `judge` block (`null` when no
+judge ran). The rubric and prompt are **original** artefacts (in
+`crates/localpilot-harness/src/judge.rs`); each dimension is scored `1..=5`,
+higher is better, and `overall` is their mean.
+
+The discipline that makes the scores trustworthy is built in:
+
+- **Blinded.** Single-solution scoring puts no arm identity in the prompt, so the
+  judge cannot tell LocalPilot from a baseline. A comparative preference call
+  presents the two solutions in a **seed-randomized order** and maps the verdict
+  back, so position is not a tell.
+- **Stronger judge.** The judge model must be stronger than the subject model;
+  the caller configures it. (Pairing a weak judge with the subject is a known
+  failure mode — the scores would be meaningless.)
+- **Offline-deterministic.** Scoring answers from a prompt-addressed cache (a
+  stable FNV key), so CI never calls a model; the live path is opportunistic and
+  caches its response.
+- **Calibrated.** `cohens_kappa` scores the judge's labels against a
+  human-labelled sample, so agreement is **reported, not assumed**. Pair the
+  judge with the deterministic static signals — never rely on it alone.
+
+The judge is a complement to, not a replacement for, the deterministic `quality`
+block. Treat its absolute scores with caution and prefer **deltas between
+blinded arms**.
+
 ### Snapshot Tests
 
 Useful for:
