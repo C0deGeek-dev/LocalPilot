@@ -51,8 +51,9 @@ column. Transient build-sequencing choices stay in the plan's decision log.
   paths, cross-platform path/shell discipline.
 - **Tier-1 parity.** Windows, Linux, and macOS are equal tier-1 (ADR-0007). A
   box that only works on one OS is not done.
-- **Doc-ownership map (which doc owns which area).** Match the change to its
-  owning doc before editing; do not duplicate an area across docs. The numbered
+- **Doc-ownership map (routes §6.16's documentation-impact review).** When the
+  §6.16 review fires, match the change to its owning doc before editing; do not
+  duplicate an area across docs. The numbered
   spec set is canonical — the routing table in `CLAUDE.md` ("## The specs") is
   the index:
   - `docs/00-clean-room.md` — provenance (read first)

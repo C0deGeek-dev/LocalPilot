@@ -279,6 +279,19 @@ Gate per checkpoint is the four-command gate in §6 (fmt/clippy/test/check);
 hygiene (`machete` on dep change, `deny`/`audit` before a release milestone) is
 not per-checkpoint.
 
+**Documentation ships with the change (both tiers).** Every change runs a
+*documentation-impact review*: identify which docs it touches — route via the
+ownership map in [`README.md`](README.md) and `CLAUDE.md` ("## The specs") —
+and update them in the same checkpoint (Tier L) or the same PR (Tier S), or
+state `n/a` with a one-line reason. The trigger is broad: behaviour,
+architecture, commands, usage, configuration, setup, troubleshooting, or
+developer workflow. Scope is every doc a user *or* contributor relies on, not
+README alone — the numbered spec set, the topic docs
+(`install`/`configuration`/`providers`/`mcp`/`extending`), `README.md`,
+`docs/wiki/` guides (Getting Started / How-Tos / Examples / Troubleshooting),
+and `CHANGELOG.md` for user-facing changes. Durable architecture decisions
+still graduate to an ADR in [`10-decisions.md`](10-decisions.md).
+
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers
 must be plan-agnostic — no box/decision IDs or plan filenames; and a decision

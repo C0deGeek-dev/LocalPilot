@@ -1,4 +1,4 @@
-﻿# Contributing
+# Contributing
 
 ## Ground Rules
 
@@ -38,6 +38,9 @@ Each PR should include:
 - what changed
 - why it changed
 - tests added or updated
+- docs updated for any behaviour, architecture, command, usage, configuration,
+  setup, troubleshooting, or developer-workflow change (`CHANGELOG.md`,
+  `README.md`, `docs/`, `docs/wiki/`), or a note that none apply and why
 - provenance note for API behavior or protocol details
 
 Example provenance note:
@@ -60,6 +63,7 @@ No private endpoint behavior used.
 ## Review Checklist
 
 - [ ] Code is original.
+- [ ] Docs updated for the change (or n/a noted) — `CHANGELOG.md`/`README.md`/`docs/`/`docs/wiki/` per the `docs/README.md` ownership map.
 - [ ] Public docs are cited where protocol behavior matters.
 - [ ] Tests cover failure paths.
 - [ ] No private endpoints.
