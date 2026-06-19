@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Project context files (`CLAUDE.md` / `AGENTS.md`).** LocalPilot now discovers
+  project instruction files at the workspace root, in nested directories, and at
+  a per-user global location (`~/.localpilot/`), resolves their `@`-import
+  directives (cycle-detected and depth-bounded), and merges them by precedence
+  (repo-root > nested > global) into one ordered context document. Folder
+  ingestion captures the merged document as first-class derived knowledge under a
+  synthetic `<project-context>` path, so `knowledge_search` can surface project
+  conventions and constraints on demand. See
+  [docs/configuration.md](docs/configuration.md) §Project context files.
 - **Background processes.** A new `run_background` tool runs a long-running
   command — a dev server like `npm run dev` or `bun run index.ts`, or a watcher —
   detached from the turn: it confirms the process stayed up past a short grace

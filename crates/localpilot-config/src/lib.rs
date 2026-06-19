@@ -7,11 +7,16 @@
 //! use into [`localpilot_core::Secret`].
 #![forbid(unsafe_code)]
 
+mod context;
 mod error;
 mod load;
 pub mod redact;
 mod schema;
 
+pub use context::{
+    ContextDiscovery, ContextFile, ContextKind, ContextScope, ProjectContext, DEFAULT_DIR_DEPTH,
+    DEFAULT_IMPORT_DEPTH,
+};
 pub use error::ConfigError;
 pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
 pub use schema::{

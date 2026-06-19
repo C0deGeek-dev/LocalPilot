@@ -38,6 +38,11 @@ const CHUNK_BYTES: usize = 8 * 1024;
 /// How many manifest entries the session-open staleness check stat-samples, so
 /// change detection stays bounded on the hot path (it never re-walks the tree).
 const REFRESH_SAMPLE_CAP: usize = 256;
+/// Synthetic path for the merged project-context document (the discovered
+/// `CLAUDE.md`/`AGENTS.md` files with `@`-imports resolved and precedence
+/// applied). Angle brackets keep it out of the slash-relative namespace real
+/// workspace files use, so it never collides with a walked file's path.
+const PROJECT_CONTEXT_PATH: &str = "<project-context>";
 
 /// Folder ingestion errors.
 #[derive(Debug, Error)]
@@ -380,7 +385,7 @@ pub fn run(
     if mode == RunMode::Full {
         store.clear()?;
     }
-    let candidate_paths: BTreeSet<String> = manifest
+    let mut candidate_paths: BTreeSet<String> = manifest
         .entries
         .iter()
         .filter(|entry| entry.status == CandidateStatus::Candidate)
@@ -444,6 +449,23 @@ pub fn run(
         job.updated_unix = unix_now();
         write_json(&ingest_dir.join(JOB_FILE), &job)?;
     }
+    // Ingest the merged project context (the discovered CLAUDE.md/AGENTS.md, with
+    // @-imports resolved and precedence applied) as one first-class derived
+    // document, so retrieval surfaces project conventions and constraints even
+    // when the raw files are large or scattered across nested directories. It is
+    // a candidate path so the refresh sweep below never tombstones it.
+    let context_chunks = project_context_chunks(&root, &prefix_policy);
+    if let Some(hash) = context_chunks
+        .first()
+        .map(|chunk| chunk.content_hash.clone())
+    {
+        if mode == RunMode::Refresh {
+            store.mark_path_changed(PROJECT_CONTEXT_PATH, &hash)?;
+        }
+        store.upsert_chunks(&context_chunks)?;
+        candidate_paths.insert(PROJECT_CONTEXT_PATH.to_string());
+    }
+
     // Files that vanished since the last run: their fresh rows become stale with
     // no successor (kept as tombstones, like the old JSON behaviour).
     if mode == RunMode::Refresh {
@@ -1460,6 +1482,19 @@ fn chunk_file(
         path: path.to_path_buf(),
         source,
     })?;
+    Ok(chunk_text(&text, display_path, content_hash, prefix_policy))
+}
+
+/// Chunk in-memory `text` into redacted [`ChunkRecord`]s under `display_path`.
+/// The line/byte-budgeted splitter shared by file ingestion and the merged
+/// project-context document, so both produce identically-shaped, FTS-indexable
+/// chunks.
+fn chunk_text(
+    text: &str,
+    display_path: &str,
+    content_hash: &str,
+    prefix_policy: &crate::context_prefix::PrefixEnrichmentPolicy,
+) -> Vec<ChunkRecord> {
     // One context prefix per file, shared by all its chunks. With no enricher
     // wired the off-machine tier is unreachable and this resolves to the
     // deterministic synthetic prefix; any egress would record an audit row.
@@ -1468,7 +1503,7 @@ fn chunk_file(
         prefix_policy,
         None,
         display_path,
-        &text,
+        text,
         &mut prefix_audit,
     );
     debug_assert!(
@@ -1521,7 +1556,7 @@ fn chunk_file(
             },
         );
     }
-    Ok(chunks)
+    chunks
 }
 
 fn push_chunk(
@@ -1556,6 +1591,47 @@ fn push_chunk(
         stale: false,
         superseded_by: None,
     });
+}
+
+/// Ingest the merged project context as derived chunks on demand, independently
+/// of a full folder run — the host's entry point to (re)capture the project
+/// instruction files (`CLAUDE.md`/`AGENTS.md`, imports resolved, precedence
+/// applied) without re-walking the whole tree. Reuses the existing chunk store;
+/// returns the number of context chunks written (0 when the project carries no
+/// context files).
+///
+/// # Errors
+/// Returns [`IngestError`] when the chunk store cannot be opened or written.
+pub fn ingest_project_context(project_root: &Path) -> Result<usize, IngestError> {
+    let root = canonical_root(project_root)?;
+    let prefix_policy = crate::context_prefix::PrefixEnrichmentPolicy { enabled: false };
+    let chunks = project_context_chunks(&root, &prefix_policy);
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+    let ingest_dir = ensure_ingest_dir(&root)?;
+    let store = ChunkStore::open(&ingest_dir)?;
+    if let Some(hash) = chunks.first().map(|chunk| chunk.content_hash.clone()) {
+        store.mark_path_changed(PROJECT_CONTEXT_PATH, &hash)?;
+    }
+    store.upsert_chunks(&chunks)?;
+    Ok(chunks.len())
+}
+
+/// Build redacted chunks for the merged project context, or an empty vec when the
+/// project carries no `CLAUDE.md`/`AGENTS.md`. The discovery walks the workspace
+/// (root, nested, and the per-user global location) and resolves `@`-imports.
+fn project_context_chunks(
+    root: &Path,
+    prefix_policy: &crate::context_prefix::PrefixEnrichmentPolicy,
+) -> Vec<ChunkRecord> {
+    let context = localpilot_config::ContextDiscovery::new(root).discover();
+    if context.is_empty() {
+        return Vec::new();
+    }
+    let merged = context.render();
+    let hash = fnv_hash_hex(merged.as_bytes());
+    chunk_text(&merged, PROJECT_CONTEXT_PATH, &hash, prefix_policy)
 }
 
 fn build_review_items(manifest: &PreviewManifest, chunk_count: usize) -> Vec<IngestReviewItem> {
@@ -2155,6 +2231,50 @@ mod tests {
         let pack = build_pack(dir.path(), "parser", 100).unwrap();
         assert_eq!(pack.chunks.len(), 1);
         assert!(dir.path().join(INGEST_DIR).join(PACK_FILE).exists());
+    }
+
+    /// 01.4 wiring: a full ingest run captures the merged project context as a
+    /// first-class document, with `@`-imports resolved, so retrieval surfaces a
+    /// convention that lives *only* in an imported file — proving it is the merged
+    /// context that was ingested, not just the raw `CLAUDE.md`.
+    #[test]
+    fn ingest_captures_the_merged_project_context_with_imports_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        // The imported phrase appears in shared.md, never in CLAUDE.md itself.
+        fs::write(
+            dir.path().join("shared.md"),
+            "convention: zorptastic naming\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "project rules\n@shared.md\n").unwrap();
+
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // The imported convention is searchable, and the hit is the merged
+        // project-context document (not the raw CLAUDE.md, which lacks the phrase).
+        let hits = search(dir.path(), "zorptastic").unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.path == PROJECT_CONTEXT_PATH),
+            "merged project context should surface the imported convention: {hits:?}"
+        );
+    }
+
+    /// The on-demand entry point ingests the context without a full folder walk,
+    /// and reports nothing for a project that carries no instruction files.
+    #[test]
+    fn ingest_project_context_is_on_demand_and_skips_a_bare_project() {
+        let dir = tempfile::tempdir().unwrap();
+        // No CLAUDE.md/AGENTS.md, and no ~/.localpilot leakage assumed: bare.
+        // (A dev machine with a global file would only add unrelated chunks; this
+        // project has its own root files absent, which is what the count reflects.)
+        fs::write(dir.path().join("CLAUDE.md"), "use guard clauses here\n").unwrap();
+        let written = ingest_project_context(dir.path()).unwrap();
+        assert!(
+            written >= 1,
+            "a project with CLAUDE.md should ingest context"
+        );
+        let hits = search(dir.path(), "guard").unwrap();
+        assert!(hits.iter().any(|hit| hit.path == PROJECT_CONTEXT_PATH));
     }
 
     #[test]

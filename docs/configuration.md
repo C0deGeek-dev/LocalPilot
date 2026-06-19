@@ -21,6 +21,45 @@ The configuration schema is **stable under semantic versioning** from v1.0:
 Before v1.0 (the current `0.x` alphas) the schema may still change; such changes
 are noted in `CHANGELOG.md`.
 
+## Project context files
+
+Beyond `.localpilot.toml`, a project may carry free-text **instruction files** —
+`CLAUDE.md` and `AGENTS.md` — that orient the agent with project conventions and
+constraints. LocalPilot discovers them, resolves their `@`-imports, and merges
+them into one ordered context document that the learning engine ingests as
+first-class project knowledge (so retrieval can surface a convention on demand).
+
+**Discovery.** Three layers are collected:
+
+- **repo-root** — `CLAUDE.md` / `AGENTS.md` at the workspace root;
+- **nested** — the same file names in subdirectories of the workspace (the walk
+  honours ignore files and is depth-bounded);
+- **global** — `CLAUDE.md` / `AGENTS.md` under the per-user `~/.localpilot/`
+  directory (resolved cross-platform from the home directory).
+
+**Precedence** (most → least specific): **repo-root > nested directory >
+global**. The workspace-root files are the authoritative project instructions
+and lead the merge; nested-directory files refine within their subtree and
+follow (ordered by ascending directory depth, then path, for determinism); the
+per-user global files are the baseline and come last.
+
+**`@`-imports.** A line whose trimmed text is exactly `@<path>` imports that
+file's body inline at that point (relative paths resolve against the importing
+file's directory; an absolute path is used as-is). Imports may nest; resolution
+is bounded by a maximum depth and guarded against cycles, so the merged output is
+always finite and deterministic. A missing or unreadable import, or one past the
+depth bound or in a cycle, is replaced by a short marker comment rather than
+failing discovery. A prose `@mention` (with surrounding text on the line) is not
+an import directive.
+
+**Ingestion.** Folder ingestion (`localpilot ingest run` / `refresh`, and the
+session-open background build) captures the merged document as a derived chunk
+under a synthetic `<project-context>` path, distinct from the raw files, so
+`knowledge_search` surfaces project conventions even when the source files are
+large or scattered. The merged context is derived, disposable state under
+`.localmind/ingest/` like any other ingested knowledge (ADR-0013); it is never
+written to accepted memory without review.
+
 ## Reference
 
 ### `[provider]`
