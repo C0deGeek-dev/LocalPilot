@@ -141,7 +141,7 @@ async fn generate<T>(
     )))
 }
 
-async fn complete_text(
+pub(crate) async fn complete_text(
     provider: &dyn ModelProvider,
     model: &str,
     messages: Vec<Message>,

@@ -457,6 +457,15 @@ where
             .and_then(|p| p.next_incomplete().map(|s| s.description.clone()));
         if next_step.is_none() {
             writeln!(out, "all steps complete")?;
+            // Advisory completion retrospective (best-effort): review the finished
+            // work against the brief and record any lessons to LESSONS.md. A
+            // provider error here never breaks a finished run, and the review never
+            // blocks completion or edits code.
+            if let Ok(Some(retro)) =
+                localpilot_harness::run_and_record(&*provider, model, root).await
+            {
+                writeln!(out, "{}", retro.render_summary())?;
+            }
             break;
         }
 
