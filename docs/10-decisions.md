@@ -2,6 +2,65 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0035: Plan Mode Carries Planning Judgment — Reuse-Before-Add, Acceptance-Criteria Coverage, And An Advisory Completion Retrospective
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls — the
+model proposes, the runtime decides) and ADR-0003 (`brief.md` / `PROGRESS.md` /
+`DECISIONS.md` are authoritative, user-editable runtime documents).
+
+The harness plan-mode flow (idea → `brief.md` → `PROGRESS.md` → per-step resume)
+was strong on machinery — per-step commits, the anti-sunk-cost replan loop, the
+quality gate, the evidence-grounded decision log — but thin on the planning
+*judgment* a good plan needs. This record fixes three additions, all expressed as
+properties of the documents the model already produces, with the runtime
+plan-document shape unchanged (a flat numbered step list, no sub-plan ceremony).
+
+**Reuse before add, and cover every criterion (planning time).** The planner is
+instructed to study the repository summary it already receives and prefer a step
+that extends or reuses an existing module/type/function — naming it — over adding
+parallel code, and to produce a step list that collectively satisfies every
+acceptance criterion in the brief. These are contracts on the generated document,
+not a `PROGRESS.md` schema change.
+
+**Risks and doc-currency (structural cues).** `brief.md` gains an optional
+`## Risks & Rollback` section (absent in an older brief, rendered only when
+present, round-trips losslessly); the per-step worker prompt tells the model to
+update the matching documentation in the same step when a change alters observable
+behaviour, configuration, or interfaces.
+
+**An advisory completion retrospective (completion time).** When no incomplete
+step remains, the harness runs one bounded review over the brief and the completed
+plan — acceptance criteria still unmet, scope drift, tests that pin implementation
+detail — and appends durable lessons to a root `LESSONS.md` (a new authoritative,
+user-editable runtime document alongside `DECISIONS.md`). The retrospective is
+**advisory by construction**: it reports findings and records lessons; it never
+blocks completion, never edits shipped code, and never commits. It runs once,
+after the final step is already committed, and a provider/quota error there is
+swallowed so it can never break a finished run.
+
+Reason:
+
+- planning judgment belongs in the instruction that generates the document, not
+  in a new analysis engine bolted onto the loop — reuse-before-add and
+  criteria-coverage are properties of the plan the model writes, so they live in
+  the planner prompt and are pinned by a stable prompt snapshot plus a behaviour
+  test that the contract and its inputs reach the model;
+- the retrospective stays on the propose side of ADR-0010's boundary: like the
+  read-only stages of the self-improvement loop (ADR-0034) it only *reports*, so a
+  confused or wrong review costs an advisory line, never an unintended write or a
+  blocked completion;
+- a flat `PROGRESS.md` is correct for plan mode's scale — importing sub-plan
+  structure (subjects, owners, gates) would add ceremony a single autonomous build
+  does not need;
+- `LESSONS.md` mirrors `DECISIONS.md` (root-sited, append-only, round-tripping,
+  user-editable) so the lessons are reviewable and survive a context reset, rather
+  than hiding in a disposable cache.
+
+Supersedes nothing. A config switch to disable the retrospective, structured
+per-step → criterion reference tags, and writing lessons back into LocalMind
+memory are explicit non-goals here; each is a separable later decision behind the
+same seam.
+
 ## ADR-0034: The Developer-Process Self-Improvement Loop Is Human-Gated By Construction — Read-Only Up To "Propose", Never Self-Merges
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls — every

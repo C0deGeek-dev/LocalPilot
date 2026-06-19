@@ -78,7 +78,14 @@ Output:
 - test strategy
 
 The plan must be editable by the user. The next run treats the edited file as
-the source of truth.
+the source of truth. The planner prefers steps that extend or reuse the existing
+code named in the repository summary over adding parallel code, and the step list
+must collectively satisfy every acceptance criterion in the brief (ADR-0035).
+
+When a run completes its last step, an advisory completion retrospective reviews
+the work against the brief — unmet acceptance criteria, scope drift, and
+test-quality — and records durable lessons to `LESSONS.md`. It reports only; it
+never blocks completion or edits code.
 
 ### Job 3: Execute One Step at a Time
 
