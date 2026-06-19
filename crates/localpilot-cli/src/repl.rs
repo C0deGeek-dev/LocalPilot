@@ -210,6 +210,12 @@ pub async fn run_chat(
         Vec::new(),
     );
     runtime.set_broker(broker);
+    localpilot_harness::register_project_analysis_context(
+        &cwd,
+        config.context.project_analysis,
+        config.docs.lookup_policy,
+        &mut runtime,
+    );
     // Relevant accepted LocalMind memory is contributed per turn through the
     // context-hook fabric; ingested folder knowledge is pulled on demand via the
     // knowledge_search tool rather than seeded here.

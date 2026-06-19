@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use localpilot_config::{load, AutoFix, Cadence, CliOverrides, ConfigPaths};
+use localpilot_config::{load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy};
 use proptest::prelude::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -130,7 +130,28 @@ fn default_config_loads() -> TestResult {
         assert_eq!(cfg.provider.default, "local");
         assert_eq!(cfg.harness.attempts_per_step, 3);
         assert!(cfg.harness.auto_commit);
+        assert!(cfg.context.project_analysis);
+        assert_eq!(cfg.docs.lookup_policy, LookupPolicy::Evidence);
         assert_eq!(cfg.quota.max_wait_minutes, 360);
+        Ok(())
+    })
+}
+
+#[test]
+fn project_analysis_and_lookup_policy_parse() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[context]\nproject_analysis = false\n\n[docs]\nlookup_policy = \"proactive\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(!cfg.context.project_analysis);
+        assert_eq!(cfg.docs.lookup_policy, LookupPolicy::Proactive);
         Ok(())
     })
 }

@@ -21,6 +21,7 @@ mod launch_targets;
 mod planning;
 mod precondition;
 mod progress;
+mod project_analysis;
 mod quality;
 mod resume;
 mod rules;
@@ -54,6 +55,9 @@ pub use judge::{
 };
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
+pub use project_analysis::{
+    analyze_project, register_project_analysis_context, ProjectAnalysis, ProjectAnalysisContext,
+};
 pub use quality::{
     program_on_path, propose_gate, ratify_gate, render_check, summarize_proposal, CheckOutcome,
     CheckRunner, CheckStatus, GateRatification, ProposedCheck, ToolchainProfile,

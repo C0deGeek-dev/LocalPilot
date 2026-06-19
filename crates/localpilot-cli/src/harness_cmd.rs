@@ -30,6 +30,10 @@ mode = \"agent\"\n\
 attempts_per_step = 3\n\
 auto_commit = true\n\
 # test_command = \"cargo test\"\n\n\
+[context]\n\
+project_analysis = true\n\n\
+[docs]\n\
+lookup_policy = \"evidence\"\n\n\
 [permissions]\n\
 profile = \"default\"\n\n\
 [provider]\n\
@@ -482,6 +486,12 @@ where
             config.harness.claim_gate.is_enabled(),
             &config.tools,
             (run.approver)(),
+        );
+        localpilot_harness::register_project_analysis_context(
+            root,
+            config.context.project_analysis,
+            config.docs.lookup_policy,
+            &mut runtime,
         );
         localpilot_localmind::register_context_hook(root, &mut runtime);
         let outcome = resume_one_step_with_events(

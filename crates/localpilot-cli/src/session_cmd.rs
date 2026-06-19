@@ -111,6 +111,12 @@ pub async fn build_runtime(
         Vec::new(),
     );
     runtime.set_broker(broker);
+    localpilot_harness::register_project_analysis_context(
+        cwd,
+        config.context.project_analysis,
+        config.docs.lookup_policy,
+        &mut runtime,
+    );
     localpilot_localmind::register_context_hook(cwd, &mut runtime);
     Ok(runtime)
 }

@@ -106,6 +106,23 @@ Notable rule key:
 | --- | --- | --- |
 | `check_before_launch` | `warn` | When the task prompt named a local serveable target (a loopback host, or any `host:port` with an explicit port) that has not been probed this session, an attempt to launch a local server or scaffold a competing `index.html` is nudged (`warn`, the call still runs), refused (`block`), or ignored (`off`). Auto-extracted from the prompt — an external reference URL without a port is not a target. Advisory, tighten-only, best-effort. See [06-harness-spec.md](06-harness-spec.md). |
 
+### `[context]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `project_analysis` | bool | `true` | Inject a compact, read-only project-facts block before each turn. LocalPilot derives it from manifests, lockfiles, package/dependency names, scripts, and common entrypoint markers so the model reuses existing project structure before inventing alternatives. |
+
+### `[docs]`
+
+Controls when the agent should expand beyond local project facts into available
+knowledge, docs, MCP, or tool-discovery surfaces. This does not grant any new
+permission: network and MCP/tool calls still pass through the normal permission
+engine.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `lookup_policy` | `local_only` \| `evidence` \| `proactive` | `evidence` | `local_only` keeps the model within repo/context unless the user asks for external information. `evidence` starts local and looks up docs/tools when local facts are insufficient, ambiguous, or a local attempt fails. `proactive` nudges the model to use available docs/MCP/tool discovery early for package or framework work. |
+
 ### `[compaction]`
 
 | Key | Type | Default | Meaning |
@@ -190,6 +207,12 @@ model = "qwen2.5-coder"
 [harness]
 mode = "agent"
 test_command = "cargo test"
+
+[context]
+project_analysis = true
+
+[docs]
+lookup_policy = "evidence"
 
 [compaction]
 mode = "deterministic"

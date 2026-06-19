@@ -20,8 +20,8 @@ pub use context::{
 pub use error::ConfigError;
 pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
 pub use schema::{
-    AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, HarnessConfig,
-    IngestConfig, IngestMode, McpConfig, McpServerConfig, Mode, PermissionProfile,
-    PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig,
-    RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
+    AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
+    DocsConfig, HarnessConfig, IngestConfig, IngestMode, LookupPolicy, McpConfig, McpServerConfig,
+    Mode, PermissionProfile, PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume,
+    QuotaConfig, RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
 };

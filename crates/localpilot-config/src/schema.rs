@@ -14,6 +14,8 @@ pub struct Config {
     pub provider: ProviderSelection,
     pub providers: IndexMap<String, ProviderConfig>,
     pub harness: HarnessConfig,
+    pub context: ContextConfig,
+    pub docs: DocsConfig,
     pub permissions: PermissionsConfig,
     pub quota: QuotaConfig,
     pub mcp: McpConfig,
@@ -30,6 +32,8 @@ impl Default for Config {
             provider: ProviderSelection::default(),
             providers: IndexMap::new(),
             harness: HarnessConfig::default(),
+            context: ContextConfig::default(),
+            docs: DocsConfig::default(),
             permissions: PermissionsConfig::default(),
             quota: QuotaConfig::default(),
             mcp: McpConfig::default(),
@@ -40,6 +44,45 @@ impl Default for Config {
             tools: ToolsConfig::default(),
         }
     }
+}
+
+/// Context that LocalPilot may contribute before each turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    /// Inject a compact, read-only project analysis block before each turn.
+    pub project_analysis: bool,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            project_analysis: true,
+        }
+    }
+}
+
+/// When the agent should expand beyond local project facts into docs/search
+/// tools, if those tools are available and allowed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LookupPolicy {
+    /// Use only local project context unless the user explicitly asks otherwise.
+    LocalOnly,
+    /// Local analysis first; expand when a dependency/API is unknown, ambiguous,
+    /// recently changing, or a local attempt fails.
+    #[default]
+    Evidence,
+    /// Reach for available docs/search/MCP surfaces early for package/framework
+    /// work, accepting extra latency and permission prompts.
+    Proactive,
+}
+
+/// External documentation/search lookup behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DocsConfig {
+    pub lookup_policy: LookupPolicy,
 }
 
 /// Pull-discovery broker configuration (ADR-0031). The broker narrows each turn's
