@@ -5,8 +5,8 @@
 
 use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
 use localmind_store::{
-    MemoryPersistence, MemoryRecord, ReviewQueue, ReviewQueueItem, SkillDraftRecord,
-    SkillDraftStore,
+    MemoryPersistence, MemoryPersistenceError, MemoryRecord, ReviewQueue, ReviewQueueItem,
+    SkillDraftRecord, SkillDraftStore, StoreConfigError,
 };
 
 use crate::LearningError;
@@ -281,17 +281,30 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
 /// prompt — the single ranked, capped retrieval that backs *both* the injected
 /// block and the "memories used" audit, so the two can never diverge. Capped at
 /// [`CONTEXT_MEMORY_LIMIT`] (the count actually injected). Empty when injection
-/// is disabled or the project has no memory store; never creates project files.
+/// is disabled, the project has no LocalMind config, or learning is disabled;
+/// never creates project files. A present-but-broken store is *not* empty — see
+/// Errors.
 ///
 /// # Errors
-/// Returns [`LearningError::Context`] if an existing memory index cannot be read.
+/// Returns [`LearningError::Context`] when an existing store cannot be read —
+/// malformed config, a failed migration, or database corruption — so a broken
+/// store surfaces as an actionable error instead of masquerading as "no memory".
+/// A missing config or disabled learning is an empty result, not an error.
 pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, LearningError> {
     if !memory_injection_enabled(project_root) {
         return Ok(Vec::new());
     }
+    // Distinguish "nothing to inject" from "the store is broken". A project that
+    // has never closed out (no config) or has learning disabled has no memory —
+    // an empty result. Any other open failure (malformed config, failed
+    // migration, corrupt database) is propagated so corruption cannot silently
+    // remove memory from context and from the "memories used" evidence alike.
     let persistence = match MemoryPersistence::open_project(project_root) {
         Ok(persistence) => persistence,
-        Err(_) => return Ok(Vec::new()),
+        Err(MemoryPersistenceError::Config(
+            StoreConfigError::MissingConfig { .. } | StoreConfigError::LearningDisabled { .. },
+        )) => return Ok(Vec::new()),
+        Err(e) => return Err(LearningError::Context(e.to_string())),
     };
     let hits = persistence
         .search(query)
@@ -627,5 +640,57 @@ mod tests {
     #[test]
     fn an_empty_queue_clusters_to_nothing() {
         assert!(cluster_by_similarity(&[]).is_empty());
+    }
+
+    #[test]
+    fn context_hits_missing_config_is_empty_not_error() {
+        // A project that has never closed out has no config and no store. That is
+        // "nothing to inject", an empty result — never an error.
+        let dir = tempfile::tempdir().unwrap();
+        let hits = context_hits(dir.path(), "anything").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn context_hits_disabled_injection_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::initialize(dir.path()).unwrap();
+        memory_disable_injection(dir.path()).unwrap();
+        let hits = context_hits(dir.path(), "anything").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn context_hits_learning_disabled_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            "[learning]\nenabled = false\n",
+        )
+        .unwrap();
+        let hits = context_hits(dir.path(), "anything").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn context_hits_corrupt_store_errors_rather_than_masking() {
+        // The smallest artefact proving the masking is gone: a configured,
+        // learning-enabled project whose existing store file is unreadable must
+        // surface an error, not collapse to "no memory".
+        let dir = tempfile::tempdir().unwrap();
+        crate::initialize(dir.path()).unwrap();
+        let state = dir.path().join(".localmind");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("localmind.sqlite"),
+            b"this is not a sqlite database",
+        )
+        .unwrap();
+
+        let result = context_hits(dir.path(), "anything");
+        assert!(
+            matches!(result, Err(LearningError::Context(_))),
+            "expected a propagated Context error, got {result:?}"
+        );
     }
 }

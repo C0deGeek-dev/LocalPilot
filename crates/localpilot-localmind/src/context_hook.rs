@@ -85,25 +85,37 @@ impl ContextHook for LocalMindContext {
         }
 
         // Accepted memory: one ranked, capped retrieval feeds both the injected
-        // block and the recorded set, line by line under the char budget.
-        if let Ok(hits) = crate::ops::context_hits(&self.root, prompt) {
-            let mut block = String::from("Relevant accepted project memory:\n");
-            let mut wrote = false;
-            for hit in hits {
-                let line = format!("- {}\n", hit.snippet.trim());
-                if block.chars().count() + line.chars().count() > ACCEPTED_MEMORY_CHAR_CAP {
-                    break;
+        // block and the recorded set, line by line under the char budget. Still
+        // best-effort for the turn, but a broken store (corrupt/misconfigured) no
+        // longer vanishes silently: it is logged so the failure is diagnosable
+        // instead of looking identical to "no memory".
+        match crate::ops::context_hits(&self.root, prompt) {
+            Ok(hits) => {
+                let mut block = String::from("Relevant accepted project memory:\n");
+                let mut wrote = false;
+                for hit in hits {
+                    let line = format!("- {}\n", hit.snippet.trim());
+                    if block.chars().count() + line.chars().count() > ACCEPTED_MEMORY_CHAR_CAP {
+                        break;
+                    }
+                    block.push_str(&line);
+                    wrote = true;
+                    memories.push(MemoryUsed {
+                        id: hit.memory_id,
+                        score: hit.score,
+                        layer: "memory".to_string(),
+                    });
                 }
-                block.push_str(&line);
-                wrote = true;
-                memories.push(MemoryUsed {
-                    id: hit.memory_id,
-                    score: hit.score,
-                    layer: "memory".to_string(),
-                });
+                if wrote {
+                    blocks.push(block.trim_end().to_string());
+                }
             }
-            if wrote {
-                blocks.push(block.trim_end().to_string());
+            Err(error) => {
+                tracing::warn!(
+                    target: "localpilot::localmind",
+                    %error,
+                    "accepted-memory retrieval failed; this turn ran without memory context (the store may be corrupt or misconfigured)"
+                );
             }
         }
 
@@ -293,6 +305,30 @@ mod tests {
 
         // An unrelated prompt surfaces nothing.
         assert!(hook.memories_used("audio playback latency").is_empty());
+    }
+
+    #[test]
+    fn a_broken_memory_store_is_handled_best_effort_at_the_hook_seam() {
+        // context_hits now propagates a corrupt-store error (proven in ops). At
+        // this seam the hook must stay best-effort — log and contribute nothing,
+        // never panic or fail the turn.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let state = root.join(".localmind");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("localmind.sqlite"),
+            b"this is not a sqlite database",
+        )
+        .unwrap();
+
+        let hook = LocalMindContext::new(root);
+        assert_eq!(hook.context_for("anything"), None);
+        assert!(hook
+            .memories_used("anything")
+            .iter()
+            .all(|m| m.layer != "memory"));
     }
 
     #[test]

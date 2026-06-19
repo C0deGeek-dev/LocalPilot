@@ -54,6 +54,26 @@ depends on LocalMind, never the reverse.
   and skips an empty session so opening and closing one leaves no artifacts.
   One-shot `localpilot print` deliberately does **not** close out, so a bare
   prompt never creates project files (ADR-0018).
+
+### Which surfaces learn
+
+"Learning" means closing out a session into LocalMind (extract candidate lessons,
+enqueue for review). Retrieval / context injection is read-only and happens on
+any surface that has accepted memory; only the surfaces below *write* learning
+candidates. The `print`-mode code comment in `context_inject.rs` is the source of
+truth this table mirrors.
+
+| Surface | Closes out to LocalMind? |
+|---|---|
+| Interactive `chat` / REPL | Yes — on session end |
+| Headless harness (`harness run`) | Yes — each step |
+| RPC / ACP serve loop | Yes — on session end |
+| `localpilot learning closeout` | Yes — explicit, on demand |
+| One-shot `localpilot print` | No — read-only, never closes out (ADR-0018) |
+| Bare `ask` / other one-shot prompts | No — unless an explicit `learning closeout` is run |
+
+Close-out is best-effort and non-fatal, and an empty session writes nothing.
+
 - The agent can propose a durable lesson in-session with the `remember` tool: it
   enqueues a review candidate (permission-gated, project-local write) and never
   writes accepted memory directly — promotion stays a human, review-gated step
