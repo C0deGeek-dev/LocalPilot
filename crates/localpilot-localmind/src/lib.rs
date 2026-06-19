@@ -62,7 +62,6 @@ pub use layered::{
 };
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
 pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
-pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, memory_delete, memory_disable_injection,
@@ -74,6 +73,7 @@ pub use ops::{
 pub use pack::{PackEntry, PackSource};
 pub use primer::{accepted_primer, distill_primer_into_review};
 pub use remember_tool::Remember;
+pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
 pub use skill_drafts_tool::SkillDrafts;
 pub use tool_use::{tool_use_candidate, ToolUseSignal};

@@ -142,7 +142,8 @@ mod tests {
         // duplicate candidates.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let lesson = RetrospectiveLesson::new("Reuse the canonical redactor; never re-detect secrets.");
+        let lesson =
+            RetrospectiveLesson::new("Reuse the canonical redactor; never re-detect secrets.");
 
         let first = write_retrospective_lesson(root, &lesson).unwrap();
         assert!(first.is_some());
@@ -158,9 +159,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        assert!(write_retrospective_lesson(root, &RetrospectiveLesson::new("")).unwrap().is_none());
-        assert!(write_retrospective_lesson(root, &RetrospectiveLesson::new("none")).unwrap().is_none());
-        assert!(write_retrospective_lesson(root, &RetrospectiveLesson::new("  \n ")).unwrap().is_none());
+        assert!(
+            write_retrospective_lesson(root, &RetrospectiveLesson::new(""))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            write_retrospective_lesson(root, &RetrospectiveLesson::new("none"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            write_retrospective_lesson(root, &RetrospectiveLesson::new("  \n "))
+                .unwrap()
+                .is_none()
+        );
         assert!(
             review_list(root).unwrap().is_empty(),
             "no candidate should have been enqueued"
@@ -186,7 +199,10 @@ mod tests {
         let item = review_list(root).unwrap().into_iter().next().unwrap();
         review_decide(root, &item.id, ReviewVerdict::Accept, "david", None).unwrap();
         let memory_id = promote(root, &item.id).unwrap();
-        assert!(!memory_id.is_empty(), "only a human promotion reaches memory");
+        assert!(
+            !memory_id.is_empty(),
+            "only a human promotion reaches memory"
+        );
     }
 
     #[test]
