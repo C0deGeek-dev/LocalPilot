@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0036: The `localpilot-localmind` Adapter Boundary And Its Extraction Trigger
+
+Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` execution record
+vs `.localmind/` memory) and ADR-0012 (`.localpilot/` derived state is disposable).
+Host-side only: the engine's matching invariant (host-neutral `localmind-core`) is
+already LocalMind `D-LM-0002`, so this record adds no new cross-engine decision.
+
+`localpilot-localmind` has grown from a thin adapter into a sizable subsystem:
+the ingest engine alone is ~3000 lines, alongside the chunk store, layered pack,
+cold-start primer, the derived search index, and the model-callable tools. This is
+defensible today — it is one cohesive host-side concern (turn a workspace into
+retrievable, redacted, host-owned derived context for the bundled engine) — but it
+will not stay defensible if the next knowledge feature simply lands here too.
+
+**The boundary, as it stands.** The adapter owns the *host* role and nothing the
+engine owns:
+
+- **The host owns filesystem walking and redaction.** Discovery, ignore rules,
+  and the canonical redaction pass run host-side before anything is persisted —
+  one redaction authority (ADR-0011); LocalMind's import redaction is defense in
+  depth, never a second authority. The engine never walks the filesystem itself.
+- **`.localmind/ingest/` derived state is disposable and rebuildable** (ADR-0012):
+  the index/chunk/pack artifacts can be deleted and regenerated from the workspace
+  plus the engine; nothing durable lives only there.
+- **Accepted-memory writes stay LocalMind review-gated.** The adapter enqueues
+  candidates; promotion to accepted memory is a human, review-gated step in the
+  engine. The adapter never writes accepted memory directly.
+- **The dependency edge is one-way:** LocalPilot depends on LocalMind, never the
+  reverse; `localmind-core` stays host-neutral.
+
+**The extraction trigger (no move now).** Before the **next** major
+ingestion/knowledge capability lands in `localpilot-localmind`, pick one of two
+splits rather than growing the adapter again:
+
+1. split the derived **index / search / pack** primitives into a narrower
+   LocalPilot crate (e.g. `localpilot-localmind-index`), leaving the adapter as
+   the contract/redaction/permission seam; **or**
+2. move the host-neutral derived-context primitives **behind a LocalMind API**, so
+   the engine owns them and the adapter shrinks to capture + redaction + wiring.
+
+Either split must preserve the four invariants above. This ADR is the recorded
+trigger; it deliberately does **not** move code today (the current size is
+cohesive and tested), so a future contributor extends against a fixed boundary
+instead of an ad-hoc one.
+
+Reason: recording the boundary + trigger now is cheap and keeps the "adapter, not a
+second engine" intent legible; discovering the boundary only when the subsystem is
+already too large is the expensive path. Deferring the move avoids a churny
+refactor with no present payoff (§ KISS/YAGNI) while still preventing silent
+unbounded growth.
+
+Supersedes nothing.
+
 ## ADR-0035: Plan Mode Carries Planning Judgment — Reuse-Before-Add, Acceptance-Criteria Coverage, And An Advisory Completion Retrospective
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls — the

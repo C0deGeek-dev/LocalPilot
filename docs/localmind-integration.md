@@ -29,6 +29,24 @@ LocalMind's import redaction is defense in depth, not a second authority.
   enforces permissions and redaction before persistence, drives TUI/CLI
   surfaces, and adapts LocalPilot session records into LocalMind contracts.
 
+### Adapter size and the extraction trigger (ADR-0036)
+
+`localpilot-localmind` has grown into a sizable host-side subsystem (the ingest
+engine plus the chunk store, layered pack, cold-start primer, derived search
+index, and model-callable tools). That is cohesive and tested today, so **no code
+moves now**. But it is a recorded trigger, not an open-ended licence to grow:
+**before the next major ingestion/knowledge capability lands here**, split it one
+of two ways rather than adding to the adapter —
+
+1. carve the derived **index/search/pack** primitives into a narrower LocalPilot
+   crate, leaving the adapter as the contract/redaction/permission seam; or
+2. move the host-neutral derived-context primitives **behind a LocalMind API**.
+
+Either split must preserve the invariants above: host-owned filesystem walking +
+single-authority redaction, disposable/rebuildable `.localmind/ingest/` derived
+state, review-gated accepted-memory writes, and the one-way LocalPilot→LocalMind
+dependency edge. See ADR-0036 for the full decision.
+
 ## Bundling
 
 LocalMind is vendored as a git submodule at `external/localmind` and excluded
