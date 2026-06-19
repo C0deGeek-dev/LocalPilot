@@ -11,6 +11,7 @@ use localpilot_store::Store;
 
 mod context_inject;
 mod doctor;
+mod eval_cmd;
 mod handoff_cmd;
 mod harness_cmd;
 mod ingest_cmd;
@@ -176,6 +177,37 @@ enum Command {
         /// Resume the given session id.
         #[arg(long)]
         resume: Option<String>,
+    },
+    /// Run the agent headless on one problem and emit the capability scorecard
+    /// (JSON) to stdout — the solver entry point for an external benchmark runner.
+    Eval {
+        /// The problem statement for the agent to solve in this workspace.
+        problem: String,
+        /// Model name to request.
+        #[arg(long)]
+        model: String,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+        /// The harness arm label recorded on the scorecard (e.g. `full`, `baseline`).
+        #[arg(long, default_value = "full")]
+        arm: String,
+        /// The task id recorded on the scorecard.
+        #[arg(long, default_value = "eval")]
+        task: String,
+        /// Grading command (exit 0 = passed). Omit to emit an ungraded run for an
+        /// external grader to score.
+        #[arg(long)]
+        test: Option<String>,
+        /// Path to a gold unified diff, for the vs-gold ratio.
+        #[arg(long)]
+        gold_diff: Option<PathBuf>,
     },
     /// Inspect, resume, or export durable sessions in this workspace.
     Session {
@@ -845,6 +877,30 @@ async fn main() -> anyhow::Result<()> {
                 allow_writes,
                 resume,
             )
+            .await?;
+        }
+        Command::Eval {
+            problem,
+            model,
+            provider,
+            permission,
+            bypass,
+            arm,
+            task,
+            test,
+            gold_diff,
+        } => {
+            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            eval_cmd::run_eval(eval_cmd::EvalOptions {
+                problem: &problem,
+                model: &model,
+                provider_id: provider.as_deref(),
+                profile,
+                arm: &arm,
+                task: &task,
+                test_command: test.as_deref(),
+                gold_diff: gold_diff.as_deref(),
+            })
             .await?;
         }
         Command::Session { command } => match command {

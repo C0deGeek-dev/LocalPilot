@@ -55,6 +55,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   correctness gates first and passers rank by quality + process + regression-safety
   (speed stays a reported guardrail). All deterministic and offline-testable, with
   an original clean-room set of adversarial tasks.
+- **`localpilot eval` command.** A new headless subcommand runs the agent on one
+  problem in the workspace and emits the capability scorecard (JSON) to stdout —
+  the solver entry point an external benchmark runner drives. It runs the same
+  harness a real session uses, captures the produced diff + the session trace,
+  optionally grades with `--test <cmd>` (or leaves `results` for an external
+  grader), and records `--arm`/`--task`/`--gold-diff` on the card. Only the JSON
+  reaches stdout, so the line is pipe-safe.
 
 ## v0.3.0-beta.3 - 2026-06-18
 

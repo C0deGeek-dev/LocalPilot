@@ -80,6 +80,24 @@ unchanged; the JSON scorecard is the structured superset. Run it with:
 cargo test -p localpilot-harness --test evals -- --nocapture
 ```
 
+#### Emitting a scorecard headless (`localpilot eval`)
+
+`localpilot eval` runs the agent on one problem in the current workspace (a git
+repository) and prints the capability scorecard JSON to stdout — the solver entry
+point an external benchmark runner drives. It uses the same harness a real
+session does, captures the produced diff + the session event trace, and assembles
+the scorecard via the shared `build_scorecard`. Only the JSON reaches stdout
+(model output is suppressed), so the line is pipe-safe.
+
+```powershell
+localpilot eval "<problem statement>" --model <m> --arm full --task <id> `
+    --test "cargo test -q" --gold-diff gold.diff
+```
+
+`--test <cmd>` grades `results` (exit 0 = passed); omit it to emit an **ungraded**
+run for an external grader (a benchmark's own container) to fill `results` after
+applying the diff. `--gold-diff` supplies the gold patch for the `vs_gold_ratio`.
+
 #### First-party capability corpus
 
 A second corpus of original tasks lives under

@@ -73,6 +73,58 @@ impl Scorecard {
     }
 }
 
+/// The artefacts of one completed headless run, from which [`build_scorecard`]
+/// assembles a [`Scorecard`]. The caller supplies the graded `results` and the
+/// captured `diff_text`; the `quality`, `process`, and `speed` blocks are derived
+/// here from the diff and the session event trace. `judge` is left `None` — a
+/// caller that runs the LLM-as-judge attaches it afterward.
+pub struct RunInputs<'a> {
+    /// Task identifier.
+    pub task: String,
+    /// The harness arm this run used.
+    pub arm: String,
+    /// The model id (or `fake`).
+    pub model: String,
+    /// The graded results block (the runner/grader supplies the verdict).
+    pub results: ResultsBlock,
+    /// The produced unified diff (`git diff`).
+    pub diff_text: &'a str,
+    /// The gold diff, for the vs-gold ratio; `None` when there is no gold patch.
+    pub gold: Option<DiffStat>,
+    /// The quality-gate check outcomes, if the gate ran (empty otherwise).
+    pub gate: &'a [CheckOutcome],
+    /// The run's session event trace.
+    pub events: &'a [SessionEvent],
+    /// Runner-measured wall-clock duration, in milliseconds.
+    pub wall_ms: u64,
+}
+
+/// Assemble a [`Scorecard`] from one completed run's artefacts — the shared
+/// derivation the `eval` CLI uses to emit a scorecard from a headless run, so the
+/// quality/process blocks are computed identically to the eval corpora.
+#[must_use]
+pub fn build_scorecard(inputs: RunInputs) -> Scorecard {
+    let diff = DiffStat::from_unified(inputs.diff_text);
+    let ledger = EvidenceLedger::project(inputs.events);
+    Scorecard {
+        schema: SCORECARD_SCHEMA,
+        task: inputs.task,
+        arm: inputs.arm,
+        model: inputs.model,
+        results: inputs.results,
+        quality: QualityBlock::from_signals(
+            &diff,
+            inputs.gold.as_ref(),
+            inputs.gate,
+            Some(complexity_delta_in_diff(inputs.diff_text)),
+            tests_added_in_diff(inputs.diff_text),
+        ),
+        process: extract_process(inputs.events, &ledger),
+        speed: SpeedBlock::from_events(inputs.events, inputs.wall_ms),
+        judge: None,
+    }
+}
+
 /// The results layer: did the work get done, safely?
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultsBlock {
@@ -626,6 +678,54 @@ mod tests {
             process.recovered_after_failure,
             "an errored read was followed by a grounded successful read"
         );
+    }
+
+    #[test]
+    fn build_scorecard_assembles_from_run_artefacts() {
+        let events = vec![
+            assistant(vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({ "path": "a.rs", "content": "fn a() {}" }),
+            )]),
+            tool_result("c1", "ok", false),
+            event(SessionEventKind::UsageReported {
+                input_tokens: 12,
+                output_tokens: 4,
+            }),
+            event(SessionEventKind::TurnEnded {
+                stop: "Done".to_string(),
+            }),
+        ];
+        let diff = "diff --git a/a.rs b/a.rs\n+++ b/a.rs\n+fn a() {}\n";
+        let card = build_scorecard(RunInputs {
+            task: "t1".to_string(),
+            arm: "full".to_string(),
+            model: "fake".to_string(),
+            results: ResultsBlock {
+                passed: true,
+                regression_safe: true,
+                partial_credit: 1.0,
+                tests_total: 1,
+                tests_passed: 1,
+            },
+            diff_text: diff,
+            gold: Some(DiffStat {
+                added: 1,
+                removed: 0,
+                files: 1,
+            }),
+            gate: &[],
+            events: &events,
+            wall_ms: 250,
+        });
+        assert_eq!(card.task, "t1");
+        assert_eq!(card.quality.diff_added, 1);
+        assert_eq!(card.quality.vs_gold_ratio, Some(1.0));
+        assert_eq!(card.process.tool_calls, 1);
+        assert_eq!(card.process.exit_reason, "Done");
+        assert_eq!(card.speed.input_tokens, 12);
+        assert!(card.judge.is_none());
     }
 
     #[test]

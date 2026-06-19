@@ -44,7 +44,32 @@ pub async fn print_mode(
     resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    let mut runtime = build_runtime(&cwd, model, provider_id, profile, allow_writes).await?;
+    if let Some(session) = resume {
+        // Resume rebuilds the conversation from the durable event log; the
+        // profile and trust just configured stay in force.
+        runtime.load_session(session)?;
+    }
+
+    run_and_print(runtime, prompt).await
+}
+
+/// Build a non-interactive session runtime for `cwd` with the configured
+/// provider, tools (MCP + broker), and context hook — the shared setup both
+/// `print` and `eval` use, so a headless eval run sees the same harness a real
+/// run does. `trusted` enables workspace writes.
+///
+/// # Errors
+/// Returns an error if configuration, the provider registry, or the workspace
+/// cannot be set up.
+pub async fn build_runtime(
+    cwd: &std::path::Path,
+    model: &str,
+    provider_id: Option<&str>,
+    profile: Profile,
+    trusted: bool,
+) -> anyhow::Result<SessionRuntime> {
+    let config = localpilot_config::load(&ConfigPaths::standard(cwd), &CliOverrides::default())?;
     let registry = ProviderRegistry::from_config(&config)?;
     let provider = match provider_id {
         Some(id) => registry.get(id),
@@ -64,13 +89,13 @@ pub async fn print_mode(
         registry,
         PermissionEngine::new(profile, Vec::new()),
         Box::new(ScriptedApprover::new(Vec::new())),
-        Store::open(&cwd),
-        Workspace::new(&cwd)?,
+        Store::open(cwd),
+        Workspace::new(cwd)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.to_string(),
             interactivity: Interactivity::NonInteractive,
-            trusted: allow_writes,
+            trusted,
             context_token_limit,
             compaction_mode: compaction_mode(config.compaction.mode),
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
@@ -86,14 +111,8 @@ pub async fn print_mode(
         Vec::new(),
     );
     runtime.set_broker(broker);
-    localpilot_localmind::register_context_hook(&cwd, &mut runtime);
-    if let Some(session) = resume {
-        // Resume rebuilds the conversation from the durable event log; the
-        // profile and trust just configured stay in force.
-        runtime.load_session(session)?;
-    }
-
-    run_and_print(runtime, prompt).await
+    localpilot_localmind::register_context_hook(cwd, &mut runtime);
+    Ok(runtime)
 }
 
 fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {
