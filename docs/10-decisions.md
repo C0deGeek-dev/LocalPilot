@@ -2,6 +2,94 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0034: The Developer-Process Self-Improvement Loop Is Human-Gated By Construction — Read-Only Up To "Propose", Never Self-Merges
+
+Status: accepted. Builds on ADR-0010 (the runtime validates and controls — every
+side effect passes a typed permission engine), ADR-0011 (store split:
+`.localpilot/` is the execution record, `.localmind/` is memory), ADR-0023
+(deterministic-first verification), ADR-0028 (handoff is a checked execution
+record, never memory), and ADR-0033 (external corpora never enter the clean-room
+tree). Cross-engine half recorded as LocalMind `D-LM-0014`. Source consulted
+clean-room: a comparison of a self-styled "self-evolving" agent fork in LocalHub
+research — its *premise* (an agent that observes its own friction and proposes
+improvements) is adapted; **no code, prompt, identifier, or branding is ported**,
+and its stated anti-goal (autonomy → human-oversight → zero) is explicitly
+rejected.
+
+LocalPilot grows a developer-process self-improvement capability: it can scan a
+repository for drift, observe its own harness friction during real work, propose
+a minimal fix, gate that fix on offline evals, and learn from the outcome. The
+hazard a capability like this carries is **autonomy creep** — each convenience
+quietly erodes the point at which a human must say yes, until an agent is editing,
+committing, and merging its own changes. This record fixes the invariant that
+makes the loop safe to build, so every later layer composes against fixed terms.
+
+**The loop and its one-way boundary.** The stages are
+`observe → retrieve → detect → propose → evaluate → patch → human-approve → merge → lesson-writeback`.
+A single boundary cuts the loop in two:
+
+- **Up to and including `propose`, every stage is read-only** and the agent may
+  run it autonomously. `observe` (repo scan + harness-friction findings),
+  `retrieve` (prior lessons from LocalMind, read-only), `detect` (rank findings),
+  and `propose` (emit a ranked, advisory findings report) perform **no workspace
+  mutation** — their only effect is a workspace read (`Effect::ReadPath`), exactly
+  like `knowledge_search`/`skill_load`.
+- **From `patch` onward, every stage that can change code, push, or merge is
+  hard-gated on explicit human approval.** Patch generation writes only inside an
+  **isolated git worktree**, never to `main`; the agent stops at "proposed patch +
+  provenance + eval result" and cannot apply, commit, push, or merge it without an
+  explicit human approval token. The gate is enforced **by construction** — the
+  apply path requires the token as a parameter and there is no code path that
+  reaches a write to `main` without one — **not by prompt convention.**
+
+**No self-merge, ever.** The agent never merges its own patch to `main` and never
+auto-pushes. Merge is a human action outside the loop. Rollback for any proposed
+change is to drop the worktree/branch; nothing durable was mutated.
+
+**The eval gate is necessary, not sufficient.** A LocalBench offline eval gate
+(reusing the ADR-0033 capability scorecard) scores a proposed patch and can
+*block* it from reaching the human queue, but a green gate **never** substitutes
+for human approval — it only filters out obviously-bad patches before a human
+spends attention. Offline benchmarks are the accepted bar (ecosystem
+validation-evidence policy / D008); a live local-model run is opportunistic.
+
+**Learning carries provenance and negative signals.** Accepted and rejected
+outcomes are written back as durable LocalMind lessons through the existing
+review-gated memory path (ADR-0011) — a rejected patch writes a *negative-signal*
+lesson — so the next run retrieves prior outcomes and stops repeating a mistake.
+Lessons carry provenance and outcome; a bad lesson is curated/superseded, never
+silently trusted.
+
+**Outward publication is the highest-risk tail and is defer-by-default.** Emitting
+a finding or patch as a GitHub/Azure DevOps issue or PR is an irreversible outward
+action: it is **draft-only**, confirm-gated, never auto-merged, and ships only
+after the read-only and gated layers are proven.
+
+Reason:
+
+- the invariant is **structural, not aspirational**: "read-only ≤ propose; every
+  write/push/merge is human-gated; no self-merge" is enforced by the permission
+  engine and an approval-token-typed apply path, so a confused or prompt-injected
+  model cannot reach a mutation the human did not authorize — the same posture
+  ADR-0010 fixed for tools and ADR-0027/0031 fixed for skills/tools (reach injects
+  content the agent reads; it grants no effect);
+- keeping the autonomous half **read-only** means the agent can run the expensive,
+  useful part (observe → propose) unattended without ever being one bug away from
+  an unintended write;
+- composing existing mechanisms (worktree isolation, the permission engine, the
+  LocalMind review-gated memory path, the LocalBench scorecard) rather than
+  building a new engine keeps the safety guarantees the stack already proved, and
+  the loop adds a *bound*, not a second control plane;
+- defer-by-default outward automation means the irreversible surface is built last
+  and behind a separate human sign-off, so the loop is useful long before it can
+  publish anything.
+
+Supersedes nothing. Auto-instrumenting the harness to capture per-tool-call
+friction (beyond the audit-prompt friction source), a model-judged eval critic,
+and any move toward reducing the human gate are explicit non-goals here; each
+would need its own decision and, for anything touching the gate, a fresh security
+review against this invariant.
+
 ## ADR-0033: External Benchmark Corpora Never Enter The Clean-Room Tree
 
 Status: accepted. Builds on `docs/00-clean-room.md` (clean-room provenance) and
