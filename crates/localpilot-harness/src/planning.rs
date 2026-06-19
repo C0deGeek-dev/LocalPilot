@@ -1,4 +1,4 @@
-﻿//! Intake and planning: turn an idea into a `brief.md`, and a brief into a
+//! Intake and planning: turn an idea into a `brief.md`, and a brief into a
 //! `PROGRESS.md`, using original LocalPilot prompts.
 //!
 //! Generated documents are validated before they are returned; invalid model
@@ -56,7 +56,15 @@ Branch: feature/<kebab-name>\n\
 \n\
 Each step must be small enough to complete and verify in one sitting, ordered so \
 that tests come before the implementation they cover. Number steps from 1 with no \
-gaps.";
+gaps.\n\
+\n\
+Study the repository summary before writing steps. Where existing code already \
+covers part of the work, prefer a step that extends or reuses it, naming that \
+module, type, or function in the step, over adding parallel code; add new code \
+only where nothing existing fits.\n\
+\n\
+The steps together must satisfy every acceptance criterion in the brief; do not \
+leave a criterion unaddressed.";
 
 const MAX_ATTEMPTS: usize = 3;
 
@@ -185,6 +193,65 @@ mod tests {
             .text(VALID_BRIEF);
         let brief = run_intake(&provider, "m", "build a thing").await.unwrap();
         assert_eq!(brief.name, "thing");
+    }
+
+    #[tokio::test]
+    async fn planner_is_asked_to_reuse_existing_code_and_cover_every_criterion() {
+        use localpilot_core::ContentBlock;
+
+        let brief = Brief::parse(VALID_BRIEF).unwrap();
+        let valid_progress =
+            "# Progress: thing\nBranch: feature/thing\n\n## Steps\n\n- [ ] 1. Do the thing\n";
+        let provider = FakeProvider::new().text(valid_progress);
+        let repo_summary =
+            "Existing modules: localpilot_store::SessionStore already handles persistence.";
+
+        run_plan(&provider, "m", &brief, repo_summary)
+            .await
+            .unwrap();
+
+        let reqs = provider.requests();
+        let messages = &reqs.first().expect("a planner request").messages;
+        let role_text = |system: bool| {
+            messages
+                .iter()
+                .filter(|m| {
+                    if system {
+                        matches!(m.role, Role::System)
+                    } else {
+                        matches!(m.role, Role::User)
+                    }
+                })
+                .flat_map(|m| &m.content)
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let system = role_text(true);
+        let user = role_text(false);
+
+        // The planner is instructed to reuse existing code and to cover every criterion.
+        assert!(
+            system.contains("extends or reuses"),
+            "reuse-before-add instruction missing from planner prompt"
+        );
+        assert!(
+            system.contains("every acceptance criterion"),
+            "criteria-coverage instruction missing from planner prompt"
+        );
+        // ...and it is handed the repository summary and the brief's acceptance criteria
+        // so it can honour both.
+        assert!(
+            user.contains("SessionStore"),
+            "repository summary not passed to the planner"
+        );
+        assert!(
+            user.contains("A test passes"),
+            "brief acceptance criteria not passed to the planner"
+        );
     }
 
     #[tokio::test]
