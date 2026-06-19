@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use async_trait::async_trait;
+use localpilot_core::{one_line, word_overlap, Locator, SUMMARY_CHARS};
 use localpilot_sandbox::Effect;
 use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput};
 use schemars::JsonSchema;
@@ -26,8 +27,6 @@ use crate::loader::{standard_skill_dirs, Skill, SkillSet};
 /// Locators returned by a search are capped so a turn spends a bounded number of
 /// tokens to *find* a skill before paying for any body.
 const MAX_LOCATORS: usize = 10;
-/// One-line summary length for a locator.
-const SUMMARY_CHARS: usize = 100;
 /// Upper bound on a single loaded skill body, so pulling guidance stays lean.
 const BODY_CHARS: usize = 12_000;
 
@@ -51,10 +50,7 @@ pub fn discover_trusted(root: &Path, trusted: bool) -> Result<SkillSet, SkillErr
 /// returned always scores at least 1.
 fn score(skill: &Skill, query_words: &[&str], query_lower: &str) -> u32 {
     let description = skill.manifest.description.to_ascii_lowercase();
-    let word_hits = query_words
-        .iter()
-        .filter(|w| description.contains(**w))
-        .count();
+    let word_hits = word_overlap(&description, query_words);
     let trigger_bonus = u32::from(
         skill
             .manifest
@@ -63,16 +59,7 @@ fn score(skill: &Skill, query_words: &[&str], query_lower: &str) -> u32 {
             .iter()
             .any(|c| query_lower.contains(&c.to_ascii_lowercase())),
     ) * 2;
-    word_hits as u32 + trigger_bonus
-}
-
-fn one_line(text: &str) -> String {
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut shown: String = collapsed.chars().take(SUMMARY_CHARS).collect();
-    if collapsed.chars().count() > SUMMARY_CHARS {
-        shown.push('…');
-    }
-    shown
+    word_hits + trigger_bonus
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -140,19 +127,22 @@ impl Tool for SkillSearch {
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|w| w.len() > 2)
             .collect();
-        let mut hits: Vec<(&Skill, u32)> = set
+        let mut locators: Vec<Locator> = set
             .relevant(&input.query)
             .into_iter()
-            .map(|skill| (skill, score(skill, &query_words, &query_lower)))
+            .map(|skill| {
+                Locator::new(
+                    skill.manifest.name.clone(),
+                    one_line(&skill.manifest.description, SUMMARY_CHARS),
+                    score(skill, &query_words, &query_lower),
+                )
+            })
             .collect();
         // Highest score first; ties broken by name for a stable order.
-        hits.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.0.manifest.name.cmp(&b.0.manifest.name))
-        });
-        hits.truncate(MAX_LOCATORS);
+        locators.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+        locators.truncate(MAX_LOCATORS);
 
-        if hits.is_empty() {
+        if locators.is_empty() {
             return Ok(ToolOutput::ok(format!(
                 "no project skills match \"{}\"",
                 input.query
@@ -161,13 +151,8 @@ impl Tool for SkillSearch {
         let mut out = String::from(
             "Matching project skills (locators only — call `skill_load` with a name to read one):\n",
         );
-        for (skill, score) in &hits {
-            let _ = writeln!(
-                out,
-                "- {} (score {score}): {}",
-                skill.manifest.name,
-                one_line(&skill.manifest.description)
-            );
+        for loc in &locators {
+            let _ = writeln!(out, "- {} (score {}): {}", loc.name, loc.score, loc.summary);
         }
         Ok(ToolOutput::ok(out))
     }
@@ -372,6 +357,32 @@ mod tests {
             !out.text.contains("Body of add-provider"),
             "body leaked into search: {}",
             out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn search_locator_summary_is_capped_to_one_line_with_ellipsis() {
+        // Equivalence guard for the move to localpilot_core::one_line: a long,
+        // multi-word description must still collapse to a single capped summary
+        // ending in an ellipsis, never dump the whole description into the locator.
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("guide adding {}", "a provider integration ".repeat(20));
+        write_skill_md(dir.path(), "add-provider", long.trim(), false, "");
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = SkillSearch
+            .invoke(json!({ "query": "guide adding provider" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        let line = out
+            .text
+            .lines()
+            .find(|l| l.contains("add-provider"))
+            .expect("locator line");
+        assert!(line.contains('…'), "summary not ellipsized: {line:?}");
+        assert!(
+            line.chars().count() < long.chars().count(),
+            "summary was not truncated: {line:?}"
         );
     }
 

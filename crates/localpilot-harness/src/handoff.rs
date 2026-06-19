@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use localpilot_config::redact::redact;
-use localpilot_core::SessionId;
+use localpilot_core::{collapse_whitespace, SessionId};
 use localpilot_store::{SessionEventKind, Store};
 
 use crate::brief::Brief;
@@ -82,8 +82,12 @@ impl HandoffHeader {
         let _ = writeln!(out, "dirty: {}", self.dirty);
         let _ = writeln!(out, "session: {}", self.session.as_deref().unwrap_or(""));
         let _ = writeln!(out, "confidence: {:.2}", self.confidence);
-        let _ = writeln!(out, "objective: {}", one_line(&self.objective));
-        let _ = writeln!(out, "next_action: {}", one_line(&self.next_action));
+        let _ = writeln!(out, "objective: {}", collapse_whitespace(&self.objective));
+        let _ = writeln!(
+            out,
+            "next_action: {}",
+            collapse_whitespace(&self.next_action)
+        );
         let _ = writeln!(out, "references: {}", self.references.join(", "));
         let _ = writeln!(
             out,
@@ -608,10 +612,6 @@ fn first_line(text: &str) -> String {
         .to_string()
 }
 
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -635,6 +635,34 @@ mod tests {
             references: vec!["PROGRESS.md".to_string(), "DECISIONS.md".to_string()],
             suggested_skills: vec!["add-provider".to_string()],
         }
+    }
+
+    #[test]
+    fn header_collapses_field_whitespace_without_capping_length() {
+        // Equivalence guard for the move to localpilot_core::collapse_whitespace:
+        // the header flattens internal whitespace in objective/next_action but does
+        // NOT cap them — unlike the locator/index summaries — so a long objective
+        // survives in full on a single line.
+        let mut header = sample_header();
+        let long = format!("ship {}", "the multi word parser ".repeat(20));
+        header.objective = format!("ship\n  the\t parser  {long}");
+        let rendered = header.render();
+        let line = rendered
+            .lines()
+            .find(|l| l.starts_with("objective: "))
+            .unwrap();
+        assert!(
+            !line.contains('\t') && !line.contains("  "),
+            "whitespace not collapsed: {line:?}"
+        );
+        assert!(
+            !line.contains('…'),
+            "objective must not be ellipsized: {line:?}"
+        );
+        assert!(
+            line.chars().count() > 100,
+            "long objective was truncated: {line:?}"
+        );
     }
 
     #[test]

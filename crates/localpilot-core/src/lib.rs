@@ -10,18 +10,22 @@
 mod error;
 mod id;
 mod message;
+mod search;
 mod secret;
 mod summary;
+mod text;
 mod tool;
 mod usage;
 
 pub use error::CoreError;
 pub use id::{EventId, MessageId, SessionId, ToolUseId, TurnId};
 pub use message::{ContentBlock, Message, MessageMetadata, Role};
+pub use search::{word_overlap, Locator};
 pub use secret::Secret;
 pub use summary::{
     StructuredSummary, SummaryBudget, SummarySection, SummarySectionKind, SummarySource,
     SummarySourceKind, STRUCTURED_SUMMARY_SCHEMA_VERSION,
 };
+pub use text::{collapse_whitespace, one_line, truncate_collapsed, SUMMARY_CHARS};
 pub use tool::{ToolCall, ToolResult};
 pub use usage::{TokenUsage, UsageSummary};

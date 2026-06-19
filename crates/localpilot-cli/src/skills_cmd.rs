@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use localpilot_core::{one_line, SUMMARY_CHARS};
 use localpilot_skills::{discover_trusted, Invocation};
 
 /// List the project's discovered skills with their invocation and a one-line
@@ -43,7 +44,7 @@ pub fn list(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
             writeln!(
                 out,
                 "- {name} [{invocation}]: {}",
-                one_line(&skill.manifest.description)
+                one_line(&skill.manifest.description, SUMMARY_CHARS)
             )?;
         }
     }
@@ -92,15 +93,6 @@ pub fn show(root: &Path, name: &str, out: &mut dyn Write) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn one_line(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut shown: String = collapsed.chars().take(100).collect();
-    if collapsed.chars().count() > 100 {
-        shown.push('…');
-    }
-    shown
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -134,6 +126,27 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("add-provider [discoverable]"), "{text}");
         assert!(text.contains("secret-step [user-only]"), "{text}");
+    }
+
+    #[test]
+    fn list_summary_is_capped_to_one_line_with_ellipsis() {
+        // Equivalence guard for the move to localpilot_core::one_line: a long skill
+        // description is collapsed to one capped line + ellipsis in the user listing.
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("guide adding {}", "a provider integration ".repeat(20));
+        write_skill_md(dir.path(), "add-provider", long.trim(), false);
+        let mut buf = Vec::new();
+        list(dir.path(), &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains("add-provider"))
+            .expect("listing line");
+        assert!(line.contains('…'), "summary not ellipsized: {line:?}");
+        assert!(
+            line.chars().count() < long.chars().count(),
+            "summary not truncated: {line:?}"
+        );
     }
 
     #[test]

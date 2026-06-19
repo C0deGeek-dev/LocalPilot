@@ -13,13 +13,17 @@
 //! top entries to full bodies only while they fit a configurable budget — so a
 //! tight budget degrades gracefully to index-only and never overspends.
 
+use localpilot_core::truncate_collapsed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ingest::{self, IngestError};
 
-/// One line, with internal newlines collapsed, capped for an index summary.
+/// Index-summary character cap. Deliberately wider than the locator default
+/// (`localpilot_core::SUMMARY_CHARS`, 100): an index summary is a silent preview
+/// bound, so it caps without an ellipsis marker (`truncate_collapsed`), unlike
+/// the locator surfaces that ellipsize.
 const SUMMARY_CHARS: usize = 120;
 
 /// Approximate token estimate: ~4 chars per token, floored at 1 for any
@@ -102,7 +106,7 @@ pub fn index_layer(
         .into_iter()
         .take(limit)
         .map(|hit| {
-            let summary = one_line(&hit.snippet);
+            let summary = truncate_collapsed(&hit.snippet, SUMMARY_CHARS);
             IndexEntry {
                 token_cost: estimate_tokens(&summary).max(1),
                 id: hit.chunk_id,
@@ -216,12 +220,6 @@ pub fn layered_pack(
     })
 }
 
-/// Collapse a snippet to a single capped line for an index summary.
-fn one_line(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(SUMMARY_CHARS).collect()
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -263,6 +261,28 @@ mod tests {
             index_cost * 4 <= fetch_cost,
             "index ({index_cost}) must be materially cheaper than fetch ({fetch_cost})"
         );
+    }
+
+    #[test]
+    fn index_summary_caps_without_an_ellipsis_marker() {
+        // Equivalence guard for the move to localpilot_core::truncate_collapsed: an
+        // index summary stays a SUMMARY_CHARS-bounded preview with NO ellipsis
+        // marker — deliberately unlike the locator surfaces that ellipsize at 100.
+        let dir = ingested_project();
+        let index = index_layer(dir.path(), "widget", 5).unwrap();
+        assert!(!index.is_empty(), "expected an index hit for widget");
+        for entry in &index {
+            assert!(
+                entry.summary.chars().count() <= SUMMARY_CHARS,
+                "summary over cap: {:?}",
+                entry.summary
+            );
+            assert!(
+                !entry.summary.contains('…'),
+                "index summary must not ellipsize: {:?}",
+                entry.summary
+            );
+        }
     }
 
     #[test]

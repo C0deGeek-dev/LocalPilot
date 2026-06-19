@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use localpilot_core::{one_line, word_overlap, SUMMARY_CHARS};
 use localpilot_sandbox::Effect;
 use parking_lot::Mutex;
 use schemars::JsonSchema;
@@ -38,8 +39,6 @@ pub const TOOL_LOAD: &str = "tool_load";
 /// number of tokens to *find* a tool before paying for any schema. Mirrors
 /// `skill_search`'s `MAX_LOCATORS`.
 const MAX_LOCATORS: usize = 10;
-/// One-line summary length for a locator. Mirrors `skill_search`'s `SUMMARY_CHARS`.
-const SUMMARY_CHARS: usize = 100;
 /// Default bound on the revealed working set (LRU eviction past it). Evicting a
 /// revealed tool only un-advertises it; the model can re-reveal on demand.
 pub const DEFAULT_WORKING_SET_CAP: usize = 24;
@@ -149,16 +148,6 @@ fn graduates(history: &[ResolutionRecord], name: &str, threshold: usize) -> bool
             >= threshold
 }
 
-/// Collapse text to a single bounded line for a locator summary.
-fn one_line(text: &str) -> String {
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut shown: String = collapsed.chars().take(SUMMARY_CHARS).collect();
-    if collapsed.chars().count() > SUMMARY_CHARS {
-        shown.push('…');
-    }
-    shown
-}
-
 /// Split a need into matchable lowercase words (length > 2, like `skill_search`).
 fn need_words(need_lower: &str) -> Vec<&str> {
     need_lower
@@ -172,7 +161,7 @@ fn need_words(need_lower: &str) -> Vec<&str> {
 /// directly. Mirrors the `skill_search` scorer applied to tools.
 fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> u32 {
     let haystack = format!("{} {}", entry.name, entry.description).to_ascii_lowercase();
-    let word_hits = words.iter().filter(|w| haystack.contains(**w)).count() as u32;
+    let word_hits = word_overlap(&haystack, words);
     let name_lower = entry.name.to_ascii_lowercase();
     let name_bonus = u32::from(
         need_lower.contains(&name_lower) || words.iter().any(|w| name_lower.contains(*w)),
@@ -198,7 +187,7 @@ pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> V
             let deprecated = overlay.is_deprecated(&entry.name);
             Some(Locator {
                 name: entry.name.clone(),
-                summary: one_line(&entry.description),
+                summary: one_line(&entry.description, SUMMARY_CHARS),
                 score,
                 deprecated_replacement: overlay.replacement_for(&entry.name).map(str::to_string),
                 deprecated,
@@ -822,6 +811,31 @@ mod tests {
     fn resolve_returns_nothing_for_an_unrelated_need() {
         let broker = broker();
         assert!(broker.resolve("xyzzy plugh frobnicate").is_empty());
+    }
+
+    #[test]
+    fn locator_summary_is_one_line_capped_with_ellipsis() {
+        // Equivalence guard for the move to localpilot_core::one_line: a long tool
+        // description must collapse to a single SUMMARY_CHARS summary + ellipsis.
+        let long = format!("fetch {}", "bytes over the network ".repeat(20));
+        let cat = Catalog::project([(
+            "fetch",
+            long.as_str(),
+            schema(&["url"]),
+            ToolSource::Builtin,
+        )]);
+        let broker = Broker::new(BrokerConfig::default());
+        broker.set_catalog(cat);
+
+        let hits = broker.resolve("fetch bytes over the network");
+        assert!(!hits.is_empty(), "expected a hit");
+        let summary = &hits[0].summary;
+        assert!(summary.ends_with('…'), "not ellipsized: {summary:?}");
+        assert_eq!(
+            summary.chars().count(),
+            SUMMARY_CHARS + 1,
+            "expected SUMMARY_CHARS chars + ellipsis: {summary:?}"
+        );
     }
 
     #[test]
