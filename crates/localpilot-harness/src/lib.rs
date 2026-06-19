@@ -18,12 +18,14 @@ mod handoff;
 mod hooks;
 mod judge;
 mod launch_targets;
+mod lessons;
 mod planning;
 mod precondition;
 mod progress;
 mod project_analysis;
 mod quality;
 mod resume;
+mod retrospective;
 mod rules;
 mod scorecard;
 mod session;
@@ -53,6 +55,7 @@ pub use judge::{
     resolve_preference, BlindedPair, Judge, JudgeBlock, JudgeCache, JudgeError, JudgeInput,
     Preferred, RankingFixture, RankingTrust, RANKING_FIXTURES, RUBRIC,
 };
+pub use lessons::{Lesson, Lessons};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use project_analysis::{
@@ -64,6 +67,7 @@ pub use quality::{
     QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
+pub use retrospective::{run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT};
 pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
 pub use scorecard::{
     build_scorecard, complexity_delta_in_diff, extract_process, tests_added_in_diff, DiffStat,

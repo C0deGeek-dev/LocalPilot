@@ -5,6 +5,17 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Plan mode carries planning judgment.** The planner now prefers steps that
+  extend or reuse the existing code named in the repository summary over adding
+  parallel code, and must cover every acceptance criterion in the brief. `brief.md`
+  gains an optional `## Risks & Rollback` section (absent in older briefs,
+  round-trips losslessly), and the per-step worker prompt asks the model to update
+  the matching documentation in the same step as a behaviour change. When a run
+  finishes its last step, an **advisory** completion retrospective reviews the work
+  against the brief (unmet criteria, scope drift, test-quality) and appends durable
+  lessons to a new root `LESSONS.md`; it reports only — it never blocks completion,
+  edits code, or commits. See [docs/06-harness-spec.md](docs/06-harness-spec.md)
+  §Completion Retrospective and ADR-0035.
 - **Measured session-friction findings (self-review).** `localpilot self-review`
   gained a third, deterministic findings source: a captured run's capability
   scorecard `process` block is projected into the same ranked findings stream with

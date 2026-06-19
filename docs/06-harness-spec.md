@@ -130,6 +130,11 @@ Required sections:
 ## Acceptance Criteria
 ```
 
+An optional trailing `## Risks & Rollback` section captures what could go wrong
+once the work ships and how it is undone (revert, feature flag, config switch, or
+migration down). It is omitted from an older or hand-written brief without error
+and rendered only when present, so a brief round-trips losslessly either way.
+
 ### `PROGRESS.md`
 
 Required shape:
@@ -172,6 +177,22 @@ reset and the next run reads why the plan changed.
 Like `brief.md` and `PROGRESS.md`, this file is authoritative and user-editable
 (ADR-0003). It is optional for a clean run and created on first deviation.
 
+### `LESSONS.md`
+
+Append-only log of durable lessons the completion retrospective captures at the
+end of a run (see §Completion Retrospective). Each entry is a dated single line:
+
+```markdown
+# Lessons: <name>
+
+- <date> · <a durable lesson worth keeping for future work>
+```
+
+Like the other runtime documents it is authoritative and user-editable (ADR-0003),
+sited at the project root, and round-trips losslessly. It is created on the first
+lesson and is never required for a clean run. The retrospective only appends to
+it — it does not commit it; the user reviews and commits the artifact.
+
 ## Commands
 
 ### `localpilot init`
@@ -208,6 +229,12 @@ Inputs:
 Output:
 
 - `PROGRESS.md`
+
+The planner is instructed to study the repository summary and prefer steps that
+extend or reuse the existing module/type/function they name over adding parallel
+code, and to produce a step list that collectively satisfies every acceptance
+criterion in the brief (ADR-0035). These are contracts on the generated plan, not
+a `PROGRESS.md` format change.
 
 ### `localpilot harness resume`
 
@@ -530,6 +557,22 @@ For each step:
 5. After repeated discard/retry failures, replan the step with attempt logs and
    record the replan in `DECISIONS.md`.
 6. Cap replans to avoid runaway automation.
+
+## Completion Retrospective
+
+When a resume run reaches a plan with no incomplete step left, the harness runs
+one bounded, **advisory** review over the brief and the completed plan (ADR-0035).
+It surfaces which acceptance criteria are still unmet, scope drift from the brief,
+and tests that pin implementation detail instead of observable behaviour, and it
+appends any durable lessons to `LESSONS.md`.
+
+It is advisory by construction: it reports findings and records lessons — it never
+blocks completion, edits shipped code, or commits. It runs once, after the final
+step is already committed, and it is best-effort: a provider or quota error at that
+point is swallowed so a finished run is never broken, and a reply in the wrong
+shape degrades to "no findings" rather than an error. The worker prompt also
+carries a doc-currency cue, so a step that changes observable behaviour,
+configuration, or interfaces updates the matching documentation in the same step.
 
 ## Background Processes
 
