@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Loop-outcome lesson writeback (self-improvement loop learning arc).** When a
+  human accepts or rejects a patch proposal, the outcome is written back as a
+  durable lesson through the existing review-gated LocalMind path (no new store):
+  an accepted outcome becomes a process lesson, a rejected one a first-class
+  negative-signal anti-pattern ("Avoid (rejected): …") carrying the
+  change-provenance reference. Once accepted, the lesson is retrieved by
+  `localpilot self-review` on the next run, so the loop stops repeating a mistake;
+  a bad lesson is curated through the existing `memory delete`/review-reject
+  paths. See [docs/localmind-integration.md](docs/localmind-integration.md)
+  §Loop-Outcome Lesson Writeback (LocalMind decision D-LM-0014).
 - **Human-gated patch generation (self-improvement loop write half).** A new
   crate turns an approved finding into a minimal change inside an isolated git
   worktree on its own branch (never the main working tree), scope-bound to the

@@ -125,6 +125,35 @@ Close-out is best-effort and non-fatal, and an empty session writes nothing.
 State is project-local under `.localmind/`. Durable memory is readable Markdown;
 queue, audit, search index, and the code-structure graph live in SQLite.
 
+## Loop-Outcome Lesson Writeback
+
+When a human accepts or rejects a self-improvement patch proposal, the outcome is
+written back as a durable lesson so the next loop run retrieves it and stops
+repeating a mistake (LocalMind decision `D-LM-0014`). This reuses the **existing**
+review-gated path — it builds no new store:
+
+- A loop-outcome lesson carries `{ trigger, what, why, applies_to, outcome,
+  provenance_ref }` and is enqueued as a `CandidateLesson` through the normal
+  review queue. Promotion to accepted memory stays a human, review-gated step
+  (ADR-0011); the patch decision is not auto-promotion of the lesson.
+- A **rejected** outcome is a first-class negative signal — an `AntiPattern`
+  candidate framed as a steer-away ("Avoid (rejected): …") that records what was
+  proposed and why it was rejected — not the absence of a lesson. An accepted
+  outcome is a `Process` lesson.
+- The lesson carries provenance (an evidence ref to the change-provenance record)
+  and its outcome (the category), so retrieval can weigh it and an audit can trace
+  it.
+- **Retrieval-on-next-run:** once a loop lesson is accepted, it is ordinary
+  accepted memory — `localpilot self-review` pulls it (via `memory_list`) as a
+  prior lesson, and a finding on a file the lesson names is surfaced as a
+  recurring issue. A rejected proposal's anti-pattern steers the next run away.
+- **Pollution guard / curation:** lessons are review-gated, so a rejected
+  candidate never reaches accepted memory; a bad *accepted* lesson is curated with
+  the existing `memory delete` (supersede) path. No special-case store.
+
+The host surface is `localpilot_localmind::write_loop_lesson`; everything else
+(review, promote, search, delete) is the existing LocalMind loop.
+
 ## Code Graph
 
 LocalMind owns a code-structure knowledge graph (schema, tree-sitter ingestion,

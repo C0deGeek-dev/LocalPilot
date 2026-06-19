@@ -19,6 +19,7 @@ mod inspector;
 mod knowledge_tool;
 mod layered;
 mod layered_tool;
+mod loop_lesson;
 mod memory_search_tool;
 mod ops;
 mod pack;
@@ -59,6 +60,7 @@ pub use layered::{
     LayeredPack, RetrievalLayer,
 };
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
+pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, memory_delete, memory_disable_injection,
