@@ -220,6 +220,23 @@ Owns:
 
 Recovery must prefer stopping safely over continuing with corrupted context.
 
+### `localpilot-patchgen`
+
+Owns the write half of the self-improvement loop (ADR-0034):
+
+- isolated-worktree proposal generation (never writes `main`)
+- scope/path containment and minimal-diff checks
+- the `ApprovalToken`-gated promotion path (single human-only constructor)
+- the change-provenance record carried with each proposal
+
+**As shipped:** this crate is built and tested but **not yet wired to a caller**
+— it is intentionally staged, not live. It has no CLI, harness, or adapter
+entry point yet; the planned entry is a confirm-gated `localpilot self-review
+propose-patch` command that produces a worktree proposal and **stops at the
+`ApprovalToken` gate**. Wiring is deferred until the next self-improvement phase
+(see ADR-0034's as-shipped note). The gate stays correct by construction
+regardless: no autonomous path constructs a token.
+
 ### `localpilot-quota`
 
 Owns:

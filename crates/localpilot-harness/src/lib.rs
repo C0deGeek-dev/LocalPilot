@@ -12,6 +12,7 @@ mod claim;
 mod compaction;
 mod decisions;
 mod discipline;
+mod dispatch_gate;
 mod error;
 mod evidence;
 mod handoff;

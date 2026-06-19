@@ -33,6 +33,7 @@ use crate::compaction::{
     apply_smart_digest, compact_plan, estimate_tokens, CompactionMetadata, CompactionMode,
     CompactionResult,
 };
+use crate::dispatch_gate::{pre_dispatch_decision, PreDispatch};
 use crate::hooks::{HookEvent, HookFabric};
 use crate::launch_targets::{self, LocalTarget};
 use crate::quality::{CheckOutcome, CheckRunner};
@@ -1713,56 +1714,68 @@ impl SessionRuntime {
                 // target not yet probed and this call launches its own server or
                 // scaffolds a competing page, the rule warns (model-visible, the
                 // call still runs) or, when configured to block, refuses it.
-                let launch_verdict = self.check_before_launch_verdict(name, input);
-                let result = if let Some(resolution) = self.broker_reresolution(name) {
-                    // The broker narrowed the surface and this tool is not
-                    // advertised (unknown, out-of-working-set, or retired): reveal
-                    // the closest available tool and ask the model to retry. The
-                    // attempted call does not run (reveal-never-grant; no
-                    // resolve-and-run). Surfaced as a non-error redirect.
-                    let _ = events.send(RuntimeEvent::Warning(format!(
-                        "tool `{name}` is not advertised; resolving to the closest available tool"
-                    )));
-                    self.record_resolution(&resolution, "failure_driven");
-                    Some(localpilot_core::ToolResult::success(
-                        ToolUseId::from(id.as_str()),
-                        resolution.message,
-                    ))
-                } else if let Some(reason) = self.precondition_block(name, input) {
-                    // A contract precondition (e.g. RequiresPriorRead) refused the
-                    // call before permission. Tighten-only: surface it as an error
-                    // result so the model sees why and can recover.
-                    Some(localpilot_core::ToolResult::error(
-                        ToolUseId::from(id.as_str()),
-                        reason,
-                    ))
-                } else if let Some(RuleVerdict::Block(reason)) = &launch_verdict {
-                    // A blocking `check_before_launch` severity refuses the launch
-                    // before it runs, the same tighten-only path as a precondition.
-                    let _ = events.send(RuntimeEvent::Warning(reason.clone()));
-                    Some(localpilot_core::ToolResult::error(
-                        ToolUseId::from(id.as_str()),
-                        reason.clone(),
-                    ))
-                } else {
-                    let retention = StoreRetention(&self.store);
-                    let ctx = ToolContext {
-                        workspace: &self.workspace,
-                        interactivity: self.config.interactivity,
-                        trusted: self.config.trusted,
-                        retention: Some(&retention),
-                        processes: Some(&self.background),
-                    };
-                    let gates = self.hooks.gates();
-                    tokio::select! {
-                        () = cancel.cancelled() => None,
-                        result = self.tools.dispatch_gated(
-                            &call,
-                            &ctx,
-                            &self.engine,
-                            self.approver.as_ref(),
-                            &gates,
-                        ) => Some(result),
+                // Compose the pre-execution gate chain into one ordered decision
+                // (precedence: broker redirect → precondition block → rule block →
+                // proceed). A refusal short-circuits before any advisory `Warn`, so
+                // the ordering is pinned and tested in `dispatch_gate`, not implicit
+                // here. The gate inputs are read-only; the permission engine runs
+                // only on `Proceed`.
+                let decision = pre_dispatch_decision(
+                    self.broker_reresolution(name),
+                    self.precondition_block(name, input),
+                    self.check_before_launch_verdict(name, input),
+                );
+                let mut launch_warn: Option<String> = None;
+                let result = match decision {
+                    PreDispatch::Redirect(resolution) => {
+                        // The broker narrowed the surface and this tool is not
+                        // advertised (unknown, out-of-working-set, or retired):
+                        // reveal the closest available tool and ask the model to
+                        // retry. The attempted call does not run (reveal-never-grant;
+                        // no resolve-and-run). Surfaced as a non-error redirect.
+                        let _ = events.send(RuntimeEvent::Warning(format!(
+                            "tool `{name}` is not advertised; resolving to the closest available tool"
+                        )));
+                        self.record_resolution(&resolution, "failure_driven");
+                        Some(localpilot_core::ToolResult::success(
+                            ToolUseId::from(id.as_str()),
+                            resolution.message,
+                        ))
+                    }
+                    PreDispatch::Block { reason, announce } => {
+                        // A contract precondition (quiet) or a blocking
+                        // `check_before_launch` severity (announced) refused the call
+                        // before permission. Tighten-only: surface it as an error
+                        // result so the model sees why and can recover.
+                        if announce {
+                            let _ = events.send(RuntimeEvent::Warning(reason.clone()));
+                        }
+                        Some(localpilot_core::ToolResult::error(
+                            ToolUseId::from(id.as_str()),
+                            reason,
+                        ))
+                    }
+                    PreDispatch::Proceed { warn } => {
+                        launch_warn = warn;
+                        let retention = StoreRetention(&self.store);
+                        let ctx = ToolContext {
+                            workspace: &self.workspace,
+                            interactivity: self.config.interactivity,
+                            trusted: self.config.trusted,
+                            retention: Some(&retention),
+                            processes: Some(&self.background),
+                        };
+                        let gates = self.hooks.gates();
+                        tokio::select! {
+                            () = cancel.cancelled() => None,
+                            result = self.tools.dispatch_gated(
+                                &call,
+                                &ctx,
+                                &self.engine,
+                                self.approver.as_ref(),
+                                &gates,
+                            ) => Some(result),
+                        }
                     }
                 };
                 let Some(mut result) = result else {
@@ -1799,8 +1812,8 @@ impl SessionRuntime {
                 // A `Warn` from check-before-launch lets the call run but appends
                 // the nudge to its result so the model reads it and can probe the
                 // named target before launching again. (A `Block` already refused
-                // above and never reaches here as a Warn.)
-                if let Some(RuleVerdict::Warn(message)) = &launch_verdict {
+                // above via the decision and never reaches here as a Warn.)
+                if let Some(message) = &launch_warn {
                     let _ = events.send(RuntimeEvent::Warning(message.clone()));
                     result
                         .output

@@ -61,6 +61,21 @@ per-step → criterion reference tags, and writing lessons back into LocalMind
 memory are explicit non-goals here; each is a separable later decision behind the
 same seam.
 
+**Review-gated bridge — still deferred (2026-06).** `LESSONS.md` is the
+human-editable *mirror*, not a system of record: a retrospective lesson is an
+advisory bullet, never accepted memory. Routing those bullets into LocalMind's
+review-gated queue is intentionally **not** wired yet, and is deferred rather than
+forced because (a) the harness does not depend on the LocalMind adapter, so the
+bridge belongs in the host, and (b) the existing review-gated entry point
+(`write_loop_lesson`/`LoopLesson`) is shaped for *self-improvement patch outcomes*
+— it requires an accepted/rejected `outcome` and a change-provenance reference a
+completion retrospective does not have. A faithful bridge therefore needs a new
+advisory-lesson → review-candidate mapping (its own category, confidence, and
+evidence-kind policy), so auto-enqueuing every bullet does not flood the human
+review queue with low-signal candidates. Design that mapping before the next
+lesson-producing surface lands; until then a lesson stays a `LESSONS.md` mirror
+entry the human curates, never silently-accepted memory.
+
 ## ADR-0034: The Developer-Process Self-Improvement Loop Is Human-Gated By Construction — Read-Only Up To "Propose", Never Self-Merges
 
 Status: accepted. Builds on ADR-0010 (the runtime validates and controls — every
@@ -148,6 +163,18 @@ friction (beyond the audit-prompt friction source), a model-judged eval critic,
 and any move toward reducing the human gate are explicit non-goals here; each
 would need its own decision and, for anything touching the gate, a fresh security
 review against this invariant.
+
+**As shipped (2026-06).** The read-only half (`localpilot-selfreview`: observe →
+detect → propose, advisory findings report) is wired and reachable. The write
+half (`localpilot-patchgen`: worktree proposal + `ApprovalToken`-gated promotion)
+is **built and tested but intentionally staged — not yet wired to any caller**.
+The planned, deferred entry point is a confirm-gated `localpilot self-review
+propose-patch` command that produces a worktree proposal and stops at the
+`ApprovalToken` gate; until it lands, the crate has no autonomous or CLI path that
+constructs a token, so the by-construction invariant holds trivially (no caller =
+no write path). This note exists because the crate's presence alone does not mean
+the propose path is live; wiring waits for the next loop phase and a security
+re-check against this invariant.
 
 ## ADR-0033: External Benchmark Corpora Never Enter The Clean-Room Tree
 
