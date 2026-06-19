@@ -469,6 +469,23 @@ where
                 localpilot_harness::run_and_record(&*provider, model, root).await
             {
                 writeln!(out, "{}", retro.render_summary())?;
+                // Also offer each lesson to LocalMind's review-gated queue, so a
+                // human can promote it to memory instead of it living only in the
+                // human-editable LESSONS.md mirror. Advisory and non-blocking: a
+                // failed enqueue never breaks a finished run (the lesson is still in
+                // LESSONS.md), and a candidate reaches memory only after human review.
+                let mut offered = 0usize;
+                for lesson in &retro.lessons {
+                    if let Ok(Some(_)) = localpilot_localmind::write_retrospective_lesson(
+                        root,
+                        &localpilot_localmind::RetrospectiveLesson::new(lesson.as_str()),
+                    ) {
+                        offered += 1;
+                    }
+                }
+                if offered > 0 {
+                    writeln!(out, "  {offered} lesson(s) offered to LocalMind review")?;
+                }
             }
             break;
         }

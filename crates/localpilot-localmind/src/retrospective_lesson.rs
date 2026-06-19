@@ -188,4 +188,21 @@ mod tests {
         let memory_id = promote(root, &item.id).unwrap();
         assert!(!memory_id.is_empty(), "only a human promotion reaches memory");
     }
+
+    #[test]
+    fn a_failing_store_returns_err_not_a_panic() {
+        // The host wire is advisory (`if let Ok(Some(_))`): it swallows the result so a
+        // finished run is never broken by a review enqueue. That is only safe if a
+        // failure surfaces as Err, never a panic — pin that here with a non-directory
+        // root (store init/open must fail cleanly).
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let result = write_retrospective_lesson(
+            file.path(),
+            &RetrospectiveLesson::new("a lesson that cannot be stored"),
+        );
+        assert!(
+            result.is_err(),
+            "a non-directory root must Err cleanly, not panic: {result:?}"
+        );
+    }
 }
