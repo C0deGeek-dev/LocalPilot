@@ -168,6 +168,18 @@ pub struct ActiveTool {
     pub name: String,
 }
 
+/// A background process started this session (via `run_background`), surfaced in
+/// the status line and the `/bg` command. The host pushes the current set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundProcess {
+    /// The id the host uses to stop it (e.g. "bg-1").
+    pub id: String,
+    /// The command line that was started.
+    pub command: String,
+    /// Whether the process is still running.
+    pub alive: bool,
+}
+
 /// The full UI state.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -207,6 +219,9 @@ pub struct AppState {
     pub plan: Vec<PlanItem>,
     /// Tools currently running, shown as transient live indicators.
     pub active_tools: Vec<ActiveTool>,
+    /// Background processes started this session, shown in the status line and
+    /// listed by `/bg`. The host refreshes this set.
+    pub background: Vec<BackgroundProcess>,
     pub should_quit: bool,
     /// Whether a turn is in flight (drives the working indicator).
     pub busy: bool,
@@ -243,6 +258,7 @@ impl AppState {
             workspace_files: Vec::new(),
             plan: Vec::new(),
             active_tools: Vec::new(),
+            background: Vec::new(),
             should_quit: false,
             busy: false,
             spinner: 0,
@@ -540,6 +556,7 @@ impl AppState {
         ("ingest", "Manage workspace ingestion"),
         ("knowledge", "Query the knowledge base"),
         ("context", "Build a context bundle"),
+        ("bg", "List background processes (/bg stop <id>|all)"),
         ("quit", "Exit LocalPilot"),
     ];
 
@@ -870,6 +887,7 @@ impl AppState {
             UiEvent::ToggleMemoryPanel => {
                 self.memory_panel.visible = !self.memory_panel.visible;
             }
+            UiEvent::BackgroundProcesses(processes) => self.background = processes,
             UiEvent::Quit => self.should_quit = true,
         }
     }
@@ -940,6 +958,8 @@ pub enum UiEvent {
     ShowMemoryPanel(String),
     /// Toggle the inspector panel's visibility.
     ToggleMemoryPanel,
+    /// Replace the set of background processes shown in the status line.
+    BackgroundProcesses(Vec<BackgroundProcess>),
     Quit,
 }
 
@@ -1098,6 +1118,22 @@ mod tests {
         s.open_file_picker();
         let picker = s.file_picker.as_ref().expect("picker open");
         assert_eq!(picker.items.len(), 5);
+    }
+
+    #[test]
+    fn the_background_event_replaces_the_tracked_set() {
+        let mut s = state();
+        s.apply(UiEvent::BackgroundProcesses(vec![BackgroundProcess {
+            id: "bg-1".to_string(),
+            command: "npm run dev".to_string(),
+            alive: true,
+        }]));
+        assert_eq!(s.background.len(), 1);
+        assert_eq!(s.background[0].id, "bg-1");
+
+        // A later push replaces the set rather than appending.
+        s.apply(UiEvent::BackgroundProcesses(Vec::new()));
+        assert!(s.background.is_empty());
     }
 
     #[test]

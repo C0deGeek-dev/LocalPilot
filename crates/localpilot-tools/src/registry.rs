@@ -12,6 +12,7 @@ use crate::builtins::{
     GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile, SearchText,
     UpdatePlan, WriteFile,
 };
+use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
 use crate::catalog::{Catalog, ToolSource};
 use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
@@ -57,6 +58,7 @@ impl ToolRegistry {
         registry.register(Box::new(SearchText));
         registry.register(Box::new(ApplyPatch));
         registry.register(Box::new(RunShell));
+        registry.register(Box::new(RunBackground));
         registry.register(Box::new(Fetch));
         registry.register(Box::new(ReadToolOutput));
         registry.register(Box::new(GitStatus));

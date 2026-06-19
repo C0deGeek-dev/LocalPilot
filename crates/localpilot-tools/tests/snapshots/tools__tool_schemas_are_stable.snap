@@ -441,6 +441,100 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
     }
   ],
   [
+    "run_background",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "BackgroundAction": {
+          "oneOf": [
+            {
+              "description": "Start a long-running command as a background process (the default).",
+              "enum": [
+                "start"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "List the tracked background processes.",
+              "enum": [
+                "list"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Read the captured output of a tracked process by `id`.",
+              "enum": [
+                "logs"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Stop and forget a tracked process by `id`.",
+              "enum": [
+                "stop"
+              ],
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "action": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BackgroundAction"
+            }
+          ],
+          "description": "What to do. Defaults to starting a process."
+        },
+        "args": {
+          "default": [],
+          "description": "For `start`: arguments passed to `program` for direct execution.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "default": null,
+          "description": "For `start`: a shell command line to run in the background.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grace_secs": {
+          "default": null,
+          "description": "For `start`: seconds to wait before judging the process stayed up. Defaults to 2.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "default": null,
+          "description": "For `logs`/`stop`: the id of the tracked process (as returned by `start`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "program": {
+          "default": null,
+          "description": "For `start`: a program to run directly when `args` is provided; otherwise treated as a shell command line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RunBackgroundInput",
+      "type": "object"
+    }
+  ],
+  [
     "fetch",
     {
       "$schema": "http://json-schema.org/draft-07/schema#",

@@ -9,6 +9,7 @@
 
 mod broker;
 mod builtins;
+mod builtins_background;
 mod builtins_shell;
 mod catalog;
 mod contract;
@@ -24,6 +25,7 @@ pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
     ReplaceInFile, SearchText, WriteFile,
 };
+pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
 pub use builtins_shell::RunShell;
 pub use catalog::{
     fingerprint, Catalog, CatalogDelta, CatalogEntry, DeprecationOverlay, ToolSource,

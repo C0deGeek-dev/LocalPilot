@@ -309,6 +309,7 @@ mod tests {
             interactivity: Interactivity::NonInteractive,
             trusted,
             retention: None,
+            processes: None,
         }
     }
 

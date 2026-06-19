@@ -15,6 +15,10 @@ pub struct ToolContext<'a> {
     /// pass to `read_tool_output`. `None` disables spilling (output is capped
     /// only).
     pub retention: Option<&'a dyn OutputRetention>,
+    /// The session-scoped registry of background processes that `run_background`
+    /// starts and manages. `None` disables background processes (the host wired
+    /// no registry), and `run_background` reports them as unavailable.
+    pub processes: Option<&'a crate::builtins_background::BackgroundProcesses>,
 }
 
 /// A tighten-only gate consulted after the permission engine for every tool

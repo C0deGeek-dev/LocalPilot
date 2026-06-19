@@ -27,8 +27,8 @@ use localpilot_sandbox::{
 use localpilot_store::Store;
 use localpilot_tui::{
     banner_text, handle_input, history_block_text, parse_slash, render, AppInput, AppState,
-    ApprovalRequest, Header, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
-    TrustPrompt, UiEvent,
+    ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, IngestAction, Key, Mode,
+    PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::text::Text;
@@ -377,7 +377,7 @@ async fn submit_current_input(
     if prompt.trim().is_empty() {
         return Ok(());
     }
-    if let Some(action) = parse_slash(&prompt) {
+    let result = if let Some(action) = parse_slash(&prompt) {
         run_slash(terminal, state, runtime, approval_rx, host, action).await
     } else {
         state.apply(UiEvent::UserMessage(shown));
@@ -387,7 +387,11 @@ async fn submit_current_input(
         // The turn may have created or removed files; refresh the @-mention list.
         state.set_workspace_files(workspace_files(host.cwd));
         outcome
-    }
+    };
+    // A turn may have started a background process and a `/bg`/`/new` may have
+    // changed the set; keep the status-line indicator current either way.
+    refresh_background(state, runtime);
+    result
 }
 
 async fn run_slash(
@@ -548,6 +552,7 @@ async fn run_slash(
             let result = crate::ingest_cmd::knowledge_pack(host.cwd, &task, &mut output);
             apply_command_result(state, output, result);
         }
+        SlashAction::Background(command) => apply_background_command(state, runtime, command),
         SlashAction::Quit => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
@@ -559,6 +564,63 @@ async fn run_slash(
         }
     }
     Ok(())
+}
+
+/// List or stop the session's background processes, posting the result as
+/// notices. Stopping is synchronous, so it runs directly off the input loop.
+fn apply_background_command(
+    state: &mut AppState,
+    runtime: &SessionRuntime,
+    command: BackgroundCommand,
+) {
+    match command {
+        BackgroundCommand::List => {
+            let processes = runtime.background_processes();
+            if processes.is_empty() {
+                state.apply(UiEvent::Notice("no background processes".to_string()));
+            } else {
+                state.apply(UiEvent::Notice(
+                    "background processes (stop with /bg stop <id> or /bg stop all):".to_string(),
+                ));
+                for process in processes {
+                    let status = if process.alive { "running" } else { "exited" };
+                    state.apply(UiEvent::Notice(format!(
+                        "  {} [{}] {}s · {}",
+                        process.id, status, process.age_secs, process.command
+                    )));
+                }
+            }
+        }
+        BackgroundCommand::Stop(id) => {
+            if runtime.stop_background_process(&id) {
+                state.apply(UiEvent::Notice(format!("stopped background process {id}")));
+            } else {
+                state.apply(UiEvent::Notice(format!("no background process {id}")));
+            }
+        }
+        BackgroundCommand::StopAll => {
+            let count = runtime.background_processes().len();
+            runtime.stop_all_background_processes();
+            state.apply(UiEvent::Notice(format!(
+                "stopped {count} background process(es)"
+            )));
+        }
+    }
+}
+
+/// Push the current background-process set into the UI so the status-line
+/// indicator and `/bg` listing stay in sync after a turn or a `/bg` command.
+fn refresh_background(state: &mut AppState, runtime: &SessionRuntime) {
+    let processes = runtime
+        .background_processes()
+        .into_iter()
+        .map(|process| BackgroundProcess {
+            id: process.id,
+            command: process.command,
+            alive: process.alive,
+        })
+        .collect();
+    state.apply(UiEvent::BackgroundProcesses(processes));
 }
 
 fn continue_session(state: &mut AppState, runtime: &mut SessionRuntime, id: Option<&str>) {

@@ -347,7 +347,7 @@ fn is_network_package_op(stem: &str, args: &[String]) -> bool {
     ];
     match stem {
         "apt" | "apt-get" | "yum" | "dnf" | "pacman" | "brew" | "pip" | "pip3" | "npm" | "pnpm"
-        | "yarn" | "gem" | "go" => any_arg(args, &installs),
+        | "yarn" | "bun" | "deno" | "gem" | "go" => any_arg(args, &installs),
         "cargo" => any_arg(args, &["install", "add", "publish", "update"]),
         _ => false,
     }
@@ -411,6 +411,8 @@ fn is_project_write_program(stem: &str) -> bool {
             | "npm"
             | "pnpm"
             | "yarn"
+            | "bun"
+            | "deno"
             | "cmake"
             | "ninja"
             | "rustc"
@@ -487,6 +489,27 @@ mod tests {
         assert_eq!(
             classify_posix("totally-unknown-cmd", &argv(&[])),
             CommandClass::Unknown
+        );
+    }
+
+    #[test]
+    fn bun_and_deno_are_recognized_runtimes() {
+        // A run/task is a project build step; an install reaches the network.
+        assert_eq!(
+            classify_posix("bun", &argv(&["run", "build"])),
+            CommandClass::ProjectWrite
+        );
+        assert_eq!(
+            classify_posix("deno", &argv(&["task", "build"])),
+            CommandClass::ProjectWrite
+        );
+        assert_eq!(
+            classify_posix("bun", &argv(&["install"])),
+            CommandClass::Network
+        );
+        assert_eq!(
+            classify_posix("deno", &argv(&["add", "npm:left-pad"])),
+            CommandClass::Network
         );
     }
 

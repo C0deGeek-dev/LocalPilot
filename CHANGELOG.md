@@ -5,6 +5,17 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Background processes.** A new `run_background` tool runs a long-running
+  command — a dev server like `npm run dev` or `bun run index.ts`, or a watcher —
+  detached from the turn: it confirms the process stayed up past a short grace
+  period, captures its startup output, and tracks it so later turns can `list`,
+  read `logs`, or `stop` it. The registry is session-scoped and in-memory; every
+  child is killed when the session closes (no cross-invocation daemons).
+  `run_shell` now recognizes a dev-server/watcher command and points at
+  `run_background` instead of blocking until its timeout, and `bun`/`deno` are
+  recognized by the command classifier. The interactive UI pins a running-process
+  indicator to the bottom-right status corner, and a new `/bg` command lists them
+  (`/bg`), stops one (`/bg stop <id>`), or stops all (`/bg stop all`).
 - **Capability scorecard.** The golden-task evals now emit a machine-readable
   JSON scorecard per task run, widening the previous pass/fail line into three
   measured layers — `results` (pass/fail, regression-safety, partial credit),

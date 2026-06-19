@@ -1095,6 +1095,7 @@ mod tests {
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             retention: None,
+            processes: None,
         };
         let read = vec![Effect::ReadPath {
             inside_workspace: true,
@@ -1139,6 +1140,7 @@ mod tests {
             interactivity: Interactivity::Interactive,
             trusted: false,
             retention: None,
+            processes: None,
         };
         let call = ToolCall::new(
             ToolUseId::from("c1"),

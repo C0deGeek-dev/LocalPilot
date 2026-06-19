@@ -149,6 +149,35 @@ Rules:
 - set timeout
 - capture stdout/stderr separately
 - never chain destructive commands generated from untrusted path lists
+- a recognized long-running command (dev server or watcher — `npm run dev`,
+  `bun serve`, `vite`, `*--watch*`, …) is not run here: it would only block until
+  the timeout. The tool returns a hint to use `run_background` instead, and the
+  timeout message carries the same hint for the ambiguous cases.
+
+### `run_background`
+
+Starts a long-running command (a dev server like `npm run dev` or `bun run
+index.ts`, or a watcher) as a background process, then manages it. One tool with
+an `action`:
+
+- `start` (default) — spawn the command detached from the turn, draining its
+  stdout/stderr into a capped rolling log. Wait a short grace period
+  (`grace_secs`, default 2); if the process is still alive it is tracked under an
+  id and the id plus startup output are returned, otherwise it is reported as
+  having failed to stay up (with its exit code and output) and is not tracked.
+- `list` — the tracked processes (id, running/exited, age, command line).
+- `logs` — the captured output of a tracked process by `id`.
+- `stop` — terminate and forget a tracked process by `id`.
+
+Rules:
+
+- a `start` is classified, permission-checked, and captured exactly like
+  `run_shell`; `list`/`logs`/`stop` only manage already-approved processes and
+  carry no external effect.
+- the registry is **session-scoped and in-memory**: every child is started with
+  `kill_on_drop`, and the session terminates all of them on close (and when a new
+  session starts). No background process outlives the session — there are no
+  cross-invocation daemons.
 
 ### quality-gate checks
 

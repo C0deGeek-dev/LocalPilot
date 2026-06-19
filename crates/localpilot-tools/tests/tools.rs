@@ -32,6 +32,7 @@ fn ctx(ws: &Workspace, interactivity: Interactivity, trusted: bool) -> ToolConte
         interactivity,
         trusted,
         retention: None,
+        processes: None,
     }
 }
 
@@ -93,7 +94,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 19);
+    assert_eq!(registry.names().len(), 20);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -893,6 +894,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
         interactivity: Interactivity::Interactive,
         trusted: true,
         retention: Some(&retention),
+        processes: None,
     };
 
     let result = dispatch(

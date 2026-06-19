@@ -71,12 +71,25 @@ pub enum SlashAction {
     Ingest(IngestAction),
     Knowledge(String),
     ContextBuild(String),
+    /// Manage background processes started this session.
+    Background(BackgroundCommand),
     Quit,
     Invalid {
         command: String,
         reason: String,
     },
     Unknown(String),
+}
+
+/// Parsed `/bg` subcommands for managing background processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundCommand {
+    /// List the running background processes.
+    List,
+    /// Stop a single process by id.
+    Stop(String),
+    /// Stop every background process.
+    StopAll,
 }
 
 /// Parsed ingestion slash subcommands.
@@ -156,6 +169,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
             reason: "usage: /knowledge <query>".to_string(),
         },
         _ if name == "context" => parse_context(args),
+        _ if name == "bg" => parse_bg(args),
         _ if matches!(name, "quit" | "q") && args.is_empty() => SlashAction::Quit,
         _ if matches!(
             name,
@@ -217,6 +231,26 @@ fn parse_ingest(args: &str) -> SlashAction {
         _ => SlashAction::Invalid {
             command: "ingest".to_string(),
             reason: "usage: /ingest [preview|status|pause|resume|cancel|refresh|rebuild|skipped|include <path>|exclude <path>|forget <path-or-id>|review|promote <id>]".to_string(),
+        },
+    }
+}
+
+fn parse_bg(args: &str) -> SlashAction {
+    if args.is_empty() {
+        return SlashAction::Background(BackgroundCommand::List);
+    }
+    let (subcommand, rest) = args
+        .split_once(char::is_whitespace)
+        .map_or((args, ""), |(name, rest)| (name, rest.trim()));
+    match subcommand {
+        "list" if rest.is_empty() => SlashAction::Background(BackgroundCommand::List),
+        "stop" if rest == "all" => SlashAction::Background(BackgroundCommand::StopAll),
+        "stop" if !rest.is_empty() => {
+            SlashAction::Background(BackgroundCommand::Stop(rest.to_string()))
+        }
+        _ => SlashAction::Invalid {
+            command: "bg".to_string(),
+            reason: "usage: /bg [list | stop <id> | stop all]".to_string(),
         },
     }
 }
@@ -406,6 +440,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         )),
         SlashAction::ContextBuild(_) => state.apply(UiEvent::Notice(
             "/context is handled by the interactive host".to_string(),
+        )),
+        SlashAction::Background(_) => state.apply(UiEvent::Notice(
+            "/bg is handled by the interactive host".to_string(),
         )),
         SlashAction::Quit => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
@@ -601,6 +638,32 @@ mod tests {
                 "item-1".to_string()
             )))
         );
+    }
+
+    #[test]
+    fn bg_slash_commands_are_parsed() {
+        assert_eq!(
+            parse_slash("/bg"),
+            Some(SlashAction::Background(BackgroundCommand::List))
+        );
+        assert_eq!(
+            parse_slash("/bg list"),
+            Some(SlashAction::Background(BackgroundCommand::List))
+        );
+        assert_eq!(
+            parse_slash("/bg stop bg-1"),
+            Some(SlashAction::Background(BackgroundCommand::Stop(
+                "bg-1".to_string()
+            )))
+        );
+        assert_eq!(
+            parse_slash("/bg stop all"),
+            Some(SlashAction::Background(BackgroundCommand::StopAll))
+        );
+        assert!(matches!(
+            parse_slash("/bg frobnicate"),
+            Some(SlashAction::Invalid { command, .. }) if command == "bg"
+        ));
     }
 
     #[test]

@@ -39,7 +39,7 @@ struct RunShellInput {
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-enum RunShellExecution {
+pub(crate) enum RunShellExecution {
     Direct { program: String, args: Vec<String> },
     Shell { command: String },
 }
@@ -49,21 +49,26 @@ struct NormalizedRunShellInput {
     timeout_secs: Option<u64>,
 }
 
-fn normalize_run_shell_input(input: RunShellInput) -> Result<NormalizedRunShellInput, ToolError> {
-    if let Some(command) = input.command {
+/// Resolve the `command` / `program` + `args` fields shared by `run_shell` and
+/// `run_background` into a single execution: a `command` (or a bare `program`
+/// with no args) runs through the platform shell; a `program` with `args` runs
+/// directly. Returns [`ToolError::InvalidInput`] when neither is usable.
+pub(crate) fn normalize_execution(
+    command: Option<String>,
+    program: Option<String>,
+    args: Vec<String>,
+) -> Result<RunShellExecution, ToolError> {
+    if let Some(command) = command {
         let command = command.trim().to_string();
         if command.is_empty() {
             return Err(ToolError::InvalidInput(
                 "command must not be empty".to_string(),
             ));
         }
-        return Ok(NormalizedRunShellInput {
-            execution: RunShellExecution::Shell { command },
-            timeout_secs: input.timeout_secs,
-        });
+        return Ok(RunShellExecution::Shell { command });
     }
 
-    let Some(program) = input.program else {
+    let Some(program) = program else {
         return Err(ToolError::InvalidInput(
             "expected `command` or `program`".to_string(),
         ));
@@ -75,23 +80,21 @@ fn normalize_run_shell_input(input: RunShellInput) -> Result<NormalizedRunShellI
         ));
     }
 
-    if input.args.is_empty() {
-        return Ok(NormalizedRunShellInput {
-            execution: RunShellExecution::Shell { command: program },
-            timeout_secs: input.timeout_secs,
-        });
+    if args.is_empty() {
+        return Ok(RunShellExecution::Shell { command: program });
     }
 
+    Ok(RunShellExecution::Direct { program, args })
+}
+
+fn normalize_run_shell_input(input: RunShellInput) -> Result<NormalizedRunShellInput, ToolError> {
     Ok(NormalizedRunShellInput {
-        execution: RunShellExecution::Direct {
-            program,
-            args: input.args,
-        },
+        execution: normalize_execution(input.command, input.program, input.args)?,
         timeout_secs: input.timeout_secs,
     })
 }
 
-fn split_command_line(command: &str) -> Result<Vec<String>, ToolError> {
+pub(crate) fn split_command_line(command: &str) -> Result<Vec<String>, ToolError> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -128,14 +131,14 @@ fn command_text(program: &str, args: &[String]) -> String {
     }
 }
 
-fn execution_text(execution: &RunShellExecution) -> String {
+pub(crate) fn execution_text(execution: &RunShellExecution) -> String {
     match execution {
         RunShellExecution::Direct { program, args } => command_text(program, args),
         RunShellExecution::Shell { command } => command.clone(),
     }
 }
 
-fn execution_class(execution: &RunShellExecution) -> Result<CommandClass, ToolError> {
+pub(crate) fn execution_class(execution: &RunShellExecution) -> Result<CommandClass, ToolError> {
     match execution {
         RunShellExecution::Direct { program, args } => Ok(classify(program, args)),
         RunShellExecution::Shell { command } => classify_shell_command(command),
@@ -209,7 +212,7 @@ fn command_output(code: i32, stdout: &str, stderr: &str) -> String {
 
 /// Render a captured stream as text, substituting a placeholder when the bytes
 /// look binary so raw control bytes never reach the model context.
-fn render_stream(bytes: &[u8]) -> String {
+pub(crate) fn render_stream(bytes: &[u8]) -> String {
     if looks_binary(bytes) {
         binary_placeholder(bytes.len())
     } else {
@@ -217,7 +220,7 @@ fn render_stream(bytes: &[u8]) -> String {
     }
 }
 
-fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
+pub(crate) fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
         (
@@ -235,6 +238,97 @@ fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         (shell, vec!["-lc".to_string(), command.to_string()])
     }
+}
+
+/// Program basenames that are long-running servers/watchers whenever they lead a
+/// command, regardless of arguments (`nodemon app.js`, `serve ./dist`).
+const ALWAYS_SERVER_PROGRAMS: &[&str] =
+    &["nodemon", "caddy", "serve", "http-server", "live-server"];
+
+/// Dev tools that are long-running only for their server subcommands — they also
+/// have one-shot subcommands (`vite build`, `next build`) that must not match.
+const DEV_TOOL_PROGRAMS: &[&str] = &["vite", "next", "nuxt"];
+
+/// Package managers and runtimes whose `dev`/`start`/`serve`/`watch` script (or
+/// `run`/`task` script of that name) starts a long-running process.
+const PACKAGE_LAUNCHERS: &[&str] = &[
+    "npm", "pnpm", "yarn", "bun", "deno", "npx", "pnpx", "bunx", "node",
+];
+
+/// Script/subcommand names that denote a long-running process.
+const LONG_RUNNING_SCRIPTS: &[&str] = &["dev", "start", "serve", "watch"];
+
+/// The basename of `program`, lowercased and stripped of a Windows launcher
+/// extension, so `C:\\tools\\bun.exe` and `bun` compare equal.
+fn program_stem(program: &str) -> String {
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".cmd"))
+        .or_else(|| base.strip_suffix(".bat"))
+        .unwrap_or(base);
+    base.to_lowercase()
+}
+
+/// The lowercased program-and-argument tokens of an execution.
+fn execution_tokens(execution: &RunShellExecution) -> Vec<String> {
+    let raw = match execution {
+        RunShellExecution::Direct { program, args } => {
+            let mut v = Vec::with_capacity(args.len() + 1);
+            v.push(program.clone());
+            v.extend(args.iter().cloned());
+            v
+        }
+        RunShellExecution::Shell { command } => split_command_line(command).unwrap_or_default(),
+    };
+    raw.into_iter().map(|t| t.to_lowercase()).collect()
+}
+
+/// Whether an execution looks like a long-running server or watcher — a command
+/// that does not exit on its own and so belongs in `run_background` rather than
+/// `run_shell`. Deliberately conservative: it recognizes clear dev-server and
+/// watch launchers and leaves ambiguous cases (e.g. `bun run index.ts`) to the
+/// `run_shell` timeout path, so a short command is never wrongly diverted.
+pub(crate) fn looks_long_running(execution: &RunShellExecution) -> bool {
+    let tokens = execution_tokens(execution);
+    let Some((first, rest)) = tokens.split_first() else {
+        return false;
+    };
+    let stem = program_stem(first);
+
+    // A persistent `--watch` flag anywhere keeps any of these commands alive.
+    if rest.iter().any(|t| t == "--watch" || t == "-w") {
+        return true;
+    }
+
+    // An always-server launcher leading the command.
+    if ALWAYS_SERVER_PROGRAMS.contains(&stem.as_str()) {
+        return true;
+    }
+
+    // The first non-flag argument after the launcher: the script or subcommand.
+    // `run`/`task` indirection (`npm run dev`, `deno task dev`) is unwrapped to
+    // the script name that follows.
+    let non_flags: Vec<&str> = rest
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.starts_with('-'))
+        .collect();
+    let script = match non_flags.first() {
+        Some(&("run" | "task")) => non_flags.get(1).copied(),
+        other => other.copied(),
+    };
+
+    if DEV_TOOL_PROGRAMS.contains(&stem.as_str()) {
+        // `vite` / `next` / `nuxt`: a server subcommand, or bare (defaults to dev).
+        return script.is_none_or(|s| LONG_RUNNING_SCRIPTS.contains(&s));
+    }
+
+    if PACKAGE_LAUNCHERS.contains(&stem.as_str()) {
+        return script.is_some_and(|s| LONG_RUNNING_SCRIPTS.contains(&s));
+    }
+
+    false
 }
 
 pub struct RunShell;
@@ -303,6 +397,20 @@ impl Tool for RunShell {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: RunShellInput = parse_input(&input)?;
         let input = normalize_run_shell_input(input)?;
+
+        // A recognized dev-server or watcher never exits, so running it here
+        // would only block until the timeout and then kill it. Point the model at
+        // `run_background` instead of waiting. Ambiguous commands are not diverted
+        // here — the timeout path below carries the same hint if they hang.
+        if looks_long_running(&input.execution) {
+            let detail = execution_text(&input.execution);
+            return Ok(ToolOutput::ok(format!(
+                "`{detail}` looks like a long-running server or watcher, which would \
+                 block this call until it timed out. Start it with the `run_background` \
+                 tool instead; then use `run_background` again to read its logs or stop it."
+            )));
+        }
+
         let timeout = Duration::from_secs(input.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
         let (program, args) = match input.execution {
@@ -326,7 +434,8 @@ impl Tool for RunShell {
             Ok(Err(e)) => return Err(ToolError::Failed(e.to_string())),
             Err(_) => {
                 return Err(ToolError::Failed(format!(
-                    "command timed out after {}s",
+                    "command timed out after {}s. If this is a long-running server or \
+                     watcher, start it with the `run_background` tool instead.",
                     timeout.as_secs()
                 )))
             }
@@ -356,6 +465,7 @@ mod tests {
             interactivity: Interactivity::Interactive,
             trusted: true,
             retention: None,
+            processes: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
     }
@@ -419,5 +529,65 @@ mod tests {
         assert!(!reads_outside_workspace(&effects));
         // Only the RunCommand effect — no added prompt for a routine read.
         assert_eq!(effects.len(), 1);
+    }
+
+    fn long_running(command: &str) -> bool {
+        looks_long_running(&RunShellExecution::Shell {
+            command: command.to_string(),
+        })
+    }
+
+    #[test]
+    fn dev_servers_and_watchers_are_recognized_as_long_running() {
+        for command in [
+            "npm run dev",
+            "pnpm dev",
+            "yarn start",
+            "npm run start",
+            "bun serve",
+            "bun dev",
+            "bun run dev",
+            "deno task dev",
+            "vite",
+            "next dev",
+            "nuxt dev",
+            "nodemon app.js",
+            "serve ./dist",
+            "jest --watch",
+        ] {
+            assert!(long_running(command), "`{command}` should be long-running");
+        }
+    }
+
+    #[test]
+    fn one_shot_commands_are_not_recognized_as_long_running() {
+        for command in [
+            "npm run build",
+            "npm install",
+            "bun run index.ts",
+            "vite build",
+            "next build",
+            "ls -la",
+            "cargo test",
+            "echo hello",
+            "git status",
+        ] {
+            assert!(
+                !long_running(command),
+                "`{command}` should not be diverted to run_background"
+            );
+        }
+    }
+
+    #[test]
+    fn recognition_handles_direct_program_form_and_windows_extensions() {
+        assert!(looks_long_running(&RunShellExecution::Direct {
+            program: "npm".to_string(),
+            args: vec!["run".to_string(), "dev".to_string()],
+        }));
+        assert!(looks_long_running(&RunShellExecution::Direct {
+            program: "C:\\tools\\bun.exe".to_string(),
+            args: vec!["serve".to_string()],
+        }));
     }
 }

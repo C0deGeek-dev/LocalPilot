@@ -8,15 +8,15 @@
 //! surface [`render`] redraws each frame, sized by [`live_region_height`] so its
 //! content never clips. Nothing floats: there are no centered modals.
 
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::state::{
-    AppState, ApprovalRequest, FilePicker, Header, MemoryPanel, Profile, SlashPicker,
-    TranscriptLine, TrustPrompt,
+    AppState, ApprovalRequest, BackgroundProcess, FilePicker, Header, MemoryPanel, Profile,
+    SlashPicker, TranscriptLine, TrustPrompt,
 };
 
 /// Most text rows the input box grows to before it starts scrolling.
@@ -619,6 +619,54 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
         ])),
         area,
     );
+
+    // Background processes are pinned to the bottom-right corner so a running
+    // dev server stays visible at a glance, separate from the per-turn stats.
+    render_background_indicator(frame, area, state);
+}
+
+/// Render a right-aligned background-process indicator on the bottom status row:
+/// the command when a single one runs, otherwise a running count. Hidden when
+/// nothing is running.
+fn render_background_indicator(frame: &mut Frame, area: Rect, state: &AppState) {
+    if area.height < STATUS_ROWS {
+        return;
+    }
+    let running: Vec<&BackgroundProcess> = state.background.iter().filter(|p| p.alive).collect();
+    if running.is_empty() {
+        return;
+    }
+    let label = if running.len() == 1 {
+        format!("▶ {}", truncate_end(&running[0].command, 32))
+    } else {
+        format!("▶ {} background procs", running.len())
+    };
+    let bottom = Rect {
+        x: area.x,
+        y: area.y + STATUS_ROWS - 1,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Right),
+        bottom,
+    );
+}
+
+/// Truncate `text` to `max` characters, appending an ellipsis when shortened.
+fn truncate_end(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -828,6 +876,52 @@ mod tests {
             name: "run_shell".to_string(),
         });
         assert!(render_natural(&state, 60).contains("run_shell running"));
+    }
+
+    #[test]
+    fn a_running_background_process_shows_in_the_status_corner() {
+        use crate::state::BackgroundProcess;
+        let mut state = state_with_input("");
+        state.background = vec![BackgroundProcess {
+            id: "bg-1".to_string(),
+            command: "npm run dev".to_string(),
+            alive: true,
+        }];
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("npm run dev"), "{rendered}");
+    }
+
+    #[test]
+    fn an_exited_background_process_is_not_shown_in_the_corner() {
+        use crate::state::BackgroundProcess;
+        let mut state = state_with_input("");
+        state.background = vec![BackgroundProcess {
+            id: "bg-1".to_string(),
+            command: "npm run dev".to_string(),
+            alive: false,
+        }];
+        let rendered = render_natural(&state, 70);
+        assert!(!rendered.contains("npm run dev"), "{rendered}");
+    }
+
+    #[test]
+    fn multiple_background_processes_collapse_to_a_count() {
+        use crate::state::BackgroundProcess;
+        let mut state = state_with_input("");
+        state.background = vec![
+            BackgroundProcess {
+                id: "bg-1".to_string(),
+                command: "npm run dev".to_string(),
+                alive: true,
+            },
+            BackgroundProcess {
+                id: "bg-2".to_string(),
+                command: "bun serve".to_string(),
+                alive: true,
+            },
+        ];
+        let rendered = render_natural(&state, 70);
+        assert!(rendered.contains("2 background procs"), "{rendered}");
     }
 
     #[test]

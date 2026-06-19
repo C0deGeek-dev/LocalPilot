@@ -128,6 +128,7 @@ mod tests {
             interactivity: Interactivity::NonInteractive,
             trusted: true,
             retention: None,
+            processes: None,
         }
     }
 

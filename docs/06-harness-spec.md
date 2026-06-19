@@ -531,6 +531,21 @@ For each step:
    record the replan in `DECISIONS.md`.
 6. Cap replans to avoid runaway automation.
 
+## Background Processes
+
+A long-running command (a dev server or watcher) does not exit, so `run_shell`
+would only block until its timeout. The `run_background` tool
+([`docs/05`](05-tool-system.md)) instead starts such a command detached from the
+turn, confirms it stayed up past a short grace period, captures its startup
+output, and tracks it so later turns can list it, read its logs, or stop it.
+
+The registry of running processes is **session-scoped and in-memory**: it lives
+on the session runtime, every child is started with `kill_on_drop`, and the
+session terminates all of them when it closes or a new session starts. No
+background process survives the session, so there are no orphaned daemons across
+invocations. `run_shell` recognizes a dev-server/watcher command and points the
+model at `run_background` rather than hanging.
+
 ## Commit Policy
 
 Default:

@@ -422,6 +422,10 @@ pub struct SessionRuntime {
     /// full registry every turn (today's behaviour, the rollback path). When set,
     /// the per-turn tool specs are narrowed to the broker's working set.
     broker: Option<Broker>,
+    /// Long-running processes started by `run_background` this session. In-memory
+    /// and session-scoped: every child is killed when the session closes (or this
+    /// runtime drops), so no background server outlives the session.
+    background: localpilot_tools::BackgroundProcesses,
 }
 
 impl SessionRuntime {
@@ -471,6 +475,7 @@ impl SessionRuntime {
             rule_engine,
             named_targets: Vec::new(),
             broker: None,
+            background: localpilot_tools::BackgroundProcesses::new(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -665,6 +670,7 @@ impl SessionRuntime {
 
     /// Record that this session is closing.
     pub fn close(&mut self) {
+        self.background.kill_all();
         self.persist_graduation();
         self.record_event(SessionEventKind::SessionClosed);
     }
@@ -672,6 +678,8 @@ impl SessionRuntime {
     /// Start a fresh session: a new id, a clean conversation (the setup
     /// system prompt is kept), and a new durable event chain.
     pub fn start_new_session(&mut self) {
+        // A fresh session must not inherit the previous one's running servers.
+        self.background.kill_all();
         self.clear_conversation();
         self.session_id = SessionId::new();
         self.last_event = None;
@@ -772,6 +780,7 @@ impl SessionRuntime {
             interactivity: self.config.interactivity,
             trusted: self.config.trusted,
             retention: Some(&retention),
+            processes: Some(&self.background),
         };
         let result = self
             .tools
@@ -879,6 +888,23 @@ impl SessionRuntime {
     #[must_use]
     pub fn steer_queue(&self) -> SteerQueue {
         self.steer.clone()
+    }
+
+    /// A snapshot of the background processes started this session (via
+    /// `run_background`), for the UI to display and manage. Sorted by id.
+    #[must_use]
+    pub fn background_processes(&self) -> Vec<localpilot_tools::ProcStatus> {
+        self.background.list()
+    }
+
+    /// Stop and forget the background process `id`, returning whether it existed.
+    pub fn stop_background_process(&self, id: &str) -> bool {
+        self.background.stop_now(id)
+    }
+
+    /// Stop and forget every background process started this session.
+    pub fn stop_all_background_processes(&self) {
+        self.background.kill_all();
     }
 
     /// The hook fabric, for registering observers, context hooks, and tool
@@ -1725,6 +1751,7 @@ impl SessionRuntime {
                         interactivity: self.config.interactivity,
                         trusted: self.config.trusted,
                         retention: Some(&retention),
+                        processes: Some(&self.background),
                     };
                     let gates = self.hooks.gates();
                     tokio::select! {
