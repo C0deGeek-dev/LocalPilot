@@ -1256,6 +1256,7 @@ dependencies = [
  "localpilot-recovery",
  "localpilot-rpc",
  "localpilot-sandbox",
+ "localpilot-selfreview",
  "localpilot-skills",
  "localpilot-store",
  "localpilot-tools",
@@ -1431,6 +1432,17 @@ dependencies = [
  "proptest",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "localpilot-selfreview"
+version = "0.3.0-beta.3"
+dependencies = [
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

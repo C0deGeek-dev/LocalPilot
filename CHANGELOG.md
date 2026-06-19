@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`localpilot self-review` (read-only repo-health scan).** A new subcommand
+  walks the workspace and emits a ranked, advisory findings report — leftover
+  `TODO`/`FIXME` markers, a decision index (registry) lagging the decision log,
+  incomplete plan rows, broken doc links, and an opt-in missing-test heuristic —
+  plus model-emitted harness-friction findings (`--audit-prompt` /
+  `--friction-file`). Findings rank by severity × confidence; prior accepted
+  lessons inform the scan. It writes nothing. `--json` emits the machine-readable
+  report (`localpilot-selfreview-v1`). See
+  [docs/12-feature-specs.md](docs/12-feature-specs.md) §Self-Review.
 - **Project context files (`CLAUDE.md` / `AGENTS.md`).** LocalPilot now discovers
   project instruction files at the workspace root, in nested directories, and at
   a per-user global location (`~/.localpilot/`), resolves their `@`-import

@@ -1,4 +1,4 @@
-﻿# Feature Specs
+# Feature Specs
 
 ## UI Direction
 
@@ -230,3 +230,36 @@ UI:
 - footer shows quota state and reset timer
 - paused sessions show next eligible resume time
 - continuous mode shows that unattended resume is enabled
+
+## Self-Review
+
+A **read-only** repo-health scan: `localpilot self-review` walks the workspace
+and emits a ranked, advisory findings report. It writes nothing — every output
+is data the reader acts on, never an action. This is the read-only front of the
+human-gated self-improvement loop (ADR-0034); it never proposes or applies a
+change itself.
+
+Findings come from two sources, ranked together:
+
+- a **static repo scan** with independent detectors — leftover
+  `TODO`/`FIXME`/`XXX`/`HACK` markers, a decision **index** (registry) lagging
+  the actual decision **log** (`ADR-####`/`D-LM-####`), incomplete plan/tracking
+  rows (`TODO` status cells, "pending sign-off"), broken local doc links
+  (doc drift), and a heuristic, opt-in missing-test signal;
+- **session-friction findings** — a model auditing the harness during a real
+  task emits a structured block (`--audit-prompt` prints the prompt; feed the
+  result back with `--friction-file`), normalised into the same finding shape.
+
+Each finding carries `{ kind, path, span, severity, confidence, evidence,
+suggested_owner }`. The report ranks by **severity × confidence** (deterministic
+tie-breaks), so the highest-value signals lead. Prior accepted lessons retrieved
+from the learning engine inform the scan: a lesson naming a finding's file marks
+it as a recurring issue (nudging confidence up). The report schema is tagged
+(`localpilot-selfreview-v1`).
+
+CLI:
+
+- `localpilot self-review` prints the human summary; `--json` emits the
+  machine-readable report; `--missing-tests` enables the heuristic detector;
+  `--friction-file <path>` folds in a model audit block; `--audit-prompt` prints
+  the audit prompt and exits.

@@ -59,6 +59,7 @@ localpilot-quota = { path = "../localpilot-quota" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-selfreview = { path = "../localpilot-selfreview" }
 localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }

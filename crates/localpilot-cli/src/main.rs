@@ -25,6 +25,7 @@ mod models_cmd;
 #[cfg(feature = "tui")]
 mod repl;
 mod rpc_cmd;
+mod self_review_cmd;
 mod session_cmd;
 mod skills_cmd;
 #[cfg(feature = "tui")]
@@ -223,6 +224,22 @@ enum Command {
     Handoff {
         #[command(subcommand)]
         command: Option<HandoffCommand>,
+    },
+    /// Scan the repo for advisory health findings (read-only; writes nothing).
+    SelfReview {
+        /// Emit the machine-readable JSON report instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// Include the heuristic, low-confidence missing-test detector.
+        #[arg(long)]
+        missing_tests: bool,
+        /// Fold in a model's harness-friction block read from this file.
+        #[arg(long)]
+        friction_file: Option<PathBuf>,
+        /// Print the friction audit prompt and exit (to run an audit, then feed
+        /// its output back via --friction-file).
+        #[arg(long)]
+        audit_prompt: bool,
     },
 }
 
@@ -968,6 +985,29 @@ async fn main() -> anyhow::Result<()> {
                 Some(HandoffCommand::Resume { id }) => {
                     handoff_cmd::resume(&cwd, &id, &mut stdout)?;
                 }
+            }
+            stdout.flush()?;
+        }
+        Command::SelfReview {
+            json,
+            missing_tests,
+            friction_file,
+            audit_prompt,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            if audit_prompt {
+                self_review_cmd::print_audit_prompt(&mut stdout)?;
+            } else {
+                self_review_cmd::run(
+                    &cwd,
+                    &self_review_cmd::SelfReviewArgs {
+                        json,
+                        missing_tests,
+                        friction_file: friction_file.as_deref(),
+                    },
+                    &mut stdout,
+                )?;
             }
             stdout.flush()?;
         }
