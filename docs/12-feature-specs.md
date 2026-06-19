@@ -239,16 +239,24 @@ is data the reader acts on, never an action. This is the read-only front of the
 human-gated self-improvement loop (ADR-0034); it never proposes or applies a
 change itself.
 
-Findings come from two sources, ranked together:
+Findings come from three sources, ranked together:
 
 - a **static repo scan** with independent detectors — leftover
   `TODO`/`FIXME`/`XXX`/`HACK` markers, a decision **index** (registry) lagging
   the actual decision **log** (`ADR-####`/`D-LM-####`), incomplete plan/tracking
   rows (`TODO` status cells, "pending sign-off"), broken local doc links
   (doc drift), and a heuristic, opt-in missing-test signal;
-- **session-friction findings** — a model auditing the harness during a real
-  task emits a structured block (`--audit-prompt` prints the prompt; feed the
-  result back with `--friction-file`), normalised into the same finding shape.
+- **model-reported session friction** — a model auditing the harness during a
+  real task emits a structured block (`--audit-prompt` prints the prompt; feed the
+  result back with `--friction-file`), normalised into the same finding shape;
+- **measured (auto-captured) session friction** — the deterministic counterpart:
+  a captured run's capability-scorecard `process` block (tool-call count,
+  redundant calls, reproduce-before-fix, test-before-done, recovery, exit reason)
+  is projected into the same finding shape with no model in the loop. Feed a
+  scorecard JSON with `--process-file <path>`. Redundant tool calls, a
+  budget-exceeded/no-progress stop, an edit before any observation, a done-claim
+  with no test run, and a mid-task failure each surface as a ranked friction
+  finding. A clean run yields none.
 
 Each finding carries `{ kind, path, span, severity, confidence, evidence,
 suggested_owner }`. The report ranks by **severity × confidence** (deterministic
@@ -261,8 +269,9 @@ CLI:
 
 - `localpilot self-review` prints the human summary; `--json` emits the
   machine-readable report; `--missing-tests` enables the heuristic detector;
-  `--friction-file <path>` folds in a model audit block; `--audit-prompt` prints
-  the audit prompt and exits.
+  `--friction-file <path>` folds in a model audit block; `--process-file <path>`
+  folds in measured friction from a captured run's scorecard `process` block;
+  `--audit-prompt` prints the audit prompt and exits.
 
 ## Human-Approved Patch Generation
 

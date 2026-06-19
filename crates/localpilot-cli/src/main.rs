@@ -236,6 +236,10 @@ enum Command {
         /// Fold in a model's harness-friction block read from this file.
         #[arg(long)]
         friction_file: Option<PathBuf>,
+        /// Fold in measured friction from a captured run's capability scorecard
+        /// JSON (its `process` block) read from this file.
+        #[arg(long)]
+        process_file: Option<PathBuf>,
         /// Print the friction audit prompt and exit (to run an audit, then feed
         /// its output back via --friction-file).
         #[arg(long)]
@@ -992,6 +996,7 @@ async fn main() -> anyhow::Result<()> {
             json,
             missing_tests,
             friction_file,
+            process_file,
             audit_prompt,
         } => {
             let cwd = std::env::current_dir()?;
@@ -1005,6 +1010,7 @@ async fn main() -> anyhow::Result<()> {
                         json,
                         missing_tests,
                         friction_file: friction_file.as_deref(),
+                        process_file: process_file.as_deref(),
                     },
                     &mut stdout,
                 )?;

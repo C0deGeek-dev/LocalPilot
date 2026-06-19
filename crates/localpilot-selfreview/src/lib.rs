@@ -17,9 +17,11 @@
 mod detectors;
 mod finding;
 mod friction;
+mod process_friction;
 
 pub use finding::{Finding, FindingKind, Report, Severity, Span, REPORT_SCHEMA};
 pub use friction::{parse_friction_findings, FRICTION_AUDIT_PROMPT};
+pub use process_friction::{process_friction_findings, ProcessFriction};
 
 use std::path::Path;
 
@@ -32,6 +34,9 @@ pub struct ReviewOptions {
     pub prior_lessons: Vec<String>,
     /// A raw model audit block (the friction-findings source). `None` skips it.
     pub friction_block: Option<String>,
+    /// Measured process signals from a captured run's scorecard `process` block
+    /// (the deterministic, auto-captured friction source). `None` skips it.
+    pub process: Option<ProcessFriction>,
     /// Include the heuristic, low-confidence missing-test detector. Off by
     /// default because it cannot see sibling test crates and is the noisiest
     /// signal; the host opts in.
@@ -45,6 +50,9 @@ pub fn review(root: &Path, options: &ReviewOptions) -> Report {
     let (mut findings, scanned) = detectors::scan(root, options.include_missing_tests);
     if let Some(block) = &options.friction_block {
         findings.extend(parse_friction_findings(block));
+    }
+    if let Some(process) = &options.process {
+        findings.extend(process_friction_findings(process));
     }
     apply_prior_lessons(&mut findings, &options.prior_lessons);
     Report::ranked(findings, scanned)
@@ -273,5 +281,40 @@ mod tests {
             Some(FindingKind::Friction)
         );
         assert_eq!(friction.severity, Severity::High);
+    }
+
+    /// Auto-captured process friction joins the same ranked stream as the repo
+    /// scan and the audit-prompt friction.
+    #[test]
+    fn process_friction_merges_into_the_ranked_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "src/a.rs", "// TODO: later\npub fn f() {}\n");
+
+        let report = review(
+            root,
+            &ReviewOptions {
+                process: Some(ProcessFriction {
+                    tool_calls: 6,
+                    redundant_calls: 4, // heavy thrash -> High
+                    reproduce_before_fix: true,
+                    test_before_done: true,
+                    exit_reason: "Done".to_string(),
+                    ..ProcessFriction::default()
+                }),
+                ..ReviewOptions::default()
+            },
+        );
+        let friction = report
+            .findings
+            .iter()
+            .find(|f| f.kind == FindingKind::Friction)
+            .expect("process friction finding present");
+        assert_eq!(friction.severity, Severity::High);
+        // High × 0.95 outranks the low-severity TODO, so it leads the report.
+        assert_eq!(
+            report.findings.first().map(|f| f.kind),
+            Some(FindingKind::Friction)
+        );
     }
 }

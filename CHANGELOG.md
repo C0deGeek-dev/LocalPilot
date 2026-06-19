@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Measured session-friction findings (self-review).** `localpilot self-review`
+  gained a third, deterministic findings source: a captured run's capability
+  scorecard `process` block is projected into the same ranked findings stream with
+  no model in the loop (`--process-file <scorecard.json>`). Redundant tool calls, a
+  budget-exceeded/no-progress stop, an edit before any observation, a done-claim
+  with no test run, and a mid-task failure each surface as a friction finding; a
+  clean run yields none. This is the auto-captured counterpart to the existing
+  model-reported audit-prompt friction. See
+  [docs/12-feature-specs.md](docs/12-feature-specs.md) §Self-Review.
 - **Loop-outcome lesson writeback (self-improvement loop learning arc).** When a
   human accepts or rejects a patch proposal, the outcome is written back as a
   durable lesson through the existing review-gated LocalMind path (no new store):

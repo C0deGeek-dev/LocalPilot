@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context;
-use localpilot_selfreview::{review, ReviewOptions, FRICTION_AUDIT_PROMPT};
+use localpilot_selfreview::{review, ProcessFriction, ReviewOptions, FRICTION_AUDIT_PROMPT};
 
 /// Options for one self-review run.
 pub struct SelfReviewArgs<'a> {
@@ -20,6 +20,9 @@ pub struct SelfReviewArgs<'a> {
     pub missing_tests: bool,
     /// A file holding a model's friction-findings block to fold in.
     pub friction_file: Option<&'a Path>,
+    /// A file holding a captured run's capability scorecard JSON; its `process`
+    /// block is folded in as measured (auto-captured) friction.
+    pub process_file: Option<&'a Path>,
 }
 
 /// Run the read-only self-review and print the report.
@@ -35,11 +38,16 @@ pub fn run(root: &Path, args: &SelfReviewArgs, out: &mut dyn Write) -> anyhow::R
         ),
         None => None,
     };
+    let process = match args.process_file {
+        Some(path) => Some(process_friction_from_scorecard(path)?),
+        None => None,
+    };
     let report = review(
         root,
         &ReviewOptions {
             prior_lessons: prior_lessons(root),
             friction_block,
+            process,
             include_missing_tests: args.missing_tests,
         },
     );
@@ -49,6 +57,26 @@ pub fn run(root: &Path, args: &SelfReviewArgs, out: &mut dyn Write) -> anyhow::R
         write!(out, "{}", report.human_summary())?;
     }
     Ok(())
+}
+
+/// Read a capability scorecard JSON file and project its `process` block into the
+/// measured-friction input. The scorecard is the harness's own emitted artefact;
+/// only its `process` object is read, so the self-review crate stays decoupled
+/// from the harness scorecard type.
+///
+/// # Errors
+/// Returns an error if the file cannot be read, is not valid JSON, or carries no
+/// `process` object.
+fn process_friction_from_scorecard(path: &Path) -> anyhow::Result<ProcessFriction> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading scorecard file {}", path.display()))?;
+    let scorecard: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parsing scorecard JSON {}", path.display()))?;
+    let process = scorecard
+        .get("process")
+        .with_context(|| format!("scorecard {} has no `process` block", path.display()))?;
+    serde_json::from_value(process.clone())
+        .with_context(|| format!("reading the `process` block of {}", path.display()))
 }
 
 /// Print the friction audit prompt a host runs to elicit a friction block (which
