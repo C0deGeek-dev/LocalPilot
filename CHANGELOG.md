@@ -48,6 +48,12 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   back; a prompt-addressed cache makes scoring offline-deterministic; and
   `cohens_kappa` reports agreement against a human-labelled sample. See
   [docs/08-testing.md](docs/08-testing.md) §LLM-as-judge quality rubric.
+- **Judge ranking self-test.** Added a cheap, per-run trust gate complementing
+  calibration: the judge must score each authored `better` fixture strictly above
+  its `worse` pair (`ranking_selftest_offline`, `RANKING_FIXTURES`) or scoring is
+  refused (`score_offline_gated` → `JudgeError::Untrustworthy`, naming the failed
+  fixture) rather than emitting a believed-but-wrong number. Runs offline with no
+  model (the CI gate); `ranking_selftest_live` is the opportunistic live variant.
 - **Ablation, attribution, and composite scoring.** Added an ablation arm matrix
   (`baseline`, `full`, and one arm per harness feature turned off, model pinned),
   per-feature attribution that maps each feature to the process signal it should

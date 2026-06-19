@@ -50,7 +50,7 @@ pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, Session
 pub use judge::{
     blind, cohens_kappa, judge_prompt, parse_judge_block, parse_preference, preference_prompt,
     resolve_preference, BlindedPair, Judge, JudgeBlock, JudgeCache, JudgeError, JudgeInput,
-    Preferred, RUBRIC,
+    Preferred, RankingFixture, RankingTrust, RANKING_FIXTURES, RUBRIC,
 };
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};

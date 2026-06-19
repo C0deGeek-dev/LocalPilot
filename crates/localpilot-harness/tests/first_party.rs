@@ -199,11 +199,35 @@ fn offline_judge(diff_text: &str) -> Option<localpilot_harness::JudgeBlock> {
         trajectory: None,
     };
     let mut cache = JudgeCache::default();
+    // Seed the ranking fixtures so the judge passes its self-test (every `better`
+    // outscores its `worse`), then the task diff. The corpus run scores through the
+    // gate (`score_offline_gated`), exercising the "prove the judge ranks before
+    // trusting it" path offline — an inverted judge would refuse here.
+    for fx in localpilot_harness::RANKING_FIXTURES {
+        cache.insert(
+            &judge_prompt(&JudgeInput {
+                diff: fx.better,
+                trajectory: None,
+            }),
+            "{\"readability\":5,\"idiomaticity\":5,\"abstraction_fit\":5,\"bug_resistance\":5}",
+        );
+        cache.insert(
+            &judge_prompt(&JudgeInput {
+                diff: fx.worse,
+                trajectory: None,
+            }),
+            "{\"readability\":2,\"idiomaticity\":2,\"abstraction_fit\":2,\"bug_resistance\":2}",
+        );
+    }
     cache.insert(
         &judge_prompt(&input),
         "{\"readability\":4,\"idiomaticity\":4,\"abstraction_fit\":4,\"bug_resistance\":4}",
     );
-    Judge::new("offline-judge-fixture", cache).score_offline(&input)
+    // The seeded judge passes its ranking self-test, so the gate returns a score;
+    // an inverted judge would return `Err(Untrustworthy)` here instead.
+    Judge::new("offline-judge-fixture", cache)
+        .score_offline_gated(&input)
+        .unwrap()
 }
 
 /// Drive one task offline: materialize the base workspace, confirm it is red,

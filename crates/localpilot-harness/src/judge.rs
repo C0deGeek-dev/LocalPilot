@@ -34,6 +34,10 @@ pub enum JudgeError {
     /// The judge replied but its scores could not be parsed.
     #[error("judge response could not be parsed into scores")]
     Unparseable,
+    /// The judge failed its ranking self-test, so its scores are not trusted and
+    /// scoring is refused before any spend. The string names the failed fixture.
+    #[error("judge failed its ranking self-test: {0}")]
+    Untrustworthy(String),
 }
 
 /// The original quality rubric: four dimensions, each scored `1..=5` with
@@ -305,6 +309,152 @@ impl Judge {
         self.cache.insert(&prompt, raw.clone());
         parse_judge_block(&raw, &self.judge_model, true).ok_or(JudgeError::Unparseable)
     }
+
+    /// Offline ranking self-test: score the authored [`RANKING_FIXTURES`] from the
+    /// cache and require each `better` to outscore its `worse`. A cache that omits
+    /// a fixture is untrustworthy — the judge has not been shown to rank, so its
+    /// other scores are not trusted. No model runs; the same cache always yields
+    /// the same verdict, so it is the offline CI gate.
+    #[must_use]
+    pub fn ranking_selftest_offline(&self) -> RankingTrust {
+        ranking_verdict(RANKING_FIXTURES, |input| self.score_offline(input))
+    }
+
+    /// Live ranking self-test: judge the authored fixtures with a real model
+    /// (caching each response), then take the offline verdict over the now-warm
+    /// cache. Opportunistic per the validation-evidence policy — the offline
+    /// gate-logic test is the accepted CI bar; this runs only when a judge model
+    /// is available.
+    ///
+    /// # Errors
+    /// Returns [`JudgeError`] if the provider cannot be reached/streamed or a
+    /// fixture reply does not parse.
+    pub async fn ranking_selftest_live(
+        &mut self,
+        provider: &Arc<dyn ModelProvider>,
+        model: &str,
+    ) -> Result<RankingTrust, JudgeError> {
+        for fx in RANKING_FIXTURES {
+            for diff in [fx.better, fx.worse] {
+                self.score_live(
+                    provider,
+                    model,
+                    &JudgeInput {
+                        diff,
+                        trajectory: None,
+                    },
+                )
+                .await?;
+            }
+        }
+        Ok(self.ranking_selftest_offline())
+    }
+
+    /// Score one solution offline, but only if the judge first passes its ranking
+    /// self-test — the "prove the instrument before spending on it" gate applied to
+    /// the judge: an untrustworthy judge refuses to score rather than emit a
+    /// believed-but-wrong number.
+    ///
+    /// # Errors
+    /// Returns [`JudgeError::Untrustworthy`] (naming the failed fixture) when the
+    /// ranking self-test fails.
+    pub fn score_offline_gated(
+        &self,
+        input: &JudgeInput,
+    ) -> Result<Option<JudgeBlock>, JudgeError> {
+        match self.ranking_selftest_offline() {
+            RankingTrust::Trustworthy => Ok(self.score_offline(input)),
+            RankingTrust::Untrustworthy(why) => Err(JudgeError::Untrustworthy(why)),
+        }
+    }
+}
+
+/// A pair of authored solutions to the same task: `better` is, by construction,
+/// higher quality than `worse`. Original to this repository (clean-room) — these
+/// are not lifted from any external benchmark.
+#[derive(Debug, Clone, Copy)]
+pub struct RankingFixture {
+    /// The quality aspect the pair exercises (named in a failure message).
+    pub label: &'static str,
+    /// The higher-quality solution.
+    pub better: &'static str,
+    /// The lower-quality solution to the same task.
+    pub worse: &'static str,
+}
+
+/// Authored ranking fixtures: a judge worth trusting must score each `better`
+/// strictly above its `worse`. Each `worse` variant degrades one dimension the
+/// rubric scores — cryptic naming, a blind index that panics on empty input, and
+/// a hand-rolled type for a one-line job.
+pub const RANKING_FIXTURES: &[RankingFixture] = &[
+    RankingFixture {
+        label: "readability",
+        better: "+fn average(values: &[f64]) -> f64 {\n+    let sum: f64 = values.iter().sum();\n+    sum / values.len() as f64\n+}\n",
+        worse: "+fn a(v:&[f64])->f64{let mut s=0.0;let mut i=0;while i<v.len(){s+=v[i];i+=1;}s/v.len() as f64}\n",
+    },
+    RankingFixture {
+        label: "bug_resistance",
+        better: "+fn first_word(s: &str) -> Option<&str> {\n+    s.split_whitespace().next()\n+}\n",
+        worse: "+fn first_word(s: &str) -> &str {\n+    s.split(' ').collect::<Vec<_>>()[0]\n+}\n",
+    },
+    RankingFixture {
+        label: "abstraction_fit",
+        better: "+let unique: HashSet<_> = items.iter().collect();\n",
+        worse: "+struct UniqueTracker { seen: Vec<Item>, index: HashMap<Item, usize> }\n+impl UniqueTracker {\n+    fn new() -> Self { Self { seen: vec![], index: HashMap::new() } }\n+    fn add(&mut self, it: Item) { if !self.index.contains_key(&it) { self.index.insert(it.clone(), self.seen.len()); self.seen.push(it); } }\n+}\n",
+    },
+];
+
+/// The outcome of a ranking self-test: either the judge ranked every `better`
+/// above its `worse`, or it failed on a named fixture and is not trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RankingTrust {
+    /// The judge ranked every authored `better` strictly above its `worse`.
+    Trustworthy,
+    /// The judge failed on a fixture (named with the reason); scores not trusted.
+    Untrustworthy(String),
+}
+
+impl RankingTrust {
+    /// Whether the judge passed (ranked every fixture correctly).
+    #[must_use]
+    pub fn is_trustworthy(&self) -> bool {
+        matches!(self, RankingTrust::Trustworthy)
+    }
+}
+
+/// Score every fixture's pair with `score` and require `overall(better) >
+/// overall(worse)` strictly. A parse miss (an unseen fixture) or a non-strict
+/// ordering means the judge cannot reliably tell better from worse — untrusted.
+fn ranking_verdict<F>(fixtures: &[RankingFixture], mut score: F) -> RankingTrust
+where
+    F: FnMut(&JudgeInput) -> Option<JudgeBlock>,
+{
+    for fx in fixtures {
+        let better = score(&JudgeInput {
+            diff: fx.better,
+            trajectory: None,
+        });
+        let worse = score(&JudgeInput {
+            diff: fx.worse,
+            trajectory: None,
+        });
+        match (better, worse) {
+            (Some(b), Some(w)) if b.overall > w.overall => {}
+            (Some(b), Some(w)) => {
+                return RankingTrust::Untrustworthy(format!(
+                    "{}: better scored {:.2} but worse scored {:.2} (expected strictly higher)",
+                    fx.label, b.overall, w.overall
+                ));
+            }
+            _ => {
+                return RankingTrust::Untrustworthy(format!(
+                    "{}: a sample produced no score",
+                    fx.label
+                ));
+            }
+        }
+    }
+    RankingTrust::Trustworthy
 }
 
 /// Stream one prompt to the provider and collect the final answer text.
@@ -489,5 +639,87 @@ mod tests {
     fn fnv_key_is_stable_and_distinguishes_prompts() {
         assert_eq!(JudgeCache::key("hello"), JudgeCache::key("hello"));
         assert_ne!(JudgeCache::key("hello"), JudgeCache::key("world"));
+    }
+
+    /// A uniform judge response with all four dimensions at `s`.
+    fn resp(s: u8) -> String {
+        format!(
+            "{{\"readability\":{s},\"idiomaticity\":{s},\"abstraction_fit\":{s},\"bug_resistance\":{s}}}"
+        )
+    }
+
+    /// A cache that scores every fixture's `better` at `better` and `worse` at
+    /// `worse`, so the ranking self-test can be exercised with no model.
+    fn ranked_cache(better: u8, worse: u8) -> JudgeCache {
+        let mut cache = JudgeCache::default();
+        for fx in RANKING_FIXTURES {
+            cache.insert(
+                &judge_prompt(&JudgeInput {
+                    diff: fx.better,
+                    trajectory: None,
+                }),
+                resp(better),
+            );
+            cache.insert(
+                &judge_prompt(&JudgeInput {
+                    diff: fx.worse,
+                    trajectory: None,
+                }),
+                resp(worse),
+            );
+        }
+        cache
+    }
+
+    #[test]
+    fn ranking_selftest_passes_when_better_outscores_worse() {
+        let judge = Judge::new("j", ranked_cache(5, 2));
+        assert_eq!(judge.ranking_selftest_offline(), RankingTrust::Trustworthy);
+        assert!(judge.ranking_selftest_offline().is_trustworthy());
+    }
+
+    #[test]
+    fn ranking_selftest_fails_on_an_inverted_judge() {
+        // worse scores higher than better — the judge cannot tell them apart.
+        let judge = Judge::new("j", ranked_cache(2, 5));
+        match judge.ranking_selftest_offline() {
+            RankingTrust::Untrustworthy(why) => {
+                assert!(
+                    why.contains("readability"),
+                    "names the failing fixture: {why}"
+                );
+            }
+            RankingTrust::Trustworthy => panic!("an inverted judge must be untrustworthy"),
+        }
+    }
+
+    #[test]
+    fn ranking_selftest_fails_when_a_fixture_is_unseen() {
+        // An empty cache cannot demonstrate that the judge ranks anything.
+        let judge = Judge::new("j", JudgeCache::default());
+        assert!(!judge.ranking_selftest_offline().is_trustworthy());
+    }
+
+    #[test]
+    fn gated_scoring_refuses_an_untrustworthy_judge() {
+        let input = JudgeInput {
+            diff: "+ a real change",
+            trajectory: None,
+        };
+        // A trustworthy judge that also has the task diff cached returns a score.
+        let mut cache = ranked_cache(5, 2);
+        cache.insert(&judge_prompt(&input), resp(4));
+        let good = Judge::new("j", cache);
+        assert!(good
+            .score_offline_gated(&input)
+            .expect("a trustworthy judge scores")
+            .is_some());
+
+        // An inverted judge refuses with an error and never returns a score.
+        let bad = Judge::new("j", ranked_cache(2, 5));
+        assert!(matches!(
+            bad.score_offline_gated(&input),
+            Err(JudgeError::Untrustworthy(_))
+        ));
     }
 }

@@ -150,6 +150,19 @@ The discipline that makes the scores trustworthy is built in:
 - **Calibrated.** `cohens_kappa` scores the judge's labels against a
   human-labelled sample, so agreement is **reported, not assumed**. Pair the
   judge with the deterministic static signals — never rely on it alone.
+- **Ranking self-test (prove the instrument before trusting it).** A cheap,
+  per-run gate that complements calibration: `ranking_selftest_offline` scores a
+  set of **authored** fixture pairs (`RANKING_FIXTURES` — each a `better` and a
+  `worse` solution to the same task, original to this repo) and requires the judge
+  to score every `better` strictly above its `worse`. If it cannot — an inverted
+  or a flat judge — `score_offline_gated` refuses to score
+  (`JudgeError::Untrustworthy`, naming the failed fixture) rather than emit a
+  believed-but-wrong number. This runs **offline with no model** (the fixtures are
+  scored from the cache), so it is the CI gate; `ranking_selftest_live` runs the
+  same check against a real judge model and is **opportunistic** (the offline
+  gate-logic test is the accepted bar — D008). Calibration answers "does the judge
+  agree with a human?"; the ranking self-test answers the cheaper, always-checked
+  "can the judge tell better from worse at all?"
 
 The judge is a complement to, not a replacement for, the deterministic `quality`
 block. Treat its absolute scores with caution and prefer **deltas between
