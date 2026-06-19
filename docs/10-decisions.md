@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0037: Completion-Retrospective Lessons Are Offered To Review-Gated Memory
+
+Status: accepted. Builds on ADR-0035 (the advisory completion retrospective that
+records lessons to `LESSONS.md`), ADR-0011 (store split / review-gated accepted
+memory), and ADR-0034 (the review-gated memory path). Closes the deferral recorded
+in the ADR-0035 "review-gated bridge" note (and DriftRemediation D007).
+
+The completion retrospective writes advisory lessons to the root `LESSONS.md`, a
+human-editable mirror. An un-gated file next to a review-gated memory engine is a
+half-measure: a lesson worth keeping should be promotable to accepted memory through
+the same human review every other memory passes, not stranded in a file. So each
+retrospective lesson is **also offered** to LocalMind's review-gated candidate queue.
+
+**The bridge.** `localpilot_localmind::write_retrospective_lesson` enqueues a lesson
+as a `CandidateLesson`; the cli calls it for each lesson after the run prints the
+retrospective summary.
+
+- **Advisory and non-blocking.** A failed enqueue never breaks a finished run; the
+  host swallows the result (`if let Ok(Some(_))`), which is safe because the bridge
+  returns `Err`, never a panic. `LESSONS.md` is written by the retrospective before
+  the offer runs and is left untouched — it stays the human-editable mirror.
+- **A different shape from a loop-outcome lesson.** A retrospective lesson is a
+  free-text advisory note: it sets **no** accepted/rejected `outcome` and **no**
+  change-provenance ref (reusing `LoopLesson` would fabricate both — the exact reason
+  the bridge was deferred). It is a `Process` candidate, `completion_retrospective`
+  evidence kind, with a deliberately lower prior confidence (`0.4`, below the
+  loop-outcome `0.75`) — an unverified self-observation, not a confirmed patch outcome.
+- **Queue-noise policy.** Too-short/sentinel lessons are skipped; duplicates are
+  deduped by the review queue's own canonical-hash (a repeat bumps a seen-count). No
+  custom dedup — the store already provides it.
+- **Review-gated by construction.** The candidate is `PromoteToMemory`; promotion to
+  accepted memory stays a human step (ADR-0011); a rejected candidate never reaches
+  memory. The bridge writes **no** accepted memory and adds **no** second redaction
+  authority.
+
+Reason: routing advisory lessons through the same human-gated queue makes
+`LESSONS.md` a mirror rather than a competing sink, without loosening any safety floor
+— promotion is still human, and the lower prior confidence plus the store dedup keep
+the queue from being flooded. The mapping is a small adapter function plus a few
+advisory host lines; the harness gains no LocalMind dependency (the edge stays
+host→adapter).
+
+Supersedes nothing.
+
 ## ADR-0036: The `localpilot-localmind` Adapter Boundary And Its Extraction Trigger
 
 Status: accepted. Builds on ADR-0011 (store split: `.localpilot/` execution record
@@ -114,20 +158,16 @@ per-step → criterion reference tags, and writing lessons back into LocalMind
 memory are explicit non-goals here; each is a separable later decision behind the
 same seam.
 
-**Review-gated bridge — still deferred (2026-06).** `LESSONS.md` is the
-human-editable *mirror*, not a system of record: a retrospective lesson is an
-advisory bullet, never accepted memory. Routing those bullets into LocalMind's
-review-gated queue is intentionally **not** wired yet, and is deferred rather than
-forced because (a) the harness does not depend on the LocalMind adapter, so the
-bridge belongs in the host, and (b) the existing review-gated entry point
-(`write_loop_lesson`/`LoopLesson`) is shaped for *self-improvement patch outcomes*
-— it requires an accepted/rejected `outcome` and a change-provenance reference a
-completion retrospective does not have. A faithful bridge therefore needs a new
-advisory-lesson → review-candidate mapping (its own category, confidence, and
-evidence-kind policy), so auto-enqueuing every bullet does not flood the human
-review queue with low-signal candidates. Design that mapping before the next
-lesson-producing surface lands; until then a lesson stays a `LESSONS.md` mirror
-entry the human curates, never silently-accepted memory.
+**Review-gated bridge — shipped (ADR-0037).** `LESSONS.md` remains the
+human-editable *mirror*; each retrospective lesson is now **also** offered to
+LocalMind's review-gated queue as a `Process` candidate with its own lower prior
+confidence and the store's canonical-hash dedup — never accepted memory without a
+human promotion. The bridge deliberately does **not** reuse
+`write_loop_lesson`/`LoopLesson` (a patch-outcome shape that would fabricate an
+`outcome` + a change-provenance ref a completion retrospective lacks); it is a
+separate `write_retrospective_lesson` mapping, advisory and non-blocking, with the
+harness still free of a LocalMind dependency (the edge stays host→adapter). See
+ADR-0037 for the full decision.
 
 ## ADR-0034: The Developer-Process Self-Improvement Loop Is Human-Gated By Construction — Read-Only Up To "Propose", Never Self-Merges
 

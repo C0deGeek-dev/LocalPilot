@@ -172,6 +172,31 @@ review-gated path — it builds no new store:
 The host surface is `localpilot_localmind::write_loop_lesson`; everything else
 (review, promote, search, delete) is the existing LocalMind loop.
 
+## Completion-Retrospective Lesson Bridge
+
+The harness completion retrospective (ADR-0035) records advisory lessons to the
+root `LESSONS.md` — a human-editable mirror. Those lessons are **also** offered to
+the same review-gated queue, so a lesson can become accepted memory through human
+review instead of living only in an un-gated file (ADR-0037).
+
+- The host surface is `localpilot_localmind::write_retrospective_lesson`; the cli
+  calls it for each retrospective lesson right after the run prints its summary.
+- **Advisory and non-blocking.** A failed enqueue never breaks a finished run, and
+  `LESSONS.md` stays the human-editable mirror — it is written by the retrospective
+  before the offer runs and is not touched by the bridge.
+- **A different shape from a loop-outcome lesson.** A retrospective lesson is a
+  free-text advisory note, so it sets **no** accepted/rejected `outcome` and **no**
+  change-provenance ref (it has neither). It is a `Process` candidate with a
+  `completion_retrospective` evidence kind and a deliberately lower prior confidence
+  (`0.4`, below the loop-outcome `0.75`) — an unverified self-observation entering
+  review, not a human-confirmed patch outcome.
+- **Queue-noise policy.** A too-short/sentinel lesson is skipped; duplicates are
+  deduped by the review queue's canonical-hash (a repeated lesson bumps a seen-count
+  rather than re-enqueuing). No custom dedup — the store already provides it.
+- **Review-gated, never auto-accepted.** The candidate is `PromoteToMemory`;
+  promotion to accepted memory stays a human step (ADR-0011), and a rejected
+  candidate never reaches memory.
+
 ## Code Graph
 
 LocalMind owns a code-structure knowledge graph (schema, tree-sitter ingestion,

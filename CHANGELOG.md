@@ -16,6 +16,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   lessons to a new root `LESSONS.md`; it reports only — it never blocks completion,
   edits code, or commits. See [docs/06-harness-spec.md](docs/06-harness-spec.md)
   §Completion Retrospective and ADR-0035.
+- **Completion-retrospective lessons are offered to review.** Each lesson the
+  completion retrospective records is now *also* offered to LocalMind's review-gated
+  queue as a candidate, so a human can promote it to memory instead of it living only
+  in the un-gated `LESSONS.md` (which stays the human-editable mirror). Advisory and
+  non-blocking — a failed enqueue never breaks a finished run — and a candidate
+  reaches memory only after human review. See
+  [docs/localmind-integration.md](docs/localmind-integration.md) and ADR-0037.
 - **Measured session-friction findings (self-review).** `localpilot self-review`
   gained a third, deterministic findings source: a captured run's capability
   scorecard `process` block is projected into the same ranked findings stream with
