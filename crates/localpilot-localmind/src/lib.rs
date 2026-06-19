@@ -25,6 +25,7 @@ mod ops;
 mod pack;
 mod primer;
 mod remember_tool;
+mod retrospective_lesson;
 mod review_list_tool;
 mod skill_drafts_tool;
 mod tool_use;
@@ -61,6 +62,7 @@ pub use layered::{
 };
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
 pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
+pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, memory_delete, memory_disable_injection,

@@ -163,8 +163,10 @@ pub fn write_loop_lesson(
     Ok(id)
 }
 
-/// A small FNV-1a hex digest for stable lesson ids.
-fn fnv_hex(bytes: &[u8]) -> String {
+/// A small FNV-1a hex digest for stable lesson ids. Shared with sibling lesson
+/// writers (e.g. the completion-retrospective bridge) so every review candidate
+/// derives a stable, content-addressed id the same way.
+pub(crate) fn fnv_hex(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in bytes {
         hash ^= u64::from(byte);
