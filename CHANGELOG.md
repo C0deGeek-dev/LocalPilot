@@ -5,6 +5,18 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Human-gated patch generation (self-improvement loop write half).** A new
+  crate turns an approved finding into a minimal change inside an isolated git
+  worktree on its own branch (never the main working tree), scope-bound to the
+  files the finding named, carrying a change-provenance record
+  (prompt/model/tools/test-evidence/rationale/risks/rollback/lessons). The only
+  operation that writes outside the worktree — promoting the change onto the main
+  branch — requires an approval token a human-confirmation path mints; the agent
+  never self-merges, promotion fast-forwards only and never pushes, and rollback
+  is to drop the worktree. The git surface runs fixed subcommands as argv (no
+  shell, no network). See [docs/12-feature-specs.md](docs/12-feature-specs.md)
+  §Human-Approved Patch Generation and
+  [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md).
 - **`localpilot self-review` (read-only repo-health scan).** A new subcommand
   walks the workspace and emits a ranked, advisory findings report — leftover
   `TODO`/`FIXME` markers, a decision index (registry) lagging the decision log,

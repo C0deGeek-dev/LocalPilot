@@ -263,3 +263,34 @@ CLI:
   machine-readable report; `--missing-tests` enables the heuristic detector;
   `--friction-file <path>` folds in a model audit block; `--audit-prompt` prints
   the audit prompt and exits.
+
+## Human-Approved Patch Generation
+
+The write half of the self-improvement loop, built so the human gate is
+**structural** (D002 / ADR-0034). Turning an approved finding into a fix never
+touches the main branch on its own:
+
+- **Isolated worktree.** A proposal is written into a fresh git worktree on its
+  own branch under `.localpilot/worktrees/<branch>` (git-ignored, ADR-0012),
+  based on the current `HEAD`. The main working tree is never modified. Rollback
+  is to drop the worktree/branch.
+- **Scope-bound, minimal.** A proposal carries the files the finding named; an
+  edit to any other file is rejected, and the *produced* diff is re-checked to
+  touch only those files. A no-op proposal (nothing actually changes) is rejected.
+- **Path containment.** Edit paths are joined under the worktree with a guard
+  that rejects absolute paths, `..` traversal, and drive prefixes — an edit can
+  only land inside the worktree.
+- **Change-provenance record.** Every proposal carries
+  `{ prompt, model, tools_used, test_evidence, rationale, risks, rollback_notes,
+  lessons }` (plus an eval result once the gate runs). It is meant to live with
+  the proposal (e.g. the private hub), **not** in shipped code.
+- **Hard approval gate.** The only operation that writes outside the worktree is
+  promoting the proposal onto the main branch, and it requires an approval token
+  that authorizes exactly that patch. The token's sole constructor is an explicit
+  human-confirmation call; the autonomous loop never mints one, so there is no
+  path from "propose" to a main-branch write without a human. Promotion is
+  conservative — it refuses a dirty target tree, fast-forwards only, and **never
+  pushes**. The agent never self-merges.
+
+The git surface is a fixed set of subcommands run as argv (never a shell), with
+no network subcommand anywhere; see [docs/07-security-and-privacy.md](07-security-and-privacy.md).

@@ -249,6 +249,31 @@ Provider clients must:
 - expose request IDs when providers return them
 - avoid logging raw prompts by default
 
+## Self-Improvement Patch Generation
+
+The self-improvement loop's write half (ADR-0034) is built so the human gate is
+structural, not a convention:
+
+- **No main-branch write without a human.** A proposed change is produced inside
+  an isolated git worktree on its own branch; the only operation that writes
+  outside that worktree (promotion onto the main branch) requires an approval
+  token that authorizes exactly that patch. The token's only constructor is an
+  explicit human-confirmation call — the autonomous loop has no path to mint one,
+  so it can never self-merge.
+- **Conservative promotion.** Promotion refuses a dirty target working tree,
+  fast-forwards only (never silently creates a merge or resolves conflicts), and
+  **never pushes**.
+- **No shell, no network in the git surface.** Every git invocation passes its
+  arguments as an argv array directly to `git` — there is no shell and no string
+  interpolation of model input, so an edit path or branch name can never become
+  another command. No `push`/`fetch`/`pull`/remote subcommand appears anywhere in
+  the patch-generation crate.
+- **Path containment.** Edit paths are joined under the worktree with a guard
+  that rejects absolute paths, `..` traversal, and drive prefixes; an edit can
+  only land strictly inside the worktree.
+- **Scope-bound.** A proposal may touch only the files the finding named; both
+  the declared edits and the produced diff are checked against that set.
+
 ## Quota Wait/Resume Safety
 
 Automatic quota wait/resume is allowed only when it honors the provider's

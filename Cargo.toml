@@ -15,6 +15,7 @@ members = [
     "crates/localpilot-rpc",
     "crates/localpilot-quota",
     "crates/localpilot-localmind",
+    "crates/localpilot-patchgen",
     "crates/localpilot-selfreview",
     "crates/localpilot-verify",
 ]

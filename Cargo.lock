@@ -1388,6 +1388,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-patchgen"
+version = "0.3.0-beta.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "localpilot-quota"
 version = "0.3.0-beta.3"
 dependencies = [
