@@ -192,7 +192,7 @@ impl ProposedPatch {
         &self.diff_summary
     }
 
-    /// Attach an eval-gate result to the provenance (03.4 / subject 05).
+    /// Attach an eval-gate result to the provenance.
     pub fn attach_eval_result(&mut self, result: EvalResult) {
         self.provenance.eval_result = Some(result);
     }

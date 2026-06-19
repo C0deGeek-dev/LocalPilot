@@ -28,7 +28,7 @@ use std::path::Path;
 pub struct ReviewOptions {
     /// Relevant prior lessons/conventions the host retrieved from the learning
     /// engine at scan start (read-only consumption). A lesson that names a
-    /// finding's file marks it as a recurring issue (02.3).
+    /// finding's file marks it as a recurring issue.
     pub prior_lessons: Vec<String>,
     /// A raw model audit block (the friction-findings source). `None` skips it.
     pub friction_block: Option<String>,
@@ -209,7 +209,7 @@ mod tests {
         );
     }
 
-    /// 02.3: a prior lesson that names a finding's file annotates and boosts it.
+    /// A prior lesson that names a finding's file annotates and boosts it.
     #[test]
     fn prior_lesson_informs_a_finding() {
         let dir = tempfile::tempdir().unwrap();
@@ -247,7 +247,7 @@ mod tests {
         assert!(todo.evidence.contains("prior lesson"), "{}", todo.evidence);
     }
 
-    /// 02.7: friction findings join the same ranked stream as repo-scan findings.
+    /// Friction findings join the same ranked stream as repo-scan findings.
     #[test]
     fn friction_findings_merge_into_the_ranked_report() {
         let dir = tempfile::tempdir().unwrap();

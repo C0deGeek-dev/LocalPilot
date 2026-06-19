@@ -61,7 +61,7 @@ pub fn print_audit_prompt(out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Best-effort prior-lesson retrieval (02.3): accepted memories become advisory
+/// Best-effort prior-lesson retrieval: accepted memories become advisory
 /// context for the scan. A project with no learning store yields none, and a
 /// read error is swallowed — prior lessons only inform findings, they never gate
 /// the scan.

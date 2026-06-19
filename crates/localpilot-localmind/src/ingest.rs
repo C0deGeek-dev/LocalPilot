@@ -2233,7 +2233,7 @@ mod tests {
         assert!(dir.path().join(INGEST_DIR).join(PACK_FILE).exists());
     }
 
-    /// 01.4 wiring: a full ingest run captures the merged project context as a
+    /// Merged-context wiring: a full ingest run captures the merged project context as a
     /// first-class document, with `@`-imports resolved, so retrieval surfaces a
     /// convention that lives *only* in an imported file — proving it is the merged
     /// context that was ingested, not just the raw `CLAUDE.md`.

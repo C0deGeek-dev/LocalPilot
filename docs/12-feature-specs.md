@@ -267,7 +267,7 @@ CLI:
 ## Human-Approved Patch Generation
 
 The write half of the self-improvement loop, built so the human gate is
-**structural** (D002 / ADR-0034). Turning an approved finding into a fix never
+**structural** (ADR-0034). Turning an approved finding into a fix never
 touches the main branch on its own:
 
 - **Isolated worktree.** A proposal is written into a fresh git worktree on its

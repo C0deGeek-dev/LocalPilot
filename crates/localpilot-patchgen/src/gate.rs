@@ -5,7 +5,7 @@
 //! [`ApprovalToken::approve`], is called by a host **only after** it has obtained
 //! explicit human confirmation; the autonomous self-review path never constructs
 //! one. So there is no code path from "observe → propose" to a write on the main
-//! branch — the gate is structural (D002 / ADR-0034), not a prompt convention.
+//! branch — the gate is structural (ADR-0034), not a prompt convention.
 
 /// An explicit human approval authorizing one specific proposed patch to be
 /// promoted onto the main branch. Without it, [`crate::ProposedPatch::promote`]

@@ -1,4 +1,4 @@
-//! Loop-outcome lesson writeback (subject 04 / LocalMind `D-LM-0014`).
+//! Loop-outcome lesson writeback (LocalMind `D-LM-0014`).
 //!
 //! When a human accepts or rejects a proposed patch, the outcome is written back
 //! as a durable lesson so the next loop run retrieves it and stops repeating a
@@ -248,7 +248,7 @@ mod tests {
             "the promoted loop lesson must be retrievable: {memories:?}"
         );
 
-        // 04.4 curation/supersede: a bad accepted lesson can be deleted.
+        // Curation/supersede: a bad accepted lesson can be deleted.
         memory_delete(root, &memory_id).unwrap();
         assert!(
             !memory_list(root).unwrap().iter().any(|m| m.id == memory_id),

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 /// Schema tag so a consumer can pin the record shape.
 pub const PROVENANCE_SCHEMA: &str = "localpilot-change-provenance-v1";
 
-/// The outcome of the eval gate over a proposed patch (attached in 03.4 once the
-/// gate lands). Kept deliberately small and host-neutral here: a pass/fail plus a
+/// The outcome of the eval gate over a proposed patch (attached once the gate
+/// lands). Kept deliberately small and host-neutral here: a pass/fail plus a
 /// short scorecard summary string the gate produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalResult {
@@ -43,7 +43,7 @@ pub struct ChangeProvenance {
     pub rollback_notes: String,
     /// Lessons worth recording from producing the change.
     pub lessons: Vec<String>,
-    /// The eval-gate result, attached once the gate has run (03.4 / subject 05).
+    /// The eval-gate result, attached once the gate has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<EvalResult>,
 }
