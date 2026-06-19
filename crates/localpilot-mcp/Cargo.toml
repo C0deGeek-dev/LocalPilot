@@ -1,6 +1,6 @@
 [package]
 name = "localpilot-mcp"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

@@ -60,6 +60,10 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 Coordinated LocalX beta release.
 
+- **Release hygiene.** Stamped every crate's `Cargo.toml` package version at
+  `0.3.0-beta.3` and advanced the `external/localmind` submodule pin to the
+  matching beta.3 LocalMind commit. The coordinated cut had moved the top-level
+  `VERSION` but left the Rust packages and the embedded LocalMind a train behind.
 - **RPC robustness.** The stdio line framer now caps an unterminated record
   (default 16 MiB) and returns a framing error instead of buffering without
   bound, so a peer that never sends a newline cannot exhaust memory.

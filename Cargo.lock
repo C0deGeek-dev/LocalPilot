@@ -1160,7 +1160,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-codegraph"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "serde",
  "thiserror",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "idna_adapter",
  "localmind-core",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-store"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localmind-core",
  "localmind-inference",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-config"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "figment",
  "indexmap",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-core"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-harness"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-localmind"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-mcp"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "localpilot-core",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-quota"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localpilot-config",
  "localpilot-llm",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-recovery"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "proptest",
  "serde",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-rpc"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localpilot-core",
  "localpilot-harness",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-sandbox"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "futures",
  "proptest",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-skills"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "figment",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-store"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localpilot-config",
  "localpilot-core",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tools"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tui"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "insta",
  "ratatui",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-verify"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "localpilot-core",
  "localpilot-sandbox",
