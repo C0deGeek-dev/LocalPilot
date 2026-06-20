@@ -349,16 +349,22 @@ would need its own decision and, for anything touching the gate, a fresh securit
 review against this invariant.
 
 **As shipped (2026-06).** The read-only half (`localpilot-selfreview`: observe →
-detect → propose, advisory findings report) is wired and reachable. The write
-half (`localpilot-patchgen`: worktree proposal + `ApprovalToken`-gated promotion)
-is **built and tested but intentionally staged — not yet wired to any caller**.
-The planned, deferred entry point is a confirm-gated `localpilot self-review
-propose-patch` command that produces a worktree proposal and stops at the
-`ApprovalToken` gate; until it lands, the crate has no autonomous or CLI path that
-constructs a token, so the by-construction invariant holds trivially (no caller =
-no write path). This note exists because the crate's presence alone does not mean
-the propose path is live; wiring waits for the next loop phase and a security
-re-check against this invariant.
+detect → propose, advisory findings report) **and the write half** are now wired.
+The write half (`localpilot-patchgen`: worktree proposal + `ApprovalToken`-gated
+promotion) is reached only through `localpilot self-review propose-patch` /
+`promote` / `discard`: `propose-patch` has a model author a minimal, scope-confined
+edit for a ranked finding into an isolated worktree and **stops**; `promote` applies
+it onto `main` only when an explicit human `--approve` mints the token (fast-forward
+only, never pushes); `discard` drops the worktree/branch. A proposal **persists
+across invocations** via the on-disk worktree plus its provenance record
+(`ProposedPatch::persist`/`reopen`), so a human reviews the diff between proposing
+and promoting; reattaching mints no token and writes no `main`. The by-construction
+invariant is unchanged: the sole `ApprovalToken` constructor is the explicit-human
+`--approve` path, and `promote`'s signature requires the token, so no autonomous or
+reattach path reaches a `main` write without a human act. Behaviour is proven
+against `FakeProvider` offline (D008); a live local-model run is opportunistic.
+Edit generation, model-judged critique quality, and any move toward reducing the
+gate remain separate later decisions.
 
 ## ADR-0033: External Benchmark Corpora Never Enter The Clean-Room Tree
 

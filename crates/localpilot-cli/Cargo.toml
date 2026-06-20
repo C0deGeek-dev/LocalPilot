@@ -48,7 +48,9 @@ ratatui = { workspace = true, features = [
     "scrolling-regions",
 ], optional = true }
 reqwest.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing-subscriber.workspace = true
@@ -58,6 +60,7 @@ localpilot-harness = { path = "../localpilot-harness" }
 localpilot-llm = { path = "../localpilot-llm" }
 localpilot-localmind = { path = "../localpilot-localmind" }
 localpilot-mcp = { path = "../localpilot-mcp" }
+localpilot-patchgen = { path = "../localpilot-patchgen" }
 localpilot-quota = { path = "../localpilot-quota" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-rpc = { path = "../localpilot-rpc" }

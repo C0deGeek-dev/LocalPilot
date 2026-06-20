@@ -22,6 +22,7 @@ mod logging;
 mod mcp;
 mod memory_cmd;
 mod models_cmd;
+mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;
 mod rpc_cmd;
@@ -244,6 +245,10 @@ enum Command {
         /// its output back via --friction-file).
         #[arg(long)]
         audit_prompt: bool,
+        /// Write-half subcommands: propose / promote / discard a patch for a finding
+        /// (the gated self-improvement loop, ADR-0034). Omit for the read-only report.
+        #[command(subcommand)]
+        patch: Option<propose_patch::ProposePatchCommand>,
     },
 }
 
@@ -998,10 +1003,13 @@ async fn main() -> anyhow::Result<()> {
             friction_file,
             process_file,
             audit_prompt,
+            patch,
         } => {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
-            if audit_prompt {
+            if let Some(cmd) = patch {
+                propose_patch::dispatch(cmd, &mut stdout).await?;
+            } else if audit_prompt {
                 self_review_cmd::print_audit_prompt(&mut stdout)?;
             } else {
                 self_review_cmd::run(

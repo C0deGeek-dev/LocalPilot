@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Gated `self-review propose-patch` write loop.** The write half of the
+  self-improvement loop (ADR-0034) is now wired: `localpilot self-review
+  propose-patch --finding <rank> --model <model>` asks a model to author a minimal,
+  scope-confined fix for a ranked finding into an isolated git worktree and stops;
+  `localpilot self-review promote --id <id> --reviewer <you> --approve` applies it
+  to the main branch (the `--approve` flag is the explicit human act that mints the
+  approval token — without it promotion is refused; fast-forward only, never
+  pushes); `localpilot self-review discard --id <id>` drops the proposal. A proposal
+  persists across invocations, so review can happen between propose and promote. The
+  agent never mints the token, never merges, and never pushes — the gate is structural.
 - **Scroll-up history no longer loses the start of a conversation.** In the
   `chat` REPL the inline live region used to be torn down and re-created every time
   its height changed (composer, activity tail, pickers). Early in a session that

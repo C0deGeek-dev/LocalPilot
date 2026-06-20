@@ -303,3 +303,20 @@ touches the main branch on its own:
 
 The git surface is a fixed set of subcommands run as argv (never a shell), with
 no network subcommand anywhere; see [docs/07-security-and-privacy.md](07-security-and-privacy.md).
+
+CLI (the gated write-half surface):
+
+- `localpilot self-review propose-patch --finding <rank> --model <model> [--provider <id>]`
+  — a model authors a minimal, scope-confined fix for the ranked finding (from a fresh
+  `self-review` scan) into an isolated worktree; the command prints the diff and stops,
+  leaving the proposal on disk for review.
+- `localpilot self-review promote --id <id> --reviewer <you> --approve` — apply the
+  reviewed proposal onto the main branch. `--approve` is the explicit human act that
+  mints the approval token; without it, promotion is refused. Fast-forward only; never
+  pushes.
+- `localpilot self-review discard --id <id>` — drop the proposal's worktree and branch.
+
+A proposal **persists across invocations** (`propose-patch`, then a later `promote` or
+`discard`) via the on-disk worktree plus its provenance record, so the human reviews the
+diff between proposing and promoting. Reattaching to a proposal mints no token and writes
+no main branch — the approval gate on `promote` is unchanged.
