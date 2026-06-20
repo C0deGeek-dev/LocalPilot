@@ -157,7 +157,12 @@ UI stack (chosen; see ADR-0006):
 
 - `ratatui` — terminal UI framework
 - `crossterm` — cross-platform terminal backend (Windows, Linux, macOS)
-- `tui-textarea` — multi-line input widget
+- a hand-rolled multi-line composer (no third-party input widget), so cursor,
+  wrapping, history, and paste behaviour are owned and testable
+
+Rendering is inline in the terminal's main screen buffer, not an alternate screen
+(ADR-0021): finished transcript blocks are written once into native scrollback, and
+a fixed-height bottom band holds the only redrawn surface (ADR-0039).
 
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.

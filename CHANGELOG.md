@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Scroll-up history no longer loses the start of a conversation.** In the
+  `chat` REPL the inline live region used to be torn down and re-created every time
+  its height changed (composer, activity tail, pickers). Early in a session that
+  dropped freshly committed transcript blocks before they had scrolled into the
+  terminal's native scrollback, leaving a hole in scroll-up history — the
+  conversation's start gone while pre-launch shell output survived. The live region
+  is now a fixed-height band, re-initialised only on a terminal resize, so every
+  committed block stays in scrollback. Trade-off: a small constant gap above the
+  composer when idle (tunable via `LIVE_REGION_HEIGHT`). See ADR-0039.
 - **A large file write no longer degrades the session.** When a local model
   cannot emit a big file-write tool call as one well-formed payload, the harness
   used to re-prompt blindly and degrade without ever writing the file. It now

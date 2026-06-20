@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0039: The Inline Live Region Is A Fixed-Height Band, Re-initialised Only On Terminal Resize
+
+Status: accepted. Refines ADR-0021 (inline rendering); the committed ratatui +
+crossterm stack is unchanged.
+
+The interactive REPL's inline live region reserves a constant height and is held
+there for the life of the session. It is re-initialised only when the terminal's
+own dimensions change — a window resize, or a clamp on a short window — never when
+its own content changes height.
+
+ADR-0021 originally sized the region to its content and re-initialised the terminal
+on every height change. That dropped scroll-up history: ratatui's `insert_before`
+only moves a committed block into the terminal's native scrollback once the inline
+viewport has reached the bottom of the screen; until then, committed blocks sit
+on-screen *above* the viewport. The per-content re-initialisation (`clear` + a fresh
+`Terminal`) ran on every composer/activity/picker height change and clobbered those
+not-yet-scrolled-back rows, leaving a hole in the middle of scroll-up history — early
+conversation gone — while pre-launch shell output, already in real scrollback,
+survived.
+
+Consequences:
+
+- Committed transcript blocks are never dropped by a live-region height change;
+  history fidelity no longer depends on terminal or session timing.
+- The region reserves a small constant band, so a modest blank gap sits above the
+  composer when idle. The band height (`LIVE_REGION_HEIGHT` in the terminal driver)
+  is the single tuning knob, trading the idle gap against how much in-progress output
+  is visible at once.
+- The activity tail, composer, and autocomplete pickers render *within* the band
+  (each already caps and scrolls internally) instead of growing it.
+- A terminal window resize still re-initialises the viewport. This is rare and a
+  repaint is expected then; the per-frame churn that caused the loss is gone.
+
+Reason:
+
+- holding the band fixed removes the teardown that caused the loss outright, which is
+  simpler and stronger than reducing its frequency. The fixed-height commit path is
+  pinned by offline tests over a `TestBackend` (which records a scrollback buffer);
+  the user-visible loss is confirmed by manual terminal testing. Behaviour was
+  cross-checked against a local read-only behaviour reference, while the
+  implementation, prompts, and tests are original to this repository (clean-room,
+  ADR-0005).
+
 ## ADR-0038: An Oversized Malformed Write Is Recovered By Chunking The Write
 
 Status: accepted. Extends the bad-output recovery ladder (`localpilot-recovery`)
