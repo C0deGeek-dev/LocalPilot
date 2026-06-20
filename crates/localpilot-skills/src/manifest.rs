@@ -149,9 +149,6 @@ impl SkillManifest {
 struct SkillFrontmatter {
     name: String,
     description: String,
-    #[serde(default)]
-    #[allow(dead_code)] // recorded, not yet consumed
-    license: Option<String>,
     /// `disable-model-invocation: true` makes the skill user-only (the invocation
     /// axis the loader previously discarded on load).
     #[serde(default, rename = "disable-model-invocation")]

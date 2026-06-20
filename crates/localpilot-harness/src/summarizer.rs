@@ -282,9 +282,6 @@ impl Summarizer for ProviderSummarizer {
 struct SmartDigest {
     #[serde(default)]
     sections: Vec<SmartSection>,
-    #[serde(default)]
-    #[allow(dead_code)] // accepted for forward-compatibility; not yet surfaced
-    confidence: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,9 +306,8 @@ digest. Update the prior summary: keep still-true facts, drop stale or supersede
 ones, merge new evidence, and keep unresolved next steps explicit. Only state facts \
 grounded in the material below — never invent files, results, or decisions. Do not \
 echo raw file contents, tool output, media, or base64. Reply with ONLY a JSON object \
-of shape {{\"sections\":[{{\"kind\":<one of {kinds}>,\"items\":[\"...\"]}}],\
-\"confidence\":<0..1>}}. Keep it under about {output_cap} tokens; each item is one \
-short sentence.",
+of shape {{\"sections\":[{{\"kind\":<one of {kinds}>,\"items\":[\"...\"]}}]}}. \
+Keep it under about {output_cap} tokens; each item is one short sentence.",
         kinds = SECTION_KINDS.join("|"),
         output_cap = output_cap,
     );
@@ -655,8 +651,7 @@ mod tests {
             "sections": [
                 { "kind": "goal", "items": ["fix the parser in src/parse.rs"] },
                 { "kind": "progress", "items": ["read src/parse.rs"] }
-            ],
-            "confidence": 0.8
+            ]
         })
         .to_string()
     }

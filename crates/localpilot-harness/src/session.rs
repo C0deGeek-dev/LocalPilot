@@ -362,12 +362,6 @@ impl ToolFailureGuard {
         self.failures.remove(tool_name);
     }
 
-    /// Whether `tool_name` has exceeded the threshold.
-    #[allow(dead_code)] // kept for potential future use (e.g., pre-check before dispatch)
-    fn is_stuck(&self, tool_name: &str, threshold: u32) -> bool {
-        self.failures.get(tool_name).copied().unwrap_or(0) >= threshold
-    }
-
     /// Reset all counters (call at the start of each turn).
     fn reset(&mut self) {
         self.failures.clear();
@@ -2227,35 +2221,35 @@ mod tests {
         guard.record_failure("edit_file");
         guard.record_failure("edit_file");
         guard.record_success("edit_file");
-        // After success the counter is gone.
-        assert!(!guard.is_stuck("edit_file", 6));
+        // After success the counter is gone: the next failure starts again at one.
+        assert_eq!(guard.record_failure("edit_file"), 1);
     }
 
     #[test]
     fn tool_failure_guard_resets_across_turns() {
         let mut guard = ToolFailureGuard::default();
+        let mut last = 0;
         for _ in 0..6 {
-            guard.record_failure("find_files");
+            last = guard.record_failure("find_files");
         }
-        assert!(guard.is_stuck("find_files", 6));
+        assert_eq!(last, 6);
 
         // Simulate a new turn boundary.
         guard.reset();
-        assert!(!guard.is_stuck("find_files", 6));
+        // After reset the counter starts over.
+        assert_eq!(guard.record_failure("find_files"), 1);
     }
 
     #[test]
     fn tool_failure_guard_independent_per_tool() {
         let mut guard = ToolFailureGuard::default();
+        let mut last = 0;
         for _ in 0..5 {
-            guard.record_failure("tool_a");
+            last = guard.record_failure("tool_a");
         }
-        // tool_a is at 5, not yet stuck.
-        assert!(!guard.is_stuck("tool_a", 6));
-        // tool_b hasn't failed at all.
-        assert!(!guard.is_stuck("tool_b", 6));
-
-        guard.record_failure("tool_b");
+        // tool_a is at 5; tool_b is independent and starts at one.
+        assert_eq!(last, 5);
+        assert_eq!(guard.record_failure("tool_b"), 1);
         assert_eq!(guard.record_failure("tool_b"), 2);
     }
 }

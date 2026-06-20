@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 
 use localpilot_config::{CliOverrides, ConfigPaths};
-use localpilot_localmind::{CandidateStatus, IngestJob, JobStatus, RunMode};
+use localpilot_localmind::{IngestJob, JobStatus, RunMode};
 
 /// Print an ingestion preview.
 ///
@@ -375,20 +375,5 @@ fn run_mode_label(mode: RunMode) -> &'static str {
     match mode {
         RunMode::Full => "full",
         RunMode::Refresh => "refresh",
-    }
-}
-
-#[allow(dead_code)]
-fn _status_name(status: CandidateStatus) -> &'static str {
-    match status {
-        CandidateStatus::Candidate => "candidate",
-        CandidateStatus::Ignored => "ignored",
-        CandidateStatus::Excluded => "excluded",
-        CandidateStatus::Generated => "generated",
-        CandidateStatus::Binary => "binary",
-        CandidateStatus::Unsupported => "unsupported",
-        CandidateStatus::TooLarge => "too_large",
-        CandidateStatus::DecodeFailed => "decode_failed",
-        CandidateStatus::OverBudget => "over_budget",
     }
 }
