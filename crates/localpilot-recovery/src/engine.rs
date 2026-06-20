@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::BadOutputKind;
 
+/// Whether a bad-output kind is a malformed *structured output* — the model
+/// failed to emit a well-formed tool call. These are the kinds a chunked-write
+/// instruction can recover, distinct from degenerate-text kinds (slash flood,
+/// token loop) where shrinking the output makes no difference.
+fn is_malformed_output(kind: BadOutputKind) -> bool {
+    matches!(
+        kind,
+        BadOutputKind::MalformedStructuredOutput | BadOutputKind::MalformedToolCall
+    )
+}
+
 /// The current health of the provider/model for this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +37,12 @@ pub enum RecoveryAction {
     RetryWithRepairPrompt,
     ReduceContext,
     SummarizeOversizedToolResults,
+    /// The model could not emit a large structured output — a file-write tool's
+    /// arguments — as one well-formed call. Instruct it to split the write into
+    /// smaller calls: the first section with `write_file`, each remaining
+    /// section appended. The output-side counterpart to `ReduceContext`, which
+    /// only shrinks the input.
+    RequestChunkedWrite,
     LowerImageCount,
     MarkDegraded,
     StopHarnessProgress,
@@ -100,6 +117,13 @@ impl RecoveryEngine {
         if self.attempts <= self.budget.max_repair_attempts {
             self.health = ModelHealth::Recovering;
             actions.push(RecoveryAction::RetryWithRepairPrompt);
+            // A malformed structured output is the model losing tool-call
+            // coherence — typically an oversized write it can't emit in one
+            // call. Ask it to chunk the write from the first attempt, so the
+            // instruction lands before the budget is spent.
+            if is_malformed_output(kind) {
+                actions.push(RecoveryAction::RequestChunkedWrite);
+            }
             if self.attempts > 1 {
                 actions.push(RecoveryAction::ReduceContext);
                 actions.push(RecoveryAction::SummarizeOversizedToolResults);
@@ -168,5 +192,43 @@ mod tests {
         assert_eq!(diag.kind, BadOutputKind::MalformedToolCall);
         assert!(diag.actions.contains(&RecoveryAction::AbortStream));
         assert!(diag.actions.contains(&RecoveryAction::SaveDiagnostic));
+    }
+
+    #[test]
+    fn a_malformed_output_requests_a_chunked_write_from_the_first_attempt() {
+        for kind in [
+            BadOutputKind::MalformedStructuredOutput,
+            BadOutputKind::MalformedToolCall,
+        ] {
+            let mut engine = RecoveryEngine::new(RecoveryBudget::default());
+            let diag = engine.record_bad_turn(kind);
+            assert!(
+                diag.actions.contains(&RecoveryAction::RequestChunkedWrite),
+                "{kind:?} should request a chunked write on the first attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_text_kind_does_not_request_a_chunked_write() {
+        // Slash flood / token loop are not a too-large output, so chunking the
+        // write would not help — only the repair prompt applies.
+        let mut engine = RecoveryEngine::new(RecoveryBudget::default());
+        let diag = engine.record_bad_turn(BadOutputKind::SlashFlood);
+        assert!(!diag.actions.contains(&RecoveryAction::RequestChunkedWrite));
+    }
+
+    #[test]
+    fn an_exhausted_malformed_output_degrades_without_requesting_a_chunked_write() {
+        // Past the budget the turn is degraded and stops; the chunk request is a
+        // within-budget recovery, not a terminal action.
+        let mut engine = RecoveryEngine::new(RecoveryBudget {
+            max_repair_attempts: 1,
+        });
+        engine.record_bad_turn(BadOutputKind::MalformedStructuredOutput);
+        let diag = engine.record_bad_turn(BadOutputKind::MalformedStructuredOutput);
+        assert_eq!(engine.health(), ModelHealth::Degraded);
+        assert!(diag.actions.contains(&RecoveryAction::MarkDegraded));
+        assert!(!diag.actions.contains(&RecoveryAction::RequestChunkedWrite));
     }
 }
