@@ -547,6 +547,39 @@ async fn run_slash(
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
             run_harness_command(terminal, state, approval_rx, host, true).await?;
         }
+        // The walk-and-chunk actions can run for many seconds; drive them through
+        // a spinner/progress loader so the UI never just freezes. The rest are
+        // cheap state reads/writes and stay synchronous.
+        SlashAction::Ingest(IngestAction::Run) => {
+            run_ingest_progress(
+                terminal,
+                state,
+                host.cwd,
+                localpilot_localmind::RunMode::Full,
+                false,
+            )
+            .await?;
+        }
+        SlashAction::Ingest(IngestAction::Refresh) => {
+            run_ingest_progress(
+                terminal,
+                state,
+                host.cwd,
+                localpilot_localmind::RunMode::Refresh,
+                false,
+            )
+            .await?;
+        }
+        SlashAction::Ingest(IngestAction::Resume) => {
+            run_ingest_progress(
+                terminal,
+                state,
+                host.cwd,
+                localpilot_localmind::RunMode::Refresh,
+                true,
+            )
+            .await?;
+        }
         SlashAction::Ingest(action) => run_ingest_slash(state, host.cwd, action),
         SlashAction::Knowledge(query) => {
             let mut output = Vec::new();
@@ -688,6 +721,11 @@ fn load_session_id(
     }
 }
 
+/// Handle the synchronous, fast `/ingest` actions (state reads/writes that
+/// return promptly). The walking actions — `run`, `refresh`, `resume` — are
+/// intercepted in [`run_slash`] and driven through [`run_ingest_progress`] with a
+/// loader instead; the arms for them here are a correct fallback if this is ever
+/// called directly.
 fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestAction) {
     let mut output = Vec::new();
     let result = match action {
@@ -725,6 +763,208 @@ fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestA
         IngestAction::Promote(id) => crate::ingest_cmd::promote(cwd, &id, &mut output),
     };
     apply_command_result(state, output, result);
+}
+
+/// Run a folder-ingestion walk on a blocking task while keeping the TUI live:
+/// the working spinner animates, stage milestones post as notices, and Ctrl-C
+/// pauses the run (partial chunks are kept, so `/ingest resume` continues it).
+/// Used for the long-running `run`/`refresh`/`resume` actions; the cheap ingest
+/// actions stay on the synchronous path.
+async fn run_ingest_progress(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    cwd: &std::path::Path,
+    requested_mode: localpilot_localmind::RunMode,
+    resume: bool,
+) -> anyhow::Result<()> {
+    use localpilot_localmind::{JobStatus, RunMode};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let config = match crate::ingest_cmd::load_ingest_config(cwd) {
+        Ok(config) => config,
+        Err(error) => {
+            state.apply(UiEvent::Notice(format!("ingest config error: {error}")));
+            return Ok(());
+        }
+    };
+
+    // `resume` resolves the same decision the session-open trigger uses: resume an
+    // interrupted job, rebuild, or report nothing-to-do.
+    let mode = if resume {
+        match localpilot_localmind::ingest_status(cwd) {
+            Ok(Some(job)) => {
+                let has_index = localpilot_localmind::has_chunk_index(cwd);
+                match localpilot_localmind::planned_run_mode(Some(&job), has_index) {
+                    Some(mode) => mode,
+                    None => {
+                        state.apply(UiEvent::Notice(
+                            "ingest job already completed; run /ingest refresh to update"
+                                .to_string(),
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(None) => {
+                state.apply(UiEvent::Notice("no ingest job to resume".to_string()));
+                return Ok(());
+            }
+            Err(error) => {
+                state.apply(UiEvent::Notice(format!(
+                    "ingest status unreadable: {error}"
+                )));
+                return Ok(());
+            }
+        }
+    } else {
+        requested_mode
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_task = cancel.clone();
+    let (tx, mut progress_rx) = mpsc::unbounded_channel::<localpilot_localmind::IngestProgress>();
+    let root = cwd.to_path_buf();
+    let mut handle = tokio::task::spawn_blocking(move || {
+        localpilot_localmind::ingest_run_with_progress(
+            &root,
+            &config,
+            mode,
+            &|| cancel_task.load(Ordering::Relaxed),
+            &mut |stage| {
+                let _ = tx.send(stage);
+            },
+        )
+    });
+
+    let mode_label = match mode {
+        RunMode::Full => "full",
+        RunMode::Refresh => "refresh",
+    };
+    state.busy = true;
+    state.apply(UiEvent::Notice(format!(
+        "ingesting project knowledge ({mode_label})…"
+    )));
+    let started = std::time::Instant::now();
+    let mut total = 0_u64;
+    let mut parse_bucket = 0_u64;
+
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                state.spinner = state.spinner.wrapping_add(1);
+                state.working_secs = started.elapsed().as_secs();
+                drain_ingest_progress(state, &mut progress_rx, &mut total, &mut parse_bucket);
+                // Ctrl-C requests a pause; other keys are ignored while ingesting.
+                for _ in 0..64 {
+                    if !event::poll(Duration::ZERO)? {
+                        break;
+                    }
+                    if let Event::Key(key) = event::read()? {
+                        if is_key_action(key) && is_cancel(key) && !cancel.load(Ordering::Relaxed) {
+                            cancel.store(true, Ordering::Relaxed);
+                            state.apply(UiEvent::Notice("cancelling ingestion…".to_string()));
+                        }
+                    }
+                }
+                draw_ui(terminal, state)?;
+            }
+            joined = &mut handle => break joined,
+        }
+    };
+    // Drain any milestones queued after the last tick so the final stages show.
+    drain_ingest_progress(state, &mut progress_rx, &mut total, &mut parse_bucket);
+    state.busy = false;
+
+    match outcome {
+        Ok(Ok(summary)) => {
+            let interrupted =
+                matches!(summary.job.status, JobStatus::Paused | JobStatus::Cancelled);
+            let status = match summary.job.status {
+                JobStatus::Completed => "completed",
+                JobStatus::Paused => "paused",
+                JobStatus::Cancelled => "cancelled",
+                JobStatus::Failed => "failed",
+                JobStatus::Running => "running",
+                JobStatus::Queued => "queued",
+            };
+            let suffix = if interrupted {
+                " — resume with /ingest resume"
+            } else {
+                ""
+            };
+            state.apply(UiEvent::Notice(format!(
+                "ingestion {status}: {} file(s), {} chunk(s){suffix}",
+                summary.job.completed_files, summary.chunks_written
+            )));
+        }
+        Ok(Err(error)) => {
+            state.apply(UiEvent::Notice(format!("ingestion failed: {error}")));
+        }
+        Err(error) => {
+            state.apply(UiEvent::Notice(format!("ingestion task error: {error}")));
+        }
+    }
+    draw_ui(terminal, state)?;
+    Ok(())
+}
+
+/// Drain queued ingestion progress into notices. Milestone stages post once;
+/// per-file `Parsing` ticks are throttled to quarter marks so a large walk does
+/// not flood the transcript. `total`/`bucket` carry the throttle state across
+/// calls.
+fn drain_ingest_progress(
+    state: &mut AppState,
+    rx: &mut mpsc::UnboundedReceiver<localpilot_localmind::IngestProgress>,
+    total: &mut u64,
+    bucket: &mut u64,
+) {
+    use localpilot_localmind::IngestProgress;
+    while let Ok(stage) = rx.try_recv() {
+        match stage {
+            IngestProgress::Discovering => {
+                state.apply(UiEvent::Notice("ingest: discovering files…".to_string()));
+            }
+            IngestProgress::Discovered {
+                candidates,
+                skipped,
+            } => {
+                *total = candidates;
+                state.apply(UiEvent::Notice(format!(
+                    "ingest: {candidates} file(s) to parse ({skipped} skipped)"
+                )));
+            }
+            IngestProgress::Parsing {
+                completed,
+                total: count,
+            } => {
+                *total = count;
+                if count > 0 && completed > 0 {
+                    let quarter = completed.saturating_mul(4) / count;
+                    if quarter > *bucket {
+                        *bucket = quarter;
+                        state.apply(UiEvent::Notice(format!(
+                            "ingest: parsed {completed}/{count} file(s)"
+                        )));
+                    }
+                }
+            }
+            IngestProgress::Indexing => {
+                state.apply(UiEvent::Notice(
+                    "ingest: indexing project context…".to_string(),
+                ));
+            }
+            IngestProgress::Writing => {
+                state.apply(UiEvent::Notice("ingest: writing index…".to_string()));
+            }
+            // The caller posts the final summary line from the run result.
+            IngestProgress::Completed { .. } => {}
+        }
+    }
 }
 
 fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::Result<()>) {

@@ -132,14 +132,14 @@ the runtime in-process or driving it headless over RPC/ACP.
 
 ### Chat controls
 
-`PageUp` and `PageDown` scroll the transcript. The default mouse mode keeps
-normal terminal selection available and disables terminal alternate-scroll so
-wheel notches do not navigate the input history. Press `F12` to toggle
-mouse-wheel scrolling for the transcript; in wheel mode, wheel notches use the
-same transcript paging path as `PageUp` and `PageDown`. Press `F12` again to
-restore normal terminal selection. Bracketed paste stays enabled in both mouse
-modes. Set
-`LOCALPILOT_ENABLE_MOUSE_CAPTURE=1` to start in wheel mode.
+The REPL runs in your terminal's normal screen buffer and does not capture the
+mouse, so native scrollback, text selection, and copy/paste keep working — scroll
+the transcript the way you scroll any terminal output (mouse wheel or your
+terminal's scroll keys). In the input box, `Enter` sends, and `Alt+Enter`,
+`Ctrl+J`, or a trailing `\` insert a newline; `↑`/`↓` recall input history (and
+move within a multi-line draft); `Ctrl-C` cancels an in-flight turn or ingest
+run. Type `/` for slash-command autocomplete and `@` to mention a workspace file.
+Bracketed paste is enabled, so large pastes arrive as a single block.
 
 ## Build features
 

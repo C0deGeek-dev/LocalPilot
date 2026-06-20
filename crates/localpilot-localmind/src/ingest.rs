@@ -358,6 +358,26 @@ pub fn preview(project_root: &Path, config: &IngestConfig) -> Result<PreviewMani
     })
 }
 
+/// A coarse, milestone-level progress signal emitted across a run so a host can
+/// show a live loader instead of blocking silently. The `Parsing` stage is
+/// emitted once per candidate file (a host should throttle its own redraws); the
+/// rest are one-shot phase markers.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum IngestProgress {
+    /// Walking the project tree to classify candidate files.
+    Discovering,
+    /// Discovery finished: how many files will be parsed, and how many skipped.
+    Discovered { candidates: u64, skipped: u64 },
+    /// Parsing/chunking candidate files (reused untouched on refresh when fresh).
+    Parsing { completed: u64, total: u64 },
+    /// Merging and indexing the project-context document.
+    Indexing,
+    /// Writing the manifest, review items, and job state to disk.
+    Writing,
+    /// The run finished: files completed and chunks now in the index.
+    Completed { files: u64, chunks: usize },
+}
+
 /// Run or refresh ingestion, persisting redacted chunks and manifest state.
 ///
 /// # Errors
@@ -367,12 +387,35 @@ pub fn run(
     config: &IngestConfig,
     mode: RunMode,
 ) -> Result<RunSummary, IngestError> {
+    run_with_progress(project_root, config, mode, &|| false, &mut |_| {})
+}
+
+/// Run or refresh ingestion while reporting progress and honoring cancellation,
+/// so an interactive host can drive a loader. `should_cancel` is polled before
+/// each file; a `true` return pauses the job (partial chunks are kept, so the
+/// next run resumes via [`RunMode::Refresh`]). `progress` receives
+/// [`IngestProgress`] milestones. [`run`] is the no-op-callback shorthand.
+///
+/// # Errors
+/// Returns [`IngestError`] if the run cannot read source files or write state.
+pub fn run_with_progress(
+    project_root: &Path,
+    config: &IngestConfig,
+    mode: RunMode,
+    should_cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(IngestProgress),
+) -> Result<RunSummary, IngestError> {
     if !config.enabled {
         return Err(IngestError::Disabled);
     }
     let root = canonical_root(project_root)?;
     let ingest_dir = ensure_ingest_dir(&root)?;
+    progress(IngestProgress::Discovering);
     let manifest = preview(&root, config)?;
+    progress(IngestProgress::Discovered {
+        candidates: manifest.estimates.candidate_files,
+        skipped: manifest.estimates.skipped_files,
+    });
     let store = ChunkStore::open(&ingest_dir)?;
     // Contextual chunk prefixing. The model-enrichment tier is gated on the
     // opt-in flag; no enricher is wired on this local path, so prefixes stay
@@ -411,16 +454,28 @@ pub fn run(
     };
     write_json(&ingest_dir.join(JOB_FILE), &job)?;
 
+    let total_candidates = manifest.estimates.candidate_files;
     for entry in manifest
         .entries
         .iter()
         .filter(|entry| entry.status == CandidateStatus::Candidate)
     {
+        // Honor a host cancellation (e.g. Ctrl-C) the same way the time budget
+        // does: pause with partial chunks persisted, so the next run resumes.
+        if should_cancel() {
+            job.status = JobStatus::Paused;
+            job.message = Some("interrupted by user".to_string());
+            break;
+        }
         if started.elapsed().as_secs() > config.max_elapsed_secs {
             job.status = JobStatus::Paused;
             job.message = Some("elapsed time budget reached".to_string());
             break;
         }
+        progress(IngestProgress::Parsing {
+            completed: job.completed_files,
+            total: total_candidates,
+        });
         let Some(hash) = &entry.content_hash else {
             job.failed_files = job.failed_files.saturating_add(1);
             continue;
@@ -454,6 +509,7 @@ pub fn run(
     // document, so retrieval surfaces project conventions and constraints even
     // when the raw files are large or scattered across nested directories. It is
     // a candidate path so the refresh sweep below never tombstones it.
+    progress(IngestProgress::Indexing);
     let context_chunks = project_context_chunks(&root, &prefix_policy);
     if let Some(hash) = context_chunks
         .first()
@@ -480,12 +536,17 @@ pub fn run(
         };
     }
     job.updated_unix = unix_now();
+    progress(IngestProgress::Writing);
     let chunk_count = store.count()?;
     let review = build_review_items(&manifest, chunk_count);
     write_json(&ingest_dir.join(MANIFEST_FILE), &manifest)?;
     write_json(&ingest_dir.join(REVIEW_FILE), &review)?;
     write_json(&ingest_dir.join(JOB_FILE), &job)?;
 
+    progress(IngestProgress::Completed {
+        files: job.completed_files,
+        chunks: chunk_count,
+    });
     Ok(RunSummary {
         job,
         manifest,

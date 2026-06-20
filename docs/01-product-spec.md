@@ -216,18 +216,30 @@ An always-on terminal session with:
 - always-visible footer stats
 - optional thinking/reasoning side panel
 
-Interactive slash commands are REPL-scoped:
+Interactive slash commands are REPL-scoped. Mode and permission switches
+(`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`), the reasoning panel
+(`/think`), reasoning effort (`/effort <level>`), and session controls (`/new`,
+`/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act on the live
+session. The rest:
 
 - `/clear` clears the visible conversation and runtime message history while
   preserving the session id, workspace, trust decision, provider/model, mode,
   and permission profile.
 - `/compact` manually applies the same context compaction rules used before
   provider requests, then reports whether history was compacted and shows the
-  resulting context usage.
-- `/search <query>` highlights transcript lines containing the exact query;
-  `/search` clears the active search.
-- `/resume` and `/wait-resume` run the corresponding harness workflows inside
-  the interactive session.
+  resulting context usage; `/compact force` compacts even when within budget.
+- `/continue` (alias `/resume`) reopens the previous session in this workspace.
+  The harness workflows are separate: `/harness-resume` resumes harness plan
+  work, and `/wait-resume` waits out a provider quota window and then resumes.
+- `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
+  `resume`, `preview`, `status`, `review`, and so on). The walking actions
+  (`run`, `refresh`, `resume`) show a live progress loader — discovering,
+  parsing, indexing, writing — and can be interrupted with Ctrl-C, which pauses
+  the job so a later `/ingest resume` continues from the chunks already written.
+- `/knowledge <query>` searches ingested knowledge; `/context <task>` builds a
+  task-specific context bundle from it.
+- `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
+  all`).
 
 ### Harness CLI
 

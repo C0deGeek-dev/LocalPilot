@@ -5,6 +5,20 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Ingestion shows a live progress loader.** In the `chat` REPL the walking
+  ingest actions (`/ingest run`, `/ingest refresh`, `/ingest resume`) no longer
+  block silently: a working spinner runs while stage notices report discovering,
+  files-to-parse, parsed *N*/*total* (throttled), indexing, and writing, ending
+  in an `ingestion completed: … file(s), … chunk(s)` summary. `Ctrl-C` pauses an
+  in-flight run — the chunks already written are kept, so `/ingest resume`
+  continues instead of restarting — and failures surface as a notice rather than
+  leaving the UI stuck. The non-interactive `localpilot ingest run`/`refresh`
+  also print stage banners. Backed by a new `ingest_run_with_progress` engine
+  entry point (the old `run` is a no-op-callback shim, so behaviour is
+  unchanged). Docs corrected to match: `docs/01-product-spec.md` drops the
+  never-shipped `/search` command and fixes `/resume` (it reopens the previous
+  session; the harness workflows are `/harness-resume` / `/wait-resume`), and the
+  wiki How-To/Troubleshooting pages show real `ingest`/`knowledge` subcommands.
 - **Plan mode carries planning judgment.** The planner now prefers steps that
   extend or reuse the existing code named in the repository summary over adding
   parallel code, and must cover every acceptance criterion in the brief. `brief.md`

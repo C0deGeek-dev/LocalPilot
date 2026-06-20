@@ -53,6 +53,18 @@ and `bypass` is never the default. Permission profiles (`default` / `relaxed` /
 
 ## Transcript scrolling in the REPL
 
-`PageUp`/`PageDown` page the transcript. Press `F12` to toggle mouse-wheel
-scrolling (and again to restore normal terminal selection); set
-`LOCALPILOT_ENABLE_MOUSE_CAPTURE=1` to start in wheel mode.
+The REPL stays in your terminal's normal screen buffer and does not capture the
+mouse, so scroll the transcript exactly as you scroll any other terminal output
+(mouse wheel, scrollbar, or your terminal's scroll keys). Finished history is
+printed into native scrollback while the live input box and status line stay
+pinned at the bottom.
+
+## Ingesting a folder looks stuck
+
+A first `/ingest run` (or the automatic first-use index build) walks and chunks
+the whole workspace, which takes time on a large repo. The REPL is not hung: it
+shows a working spinner plus stage notices — discovering, files to parse,
+parsed *N*/*total*, indexing, writing — and a final `ingestion completed:
+… file(s), … chunk(s)` line. Press `Ctrl-C` to pause; the chunks written so far
+are kept, and `/ingest resume` (or `localpilot ingest resume`) continues from
+there instead of restarting.

@@ -46,10 +46,11 @@ pub use ingest::{
     ingest_project_context, normalize_project_path, pause as ingest_pause, planned_run_mode,
     preview as ingest_preview, promote_for_review as ingest_promote, rebuild as ingest_rebuild,
     record_active_session, resume as ingest_resume, review_items as ingest_review_items,
-    run as ingest_run, search as knowledge_search, session_open_mode, should_build_index,
-    should_refresh, skipped as ingest_skipped, status as ingest_status, BudgetEstimate,
-    CandidateStatus, ChunkRecord, ContextPack, IngestError, IngestJob, IngestReviewItem, JobStatus,
-    KnowledgeHit, ManifestEntry, PreviewManifest, RunMode, RunSummary,
+    run as ingest_run, run_with_progress as ingest_run_with_progress, search as knowledge_search,
+    session_open_mode, should_build_index, should_refresh, skipped as ingest_skipped,
+    status as ingest_status, BudgetEstimate, CandidateStatus, ChunkRecord, ContextPack,
+    IngestError, IngestJob, IngestProgress, IngestReviewItem, JobStatus, KnowledgeHit,
+    ManifestEntry, PreviewManifest, RunMode, RunSummary,
 };
 pub use inspector::{
     inspect as inspect_memories, last_turn_memories_used, render as render_inspection,

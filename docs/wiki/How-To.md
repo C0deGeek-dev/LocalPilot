@@ -58,9 +58,18 @@ security boundaries in
 ## Ingest a folder and query its knowledge
 
 ```sh
-localpilot ingest               # preview, run, refresh, review project-local folders
-localpilot knowledge            # search and package the ingested knowledge
+localpilot ingest run                        # walk the workspace and build the index
+localpilot ingest refresh                    # re-index only changed files
+localpilot ingest status                     # current job + what the next run will do
+localpilot knowledge search "retry policy"   # query the ingested knowledge
+localpilot knowledge pack "fix the parser"   # package a task-specific context bundle
 ```
+
+Each subcommand is required — bare `localpilot ingest` prints the subcommand
+list. Inside the `chat` REPL the same actions are `/ingest run`, `/ingest
+refresh`, and `/ingest resume`; the walking actions show a live progress loader
+(discovering → parsing → indexing → writing) while they run, and Ctrl-C pauses
+the job so `/ingest resume` can continue it.
 
 ## Run the rule-enforced harness
 

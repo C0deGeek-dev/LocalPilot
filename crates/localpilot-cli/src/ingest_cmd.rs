@@ -46,12 +46,42 @@ pub fn preview(project_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
 /// Returns an error if config cannot be loaded or ingestion fails.
 pub fn run(project_root: &Path, mode: RunMode, out: &mut dyn Write) -> anyhow::Result<()> {
     let config = load_ingest_config(project_root)?;
-    let summary = localpilot_localmind::ingest_run(project_root, &config, mode)?;
+    let summary = localpilot_localmind::ingest_run_with_progress(
+        project_root,
+        &config,
+        mode,
+        &|| false,
+        &mut |stage| {
+            if let Some(line) = progress_line(stage) {
+                let _ = writeln!(out, "{line}");
+            }
+        },
+    )?;
     writeln!(out, "status: {}", job_status(summary.job.status))?;
     writeln!(out, "files: {}", summary.job.completed_files)?;
     writeln!(out, "skipped: {}", summary.job.skipped_files)?;
     writeln!(out, "chunks: {}", summary.chunks_written)?;
     Ok(())
+}
+
+/// A one-line stage banner for the non-interactive `ingest run`/`refresh`
+/// commands, so a batch run shows what it is doing instead of sitting silent.
+/// Per-file `Parsing` ticks and the terminal `Completed` marker are left to the
+/// caller's summary, so stdout stays compact.
+fn progress_line(stage: localpilot_localmind::IngestProgress) -> Option<String> {
+    use localpilot_localmind::IngestProgress;
+    match stage {
+        IngestProgress::Discovering => Some("discovering files…".to_string()),
+        IngestProgress::Discovered {
+            candidates,
+            skipped,
+        } => Some(format!(
+            "discovered {candidates} candidate file(s) ({skipped} skipped)"
+        )),
+        IngestProgress::Indexing => Some("indexing project context…".to_string()),
+        IngestProgress::Writing => Some("writing index…".to_string()),
+        IngestProgress::Parsing { .. } | IngestProgress::Completed { .. } => None,
+    }
 }
 
 /// Print current ingestion status, including what the next run would do —
@@ -299,7 +329,9 @@ pub enum RuleAction {
     Exclude,
 }
 
-fn load_ingest_config(project_root: &Path) -> anyhow::Result<localpilot_config::IngestConfig> {
+pub(crate) fn load_ingest_config(
+    project_root: &Path,
+) -> anyhow::Result<localpilot_config::IngestConfig> {
     Ok(localpilot_config::load(
         &ConfigPaths::standard(project_root),
         &CliOverrides::default(),
