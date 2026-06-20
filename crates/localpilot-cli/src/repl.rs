@@ -30,7 +30,7 @@ use localpilot_tui::{
     ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, IngestAction, Key, Mode,
     PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
 };
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -1572,10 +1572,7 @@ fn harness_compaction_mode_label(mode: localpilot_harness::CompactionMode) -> &'
 
 /// Render `text` into native scrollback above the inline viewport, sized to its
 /// wrapped height at the current terminal width.
-fn emit_block(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    text: Text<'static>,
-) -> anyhow::Result<()> {
+fn emit_block<B: Backend>(terminal: &mut Terminal<B>, text: Text<'static>) -> anyhow::Result<()> {
     let width = terminal.size()?.width;
     let height = (Paragraph::new(text.clone())
         .wrap(Wrap { trim: false })
@@ -1591,8 +1588,8 @@ fn emit_block(
 
 /// Push any finished transcript items into native scrollback, once each, so they
 /// flow into the terminal's own history and are never redrawn.
-fn flush_scrollback(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+fn flush_scrollback<B: Backend>(
+    terminal: &mut Terminal<B>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     for item in state.drain_for_scrollback() {
@@ -1710,4 +1707,107 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Offline coverage for the scrollback-commit path. Driving the real
+    //! [`flush_scrollback`]/[`emit_block`] over ratatui's `TestBackend` — which
+    //! records a `scrollback` buffer as rows scroll off the top — lets us assert
+    //! that every committed transcript block stays reachable (in scrollback or the
+    //! visible buffer) without a live terminal. These pin the invariant that the
+    //! interactive driver must keep: committed history is never silently dropped.
+
+    use super::*;
+    use localpilot_tui::TranscriptLine;
+    use ratatui::backend::TestBackend;
+
+    fn test_header() -> Header {
+        Header {
+            version: "0".into(),
+            provider: "test".into(),
+            model: "test-model".into(),
+            workspace: "ws".into(),
+            session_id: "session".into(),
+            update: None,
+        }
+    }
+
+    fn inline_terminal(width: u16, height: u16) -> Terminal<TestBackend> {
+        Terminal::with_options(
+            TestBackend::new(width, height),
+            TerminalOptions {
+                viewport: Viewport::Inline(INITIAL_INLINE_HEIGHT),
+            },
+        )
+        .expect("inline test terminal")
+    }
+
+    /// Symbols of the terminal's scrollback followed by its visible buffer — the
+    /// full set of rows a user could reach by scrolling up.
+    fn scrollback_and_buffer(terminal: &Terminal<TestBackend>) -> String {
+        let backend = terminal.backend();
+        let mut out = String::new();
+        for buffer in [backend.scrollback(), backend.buffer()] {
+            for cell in &buffer.content {
+                out.push_str(cell.symbol());
+            }
+        }
+        out
+    }
+
+    /// Push one assistant line and commit it the way the event loop does:
+    /// flush finished transcript to scrollback, then redraw the live region.
+    fn commit_line(terminal: &mut Terminal<TestBackend>, state: &mut AppState, text: &str) {
+        state.transcript.push(TranscriptLine {
+            speaker: "assistant".to_string(),
+            text: text.to_string(),
+        });
+        flush_scrollback(terminal, state).expect("flush scrollback");
+        terminal
+            .draw(|frame| render(frame, state))
+            .expect("draw live region");
+    }
+
+    #[test]
+    fn committed_history_is_recoverable_from_scrollback_and_buffer() {
+        let mut terminal = inline_terminal(40, 8);
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        for i in 0..50 {
+            commit_line(&mut terminal, &mut state, &format!("history-marker-{i}"));
+        }
+        let reachable = scrollback_and_buffer(&terminal);
+        for i in 0..50 {
+            assert!(
+                reachable.contains(&format!("history-marker-{i}")),
+                "committed line history-marker-{i} is unreachable in scrollback+buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_blocks_scroll_into_native_scrollback() {
+        let mut terminal = inline_terminal(40, 6);
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        for i in 0..30 {
+            commit_line(&mut terminal, &mut state, &format!("scrolled-{i}"));
+        }
+        // Far more committed lines than the screen holds, so the earliest must
+        // have left the visible buffer for the terminal's own scrollback.
+        assert!(
+            terminal.backend().scrollback().area.height > 0,
+            "no committed history reached native scrollback"
+        );
+        let scrollback: String = terminal
+            .backend()
+            .scrollback()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            scrollback.contains("scrolled-0"),
+            "the earliest committed line never reached scrollback"
+        );
+    }
 }
