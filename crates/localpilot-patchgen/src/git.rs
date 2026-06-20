@@ -134,12 +134,37 @@ impl Worktree {
         })
     }
 
+    /// Reattach to an existing worktree previously created by [`Worktree::create`],
+    /// without running `git worktree add`. Used by a later process (e.g. a separate
+    /// `promote`/`discard` CLI invocation) to act on a proposal it did not create.
+    /// Returns [`PatchError::UnknownProposal`] if no worktree directory is present.
+    pub(crate) fn open(repo_root: &Path, branch: &str) -> Result<Self, PatchError> {
+        validate_branch_name(branch)?;
+        let dir = repo_root.join(".localpilot").join("worktrees").join(branch);
+        if !dir.is_dir() {
+            return Err(PatchError::UnknownProposal(branch.to_string()));
+        }
+        Ok(Self {
+            repo_root: repo_root.to_path_buf(),
+            path: dir,
+            branch: branch.to_string(),
+            removed: false,
+        })
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     pub(crate) fn branch(&self) -> &str {
         &self.branch
+    }
+
+    /// Suppress drop-time removal so the worktree survives this process for a later
+    /// [`Worktree::open`] (e.g. a separate promote/discard invocation). The worktree
+    /// is then only removed by an explicit [`Worktree::remove`] on a reattached handle.
+    pub(crate) fn detach(&mut self) {
+        self.removed = true;
     }
 
     /// Remove the worktree and delete its branch — the rollback. Best-effort but

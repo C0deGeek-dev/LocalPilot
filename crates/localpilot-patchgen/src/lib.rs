@@ -162,6 +162,39 @@ pub fn propose(
 }
 
 impl ProposedPatch {
+    /// Reattach to a proposal created in an earlier process (e.g. a separate
+    /// `promote`/`discard` CLI invocation) so it can be reviewed, promoted (with a
+    /// token), or discarded. Reconstructs the handle from the on-disk worktree and
+    /// the persisted provenance, and recomputes the diff summary. The base is the
+    /// proposal commit's parent (`<branch>^`), since [`propose`] commits exactly once
+    /// on the isolated branch. This never mints a token and never writes the main
+    /// branch — the [`ApprovalToken`] gate on [`Self::promote`] is unchanged.
+    ///
+    /// # Errors
+    /// - [`PatchError::UnknownProposal`] if no worktree or record exists for `branch`;
+    /// - [`PatchError::Serde`] if the persisted record cannot be parsed;
+    /// - [`PatchError::Git`] / [`PatchError::Io`] on git or filesystem failure.
+    pub fn reopen(repo_root: &Path, branch: &str) -> Result<Self, PatchError> {
+        let worktree = git::Worktree::open(repo_root, branch)?;
+        let meta_path = proposal_meta_path(repo_root, branch);
+        let json = std::fs::read_to_string(&meta_path)
+            .map_err(|_| PatchError::UnknownProposal(branch.to_string()))?;
+        let provenance: ChangeProvenance =
+            serde_json::from_str(&json).map_err(|e| PatchError::Serde(e.to_string()))?;
+        let base_commit = git::git(repo_root, &["rev-parse", &format!("{branch}^")])?
+            .trim()
+            .to_string();
+        let diff_summary = compute_diff_summary(worktree.path(), &base_commit)?;
+        Ok(Self {
+            id: branch.to_string(),
+            repo_root: repo_root.to_path_buf(),
+            worktree,
+            base_commit,
+            provenance,
+            diff_summary,
+        })
+    }
+
     /// The patch id (its branch name).
     #[must_use]
     pub fn id(&self) -> &str {
@@ -228,14 +261,60 @@ impl ProposedPatch {
         }
     }
 
+    /// Leave the proposal on disk after this handle is dropped, so a later process
+    /// can [`Self::reopen`] it to review, promote, or discard. Writes the provenance
+    /// record beside the worktrees and suppresses drop-removal. Without this, dropping
+    /// a `ProposedPatch` removes its worktree/branch (the rollback default). Call it
+    /// once the proposal has been recorded and the process is about to exit.
+    ///
+    /// # Errors
+    /// [`PatchError::Io`] / [`PatchError::Serde`] if the record cannot be written.
+    pub fn persist(mut self) -> Result<(), PatchError> {
+        write_proposal_meta(&self.repo_root, &self.id, &self.provenance)?;
+        self.worktree.detach();
+        Ok(())
+    }
+
     /// Discard the proposal — remove the worktree and delete its branch. The
     /// rollback path; nothing on the main branch was touched.
     ///
     /// # Errors
     /// [`PatchError::Git`] if the worktree cannot be removed.
     pub fn discard(mut self) -> Result<(), PatchError> {
-        self.worktree.remove()
+        self.worktree.remove()?;
+        // Best-effort: drop the persisted provenance record too.
+        let _ = std::fs::remove_file(proposal_meta_path(&self.repo_root, &self.id));
+        Ok(())
     }
+}
+
+/// The path of the persisted provenance record for a proposal branch. Lives beside
+/// the worktrees, never inside one, so it never appears in the proposal's diff.
+fn proposal_meta_path(repo_root: &Path, branch: &str) -> PathBuf {
+    repo_root
+        .join(".localpilot")
+        .join("proposals")
+        .join(format!("{branch}.json"))
+}
+
+/// Persist a proposal's provenance so [`ProposedPatch::reopen`] can restore it in a
+/// later process.
+fn write_proposal_meta(
+    repo_root: &Path,
+    branch: &str,
+    provenance: &ChangeProvenance,
+) -> Result<(), PatchError> {
+    let path = proposal_meta_path(repo_root, branch);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| PatchError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let json = provenance
+        .to_json()
+        .map_err(|e| PatchError::Serde(e.to_string()))?;
+    std::fs::write(&path, json).map_err(|source| PatchError::Io { path, source })
 }
 
 /// A plan-agnostic commit subject for the isolated proposal branch.
@@ -476,5 +555,68 @@ mod tests {
         let json = patch.provenance().to_json().unwrap();
         assert!(json.contains("gate: pass"));
         assert!(json.contains(PROVENANCE_SCHEMA));
+    }
+
+    #[test]
+    fn persisted_proposal_reopens_in_a_later_handle_then_promotes_with_a_token() {
+        let dir = init_repo();
+        let root = dir.path();
+        // Propose, record it, then drop the live handle as a separate process would —
+        // `persist` keeps the worktree/branch/record on disk.
+        {
+            let patch = propose(
+                root,
+                "sr-reopen",
+                &proposal(&["a.rs"], &[("a.rs", "pub fn f() { /* fixed */ }\n")]),
+                provenance(),
+            )
+            .unwrap();
+            assert_eq!(patch.diff_summary().files, vec!["a.rs".to_string()]);
+            patch.persist().unwrap();
+        }
+        // A later invocation reattaches from disk: same diff + provenance restored.
+        let reopened = ProposedPatch::reopen(root, "sr-reopen").unwrap();
+        assert_eq!(reopened.id(), "sr-reopen");
+        assert_eq!(reopened.diff_summary().files, vec!["a.rs".to_string()]);
+        assert!(reopened.provenance().is_complete());
+        // main is untouched until a human token promotes.
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.rs")).unwrap(),
+            "pub fn f() {}\n"
+        );
+        let token = ApprovalToken::approve(reopened.id(), "david");
+        reopened.promote(&token).unwrap();
+        assert!(std::fs::read_to_string(root.join("a.rs"))
+            .unwrap()
+            .contains("fixed"));
+    }
+
+    #[test]
+    fn reopen_of_an_unknown_id_errors() {
+        let dir = init_repo();
+        assert!(matches!(
+            ProposedPatch::reopen(dir.path(), "nope").unwrap_err(),
+            PatchError::UnknownProposal(_)
+        ));
+    }
+
+    #[test]
+    fn a_dropped_unpersisted_proposal_is_removed_and_cannot_reopen() {
+        let dir = init_repo();
+        let root = dir.path();
+        {
+            let _patch = propose(
+                root,
+                "sr-drop",
+                &proposal(&["a.rs"], &[("a.rs", "pub fn f() { /* fixed */ }\n")]),
+                provenance(),
+            )
+            .unwrap();
+            // No persist(): dropping here removes the worktree/branch (the default).
+        }
+        assert!(matches!(
+            ProposedPatch::reopen(root, "sr-drop").unwrap_err(),
+            PatchError::UnknownProposal(_)
+        ));
     }
 }

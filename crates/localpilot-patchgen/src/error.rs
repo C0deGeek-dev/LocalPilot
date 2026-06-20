@@ -56,4 +56,13 @@ pub enum PatchError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    /// No proposed patch (worktree + provenance record) was found for the given
+    /// id, so it cannot be reopened to promote or discard.
+    #[error("no proposed patch found for id: {0}")]
+    UnknownProposal(String),
+
+    /// The persisted proposal record could not be (de)serialized.
+    #[error("proposal record (de)serialization failed: {0}")]
+    Serde(String),
 }
