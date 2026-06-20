@@ -841,6 +841,109 @@ async fn stream_decode_errors_still_use_bad_output_recovery() {
 }
 
 #[tokio::test]
+async fn a_malformed_large_write_recovers_by_writing_in_pieces() {
+    // Turn 1: a large write_file whose arguments fail to parse — the failure the
+    // local model hits on an oversized write. Turns 2-3: given the chunk
+    // instruction, the model writes the file in pieces. Turn 4: a final reply.
+    let provider = Arc::new(
+        FakeProvider::new()
+            .script(vec![Err(ProviderError::MalformedToolArguments {
+                tool: "write_file".to_string(),
+                bytes: 40_000,
+                reason: "expected `,` or `}`".to_string(),
+            })])
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "doc.md", "content": "# Part 1\n" }),
+            )
+            .tool_call(
+                "c2",
+                "append_file",
+                json!({ "path": "doc.md", "content": "# Part 2\n" }),
+            )
+            .text("done"),
+    );
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Bypass,
+    );
+
+    let reason = h
+        .runtime
+        .run_turn("write the report", &h.events, &h.cancel)
+        .await;
+
+    // The recovery completes the write instead of degrading.
+    assert_eq!(reason, StopReason::Done);
+    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(
+        std::fs::read_to_string(h._dir.path().join("doc.md")).unwrap(),
+        "# Part 1\n# Part 2\n"
+    );
+
+    // The targeted chunk-instruction prompt (not the generic one) was injected —
+    // only chosen when the chunked-write rung fires for a failed write tool.
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let synthetic_text: String = transcript
+        .iter()
+        .filter(|m| m.is_synthetic())
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            localpilot_core::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        synthetic_text.contains("append_file") && synthetic_text.contains("smaller pieces"),
+        "expected the chunked-write repair prompt, got: {synthetic_text}"
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_bad_turn_consumes_the_input_shrink_action() {
+    // The recovery ladder emits input-shrink actions on the second consecutive
+    // bad turn. The recovery path consumes them by compacting history — with a
+    // large prior exchange (above the force-compaction floor but under the
+    // context limit, so normal request shaping stays quiet), the only path to a
+    // Compacted audit event is that consumption.
+    let big = format!("project context: {}", "context ".repeat(5_000));
+    let provider = Arc::new(
+        FakeProvider::new()
+            .text("noted") // turn 1: build large history
+            .malformed() // turn 2: first bad turn
+            .malformed() // turn 3: second bad turn -> input-shrink -> compaction
+            .text("recovered"), // turn 4: clean
+    );
+    let mut h = build_from_arc(
+        Arc::clone(&provider),
+        &[],
+        SessionConfig::default(),
+        Profile::Default,
+    );
+
+    assert_eq!(
+        h.runtime.run_turn(&big, &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+    assert_eq!(
+        h.runtime.run_turn("continue", &h.events, &h.cancel).await,
+        StopReason::Done
+    );
+
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    use localpilot_store::SessionEventKind as Kind;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, Kind::Compacted { .. })),
+        "the second bad turn must consume the input-shrink action by compacting history"
+    );
+}
+
+#[tokio::test]
 async fn a_denied_tool_call_becomes_an_error_result_not_a_crash() {
     // A destructive shell command, non-interactive, is denied; the loop keeps
     // going and the next turn produces a final answer.

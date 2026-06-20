@@ -57,6 +57,18 @@ pub enum ProviderError {
     #[error("stream decode error: {0}")]
     StreamDecode(String),
 
+    /// A tool call's streamed arguments did not parse as JSON. Carries the tool
+    /// name and the byte length of the unparseable arguments, so the harness can
+    /// recover an oversized write (e.g. steer the model to chunk the write)
+    /// rather than only re-prompting blindly. Like [`StreamDecode`](Self::StreamDecode),
+    /// it does not stop the turn.
+    #[error("malformed arguments for tool `{tool}` ({bytes} bytes): {reason}")]
+    MalformedToolArguments {
+        tool: String,
+        bytes: usize,
+        reason: String,
+    },
+
     /// The provider does not support a requested feature.
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),

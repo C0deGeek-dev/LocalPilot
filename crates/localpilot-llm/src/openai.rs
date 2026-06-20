@@ -669,9 +669,14 @@ impl SseDecoder {
                 match serde_json::from_str::<Value>(&acc.args) {
                     Ok(value) => value,
                     Err(e) => {
-                        out.push_back(Err(ProviderError::StreamDecode(format!(
-                            "tool arguments: {e}"
-                        ))));
+                        // Carry the tool name and argument size so the harness can
+                        // recover an oversized write specifically, rather than
+                        // only re-prompting blindly.
+                        out.push_back(Err(ProviderError::MalformedToolArguments {
+                            tool: name,
+                            bytes: acc.args.len(),
+                            reason: e.to_string(),
+                        }));
                         continue;
                     }
                 }
@@ -854,13 +859,34 @@ mod tests {
             event,
             Ok(ModelEvent::OutputLimit { message }) if message.contains("token limit")
         )));
+        // The partial arguments are discarded on a length finish, so neither a
+        // decode error nor a malformed-arguments error is emitted.
         assert!(!events.iter().any(|event| matches!(
             event,
             Err(ProviderError::StreamDecode(message)) if message.contains("tool arguments")
         )));
         assert!(!events
             .iter()
+            .any(|event| matches!(event, Err(ProviderError::MalformedToolArguments { .. }))));
+        assert!(!events
+            .iter()
             .any(|event| matches!(event, Ok(ModelEvent::ToolCall { .. }))));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_carry_the_tool_name() {
+        // A complete-but-invalid argument payload (finished normally) surfaces a
+        // typed MalformedToolArguments naming the tool, so the harness can steer
+        // an oversized write to a chunked retry.
+        let events = collect_sse(&[
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{ not json\"}}]},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: [DONE]\n",
+        ]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Err(ProviderError::MalformedToolArguments { tool, bytes, .. })
+                if tool == "write_file" && *bytes > 0
+        )));
     }
 
     #[test]

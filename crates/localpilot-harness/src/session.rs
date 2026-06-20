@@ -19,8 +19,8 @@ use localpilot_llm::{
     ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
 };
 use localpilot_recovery::{
-    detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryEngine,
-    RepeatedErrorBreaker, StreamMonitor,
+    detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryAction,
+    RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
 };
 use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
@@ -251,6 +251,28 @@ impl SteerQueue {
 
 const REPAIR_PROMPT: &str =
     "Your previous response was unusable. Stop, and produce a clean, well-formed reply.";
+
+/// Repair prompt for a malformed *file-write* tool call: the model could not
+/// emit the whole write as one well-formed call (typically too large). Steer it
+/// to write the file in pieces instead of replaying the same oversized call.
+const CHUNKED_WRITE_REPAIR_PROMPT: &str =
+    "Your previous file-write tool call was too large to parse as one call. Write the file in \
+     smaller pieces: create it with `write_file` containing the first section, then add each \
+     remaining section with `append_file`. Keep every individual call small.";
+
+/// Whether a tool name is one of the file-write builtins a chunked-write
+/// instruction applies to.
+fn is_file_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file"
+            | "append_file"
+            | "edit_file"
+            | "multi_edit"
+            | "replace_in_file"
+            | "apply_patch"
+    )
+}
 
 /// Default threshold at which a tool is considered stuck and the safeguard
 /// intervenes.
@@ -1389,6 +1411,10 @@ impl SessionRuntime {
             let mut reasoning = String::new();
             let mut calls: Vec<(String, String, serde_json::Value)> = Vec::new();
             let mut stream_failed = false;
+            // When a tool call's arguments fail to parse, the provider reports
+            // which tool — kept so a malformed *write* steers recovery to a
+            // chunked retry rather than a blind re-prompt.
+            let mut failed_tool: Option<String> = None;
             let mut output_limited = false;
             let mut overflow = false;
             // Live degenerate-output guard, fed incrementally so a runaway
@@ -1462,6 +1488,9 @@ impl SessionRuntime {
                             if stream_error_stops_turn(&err) {
                                 return self.stop(events, StopReason::ProviderError);
                             }
+                            if let ProviderError::MalformedToolArguments { tool, .. } = &err {
+                                failed_tool = Some(tool.clone());
+                            }
                             stream_failed = true;
                             break;
                         }
@@ -1527,12 +1556,34 @@ impl SessionRuntime {
                         "retrying the degenerate response without tool schemas".to_string(),
                     ));
                 }
+                // Act on the input-shrink actions the ladder emits on a repeated
+                // bad turn: compact active history (which also truncates oversized
+                // tool results) so the retry sees a smaller context.
+                if diagnostic.actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        RecoveryAction::ReduceContext
+                            | RecoveryAction::SummarizeOversizedToolResults
+                    )
+                }) {
+                    self.shrink_for_overflow(cancel).await;
+                }
+                // Choose the repair prompt. When the ladder asks for a chunked
+                // write and the failed call was a file-write tool, steer the
+                // model to write in pieces; otherwise use the generic prompt.
+                let chunk_write = diagnostic
+                    .actions
+                    .contains(&RecoveryAction::RequestChunkedWrite)
+                    && failed_tool.as_deref().is_some_and(is_file_write_tool);
+                let prompt = if chunk_write {
+                    CHUNKED_WRITE_REPAIR_PROMPT
+                } else {
+                    REPAIR_PROMPT
+                };
                 // Persisted and marked synthetic: the repair prompt shapes the
                 // conversation the model sees, so a resumed session must
                 // reconstruct it.
-                self.append(
-                    Message::text(Role::User, REPAIR_PROMPT).into_synthetic("repair prompt"),
-                );
+                self.append(Message::text(Role::User, prompt).into_synthetic("repair prompt"));
                 continue;
             }
             self.recovery.record_clean_turn();
@@ -2012,7 +2063,12 @@ fn invalid_tool_calls(calls: &[(String, String, serde_json::Value)]) -> Option<S
 }
 
 fn stream_error_stops_turn(err: &ProviderError) -> bool {
-    !matches!(err, ProviderError::StreamDecode(_))
+    // A stream-decode failure or a malformed tool-argument payload is a bad turn
+    // the recovery ladder handles, not a terminal provider error.
+    !matches!(
+        err,
+        ProviderError::StreamDecode(_) | ProviderError::MalformedToolArguments { .. }
+    )
 }
 
 fn compaction_mode_label(mode: CompactionMode) -> &'static str {
