@@ -71,6 +71,28 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
     }
   ],
   [
+    "append_file",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "content": {
+          "description": "Content to append to the end of the file.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path to append to within the workspace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "path"
+      ],
+      "title": "AppendFileInput",
+      "type": "object"
+    }
+  ],
+  [
     "edit_file",
     {
       "$schema": "http://json-schema.org/draft-07/schema#",

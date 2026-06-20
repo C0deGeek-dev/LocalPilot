@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::contract::{Confirmation, Reversibility};
 
 use crate::builtins::{
-    ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog, GitRestore,
-    GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile, SearchText,
-    UpdatePlan, WriteFile,
+    AppendFile, ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog,
+    GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
+    SearchText, UpdatePlan, WriteFile,
 };
 use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
@@ -50,6 +50,7 @@ impl ToolRegistry {
         let mut registry = Self::new();
         registry.register(Box::new(ReadFile));
         registry.register(Box::new(WriteFile));
+        registry.register(Box::new(AppendFile));
         registry.register(Box::new(EditFile));
         registry.register(Box::new(MultiEdit));
         registry.register(Box::new(ReplaceInFile));

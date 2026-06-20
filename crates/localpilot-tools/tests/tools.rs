@@ -94,7 +94,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 20);
+    assert_eq!(registry.names().len(), 21);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -256,6 +256,144 @@ async fn edit_file_exact_match_and_rejects_ambiguous() {
     .await;
     assert!(ambiguous.is_error);
     assert!(ambiguous.output.contains("ambiguous"));
+}
+
+#[tokio::test]
+async fn append_file_creates_then_concatenates() {
+    let (dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    // The first append to a missing path creates the file.
+    let first = dispatch(
+        &registry,
+        "append_file",
+        json!({ "path": "doc.md", "content": "# Part 1\n" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!first.is_error, "{}", first.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
+        "# Part 1\n"
+    );
+
+    // A second append concatenates after the first — the chunked-write path.
+    let second = dispatch(
+        &registry,
+        "append_file",
+        json!({ "path": "doc.md", "content": "# Part 2\n" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!second.is_error, "{}", second.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
+        "# Part 1\n# Part 2\n"
+    );
+}
+
+#[tokio::test]
+async fn append_file_is_not_idempotent() {
+    let (dir, ws) = workspace_with(&[("log.txt", "start\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    for _ in 0..2 {
+        let r = dispatch(
+            &registry,
+            "append_file",
+            json!({ "path": "log.txt", "content": "line\n" }),
+            &c,
+            &default_engine(),
+            &ScriptedApprover::always(),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.output);
+    }
+    // Each append adds another copy: re-running is not a no-op.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("log.txt")).unwrap(),
+        "start\nline\nline\n"
+    );
+}
+
+#[tokio::test]
+async fn append_file_preserves_crlf_newline_style() {
+    // A CRLF file stays CRLF when an LF-content append is normalized to match —
+    // tier-1 parity (the same bytes on every platform).
+    let (dir, ws) = workspace_with(&[("win.txt", "a\r\nb\r\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let r = dispatch(
+        &registry,
+        "append_file",
+        json!({ "path": "win.txt", "content": "c\nd\n" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!r.is_error, "{}", r.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("win.txt")).unwrap(),
+        "a\r\nb\r\nc\r\nd\r\n"
+    );
+}
+
+#[tokio::test]
+async fn append_file_refuses_a_non_utf8_file() {
+    let (dir, ws) = workspace_with(&[]);
+    std::fs::write(dir.path().join("bin.dat"), [0xFF, 0xFE, 0x00, 0x01]).unwrap();
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let r = dispatch(
+        &registry,
+        "append_file",
+        json!({ "path": "bin.dat", "content": "text" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(r.is_error);
+    assert!(r.output.contains("not a UTF-8 text file"));
+    // The binary file is untouched.
+    assert_eq!(
+        std::fs::read(dir.path().join("bin.dat")).unwrap(),
+        [0xFF, 0xFE, 0x00, 0x01]
+    );
+}
+
+#[tokio::test]
+async fn append_file_approval_prompt_shows_the_path() {
+    let (_dir, ws) = workspace_with(&[("existing.txt", "old\n")]);
+    let registry = ToolRegistry::with_builtins();
+    // Untrusted workspace so the project write asks instead of auto-allowing.
+    let c = ctx(&ws, Interactivity::Interactive, false);
+    let approver = RecordingApprover::new();
+
+    let call = ToolCall::new(
+        ToolUseId::from("c1"),
+        "append_file",
+        json!({ "path": "existing.txt", "content": "more\n" }),
+    );
+    let _ = registry
+        .dispatch(&call, &c, &default_engine(), &approver)
+        .await;
+
+    let seen = approver.seen();
+    assert!(
+        !seen.is_empty(),
+        "a project write must prompt when untrusted"
+    );
+    assert_eq!(seen[0].detail, "existing.txt");
 }
 
 #[tokio::test]

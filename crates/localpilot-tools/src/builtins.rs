@@ -308,6 +308,89 @@ impl Tool for WriteFile {
     }
 }
 
+// --- append_file ------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AppendFileInput {
+    /// Path to append to within the workspace.
+    path: String,
+    /// Content to append to the end of the file.
+    content: String,
+}
+
+pub struct AppendFile;
+
+#[async_trait]
+impl Tool for AppendFile {
+    fn name(&self) -> &'static str {
+        "append_file"
+    }
+    fn contract(&self) -> ToolContract {
+        ToolContract {
+            model_description:
+                "Append content to the end of a workspace file, creating it if absent.",
+            side_effect: SideEffectClass::ProjectWrite,
+            reversibility: Reversibility::ReversibleWithArtifact,
+            // Re-running an append adds the content again, so it is not idempotent
+            // (unlike write_file, which overwrites).
+            idempotency: Idempotency::NonIdempotent,
+            preconditions: PRIOR_READ_PATH,
+            postconditions: PATH_EXISTS,
+            verification: VerificationMethod::ReadBack { tool: "read_file" },
+            ..ToolContract::default()
+        }
+    }
+    fn approval_detail(&self, input: &Value) -> String {
+        string_field_detail(input, "path")
+    }
+    fn description(&self) -> &'static str {
+        "Append to the end of a workspace file (creating it if needed), preserving newline style. Use to write a large file in pieces."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<AppendFileInput>()
+    }
+    fn effects(&self, input: &Value, ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        let input: AppendFileInput = parse_input(input)?;
+        let path = Path::new(&input.path);
+        let overwrite = ctx
+            .workspace
+            .normalize(path)
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        Ok(vec![write_path_effect(ctx, path, overwrite)])
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: AppendFileInput = parse_input(&input)?;
+        let path = ctx.workspace.normalize(Path::new(&input.path))?;
+        let existing = std::fs::read_to_string(&path).ok();
+        // A file that exists but is not valid UTF-8 (binary) reads as `None`;
+        // appending text would clobber it, so refuse rather than overwrite.
+        if existing.is_none() && path.exists() {
+            return Err(ToolError::Failed(format!(
+                "{} is not a UTF-8 text file; cannot append",
+                path.display()
+            )));
+        }
+        // Match the file's newline style (default LF for a new file) so a
+        // chunked write stays consistent across appends and platforms.
+        let newline = existing.as_deref().map_or("\n", detect_newline);
+        let addition = apply_newline(&input.content, newline);
+        let body = match existing {
+            Some(mut current) => {
+                current.push_str(&addition);
+                current
+            }
+            None => addition.clone(),
+        };
+        atomic_write(&path, body.as_bytes())?;
+        Ok(ToolOutput::ok(format!(
+            "appended {} bytes to {}",
+            addition.len(),
+            path.display()
+        )))
+    }
+}
+
 // --- edit_file --------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
