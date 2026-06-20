@@ -42,10 +42,15 @@ use crate::key_input::{
     may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
 
-/// Initial height of the inline live region before the first draw sizes it to the
-/// state: an empty composer (one row plus its two borders) above the two-row
-/// status line.
-const INITIAL_INLINE_HEIGHT: u16 = 5;
+/// Fixed height of the inline live region. The region reserves a constant, modest
+/// band and is **not** re-initialised per frame: the activity tail, composer, and
+/// status line render within it (each already caps and scrolls internally), and
+/// only an actual terminal-dimension change re-inits the viewport. The previous
+/// per-content re-init tore the viewport down on every height change, which dropped
+/// freshly committed history from native scrollback before it had scrolled
+/// off-screen. Tunable: a larger band shows more in-progress output at once but
+/// leaves a larger blank gap above the composer when idle.
+const LIVE_REGION_HEIGHT: u16 = 8;
 
 /// Blank rows between the launch banner and the composer at startup.
 const BANNER_GAP_ROWS: u16 = 2;
@@ -1598,10 +1603,11 @@ fn flush_scrollback<B: Backend>(
     Ok(())
 }
 
-/// Resize the inline live region to `height` by re-initialising the terminal —
-/// ratatui has no in-place inline-viewport-height setter. The old region is
-/// cleared and the cursor parked at its top first, so the regrown region reserves
-/// from the same baseline and leaves no stale rows in scrollback.
+/// Re-initialise the inline viewport at `height` — ratatui has no in-place
+/// inline-viewport-height setter. The old region is cleared and the cursor parked
+/// at its top first, so the new region reserves from the same baseline and leaves
+/// no stale rows in scrollback. Called only on a terminal-dimension change (window
+/// resize / height clamp), not per content (see [`LIVE_REGION_HEIGHT`]).
 fn resize_viewport(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     height: u16,
@@ -1625,14 +1631,16 @@ fn draw_ui(
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     flush_scrollback(terminal, state)?;
-    // The composer grows and shrinks with its content; track the live region's
-    // natural height and re-init the inline viewport when it changes. Clamp to the
-    // current terminal height so a short window does not trigger a re-init loop and
-    // a width change reflows on the recompute.
+    // Reserve a constant live-region band. Re-init the inline viewport only when
+    // the terminal's own dimensions change (a window resize, or a height clamp on a
+    // short window), never per content. The previous per-frame re-init dropped
+    // freshly committed history from native scrollback before it scrolled
+    // off-screen; holding the band fixed keeps every committed block in scrollback.
     let size = terminal.size()?;
-    let desired = localpilot_tui::live_region_height(state, size.width).min(size.height);
-    if terminal.get_frame().area().height != desired {
-        resize_viewport(terminal, desired)?;
+    let want_height = LIVE_REGION_HEIGHT.min(size.height.max(1));
+    let area = terminal.get_frame().area();
+    if area.height != want_height || area.width != size.width {
+        resize_viewport(terminal, want_height)?;
     }
     terminal.draw(|frame| render(frame, state))?;
     Ok(())
@@ -1669,12 +1677,16 @@ fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
         terminal::Clear(terminal::ClearType::All),
         MoveTo(0, 0)
     )?;
-    // A bottom inline viewport: finished output lives above it in native
-    // scrollback; only this region is redrawn each frame.
+    // A bottom inline viewport, reserved at a fixed height (clamped to a short
+    // window) and held there: finished output lives above it in native scrollback;
+    // only this region is redrawn each frame.
+    let rows = terminal::size()
+        .map(|(_cols, rows)| rows)
+        .unwrap_or(LIVE_REGION_HEIGHT);
     let terminal = Terminal::with_options(
         CrosstermBackend::new(stdout),
         TerminalOptions {
-            viewport: Viewport::Inline(INITIAL_INLINE_HEIGHT),
+            viewport: Viewport::Inline(LIVE_REGION_HEIGHT.min(rows.max(1))),
         },
     )?;
     Ok(terminal)
@@ -1733,11 +1745,14 @@ mod tests {
         }
     }
 
+    /// A small fixed inline viewport over a `TestBackend`, deliberately shorter
+    /// than the backend so committed history has room to scroll above it. The
+    /// height is a test literal, independent of the production [`LIVE_REGION_HEIGHT`].
     fn inline_terminal(width: u16, height: u16) -> Terminal<TestBackend> {
         Terminal::with_options(
             TestBackend::new(width, height),
             TerminalOptions {
-                viewport: Viewport::Inline(INITIAL_INLINE_HEIGHT),
+                viewport: Viewport::Inline(4),
             },
         )
         .expect("inline test terminal")
@@ -1809,5 +1824,34 @@ mod tests {
             scrollback.contains("scrolled-0"),
             "the earliest committed line never reached scrollback"
         );
+    }
+
+    #[test]
+    fn history_survives_live_region_content_changes() {
+        // The bug trigger was the live region changing height every time its
+        // content changed. With a held, fixed-height viewport the content can
+        // oscillate freely (streaming on/off, multi-line, idle) without losing any
+        // committed history. This drives that oscillation against a fixed viewport.
+        let mut terminal = inline_terminal(40, 8);
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        for i in 0..40 {
+            state.streaming = match i % 3 {
+                0 => String::new(),
+                1 => "in progress".to_string(),
+                _ => "in progress\nmore\nand more".to_string(),
+            };
+            commit_line(&mut terminal, &mut state, &format!("turn-{i}"));
+        }
+        state.streaming.clear();
+        terminal
+            .draw(|frame| render(frame, &state))
+            .expect("final draw");
+        let reachable = scrollback_and_buffer(&terminal);
+        for i in 0..40 {
+            assert!(
+                reachable.contains(&format!("turn-{i}")),
+                "turn-{i} was lost while the live-region content oscillated"
+            );
+        }
     }
 }
