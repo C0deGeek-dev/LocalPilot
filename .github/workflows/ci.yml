@@ -38,10 +38,15 @@ jobs:
       # stays verified on every OS.
       - run: cargo nextest run --workspace --manifest-path external/localmind/Cargo.toml
       - run: cargo test --doc --workspace --manifest-path external/localmind/Cargo.toml
-      # The interactive TUI (`chat`) is behind an opt-in feature; lint and build
-      # it here so the terminal driver is covered on every OS.
+      # The interactive TUI (`chat`) is behind an opt-in feature; lint, build, and
+      # test it here so the terminal driver — including the inline scrollback-commit
+      # fidelity tests — is covered on every OS.
       - run: cargo clippy -p localpilot --features tui,learning --all-targets -- -D warnings
       - run: cargo build -p localpilot --features tui,learning
+      # Run the binary's own unit tests under the TUI feature (the inline-driver
+      # scrollback-commit tests live here). Scoped to the bin: the integration tests
+      # under tests/ are not feature-dependent and already run in the workspace step.
+      - run: cargo nextest run -p localpilot --features tui,learning --bin localpilot
 
   coverage:
     name: coverage (line floor)

@@ -14,7 +14,10 @@ ignored = ["parking_lot"]
 [[bin]]
 name = "localpilot"
 path = "src/main.rs"
-test = false
+# Collect the binary's module unit tests (e.g. the inline-driver scrollback-commit
+# tests behind the `tui` feature). CI runs them via `cargo nextest run -p localpilot
+# --features tui,learning --bin localpilot`; a default-feature run finds fewer of them.
+test = true
 
 [features]
 # The interactive `chat` REPL links crossterm. It is opt-in so the default
