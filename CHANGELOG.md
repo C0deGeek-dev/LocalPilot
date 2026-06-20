@@ -5,6 +5,17 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **A large file write no longer degrades the session.** When a local model
+  cannot emit a big file-write tool call as one well-formed payload, the harness
+  used to re-prompt blindly and degrade without ever writing the file. It now
+  detects the failed write specifically (a typed `MalformedToolArguments`
+  provider signal carrying the tool name) and steers the model to write the file
+  in pieces — the first section with `write_file`, each remaining section with a
+  new **`append_file`** builtin (atomic, newline-preserving, binary-refusing) —
+  recovering the write within the existing repair budget. The recovery ladder's
+  input-shrink actions, previously computed but never applied, now compact
+  history on a repeated bad turn. See ADR-0038 and `docs/06-harness-spec.md`
+  ("Bad-output recovery").
 - **Ingestion shows a live progress loader.** In the `chat` REPL the walking
   ingest actions (`/ingest run`, `/ingest refresh`, `/ingest resume`) no longer
   block silently: a working spinner runs while stage notices report discovering,

@@ -56,6 +56,22 @@ Rules:
 - require exact old text or AST-aware operation
 - show diff before approval when interactive
 
+### `append_file`
+
+Appends content to the end of a file, creating it if absent. Lets a large file
+be written in pieces — the first section with `write_file`, each remaining
+section appended — which the bad-output recovery path steers a model toward when
+a single oversized write fails to emit as one well-formed tool call (see
+[`06-harness-spec.md`](06-harness-spec.md), "Bad-output recovery").
+
+Rules:
+
+- gated as a workspace write, identical containment and atomic write to
+  `write_file`
+- preserve the file's newline style; default to LF for a new file
+- refuse a non-UTF-8 (binary) file rather than clobbering it
+- non-idempotent by contract: re-running appends again
+
 ### `list_files`
 
 Lists files under a workspace path.

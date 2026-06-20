@@ -2,6 +2,54 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0038: An Oversized Malformed Write Is Recovered By Chunking The Write
+
+Status: accepted. Extends the bad-output recovery ladder (`localpilot-recovery`)
+and the tool surface (`localpilot-tools`).
+
+A local model that cannot emit a large file-write tool call as one well-formed
+payload makes the provider reject the streamed arguments. The session then treated
+this as a generic bad turn: it re-prompted blindly, and because the recovery ladder
+only ever shrank *input* context (which does nothing for an oversized *output*), the
+model replayed the same too-large call until the repair budget was spent and the turn
+degraded — the file never written. This was the root cause of a real session that ran
+48 clean tool calls and then failed only on the final large document write.
+
+The malformed payload is invisible to the harness turn loop — the provider adapter
+rejects unparseable tool arguments before they become a parsed `ToolCall` event, so
+the harness cannot measure the attempted output post-hoc. The failed tool *name* is,
+however, in scope where the adapter fails to parse. The fix routes that name out and
+acts on it:
+
+- **A typed provider signal.** `ProviderError::MalformedToolArguments { tool, bytes,
+  reason }` carries the failed tool name and argument size out of the
+  OpenAI-compatible adapter, replacing a flat `StreamDecode` string. Like a stream
+  decode, it does not stop the turn — it is a recoverable bad turn.
+- **An output-side recovery rung.** `RecoveryAction::RequestChunkedWrite` is the
+  counterpart to the input-shrink actions, emitted from the first repair attempt for
+  the malformed-output kinds.
+- **A targeted repair prompt.** When the failed call was a file-write tool, the
+  generic repair prompt is replaced by one that steers the model to write the file in
+  pieces — the first section with `write_file`, each remaining section with the new
+  `append_file` builtin — rather than replaying the oversized call. The gate is the
+  failed tool *name*, not a tunable byte threshold (the name is exact; a threshold is a
+  magic number).
+- **A first-class append.** `append_file` makes "write in pieces" a native primitive
+  instead of tail-anchor `edit_file` gymnastics: atomic, newline-preserving,
+  binary-refusing, non-idempotent.
+
+Rejected: transparent harness auto-split of an oversized `write_file` — it pushes
+atomicity and partial-failure handling into the harness for no gain over teaching the
+model the chunked pattern. Also out of scope: a model-serving fix; LocalBox already
+pins the `tqp-v0.2.0` lazy-grammar build, and this is a distinct failure class.
+
+Reason: the recovery acts on the *content* of the next attempt (write smaller), not
+just the fact of a retry, so an oversized write completes within the existing repair
+budget instead of degrading. The same change also wires up the ladder's previously
+inert input-shrink actions (`ReduceContext` / `SummarizeOversizedToolResults`), which
+were computed but never consumed, so a repeated bad turn now compacts history before
+re-prompting.
+
 ## ADR-0037: Completion-Retrospective Lessons Are Offered To Review-Gated Memory
 
 Status: accepted. Builds on ADR-0035 (the advisory completion retrospective that

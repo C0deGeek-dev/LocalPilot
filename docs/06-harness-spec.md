@@ -517,6 +517,33 @@ needs an ADR.
 The permission half of the contract lives in
 [`docs/07`](07-security-and-privacy.md) §Reliability Contract.
 
+## Bad-Output Recovery
+
+A turn can end badly without a provider error: degenerate text (a punctuation
+flood or a repeated-token loop), an empty turn, or a tool call whose streamed
+arguments do not parse. The runtime detects these and runs a bounded recovery
+ladder rather than persisting a corrupted turn or stopping outright. Within a
+small repair budget it re-prompts; once the budget is spent the model/provider is
+marked degraded and the turn stops (a degraded turn may not complete a harness
+step). Each recovery is recorded as a diagnostic in the session event log.
+
+Two recovery levers act on the *content* of the next attempt, not just the
+retry:
+
+- **Input shrink.** On a repeated bad turn the runtime compacts active history
+  (which also truncates oversized tool results) before re-prompting, so the retry
+  sees a smaller context.
+- **Chunked write.** When the bad turn was a **file-write tool call whose
+  arguments failed to parse** — the failure a local model hits on a single
+  oversized write — the provider reports which tool failed
+  (`MalformedToolArguments`), and the repair prompt steers the model to write the
+  file in pieces: the first section with `write_file`, each remaining section with
+  [`append_file`](05-tool-system.md). This recovers the write instead of replaying
+  the same oversized call until the budget is spent. See ADR-0038.
+
+Pinned by the `localpilot-harness` session tests (a malformed large write
+recovers by writing in pieces; a repeated bad turn compacts history).
+
 ## Per-Turn Tool-Call Budget
 
 The budget is **off by default**: with neither key set in `[harness]`, a turn
