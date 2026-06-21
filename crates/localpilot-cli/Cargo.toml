@@ -40,12 +40,16 @@ ignore = { workspace = true, optional = true }
 # Keep crossterm's parking_lot dependency on a Windows GNU/MSRV-compatible patch:
 # parking_lot_core 0.9.12 crashes before main on rustc 1.82 x86_64-pc-windows-gnu.
 parking_lot = { workspace = true, optional = true }
-# `scrolling-regions` makes Terminal::insert_before use the terminal's own
-# scroll regions instead of clearing and redrawing the inline viewport on every
-# committed history block — less flicker, cleaner scrollback across terminals.
+# Do NOT enable ratatui's `scrolling-regions` feature here. It makes
+# Terminal::insert_before commit history via DECSTBM margin scrolls
+# (`ESC[t;br` + `ESC[nS`) instead of newline-at-bottom. Windows Terminal does
+# not preserve lines scrolled out of a margin region into its scrollback
+# buffer, so conversation history above the live region is silently discarded
+# (the "scroll up, start of conversation missing" bug). The default
+# (no-scrolling-regions) path uses `append_lines` (`\n` at the bottom row),
+# which feeds scrollback reliably on every terminal, Windows Terminal included.
 ratatui = { workspace = true, features = [
     "crossterm",
-    "scrolling-regions",
 ], optional = true }
 reqwest.workspace = true
 serde = { workspace = true }
