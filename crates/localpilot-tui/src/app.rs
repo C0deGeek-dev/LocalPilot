@@ -70,6 +70,13 @@ pub enum SlashAction {
     ContinueSession(Option<String>),
     HarnessResume,
     WaitResume,
+    /// Switch the active provider/model mid-session, or — with no provider — list
+    /// the configured providers and their available models. `model` is only set
+    /// when a model id follows the provider id.
+    Model {
+        provider: Option<String>,
+        model: Option<String>,
+    },
     Ingest(IngestAction),
     Knowledge(String),
     ContextBuild(String),
@@ -159,6 +166,17 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
                 Some(args.to_string())
             };
             SlashAction::ContinueSession(id)
+        }
+        _ if name == "model" => {
+            // `/model` lists; `/model <provider>` switches to that provider's
+            // default model; `/model <provider> <model>` switches both.
+            let (provider, model) = args
+                .split_once(char::is_whitespace)
+                .map_or((args, ""), |(provider, model)| (provider, model.trim()));
+            SlashAction::Model {
+                provider: (!provider.is_empty()).then(|| provider.to_string()),
+                model: (!model.is_empty()).then(|| model.to_string()),
+            }
         }
         _ if name == "harness-resume" && args.is_empty() => SlashAction::HarnessResume,
         _ if matches!(name, "wait-resume" | "wait_resume") && args.is_empty() => {
@@ -451,6 +469,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::Background(_) => state.apply(UiEvent::Notice(
             "/bg is handled by the interactive host".to_string(),
         )),
+        SlashAction::Model { .. } => state.apply(UiEvent::Notice(
+            "/model is handled by the interactive host".to_string(),
+        )),
         SlashAction::Quit => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
@@ -696,6 +717,34 @@ mod tests {
             parse_slash("/bg frobnicate"),
             Some(SlashAction::Invalid { command, .. }) if command == "bg"
         ));
+    }
+
+    #[test]
+    fn model_slash_command_parses_each_form() {
+        // No args lists configured providers and their models.
+        assert_eq!(
+            parse_slash("/model"),
+            Some(SlashAction::Model {
+                provider: None,
+                model: None
+            })
+        );
+        // One token switches to that provider's default model.
+        assert_eq!(
+            parse_slash("/model anthropic"),
+            Some(SlashAction::Model {
+                provider: Some("anthropic".to_string()),
+                model: None
+            })
+        );
+        // A trailing model id switches both, and surrounding whitespace is trimmed.
+        assert_eq!(
+            parse_slash("/model  anthropic   claude-x "),
+            Some(SlashAction::Model {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-x".to_string())
+            })
+        );
     }
 
     #[test]

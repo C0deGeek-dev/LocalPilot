@@ -15,9 +15,14 @@ use crate::provider::{ModelProvider, SourceType};
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
-/// A set of constructed providers keyed by id, with a configured default.
+/// A set of constructed providers keyed by id, with a configured default. Holds
+/// every configured provider built up front, so re-pointing a live session at a
+/// different one is a lookup, not a rebuild. Each provider's configured default
+/// model is carried alongside so a provider-only switch can resolve a model.
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn ModelProvider>>,
+    /// The configured default model per provider id, when one is set.
+    default_models: HashMap<String, String>,
     default_id: String,
 }
 
@@ -30,15 +35,36 @@ impl ProviderRegistry {
     /// or names an unknown kind.
     pub fn from_config(config: &Config) -> Result<Self, ProviderError> {
         let mut providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::new();
+        let mut default_models: HashMap<String, String> = HashMap::new();
         for (id, entry) in &config.providers {
             let credential = config.resolve_credential(id);
             let provider = build_provider(id, entry, credential)?;
             providers.insert(id.clone(), provider);
+            if let Some(model) = entry.model.clone() {
+                default_models.insert(id.clone(), model);
+            }
         }
         Ok(Self {
             providers,
+            default_models,
             default_id: config.provider.default.clone(),
         })
+    }
+
+    /// Assemble a registry from already-built providers and their default models.
+    /// The construction path for callers that build providers themselves (and for
+    /// offline tests); [`from_config`](Self::from_config) is the normal entry.
+    #[must_use]
+    pub fn from_providers(
+        providers: HashMap<String, Arc<dyn ModelProvider>>,
+        default_models: HashMap<String, String>,
+        default_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            providers,
+            default_models,
+            default_id: default_id.into(),
+        }
     }
 
     /// The provider selected by `[provider].default`, if present.
@@ -51,6 +77,20 @@ impl ProviderRegistry {
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Arc<dyn ModelProvider>> {
         self.providers.get(id)
+    }
+
+    /// The configured default model for `id`, when the provider has one.
+    #[must_use]
+    pub fn default_model(&self, id: &str) -> Option<&str> {
+        self.default_models.get(id).map(String::as_str)
+    }
+
+    /// The configured provider ids, sorted for stable display.
+    #[must_use]
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.providers.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     /// The number of registered providers.
@@ -226,6 +266,30 @@ mod tests {
             ProviderRegistry::from_config(&config),
             Err(ProviderError::UnsupportedFeature(_))
         ));
+    }
+
+    #[test]
+    fn carries_each_providers_configured_default_model_and_ids() {
+        let mut config = Config::default();
+        let mut openai = entry("openai", None);
+        openai.model = Some("gpt-x".to_string());
+        config.providers.insert("openai".to_string(), openai);
+        config.providers.insert(
+            "local".to_string(),
+            entry("openai-compatible", Some("http://localhost:11434/v1")),
+        );
+        config.provider.default = "local".to_string();
+
+        let registry = ProviderRegistry::from_config(&config).unwrap();
+        // The configured model is carried for a provider-only switch to resolve.
+        assert_eq!(registry.default_model("openai"), Some("gpt-x"));
+        // A provider with no configured model has no default to fall back to.
+        assert_eq!(registry.default_model("local"), None);
+        // Ids are listed and sorted for stable display.
+        assert_eq!(
+            registry.ids(),
+            vec!["local".to_string(), "openai".to_string()]
+        );
     }
 
     #[test]

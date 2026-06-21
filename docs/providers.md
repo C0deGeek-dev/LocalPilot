@@ -91,6 +91,65 @@ If `base_url` is omitted, Anthropic providers use
 does not set `model`, `ANTHROPIC_MODEL` can provide the default model for
 `chat` and the no-argument launcher path.
 
+## Storing credentials: `login` / `logout`
+
+Instead of hand-setting an environment variable, you can store a key with the
+bring-your-own-key helper:
+
+```sh
+localpilot login anthropic     # or: localpilot login openai
+localpilot logout anthropic    # remove a stored key
+```
+
+`login` opens the provider's official key-creation page
+(`https://console.anthropic.com/settings/keys` for Anthropic,
+`https://platform.openai.com/api-keys` for OpenAI — the URL is always printed so
+a headless host works by paste alone), prompts for the pasted key, validates it
+with one minimal `GET /models` request, and stores it. The key is shown back
+only masked and is never logged. Flags: `--no-browser` skips opening the browser,
+`--no-verify` skips the validation request (an offline or odd-endpoint key is
+stored with a warning either way). `login <id>` also accepts a configured
+provider id, in which case the key is stored under that id.
+
+This is **bring-your-own-key only**: you create a standard API key in the
+provider dashboard. There is no "sign in with Claude/ChatGPT" and no use of
+Claude/ChatGPT *subscription* credentials — that is a provider terms violation
+(see `docs/07-security-and-privacy.md` and ADR-0042).
+
+**Where the key is stored.** On Windows, in the Credential Manager (built with
+the `keychain` feature). On macOS and Linux, and on any host without a keychain
+backend, in a `0600` file under the per-user directory beside `config.toml`
+(`credentials.json`). The key never enters the repo or a config file.
+
+**Resolution precedence.** When a provider needs a credential it is resolved in
+order: a stored credential (keychain → fallback file) first, then the
+`api_key_env` environment variable (or the kind default `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY`), then config. So a logged-in user needs no environment
+variable, and an existing env-only setup keeps working unchanged.
+
+`localpilot doctor` reports the resolved *source* per provider — `keychain`,
+`file`, `env`, or `not set` — never the secret itself.
+
+## Switching provider/model mid-session: `/model`
+
+In the `chat` REPL, `/model` switches the active provider/model without losing
+the conversation:
+
+- `/model` — list the configured providers and the models each reports (via the
+  same `GET /models` discovery as `localpilot models`), marking the active one.
+  Discovery failure is non-fatal: the configured model is shown with a note.
+- `/model <provider>` — switch to that provider, adopting its configured default
+  model (or keeping the current model name with a warning if it has none).
+- `/model <provider> <model>` — switch to that provider and model. An unlisted
+  model id warns but is still used.
+
+The switch selects an already-built provider (every configured provider is built
+once at startup), so it does not rebuild or re-authenticate; it takes effect at
+the next turn boundary and preserves the full transcript, which is
+provider-neutral. An unknown provider id, or a switch attempted while a turn is
+running, is reported as a plain message and leaves the session unchanged. See
+ADR-0041.
+
 ## Runtime tuning
 
 `request_timeout_secs` can be set on any provider entry. It applies to the HTTP

@@ -2,6 +2,101 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
+
+Status: accepted.
+
+LocalPilot's credential helper (`login` / `logout`) is **bring-your-own-key
+only**: the user creates a standard API key in the provider's own dashboard
+(`login` can deep-link there), pastes it, we validate it with one minimal
+request, and store it in the **OS keychain** (Windows Credential Manager / macOS
+Keychain), or a restrictive-mode fallback file when no keychain backend is
+present. Stored credentials enter resolution at a new top tier, ahead of the
+existing environment variable: **keychain → fallback file → `api_key_env` →
+config**, so a logged-in user needs no environment variable. `doctor` reports the
+resolved credential *source* (keychain / file / env / none), never the secret.
+
+No subscription-OAuth login is added, and **no code path obtains, stores, or
+routes Claude Free/Pro/Max or ChatGPT Plus/Pro subscription credentials**, nor
+adds a "sign in with Claude/ChatGPT" flow. Primary-source research (2026-06-21)
+confirmed neither provider offers a sanctioned OAuth flow that mints a standard
+pay-per-token API key for a third-party client: Anthropic's terms forbid routing
+third-party requests through subscription credentials (server-enforced since
+early 2026), and OpenAI's "Sign in with ChatGPT" is subscription-billed and
+locked to OpenAI's own first-party tools. BYOK is therefore the only sanctioned
+path. (Full findings: LocalHub research note; the early-2026 enforcement is
+flagged "re-verify before release".)
+
+Decisions folded in:
+
+- **Keychain crate selection.** The `keyring` crate (v3, exact-pinned) backs the
+  Windows Credential Manager store behind an opt-in `keychain` Cargo feature, so
+  the default build links no native credential deps and stays green headless. The
+  macOS (`apple-native` → `security-framework 3.7`) and Linux
+  (`sync-secret-service` → `zeroize_derive 1.5`) native backends are *not* built:
+  both pull a transitive requiring Rust edition 2024, above this workspace's MSRV
+  (1.82), and they break `cargo deny --all-features` cross-target metadata. macOS
+  and Linux therefore use the `0600` fallback file. Behaviour parity (ADR-0007)
+  holds across all three platforms — `login` / `logout` / resolution / `doctor`
+  work everywhere; only the secret backend differs (Windows keychain vs file), and
+  that difference plus the keychain-absent fallback is documented. (Revisit the
+  native macOS/Linux backends when the keyring dependency tree builds on the MSRV.)
+- **Best-effort keychain, never blocking.** A keychain that is absent or locked
+  is a miss, never an error: the store falls back to the file and resolution
+  falls through to the environment, so startup and a live session never depend on
+  keychain availability.
+- **Secret discipline.** The pasted key is wrapped in `Secret` immediately, never
+  logged or echoed in full (only a masked prefix/suffix), and the fallback file is
+  owner-only (`0600` on unix) under the user-profile directory. The `Secret` type
+  still refuses `Serialize`, so the only places a key leaves the wrapper are the
+  audited keychain/file writes.
+
+Reason:
+
+- the only sanctioned credential path is BYOK, so the value we can add is a better
+  BYOK *experience* (deep-link + paste + validate + keychain) — never a prohibited
+  subscription login. The legality basis, the keychain choice, the resolution
+  precedence, and the redaction guarantees are durable and security-sensitive, so
+  they live here. Implementation, config keys, URLs, and tests are original to this
+  repository; only public key-creation URLs and published policy are referenced
+  (clean-room, ADR-0005).
+
+## ADR-0041: Mid-Session Provider/Model Switch Selects An Already-Built Provider
+
+Status: accepted.
+
+A live session can switch its active provider and/or model mid-conversation via
+the `/model` command without losing the transcript. The provider registry already
+builds **every** configured provider up front into a `HashMap<id, Arc<dyn
+ModelProvider>>`; the runtime is handed a shared `Arc<ProviderRegistry>` and the
+switch re-points its `provider` + `config.model` by looking the target up — it
+does **not** rebuild or re-authenticate a provider on switch. The transcript is
+provider-neutral (`Vec<Message>`) and is left untouched, so the conversation
+continues against the new provider on the next turn.
+
+Decisions folded in:
+
+- **Turn-boundary only.** A switch is refused while a turn is in flight (a typed
+  error) and applied cleanly between turns, so the transcript is never re-pointed
+  mid-turn (which could strand a partial tool-call turn the new provider cannot
+  continue). The interactive host already defers slash commands until the turn is
+  idle; the runtime guard is the belt-and-suspenders contract.
+- **Model follows the provider.** A provider-only switch adopts the new provider's
+  configured default model; when it has none, the current model name is kept and a
+  non-fatal warning is surfaced. `/model <provider> <model>` sets both.
+- **Listing reuses discovery.** The `/model` picker lists providers from config and
+  their models through the existing `discover_models()` path (`GET /models`) that
+  `localpilot models` already uses — no new `ModelProvider` trait method. Discovery
+  failure is non-fatal: the configured model is shown with a note.
+
+Reason:
+
+- reusing the build-all-up-front registry makes the switch the cheapest correct
+  operation (a lookup, no new auth, no lost state), and pinning it to a turn
+  boundary keeps the provider-neutral transcript continuable. A single attached
+  registry handle, mirroring the existing `set_*` runtime mutators, avoids a second
+  provider-construction path.
+
 ## ADR-0040: Prompt History Is A Global Per-User JSONL Store With Project-Scoped Recall
 
 Status: accepted. Adds a per-user persistence surface beside the project-local

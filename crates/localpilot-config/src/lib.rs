@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod context;
+pub mod credentials;
 mod error;
 mod load;
 pub mod redact;
@@ -17,9 +18,11 @@ pub use context::{
     ContextDiscovery, ContextFile, ContextKind, ContextScope, ProjectContext, DEFAULT_DIR_DEPTH,
     DEFAULT_IMPORT_DEPTH,
 };
+pub use credentials::{CredentialError, CredentialSource, CredentialStore};
 pub use error::ConfigError;
 pub use load::{
-    load, project_config_path, prompt_history_path, user_config_path, CliOverrides, ConfigPaths,
+    credential_store_path, load, project_config_path, prompt_history_path, user_config_path,
+    CliOverrides, ConfigPaths,
 };
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,

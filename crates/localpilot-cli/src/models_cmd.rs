@@ -79,8 +79,9 @@ pub async fn run(provider_filter: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// The base URL to query for a provider that speaks the OpenAI-compatible
-/// listing, or `None` for protocol shapes without one.
-fn listing_base_url(entry: &ProviderConfig) -> Option<String> {
+/// listing, or `None` for protocol shapes without one. Shared with the `/model`
+/// picker so both list models through the one discovery path.
+pub(crate) fn listing_base_url(entry: &ProviderConfig) -> Option<String> {
     match entry.kind.as_str() {
         "openai" => Some(
             entry

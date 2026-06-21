@@ -41,6 +41,22 @@ Per-model context windows and reasoning effort:
 full config reference + stability policy:
 [configuration.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md).
 
+## Store an API key, or switch model mid-chat
+
+Store a key without an environment variable (bring-your-own-key — it goes to the
+OS keychain or a `0600` file, never config):
+
+```sh
+localpilot login anthropic      # deep-link → paste → validate → store
+localpilot logout anthropic     # remove it
+```
+
+In `chat`, `/model` switches the active provider/model without losing the
+conversation (`/model` lists them; `/model <provider> [model]` switches). Details
+and the credential resolution order:
+[providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)
+§Storing credentials and §Switching provider/model.
+
 ## Add an MCP tool server
 
 Configure a Model Context Protocol server so its tools become available to the

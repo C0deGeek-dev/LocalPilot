@@ -16,7 +16,8 @@ use localpilot_core::{
     ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
 };
 use localpilot_llm::{
-    ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, QuotaInfo, ToolSpec,
+    ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, ProviderRegistry,
+    QuotaInfo, ToolSpec,
 };
 use localpilot_recovery::{
     detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryAction,
@@ -393,6 +394,32 @@ fn no_progress_hint() -> String {
         .to_string()
 }
 
+/// The result of re-pointing a live session at a different provider/model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchOutcome {
+    /// The provider id now active.
+    pub provider_id: String,
+    /// The model now active.
+    pub model: String,
+    /// A non-fatal note for the user (e.g. the new provider had no configured
+    /// default model, so the prior model name was kept).
+    pub warning: Option<String>,
+}
+
+/// Why a mid-session provider/model switch was refused. The switch is a pure
+/// runtime re-point, so the only failures are an in-flight turn or an id that is
+/// not in the registry — never a network or auth error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SwitchError {
+    /// A turn is in flight; the switch is refused until the next turn boundary so
+    /// the transcript is never re-pointed mid-turn.
+    #[error("a turn is in progress; switch again once it finishes")]
+    TurnInFlight,
+    /// No provider with this id is configured (or no registry was attached).
+    #[error("provider '{0}' is not configured")]
+    UnknownProvider(String),
+}
+
 /// The agent-mode runtime.
 pub struct SessionRuntime {
     provider: Arc<dyn ModelProvider>,
@@ -443,6 +470,14 @@ pub struct SessionRuntime {
     /// and session-scoped: every child is killed when the session closes (or this
     /// runtime drops), so no background server outlives the session.
     background: localpilot_tools::BackgroundProcesses,
+    /// The already-built provider registry, when the host attaches one. Present in
+    /// interactive sessions so the active provider/model can be re-pointed
+    /// mid-conversation (the switch is a lookup here, never a rebuild). `None`
+    /// leaves the session single-provider — a switch is then refused as unknown.
+    registry: Option<Arc<ProviderRegistry>>,
+    /// Whether a turn is currently running. A switch is refused while this is set,
+    /// so the provider/model are only ever re-pointed at a turn boundary.
+    turn_in_flight: bool,
 }
 
 impl SessionRuntime {
@@ -493,6 +528,8 @@ impl SessionRuntime {
             named_targets: Vec::new(),
             broker: None,
             background: localpilot_tools::BackgroundProcesses::new(),
+            registry: None,
+            turn_in_flight: false,
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -900,6 +937,85 @@ impl SessionRuntime {
         self.config.reasoning_effort
     }
 
+    /// Attach the already-built provider registry so the active provider/model can
+    /// be re-pointed mid-session. The host builds every configured provider once
+    /// (`ProviderRegistry::from_config`) and hands the runtime a shared handle;
+    /// the switch then selects an already-built provider rather than rebuilding or
+    /// re-authenticating one. Without a registry attached, a switch is refused.
+    pub fn set_registry(&mut self, registry: Arc<ProviderRegistry>) {
+        self.registry = Some(registry);
+    }
+
+    /// The id of the active provider, read from its own declaration.
+    #[must_use]
+    pub fn active_provider_id(&self) -> &str {
+        &self.provider.declaration().id
+    }
+
+    /// The active model.
+    #[must_use]
+    pub fn active_model(&self) -> &str {
+        &self.config.model
+    }
+
+    /// Re-point the session at the configured provider `id`, selecting the
+    /// already-built provider from the attached registry. The transcript
+    /// (`Vec<Message>`) is provider-neutral and is left untouched, so the
+    /// conversation continues against the new provider on the next turn. The model
+    /// follows the provider: the new provider's configured default model is used,
+    /// or — when it has none — the current model name is kept and a warning is
+    /// returned. Refused while a turn is in flight, or when `id` is not configured.
+    ///
+    /// # Errors
+    /// [`SwitchError::TurnInFlight`] mid-turn; [`SwitchError::UnknownProvider`]
+    /// when no registry is attached or `id` is not configured.
+    pub fn set_active_provider(&mut self, id: &str) -> Result<SwitchOutcome, SwitchError> {
+        if self.turn_in_flight {
+            return Err(SwitchError::TurnInFlight);
+        }
+        let registry = self
+            .registry
+            .as_ref()
+            .ok_or_else(|| SwitchError::UnknownProvider(id.to_string()))?;
+        let provider = registry
+            .get(id)
+            .ok_or_else(|| SwitchError::UnknownProvider(id.to_string()))?
+            .clone();
+        let (model, warning) = match registry.default_model(id) {
+            Some(model) => (model.to_string(), None),
+            None => (
+                self.config.model.clone(),
+                Some(format!(
+                    "provider '{id}' has no configured default model; keeping '{}'",
+                    self.config.model
+                )),
+            ),
+        };
+        self.provider = provider;
+        self.config.model = model.clone();
+        Ok(SwitchOutcome {
+            provider_id: id.to_string(),
+            model,
+            warning,
+        })
+    }
+
+    /// Set the active model for subsequent turns on the current provider. Used for
+    /// `/model <provider> <model>` (after [`set_active_provider`]) and for a
+    /// model-only change. The provider and transcript are untouched. Model-id
+    /// validity against the provider's catalog is the caller's concern (the
+    /// `/model` UX validates against discovery); this only re-points the name.
+    ///
+    /// # Errors
+    /// [`SwitchError::TurnInFlight`] when a turn is in flight.
+    pub fn set_active_model(&mut self, model: impl Into<String>) -> Result<(), SwitchError> {
+        if self.turn_in_flight {
+            return Err(SwitchError::TurnInFlight);
+        }
+        self.config.model = model.into();
+        Ok(())
+    }
+
     /// A clonable handle for queueing steering input into a running turn.
     /// Queued text is admitted at the next safe provider-turn boundary.
     #[must_use]
@@ -1304,6 +1420,10 @@ impl SessionRuntime {
         // represents, so the "memories used" record cannot diverge from what was
         // injected. Recording is pure observation — it never changes the context,
         // and an empty set records nothing.
+        // A turn is now in flight: a mid-session provider/model switch is refused
+        // until it ends (cleared in `stop`, the single exit), so the transcript is
+        // only ever re-pointed at a turn boundary.
+        self.turn_in_flight = true;
         let contribution = self.hooks.contribute(user_input);
         let retrieval_text = contribution.text.unwrap_or_default();
         if !contribution.memories.is_empty() {
@@ -1959,6 +2079,8 @@ impl SessionRuntime {
     }
 
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {
+        // The turn has ended: a switch is allowed again at this boundary.
+        self.turn_in_flight = false;
         if reason == StopReason::Cancelled {
             self.record_event(SessionEventKind::Cancelled);
         }
@@ -2144,6 +2266,145 @@ fn quota_reset_label(quota: &QuotaInfo) -> String {
 mod tests {
 
     use super::*;
+    use localpilot_llm::{FakeProvider, ProviderDeclaration};
+    use localpilot_recovery::RecoveryBudget;
+    use localpilot_sandbox::{ScriptedApprover, Workspace};
+
+    /// A fake provider that reports `id` as its declaration id.
+    fn fake_with_id(id: &str) -> Arc<dyn ModelProvider> {
+        let mut declaration: ProviderDeclaration = FakeProvider::new().declaration().clone();
+        declaration.id = id.to_string();
+        declaration.display_name = id.to_string();
+        Arc::new(FakeProvider::new().with_declaration(declaration))
+    }
+
+    /// A runtime seeded with provider `a` and a registry holding `a` + `b`, where
+    /// only `b` carries a configured default model. Returns the runtime and its
+    /// temp dir (kept alive for the store).
+    fn switchable_runtime() -> (SessionRuntime, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::new();
+        providers.insert("a".to_string(), fake_with_id("a"));
+        providers.insert("b".to_string(), fake_with_id("b"));
+        let mut default_models = HashMap::new();
+        default_models.insert("b".to_string(), "model-b".to_string());
+        let registry = Arc::new(ProviderRegistry::from_providers(
+            providers,
+            default_models,
+            "a",
+        ));
+
+        let mut runtime = SessionRuntime::new(
+            registry.get("a").unwrap().clone(),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                model: "model-a".to_string(),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        runtime.set_registry(registry);
+        (runtime, dir)
+    }
+
+    #[test]
+    fn switching_provider_retargets_and_resolves_the_new_default_model() {
+        let (mut runtime, _dir) = switchable_runtime();
+        assert_eq!(runtime.active_provider_id(), "a");
+        assert_eq!(runtime.active_model(), "model-a");
+        let history_before = runtime.messages.len();
+
+        let outcome = runtime.set_active_provider("b").unwrap();
+        assert_eq!(outcome.provider_id, "b");
+        // `b` has a configured default model, so the switch adopts it cleanly.
+        assert_eq!(outcome.model, "model-b");
+        assert!(outcome.warning.is_none());
+        assert_eq!(runtime.active_provider_id(), "b");
+        assert_eq!(runtime.active_model(), "model-b");
+        // The transcript is provider-neutral and is left untouched by the switch.
+        assert_eq!(runtime.messages.len(), history_before);
+    }
+
+    #[test]
+    fn provider_only_switch_without_a_default_model_keeps_the_current_one() {
+        let (mut runtime, _dir) = switchable_runtime();
+        // `a` carries no configured default model, so a switch back to it keeps the
+        // current model name and surfaces a non-fatal warning rather than failing.
+        runtime.set_active_provider("b").unwrap();
+        let outcome = runtime.set_active_provider("a").unwrap();
+        assert_eq!(outcome.provider_id, "a");
+        assert_eq!(outcome.model, "model-b");
+        assert!(outcome
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains("no configured default model")));
+        assert_eq!(runtime.active_model(), "model-b");
+    }
+
+    #[test]
+    fn switching_to_an_unknown_provider_is_a_typed_error() {
+        let (mut runtime, _dir) = switchable_runtime();
+        assert_eq!(
+            runtime.set_active_provider("nope"),
+            Err(SwitchError::UnknownProvider("nope".to_string()))
+        );
+        // The active provider is unchanged after a refused switch.
+        assert_eq!(runtime.active_provider_id(), "a");
+    }
+
+    #[test]
+    fn a_switch_is_refused_while_a_turn_is_in_flight() {
+        let (mut runtime, _dir) = switchable_runtime();
+        // Simulate a turn in progress: the switch must defer to the next boundary.
+        runtime.turn_in_flight = true;
+        assert_eq!(
+            runtime.set_active_provider("b"),
+            Err(SwitchError::TurnInFlight)
+        );
+        assert_eq!(
+            runtime.set_active_model("x"),
+            Err(SwitchError::TurnInFlight)
+        );
+        // Between turns the same switch succeeds.
+        runtime.turn_in_flight = false;
+        assert!(runtime.set_active_provider("b").is_ok());
+    }
+
+    #[test]
+    fn set_active_model_repoints_the_model_only() {
+        let (mut runtime, _dir) = switchable_runtime();
+        runtime.set_active_model("model-z").unwrap();
+        assert_eq!(runtime.active_model(), "model-z");
+        // The provider is untouched by a model-only change.
+        assert_eq!(runtime.active_provider_id(), "a");
+    }
+
+    #[test]
+    fn a_switch_without_a_registry_is_an_unknown_provider() {
+        // A single-provider session (no registry attached) refuses a switch with a
+        // typed error rather than panicking, preserving existing behaviour.
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::new(
+            fake_with_id("solo"),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig::default(),
+            Vec::new(),
+        );
+        assert_eq!(
+            runtime.set_active_provider("anything"),
+            Err(SwitchError::UnknownProvider("anything".to_string()))
+        );
+    }
 
     #[test]
     fn effective_limit_derives_from_a_known_window_with_a_reserve() {

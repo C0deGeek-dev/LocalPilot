@@ -9,9 +9,9 @@ config search paths:
   project: <workspace>/.localpilot.toml (present)
 
 providers:
-  local: credential LOCALPILOT_LOCAL_API_KEY not set; model (none); context window unknown
-  openai: credential OPENAI_API_KEY not set; model (none); context window unknown
-  anthropic: credential ANTHROPIC_API_KEY not set; model (none); context window unknown
+  local: credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
+  openai: credential OPENAI_API_KEY [not set]; model (none); context window unknown
+  anthropic: credential ANTHROPIC_API_KEY [not set]; model (none); context window unknown
 
 tools:
   git (git): available

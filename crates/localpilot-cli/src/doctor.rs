@@ -9,7 +9,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use localpilot_config::{CliOverrides, ConfigPaths};
+use localpilot_config::{CliOverrides, ConfigPaths, CredentialSource};
 
 /// A point-in-time view of the local environment relevant to running the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,13 +31,14 @@ pub struct ConfigPath {
     pub exists: bool,
 }
 
-/// Whether a provider's credential is present in the environment. The credential
-/// value is never stored here.
+/// Where a provider's credential resolves from, and the env var it would read.
+/// The credential value itself is never stored here — only its source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatus {
     pub name: String,
     pub credential_env: String,
-    pub credential_present: bool,
+    /// Which tier the credential resolves from (keychain / file / env / none).
+    pub credential_source: CredentialSource,
     /// The provider's default model, when configured.
     pub model: Option<String>,
     /// The model's context window in tokens, when configured.
@@ -111,10 +112,13 @@ pub fn render(report: &DoctorReport) -> String {
 
     let _ = writeln!(s, "providers:");
     for p in &report.providers {
-        let state = if p.credential_present {
-            "set"
-        } else {
-            "not set"
+        // Report the credential *source*, never the secret: a logged-in key shows
+        // `keychain`/`file`, an environment variable `env`, and nothing `none`.
+        let source = match p.credential_source {
+            CredentialSource::Keychain => "keychain",
+            CredentialSource::File => "file",
+            CredentialSource::Env => "env",
+            CredentialSource::None => "not set",
         };
         let model = p.model.as_deref().unwrap_or("(none)");
         let window = p
@@ -123,7 +127,7 @@ pub fn render(report: &DoctorReport) -> String {
             .unwrap_or_else(|| "unknown".to_string());
         let _ = writeln!(
             s,
-            "  {}: credential {} {state}; model {model}; context window {window}",
+            "  {}: credential {} [{source}]; model {model}; context window {window}",
             p.name, p.credential_env
         );
     }
@@ -204,7 +208,13 @@ fn providers() -> Vec<ProviderStatus> {
     .map(|(name, env)| ProviderStatus {
         name: name.to_string(),
         credential_env: env.to_string(),
-        credential_present: credential_present(env),
+        // With no config there is no stored-credential lookup to do; presence is
+        // read straight from the conventional environment variable.
+        credential_source: if credential_present(env) {
+            CredentialSource::Env
+        } else {
+            CredentialSource::None
+        },
         model: None,
         context_window: None,
     })
@@ -225,23 +235,20 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
             .providers
             .iter()
             .map(|(id, entry)| {
-                if let Some(env) = entry
+                // The resolved source honours the full precedence (keychain →
+                // fallback file → env), so a logged-in provider reads `keychain`
+                // even with no environment variable set.
+                let source = config.credential_source(id);
+                let credential_env = entry
                     .api_key_env
                     .as_deref()
                     .or_else(|| default_api_key_env(&entry.kind))
-                {
-                    return ProviderStatus {
-                        name: format!("{id} ({})", entry.kind),
-                        credential_env: env.to_string(),
-                        credential_present: credential_present(env),
-                        model: entry.model.clone(),
-                        context_window: entry.context_window,
-                    };
-                }
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "(none required)".to_string());
                 ProviderStatus {
                     name: format!("{id} ({})", entry.kind),
-                    credential_env: "(none required)".to_string(),
-                    credential_present: true,
+                    credential_env,
+                    credential_source: source,
                     model: entry.model.clone(),
                     context_window: entry.context_window,
                 }
@@ -353,14 +360,14 @@ mod tests {
                 ProviderStatus {
                     name: "local".to_string(),
                     credential_env: "LOCALPILOT_LOCAL_API_KEY".to_string(),
-                    credential_present: false,
+                    credential_source: CredentialSource::None,
                     model: None,
                     context_window: None,
                 },
                 ProviderStatus {
                     name: "openai".to_string(),
                     credential_env: "OPENAI_API_KEY".to_string(),
-                    credential_present: true,
+                    credential_source: CredentialSource::Keychain,
                     model: None,
                     context_window: None,
                 },
@@ -405,6 +412,15 @@ mod tests {
             "credential value leaked into output"
         );
         assert!(rendered.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn render_reports_the_credential_source_per_provider() {
+        // The fixture has a keychain-backed and a missing credential; the render
+        // shows each source label and never a secret.
+        let rendered = render(&fixture());
+        assert!(rendered.contains("OPENAI_API_KEY [keychain]"));
+        assert!(rendered.contains("LOCALPILOT_LOCAL_API_KEY [not set]"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
-use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime};
+use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime, SwitchError};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
@@ -164,10 +164,13 @@ pub async fn run_chat(
                  ([providers.<id>] model = \"...\")"
             )
         })?;
-    let registry = ProviderRegistry::from_config(&config)?;
+    // Build every configured provider once and keep a shared handle, so `/model`
+    // can re-point the live session at another configured provider without
+    // rebuilding or re-authenticating it.
+    let provider_registry = std::sync::Arc::new(ProviderRegistry::from_config(&config)?);
     let provider = match provider_id {
-        Some(id) => registry.get(id),
-        None => registry.default_provider(),
+        Some(id) => provider_registry.get(id),
+        None => provider_registry.default_provider(),
     }
     .cloned()
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
@@ -217,6 +220,8 @@ pub async fn run_chat(
         Vec::new(),
     );
     runtime.set_broker(broker);
+    // Hand the runtime the built provider map so `/model` switches are a lookup.
+    runtime.set_registry(provider_registry);
     localpilot_harness::register_project_analysis_context(
         &cwd,
         config.context.project_analysis,
@@ -574,6 +579,9 @@ async fn run_slash(
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
             run_harness_command(terminal, state, approval_rx, host, true).await?;
         }
+        SlashAction::Model { provider, model } => {
+            run_model_command(state, runtime, host.cwd, provider, model).await;
+        }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
         // cheap state reads/writes and stay synchronous.
@@ -630,6 +638,156 @@ async fn run_slash(
         }
     }
     Ok(())
+}
+
+/// Drive the `/model` command: with no provider, list the configured providers
+/// and their available models; otherwise re-point the live session at the named
+/// provider (and model). All outcomes — success, the no-default-model warning, an
+/// unknown provider, or a refused mid-turn switch — surface as plain notices; the
+/// command never panics or degrades the session.
+async fn run_model_command(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    cwd: &std::path::Path,
+    provider: Option<String>,
+    model: Option<String>,
+) {
+    let config =
+        match localpilot_config::load(&ConfigPaths::standard(cwd), &CliOverrides::default()) {
+            Ok(config) => config,
+            Err(error) => {
+                state.apply(UiEvent::Notice(format!(
+                    "/model: cannot read config: {error}"
+                )));
+                return;
+            }
+        };
+    match provider {
+        None => list_models(state, runtime, &config).await,
+        Some(provider_id) => switch_model(state, runtime, &config, &provider_id, model).await,
+    }
+}
+
+/// List configured providers and the models each reports, marking the active one.
+/// Discovery failure is non-fatal: the provider's configured model is shown with a
+/// note instead.
+async fn list_models(
+    state: &mut AppState,
+    runtime: &SessionRuntime,
+    config: &localpilot_config::Config,
+) {
+    if config.providers.is_empty() {
+        state.apply(UiEvent::Notice(
+            "no providers configured (see .localpilot.toml)".to_string(),
+        ));
+        return;
+    }
+    let active_provider = runtime.active_provider_id().to_string();
+    let active_model = runtime.active_model().to_string();
+    state.apply(UiEvent::Notice(
+        "providers (current marked *, switch with /model <provider> [model]):".to_string(),
+    ));
+    for (id, entry) in &config.providers {
+        let marker = if *id == active_provider { "*" } else { " " };
+        state.apply(UiEvent::Notice(format!("{marker} {id} ({})", entry.kind)));
+        let Some(base_url) = crate::models_cmd::listing_base_url(entry) else {
+            let configured = entry.model.as_deref().unwrap_or("(none)");
+            state.apply(UiEvent::Notice(format!(
+                "    configured model: {configured}"
+            )));
+            continue;
+        };
+        let credential = config.resolve_credential(id);
+        match localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
+            Ok(models) if !models.is_empty() => {
+                for model in models {
+                    let active = if *id == active_provider && model.id == active_model {
+                        " (active)"
+                    } else {
+                        ""
+                    };
+                    state.apply(UiEvent::Notice(format!("    {}{active}", model.id)));
+                }
+            }
+            Ok(_) => state.apply(UiEvent::Notice("    (no models loaded)".to_string())),
+            Err(error) => {
+                let configured = entry.model.as_deref().unwrap_or("(none)");
+                state.apply(UiEvent::Notice(format!(
+                    "    unreachable ({error}); configured model: {configured}"
+                )));
+            }
+        }
+    }
+}
+
+/// Switch the active provider (and optionally model). Reports the new target and
+/// any warning; leaves the session unchanged on a typed error.
+async fn switch_model(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    provider_id: &str,
+    model: Option<String>,
+) {
+    let outcome = match runtime.set_active_provider(provider_id) {
+        Ok(outcome) => outcome,
+        Err(SwitchError::UnknownProvider(id)) => {
+            state.apply(UiEvent::Notice(format!(
+                "/model: provider '{id}' is not configured — try /model to list"
+            )));
+            return;
+        }
+        Err(SwitchError::TurnInFlight) => {
+            state.apply(UiEvent::Notice(
+                "/model: a turn is in progress; switch once it finishes".to_string(),
+            ));
+            return;
+        }
+    };
+    // The provider's no-default-model warning surfaces before any model override.
+    if let Some(warning) = &outcome.warning {
+        state.apply(UiEvent::Notice(format!("/model: {warning}")));
+    }
+    // An explicit model overrides the provider default; validate it best-effort.
+    if let Some(model) = model {
+        if let Err(error) = runtime.set_active_model(&model) {
+            state.apply(UiEvent::Notice(format!("/model: {error}")));
+            return;
+        }
+        warn_unknown_model(state, config, provider_id, &model).await;
+    }
+    state.header.provider = runtime.active_provider_id().to_string();
+    state.header.model = runtime.active_model().to_string();
+    state.apply(UiEvent::Notice(format!(
+        "switched to provider '{}' · model '{}'",
+        runtime.active_provider_id(),
+        runtime.active_model()
+    )));
+}
+
+/// Best-effort model-id check: when the provider exposes a model listing and the
+/// requested model is absent, warn (never fail — the id may be valid but unlisted,
+/// or discovery may be offline).
+async fn warn_unknown_model(
+    state: &mut AppState,
+    config: &localpilot_config::Config,
+    provider_id: &str,
+    model: &str,
+) {
+    let Some(entry) = config.providers.get(provider_id) else {
+        return;
+    };
+    let Some(base_url) = crate::models_cmd::listing_base_url(entry) else {
+        return;
+    };
+    let credential = config.resolve_credential(provider_id);
+    if let Ok(models) = localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
+        if !models.is_empty() && !models.iter().any(|m| m.id == model) {
+            state.apply(UiEvent::Notice(format!(
+                "/model: '{model}' is not in {provider_id}'s model list; using it anyway"
+            )));
+        }
+    }
 }
 
 /// List or stop the session's background processes, posting the result as

@@ -104,6 +104,38 @@ Recall is scoped to the current directory by default (each record is tagged with
 the directory it was submitted in); Ctrl-T toggles a view of every project's
 prompts.
 
+## Stored API Credentials At Rest
+
+`localpilot login <provider>` stores a provider API key so a logged-in user needs
+no environment variable (ADR-0042). The posture:
+
+- **Bring-your-own-key only — no subscription tokens (blocking).** The key is one
+  the user creates in the provider's own dashboard. No code path obtains, stores,
+  or routes Claude Free/Pro/Max or ChatGPT Plus/Pro *subscription* credentials,
+  and there is no "sign in with Claude/ChatGPT" flow. Neither provider offers a
+  sanctioned OAuth flow that mints a standard API key for a third-party client,
+  and routing a third party's users through subscription credentials is a terms
+  violation; BYOK is the only sanctioned path.
+- **Where it is stored.** The OS keychain when available — currently the Windows
+  Credential Manager (built with the `keychain` feature). On macOS and Linux, and
+  on any host without a keychain backend, a `0600` file (`credentials.json`) under
+  the per-user directory beside `config.toml`. (The macOS/Linux native keychains
+  are held back by an MSRV-incompatible dependency; see ADR-0042.) The key never
+  enters the repo or a config file.
+- **Best-effort, never blocking.** A keychain that is absent or locked is a miss,
+  not an error: the store falls back to the file and resolution falls through to
+  the environment, so startup and a live session never depend on keychain
+  availability.
+- **Secret discipline.** The pasted key is wrapped in `Secret` immediately, never
+  logged or echoed in full (only a masked head/tail), and the `Secret` type
+  refuses serialization, so the only places a key leaves the wrapper are the
+  audited keychain/file writes. The fallback file is `0600` on unix (the per-user
+  directory ACL on Windows — tier-1 parity is behaviour parity, ADR-0007).
+- **Resolution precedence:** stored credential (keychain → file) → `api_key_env`
+  environment variable → config. `localpilot doctor` reports the resolved *source*
+  (`keychain` / `file` / `env` / `not set`), never the secret.
+- **To remove:** `localpilot logout <provider>` deletes it from every tier.
+
 ## Shell Policy
 
 Commands are classified as:

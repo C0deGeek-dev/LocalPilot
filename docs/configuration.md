@@ -87,6 +87,15 @@ provider options (for example `max_tokens` for `anthropic`, or the
 LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 [providers.md](providers.md).
 
+**Credentials are never config keys.** A provider's API key is never written to
+config. It is resolved at use with precedence: a stored credential (OS keychain →
+`0600` fallback file, written by `localpilot login`) → the `api_key_env`
+environment variable → none. So `login` makes `api_key_env` optional. The OS
+keychain backend is an opt-in build feature (`keychain`, Windows only at present;
+macOS/Linux use the fallback file — ADR-0042). See
+[providers.md](providers.md) §Storing credentials and
+[07-security-and-privacy.md](07-security-and-privacy.md) §Stored API Credentials.
+
 ### `[harness]`
 
 | Key | Type | Default | Meaning |

@@ -28,6 +28,9 @@ Security-sensitive areas:
 - Non-interactive mode denies risky actions by default.
 - Writes outside the workspace require explicit approval.
 - Secret-like files require explicit approval.
-- Provider API keys must come from environment variables or secure storage.
-- Logs must redact secrets.
+- Provider API keys must come from environment variables or secure storage
+  (`localpilot login` stores them in the OS keychain, or a `0600` per-user file).
+  Bring-your-own-key only: no "sign in with Claude/ChatGPT" and no use of
+  subscription credentials (ADR-0042).
+- Logs must redact secrets; a stored key is never logged or echoed in full.
 

@@ -581,6 +581,10 @@ impl AppState {
         ("bypass", "Use the bypass permission profile"),
         ("think", "Toggle the reasoning panel"),
         ("effort", "Set reasoning effort: minimal|low|medium|high"),
+        (
+            "model",
+            "Switch provider/model, or list them (/model [provider [model]])",
+        ),
         ("new", "Start a fresh session"),
         ("fork", "Branch the conversation into a new session"),
         ("clone", "Copy the conversation into a new session"),

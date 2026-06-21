@@ -5,6 +5,23 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Switch provider/model mid-conversation with `/model`.** In the `chat` REPL,
+  `/model` lists the configured providers and their models; `/model <provider>`
+  or `/model <provider> <model>` re-points the active session — for example start
+  on a local model and continue the same conversation on Anthropic or OpenAI. The
+  switch selects an already-built provider (no rebuild, no re-auth), takes effect
+  at the next turn boundary, and keeps the full transcript. Listing reuses the
+  `GET /models` discovery and degrades gracefully offline. See ADR-0041.
+- **Store API keys with `localpilot login` (bring-your-own-key).** `localpilot
+  login anthropic|openai` deep-links to the provider's key page, takes a pasted
+  key, validates it with one minimal request (`--no-verify` skips), and stores it
+  in the OS keychain (Windows Credential Manager) or a `0600` per-user file
+  (macOS/Linux); `localpilot logout <provider>` removes it. A stored key needs no
+  environment variable: resolution is keychain → file → `api_key_env` → config.
+  `localpilot doctor` now reports each provider's credential *source* (keychain /
+  file / env / not set), never the secret. Bring-your-own-key only — no "sign in
+  with Claude/ChatGPT" and no subscription credentials (ADR-0042). The keychain
+  backend is the opt-in `keychain` build feature.
 - **Prompt history survives a restart, scoped to the project.** The `chat`
   composer's Up/Down recall is now seeded from a durable store, so a new session
   starts with your past prompts instead of an empty history. The store is one

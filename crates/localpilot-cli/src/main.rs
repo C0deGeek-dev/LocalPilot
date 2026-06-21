@@ -19,6 +19,7 @@ mod ingest_cmd;
 mod key_input;
 mod learning_cmd;
 mod logging;
+mod login_cmd;
 mod mcp;
 mod memory_cmd;
 mod models_cmd;
@@ -45,6 +46,23 @@ struct Cli {
 enum Command {
     /// Report version, platform, config, providers, tools, and trust state.
     Doctor,
+    /// Store an API key for a provider (bring-your-own-key): deep-link to the key
+    /// page, paste, validate, and save it in the OS keychain (or a 0600 file).
+    Login {
+        /// Provider to log in: `anthropic`, `openai`, or a configured provider id.
+        provider: String,
+        /// Do not open the browser at the key-creation page (it is still printed).
+        #[arg(long)]
+        no_browser: bool,
+        /// Skip the validation request and store the key without checking it.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Remove a provider's stored API key from the keychain / fallback file.
+    Logout {
+        /// Provider id whose stored credential to remove.
+        provider: String,
+    },
     /// List the models configured local servers actually have loaded.
     Models {
         /// Only query this configured provider id.
@@ -616,6 +634,23 @@ async fn main() -> anyhow::Result<()> {
         Command::Models { provider } => {
             models_cmd::run(provider.as_deref()).await?;
         }
+        Command::Login {
+            provider,
+            no_browser,
+            no_verify,
+        } => {
+            login_cmd::login(
+                &provider,
+                login_cmd::LoginOptions {
+                    no_browser,
+                    no_verify,
+                },
+            )
+            .await?;
+        }
+        Command::Logout { provider } => {
+            login_cmd::logout(&provider)?;
+        }
         Command::Rpc {
             model,
             provider,
@@ -1089,4 +1124,37 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
     }
     writeln!(stdout)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_and_logout_subcommands_parse() {
+        // `login <provider>` with both opt-out flags.
+        let cli = Cli::try_parse_from(["localpilot", "login", "anthropic", "--no-verify"]).unwrap();
+        match cli.command {
+            Some(Command::Login {
+                provider,
+                no_browser,
+                no_verify,
+            }) => {
+                assert_eq!(provider, "anthropic");
+                assert!(!no_browser);
+                assert!(no_verify);
+            }
+            other => panic!("expected Login, got {other:?}"),
+        }
+
+        // `logout <provider>`.
+        let cli = Cli::try_parse_from(["localpilot", "logout", "openai"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Logout { provider }) if provider == "openai"
+        ));
+
+        // The provider argument is required.
+        assert!(Cli::try_parse_from(["localpilot", "login"]).is_err());
+    }
 }

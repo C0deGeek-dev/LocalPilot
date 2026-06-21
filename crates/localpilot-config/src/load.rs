@@ -172,6 +172,15 @@ pub fn prompt_history_path() -> Option<PathBuf> {
     config_base_dir().map(|base| base.join("localpilot").join("prompt-history.jsonl"))
 }
 
+/// The per-user credential fallback-file location, resolved cross-platform
+/// alongside the user config file. Holds API keys stored by `login` when the OS
+/// keychain is unavailable; owner-only on unix. Returns `None` when no suitable
+/// base directory is set.
+#[must_use]
+pub fn credential_store_path() -> Option<PathBuf> {
+    config_base_dir().map(|base| base.join("localpilot").join("credentials.json"))
+}
+
 #[cfg(windows)]
 fn config_base_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(PathBuf::from)
@@ -185,22 +194,33 @@ fn config_base_dir() -> Option<PathBuf> {
 }
 
 impl Config {
-    /// Resolve the credential for `provider_id` from the environment variable
-    /// named by its `api_key_env`, wrapped so it cannot leak through formatting.
-    /// Returns `None` when the provider, the env-var name, or its value is absent
-    /// or empty.
+    /// Resolve the credential for `provider_id`, wrapped so it cannot leak through
+    /// formatting. Precedence: a stored credential (the OS keychain, or the opt-in
+    /// fallback file) wins, then the environment variable named by `api_key_env`
+    /// (or a provider-kind default). Returns `None` when no source holds one.
     #[must_use]
     pub fn resolve_credential(&self, provider_id: &str) -> Option<Secret> {
+        self.resolve_credential_with(provider_id, &crate::credentials::CredentialStore::user())
+    }
+
+    /// [`resolve_credential`](Self::resolve_credential) against an explicit store,
+    /// so the precedence is testable without touching the real per-user store.
+    #[must_use]
+    fn resolve_credential_with(
+        &self,
+        provider_id: &str,
+        store: &crate::credentials::CredentialStore,
+    ) -> Option<Secret> {
         let provider = self.providers.get(provider_id)?;
-        // Try the explicitly named env var first, then the kind's conventional
-        // ones in order (Anthropic's gateway auth is carried by
-        // `ANTHROPIC_AUTH_TOKEN` when `ANTHROPIC_API_KEY` is empty).
-        let candidates = provider
-            .api_key_env
-            .as_deref()
-            .into_iter()
-            .chain(default_api_key_envs(&provider.kind).iter().copied());
-        for env_name in candidates {
+        // 1) A logged-in credential (keychain → fallback file) takes precedence, so
+        // a stored key needs no environment variable.
+        if let Some(secret) = store.get(provider_id) {
+            return Some(secret);
+        }
+        // 2) Then the explicitly named env var, then the kind's conventional ones
+        // in order (Anthropic's gateway auth is carried by `ANTHROPIC_AUTH_TOKEN`
+        // when `ANTHROPIC_API_KEY` is empty).
+        for env_name in self.credential_env_candidates(provider) {
             if let Ok(value) = std::env::var(env_name) {
                 if !value.trim().is_empty() {
                     return Some(Secret::new(value));
@@ -208,6 +228,39 @@ impl Config {
             }
         }
         None
+    }
+
+    /// The tier a credential for `provider_id` resolves from, without exposing the
+    /// value — for `doctor`'s source reporting. Mirrors [`resolve_credential`]'s
+    /// precedence: stored (keychain/file) → env → none.
+    #[must_use]
+    pub fn credential_source(&self, provider_id: &str) -> crate::credentials::CredentialSource {
+        use crate::credentials::{CredentialSource, CredentialStore};
+        let Some(provider) = self.providers.get(provider_id) else {
+            return CredentialSource::None;
+        };
+        if let Some(source) = CredentialStore::user().source(provider_id) {
+            return source;
+        }
+        for env_name in self.credential_env_candidates(provider) {
+            if std::env::var(env_name).is_ok_and(|value| !value.trim().is_empty()) {
+                return CredentialSource::Env;
+            }
+        }
+        CredentialSource::None
+    }
+
+    /// The ordered environment-variable names that may carry `provider`'s
+    /// credential: its explicit `api_key_env` first, then the kind's defaults.
+    fn credential_env_candidates<'a>(
+        &self,
+        provider: &'a crate::schema::ProviderConfig,
+    ) -> impl Iterator<Item = &'a str> {
+        provider
+            .api_key_env
+            .as_deref()
+            .into_iter()
+            .chain(default_api_key_envs(&provider.kind).iter().copied())
     }
 
     /// Resolve the default model for the selected provider (or the configured
@@ -278,6 +331,53 @@ mod tests {
     fn validate_rejects_empty_name_or_program() {
         assert!(validate_checks(&[check("", "cargo")]).is_err());
         assert!(validate_checks(&[check("fmt", "  ")]).is_err());
+    }
+
+    #[test]
+    fn credential_resolution_prefers_a_stored_credential_then_env_then_none() {
+        use crate::credentials::CredentialStore;
+        use crate::schema::ProviderConfig;
+
+        // A provider whose credential env var is uniquely named for this test, so
+        // it never collides with another test's environment.
+        const ENV: &str = "LOCALPILOT_TEST_CRED_PRECEDENCE";
+        const ID: &str = "cred-precedence-test-provider";
+        let mut config = Config::default();
+        config.providers.insert(
+            ID.to_string(),
+            ProviderConfig {
+                kind: "openai-compatible".to_string(),
+                api_key_env: Some(ENV.to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::with_file(Some(dir.path().join("credentials.json")));
+
+        // With neither a stored credential nor the env var, resolution is None.
+        std::env::remove_var(ENV);
+        assert!(config.resolve_credential_with(ID, &store).is_none());
+
+        // With only the env var, it resolves from the environment.
+        std::env::set_var(ENV, "env-key");
+        assert_eq!(
+            config
+                .resolve_credential_with(ID, &store)
+                .map(|s| s.expose().to_string()),
+            Some("env-key".to_string())
+        );
+
+        // A stored credential takes precedence over the env var.
+        store.file_set(ID, &Secret::new("stored-key")).unwrap();
+        assert_eq!(
+            config
+                .resolve_credential_with(ID, &store)
+                .map(|s| s.expose().to_string()),
+            Some("stored-key".to_string())
+        );
+
+        std::env::remove_var(ENV);
     }
 
     #[test]

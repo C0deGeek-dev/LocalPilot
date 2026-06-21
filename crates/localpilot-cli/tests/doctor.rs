@@ -3,6 +3,7 @@
 mod doctor;
 
 use doctor::{ConfigPath, DoctorReport, ProviderStatus, ToolStatus, TrustState};
+use localpilot_config::CredentialSource;
 
 #[test]
 fn doctor_reports_foundation_status() {
@@ -19,14 +20,14 @@ fn doctor_does_not_print_secret_values() {
     report.providers = vec![ProviderStatus {
         name: "openai".to_string(),
         credential_env: "OPENAI_API_KEY".to_string(),
-        credential_present: true,
+        credential_source: CredentialSource::Env,
         model: None,
         context_window: None,
     }];
 
     let rendered = doctor::render(&report);
 
-    assert!(rendered.contains("OPENAI_API_KEY set"));
+    assert!(rendered.contains("OPENAI_API_KEY [env]"));
     assert!(!rendered.contains("secret-from-config"));
     assert!(!rendered.contains("secret-from-env"));
 }
@@ -52,21 +53,21 @@ fn report() -> DoctorReport {
             ProviderStatus {
                 name: "local".to_string(),
                 credential_env: "LOCALPILOT_LOCAL_API_KEY".to_string(),
-                credential_present: false,
+                credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
             },
             ProviderStatus {
                 name: "openai".to_string(),
                 credential_env: "OPENAI_API_KEY".to_string(),
-                credential_present: false,
+                credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
             },
             ProviderStatus {
                 name: "anthropic".to_string(),
                 credential_env: "ANTHROPIC_API_KEY".to_string(),
-                credential_present: false,
+                credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
             },

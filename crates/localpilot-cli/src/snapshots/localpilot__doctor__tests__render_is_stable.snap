@@ -13,8 +13,8 @@ config search paths:
   project: /work/.localpilot.toml (present)
 
 providers:
-  local: credential LOCALPILOT_LOCAL_API_KEY not set; model (none); context window unknown
-  openai: credential OPENAI_API_KEY set; model (none); context window unknown
+  local: credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
+  openai: credential OPENAI_API_KEY [keychain]; model (none); context window unknown
 
 tools:
   git (git): available

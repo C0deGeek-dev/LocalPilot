@@ -217,3 +217,17 @@ api_key_env = "LOCALPILOT_LOCAL_API_KEY"
 kind = "openai"
 api_key_env = "OPENAI_API_KEY"
 ```
+
+## Credential Resolution
+
+The credential value is never stored in config — only the *name* of the
+environment variable (`api_key_env`) that may hold it. At use, a provider's
+credential is resolved with precedence: a stored credential (OS keychain → a
+`0600` fallback file, written by `localpilot login`) → the `api_key_env`
+environment variable (or a kind default) → none. So `login` makes the environment
+variable optional, while an env-only setup keeps working unchanged. The resolved
+secret is wrapped so it never reaches logs, transcripts, or error output, and
+`localpilot doctor` reports only the *source* (keychain / file / env / none).
+Bring-your-own-key only — no subscription-credential or "sign in with
+Claude/ChatGPT" path (ADR-0042). See
+[providers.md](providers.md) §Storing credentials.

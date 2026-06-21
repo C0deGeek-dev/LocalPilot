@@ -8,10 +8,19 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Build the OS-keychain credential backend (keyring). Off by default so the
+# normal build/test gate links no native credential-store deps and stays green
+# headless; release builds and the interactive binary enable it. Without it the
+# store uses the restrictive-mode fallback file and resolution falls through to
+# the environment, so credentials still work — only the secret backend differs.
+keychain = ["dep:keyring"]
+
 [dependencies]
 figment = { workspace = true }
 ignore = { workspace = true }
 indexmap = { workspace = true }
+keyring = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

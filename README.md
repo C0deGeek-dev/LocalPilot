@@ -111,7 +111,8 @@ the runtime in-process or driving it headless over RPC/ACP.
 
 | Command | What it does |
 | --- | --- |
-| `doctor` | Report version, platform, config, providers, tools, trust state |
+| `doctor` | Report version, platform, config, providers, tools, trust state (incl. each provider's credential source) |
+| `login \| logout <provider>` | Store/remove a provider API key (bring-your-own-key): deep-link to the key page, paste, validate, save to the OS keychain or a `0600` file. No subscription login |
 | `update [--check]` | Check the repo for a newer release and reinstall from source on confirm |
 | `init` | Initialize project-local state (`.localpilot.toml`, `.gitignore`) |
 | `ask` | Send one prompt and stream the answer (no tools) |
@@ -141,14 +142,17 @@ move within a multi-line draft) — recall persists across restarts, scoped to t
 current project, and `Ctrl-T` toggles a view of every project's prompts (opt out
 with `[history] persistence = "none"`); `Ctrl-C` cancels an in-flight turn or
 ingest run. Type `/` for slash-command autocomplete and `@` to mention a workspace
-file.
+file. `/model` switches the active provider/model mid-conversation without losing
+the transcript (`/model` lists them).
 Bracketed paste is enabled, so large pastes arrive as a single block.
 
 ## Build features
 
 The default binary links the LocalMind learning subsystem. The `tui` feature
-adds the interactive `chat` REPL; `learning` remains accepted as a compatibility
-alias for older build commands.
+adds the interactive `chat` REPL; the `keychain` feature adds the OS-keychain
+credential backend for `localpilot login` (Windows; macOS/Linux use a `0600`
+file); `learning` remains accepted as a compatibility alias for older build
+commands.
 
 ```sh
 cargo build -p localpilot --features tui

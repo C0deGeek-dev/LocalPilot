@@ -51,6 +51,19 @@ futures = "=0.3.31"
 ignore = "=0.4.23"
 indexmap = { version = "=2.7.0", features = ["serde"] }
 insta = "=1.47.2"
+# OS keychain backend for stored API credentials. Enabled only through the
+# opt-in `keychain` feature, so the default build links no credential-store
+# native deps. Default features off; only the Windows Credential Manager backend
+# is built. The macOS (apple-native → security-framework 3.7) and Linux
+# (sync-secret-service → zeroize_derive 1.5) backends are intentionally omitted:
+# both pull a transitive that requires Rust edition 2024, above this workspace's
+# MSRV (1.82), and they break `cargo deny --all-features` cross-target metadata.
+# macOS and Linux therefore use the `0600` fallback file — behaviour parity holds
+# (login/resolution work everywhere); only the backend differs. v3 is pinned
+# because v4 also requires edition 2024.
+keyring = { version = "=3.6.3", default-features = false, features = [
+    "windows-native",
+] }
 parking_lot = "=0.12.3"
 proptest = "=1.5.0"
 regex = "=1.11.3"
