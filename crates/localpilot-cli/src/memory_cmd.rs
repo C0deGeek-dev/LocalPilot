@@ -90,6 +90,16 @@ pub fn disable(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Re-enable memory injection for this project (clears the disable flag).
+///
+/// # Errors
+/// Returns an error if the flag cannot be cleared.
+pub fn enable(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    localpilot_localmind::memory_enable_injection(root)?;
+    writeln!(out, "memory injection enabled for this project")?;
+    Ok(())
+}
+
 /// Show a symbol's graph neighborhood, tests, and anchored lessons.
 ///
 /// # Errors

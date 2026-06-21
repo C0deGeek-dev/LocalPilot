@@ -5,6 +5,12 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Seed curated lessons + re-enable memory injection.** `localpilot learning
+  seed --file <pack.json>` writes a curated, author-reviewed set of best-practice
+  lessons straight into LocalMind accepted memory (idempotent — re-seeding skips
+  lessons already present; `--dry-run` validates without writing). `localpilot
+  memory enable` clears the injection-disable flag that `memory disable` sets, so
+  a lesson-on/off comparison is scriptable. See ADR-0043.
 - **Switch provider/model mid-conversation with `/model`.** In the `chat` REPL,
   `/model` lists the configured providers and their models; `/model <provider>`
   or `/model <provider> <model>` re-points the active session — for example start

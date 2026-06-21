@@ -361,6 +361,8 @@ enum MemoryCommand {
     Delete { id: String },
     /// Disable memory injection for this project.
     Disable,
+    /// Re-enable memory injection for this project (clears the disable flag).
+    Enable,
     /// Show a symbol's graph neighborhood, tests, and anchored lessons.
     Graph {
         /// Symbol name; use the qualified name when a plain name is ambiguous.
@@ -383,6 +385,15 @@ enum LearningCommand {
         /// Session id to close out.
         #[arg(long)]
         session: String,
+    },
+    /// Seed curated lessons from a JSON pack directly into accepted memory.
+    Seed {
+        /// Path to a JSON seed pack: `{ "lessons": [ { "body": "...", ... } ] }`.
+        #[arg(long)]
+        file: PathBuf,
+        /// Validate and count without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Review queue: list, show, and decide on candidate lessons.
     Review {
@@ -764,6 +775,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MemoryCommand::Delete { id } => memory_cmd::delete(&cwd, &id, &mut stdout)?,
                 MemoryCommand::Disable => memory_cmd::disable(&cwd, &mut stdout)?,
+                MemoryCommand::Enable => memory_cmd::enable(&cwd, &mut stdout)?,
                 MemoryCommand::Graph { symbol } => {
                     memory_cmd::graph(&cwd, &symbol, &mut stdout)?;
                 }
@@ -834,6 +846,9 @@ async fn main() -> anyhow::Result<()> {
                         learning_cmd::review_purge(&cwd, yes, &mut stdout)?;
                     }
                 },
+                LearningCommand::Seed { file, dry_run } => {
+                    learning_cmd::seed(&cwd, &file, dry_run, &mut stdout)?
+                }
                 LearningCommand::Promote { id } => learning_cmd::promote(&cwd, &id, &mut stdout)?,
                 LearningCommand::Search { query } => {
                     learning_cmd::search(&cwd, &query, &mut stdout)?;

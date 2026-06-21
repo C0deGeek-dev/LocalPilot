@@ -30,6 +30,30 @@ pub fn closeout(cwd: &std::path::Path, session: &str, out: &mut dyn Write) -> an
     Ok(())
 }
 
+/// Seed curated lessons from a JSON pack (`{ "lessons": [ ... ] }`) directly into
+/// accepted memory. Idempotent: lessons whose body already exists are skipped.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or parsed, or if seeding fails.
+pub fn seed(cwd: &Path, file: &Path, dry_run: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("read seed file '{}': {e}", file.display()))?;
+    let pack: localpilot_localmind::SeedPack = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parse seed file '{}': {e}", file.display()))?;
+    let report = learning::seed_memory(cwd, &pack.lessons, dry_run)?;
+    let suffix = if dry_run {
+        " (dry run — nothing written)"
+    } else {
+        ""
+    };
+    writeln!(
+        out,
+        "seeded {} lesson(s), skipped {}{}",
+        report.seeded, report.skipped, suffix
+    )?;
+    Ok(())
+}
+
 /// List the review queue, grouped into similarity clusters so a reviewer can
 /// triage near-duplicates together.
 ///

@@ -367,6 +367,20 @@ pub fn memory_disable_injection(project_root: &Path) -> Result<(), LearningError
     .map_err(memory_err)
 }
 
+/// Re-enable LocalMind context injection for this project by clearing the
+/// disable flag. Idempotent: a no-op when injection is already enabled.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the flag file exists but cannot be removed.
+pub fn memory_enable_injection(project_root: &Path) -> Result<(), LearningError> {
+    let path = injection_disabled_path(project_root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(memory_err(e)),
+    }
+}
+
 /// Retrieve relevant accepted memory for `query`, formatted as a compact context
 /// block to seed into an agent turn. Returns `None` when nothing matches, so the
 /// caller injects nothing rather than noise.
@@ -575,7 +589,7 @@ fn open_queue(project_root: &Path) -> Result<ReviewQueue, LearningError> {
 }
 
 /// Open memory persistence, ensuring the project is initialized first.
-fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> {
+pub(crate) fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> {
     crate::initialize(project_root)?;
     MemoryPersistence::open_project(project_root).map_err(memory_err)
 }
@@ -619,6 +633,20 @@ fn injection_disabled_path(project_root: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injection_toggle_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(memory_injection_enabled(root), "enabled by default");
+        memory_disable_injection(root).unwrap();
+        assert!(!memory_injection_enabled(root), "disabled after disable");
+        memory_enable_injection(root).unwrap();
+        assert!(memory_injection_enabled(root), "enabled after enable");
+        // Enable is idempotent — a second call on an already-enabled project is a no-op.
+        memory_enable_injection(root).unwrap();
+        assert!(memory_injection_enabled(root));
+    }
 
     #[test]
     fn clusters_group_near_duplicates_and_isolate_distinct_lessons() {

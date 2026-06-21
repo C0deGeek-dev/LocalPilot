@@ -1672,3 +1672,40 @@ Reason:
 - easier clean-room review
 - smaller test surfaces
 - easier future embedding
+
+## ADR-0043: Curated Lesson Seeding And A Re-Enable Toggle For The Memory A/B
+
+Status: accepted.
+
+LocalPilot can seed a curated, author-reviewed set of best-practice lessons
+directly into LocalMind accepted memory, and can re-enable context injection it
+previously disabled. Two host-side additions, no engine change:
+
+- **`localpilot learning seed --file <pack.json>`** reads a seed pack
+  (`{ "lessons": [ { "body", "category"?, "confidence"?, "related_files"?,
+  "related_entities"?, "evidence"?, "tags"? } ] }`) and writes each lesson as
+  active accepted memory through `MemoryPersistence::persist_memory_entry` — the
+  write path `localmind-store` already sanctions for "hosts accepting memory
+  through their own review surface". It is **idempotent**: a lesson whose
+  whitespace-normalised body already exists is skipped, and the memory id is a
+  stable FNV-1a hash of that body. `--dry-run` validates and counts without
+  writing.
+- **`localpilot memory enable`** clears the `.localmind/context-injection-disabled`
+  flag that `memory disable` writes (idempotent), giving the previously one-way
+  toggle a counterpart.
+
+Rationale: the in-session candidate→review→promote queue is the right path for
+lessons *discovered* during work, but a curated pack of durable best-practice
+lessons is reviewed *at authoring time* — routing dozens of hand-written lessons
+through the per-session queue adds no safety and much friction. The human gate
+moves to authoring, not the queue; nothing is auto-extracted. The enable toggle
+exists so a lesson-on vs lesson-off measurement can be scripted (disable → run →
+enable → run) rather than hand-deleting a flag file, and the
+memories-used audit (`localpilot memory used`) proves an arm actually injected.
+
+Boundary: seeding writes accepted memory directly and therefore skips the
+contradiction-detection and code-graph anchoring that promotion-through-review
+adds; that is acceptable for curated prose lessons, and `related_entities` can
+still be supplied for retrieval. The seed path is additive — projects that never
+run `learning seed` are unchanged, and seeded memory is ordinary accepted memory
+(searchable, deletable, injection-gated like any other).
