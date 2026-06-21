@@ -5,6 +5,17 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Prompt history survives a restart, scoped to the project.** The `chat`
+  composer's Up/Down recall is now seeded from a durable store, so a new session
+  starts with your past prompts instead of an empty history. The store is one
+  global append-only file (`prompt-history.jsonl`) under the per-user directory
+  beside `config.toml`, with each prompt tagged by the directory it was typed in;
+  recall shows **only the current project's** prompts by default, and **Ctrl-T**
+  toggles a view of every project's. It is on by default and fully opt-out via
+  `[history] persistence = "none"` (no read, no write). Prompts are stored raw so
+  recall is faithful, protected by mode `0600` on unix (the per-user directory ACL
+  on Windows) and a bounded size; see ADR-0040 and
+  `docs/07-security-and-privacy.md` (§Prompt History At Rest).
 - **Gated `self-review propose-patch` write loop.** The write half of the
   self-improvement loop (ADR-0034) is now wired: `localpilot self-review
   propose-patch --finding <rank> --model <model>` asks a model to author a minimal,

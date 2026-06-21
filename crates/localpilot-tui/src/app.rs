@@ -29,6 +29,8 @@ pub enum Key {
     PageUp,
     PageDown,
     CtrlC,
+    /// Toggle prompt recall between this project's history and every project's.
+    CtrlT,
 }
 
 /// One input to the loop: a mapped runtime event or a key press.
@@ -373,6 +375,11 @@ fn handle_key(state: &mut AppState, key: Key) {
         // no longer drive an in-app transcript scroll.
         Key::PageUp | Key::PageDown => {}
         Key::Tab => {}
+        Key::CtrlT => {
+            let all = state.toggle_history_scope();
+            let scope = if all { "all projects" } else { "this project" };
+            state.apply(UiEvent::Notice(format!("prompt history: {scope}")));
+        }
         Key::Char(c) => {
             state.insert_input(&c.to_string());
             // A '/' typed at the start of the line opens the slash-command
@@ -583,6 +590,31 @@ mod tests {
 
         handle_key(&mut state, Key::Down);
         assert_eq!(state.input, "draft");
+    }
+
+    #[test]
+    fn ctrl_t_toggles_recall_scope_and_posts_a_notice() {
+        let mut state = state();
+        state.trust = None;
+        state.seed_input_history(
+            vec!["project-only".to_string()],
+            vec!["project-only".to_string(), "another-project".to_string()],
+        );
+
+        // Default scope: recall sees only this project's prompt.
+        handle_key(&mut state, Key::Up);
+        assert_eq!(state.input, "project-only");
+
+        // Ctrl-T switches to all projects, reachable by recall, with a notice.
+        state.input.clear();
+        state.input_cursor = 0;
+        handle_key(&mut state, Key::CtrlT);
+        assert!(matches!(
+            state.transcript.last(),
+            Some(line) if line.speaker == "system" && line.text.contains("all projects")
+        ));
+        handle_key(&mut state, Key::Up);
+        assert_eq!(state.input, "another-project");
     }
 
     #[test]

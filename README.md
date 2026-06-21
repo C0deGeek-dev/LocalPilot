@@ -137,8 +137,11 @@ mouse, so native scrollback, text selection, and copy/paste keep working — scr
 the transcript the way you scroll any terminal output (mouse wheel or your
 terminal's scroll keys). In the input box, `Enter` sends, and `Alt+Enter`,
 `Ctrl+J`, or a trailing `\` insert a newline; `↑`/`↓` recall input history (and
-move within a multi-line draft); `Ctrl-C` cancels an in-flight turn or ingest
-run. Type `/` for slash-command autocomplete and `@` to mention a workspace file.
+move within a multi-line draft) — recall persists across restarts, scoped to the
+current project, and `Ctrl-T` toggles a view of every project's prompts (opt out
+with `[history] persistence = "none"`); `Ctrl-C` cancels an in-flight turn or
+ingest run. Type `/` for slash-command autocomplete and `@` to mention a workspace
+file.
 Bracketed paste is enabled, so large pastes arrive as a single block.
 
 ## Build features

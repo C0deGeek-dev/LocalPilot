@@ -7,7 +7,7 @@ tool: run_shell  (destructive)
 target: rm -rf build                                                                      
 profile: default                                                                          
 [y] approve    [n] deny                                                                   
-╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
+╭ input  (Enter sends · Alt+Enter/Ctrl+J/trailing \ newline · Ctrl+T history scope)──────╮
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        

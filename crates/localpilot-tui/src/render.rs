@@ -523,7 +523,8 @@ fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
             state.working_secs
         )
     } else {
-        "input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \\ make a newline)".to_string()
+        "input  (Enter sends · Alt+Enter/Ctrl+J/trailing \\ newline · Ctrl+T history scope)"
+            .to_string()
     };
     let inner_width = area.width.saturating_sub(2);
     let (cursor_row, cursor_col) = input_cursor_position(state, inner_width);

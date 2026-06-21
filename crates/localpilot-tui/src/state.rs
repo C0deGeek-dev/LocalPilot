@@ -195,6 +195,15 @@ pub struct AppState {
     input_history: Vec<String>,
     history_cursor: Option<usize>,
     history_draft: String,
+    /// Persisted prompts submitted in the current project, oldest-first; the seed
+    /// for project-scoped recall.
+    project_history: Vec<String>,
+    /// Persisted prompts submitted in every project, oldest-first; the seed for
+    /// the view-all-projects recall scope.
+    all_history: Vec<String>,
+    /// Whether recall currently draws from `all_history` rather than
+    /// `project_history` (toggled by the view-all key).
+    viewing_all_history: bool,
     pub footer: FooterStats,
     pub thinking: ThinkingPanel,
     /// The "memories used this turn" inspector panel.
@@ -244,6 +253,9 @@ impl AppState {
             input_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
+            project_history: Vec::new(),
+            all_history: Vec::new(),
+            viewing_all_history: false,
             footer: FooterStats::default(),
             thinking: ThinkingPanel::default(),
             memory_panel: MemoryPanel::default(),
@@ -476,19 +488,48 @@ impl AppState {
         true
     }
 
+    /// Seed recall from persisted history: `project` is the current project's
+    /// prompts and `all` is every project's, both oldest-first. Recall starts
+    /// scoped to the project; [`AppState::toggle_history_scope`] switches to all.
+    /// This is the UI-only seam — the host loads and filters the store, this never
+    /// touches the filesystem. Replaces any prior seed and resets the recall
+    /// cursor; the in-session recall semantics are unchanged.
+    pub fn seed_input_history(&mut self, project: Vec<String>, all: Vec<String>) {
+        self.project_history = cap_history(project);
+        self.all_history = cap_history(all);
+        self.viewing_all_history = false;
+        self.input_history = self.project_history.clone();
+        self.history_cursor = None;
+        self.history_draft.clear();
+    }
+
+    /// Toggle recall between this project's history and every project's. Returns
+    /// whether the view now shows all projects. The active recall list is swapped
+    /// and the cursor reset; navigation is otherwise unchanged.
+    pub fn toggle_history_scope(&mut self) -> bool {
+        self.viewing_all_history = !self.viewing_all_history;
+        self.input_history = if self.viewing_all_history {
+            self.all_history.clone()
+        } else {
+            self.project_history.clone()
+        };
+        self.history_cursor = None;
+        self.history_draft.clear();
+        self.viewing_all_history
+    }
+
     fn record_input_history(&mut self, input: &str) {
         self.history_cursor = None;
         self.history_draft.clear();
         if input.trim().is_empty() {
             return;
         }
-        if self.input_history.last().is_some_and(|last| last == input) {
-            return;
-        }
-        self.input_history.push(input.to_string());
-        if self.input_history.len() > MAX_INPUT_HISTORY {
-            self.input_history.remove(0);
-        }
+        // Record into the active recall list and both scope seeds, so a later
+        // view-all toggle still sees prompts submitted this session. Every
+        // submission belongs to the current project, hence both seeds.
+        push_capped(&mut self.input_history, input);
+        push_capped(&mut self.project_history, input);
+        push_capped(&mut self.all_history, input);
     }
 
     fn set_history_input(&mut self, index: usize) {
@@ -908,6 +949,27 @@ impl AppState {
     }
 }
 
+/// Push `input` onto a recall list, skipping a consecutive duplicate and keeping
+/// the list bounded to the most recent [`MAX_INPUT_HISTORY`] entries.
+fn push_capped(history: &mut Vec<String>, input: &str) {
+    if history.last().is_some_and(|last| last == input) {
+        return;
+    }
+    history.push(input.to_string());
+    if history.len() > MAX_INPUT_HISTORY {
+        history.remove(0);
+    }
+}
+
+/// Keep at most the most recent [`MAX_INPUT_HISTORY`] entries of a seed list.
+fn cap_history(mut history: Vec<String>) -> Vec<String> {
+    let start = history.len().saturating_sub(MAX_INPUT_HISTORY);
+    if start > 0 {
+        history.drain(0..start);
+    }
+    history
+}
+
 fn byte_offset_at_column(line: &str, column: usize) -> usize {
     line.char_indices()
         .nth(column)
@@ -996,6 +1058,59 @@ mod tests {
             Mode::Agent,
             Profile::Default,
         )
+    }
+
+    #[test]
+    fn seeding_scopes_recall_to_the_project_and_the_toggle_exposes_all() {
+        let mut s = state();
+        s.seed_input_history(
+            vec!["proj-a".to_string(), "proj-b".to_string()],
+            vec![
+                "proj-a".to_string(),
+                "other-1".to_string(),
+                "proj-b".to_string(),
+            ],
+        );
+
+        // Recall starts scoped to this project: Up walks only the project's seed.
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "proj-b");
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "proj-a");
+        // No more project entries to recall past the oldest.
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "proj-a");
+
+        // Toggling to all projects exposes the entry the project filter excluded.
+        s.input.clear();
+        s.input_cursor = 0;
+        assert!(s.toggle_history_scope());
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "proj-b");
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "other-1");
+
+        // Toggling back returns to the project scope only.
+        assert!(!s.toggle_history_scope());
+        s.input.clear();
+        s.input_cursor = 0;
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "proj-b");
+    }
+
+    #[test]
+    fn session_submissions_survive_a_view_all_toggle() {
+        let mut s = state();
+        s.seed_input_history(vec!["seeded".to_string()], vec!["seeded".to_string()]);
+        s.input = "typed this session".to_string();
+        s.input_cursor = s.input.len();
+        let _ = s.take_input_for_submit();
+
+        // The just-submitted prompt is recallable after switching scope twice.
+        s.toggle_history_scope();
+        s.toggle_history_scope();
+        assert!(s.recall_previous_input());
+        assert_eq!(s.input, "typed this session");
     }
 
     #[test]

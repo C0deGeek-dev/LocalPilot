@@ -162,6 +162,16 @@ pub fn project_config_path(root: &Path) -> PathBuf {
     root.join(".localpilot.toml")
 }
 
+/// The per-user prompt-history store location, resolved cross-platform without
+/// hardcoded paths and alongside the user config file (`%APPDATA%/localpilot` on
+/// Windows, `$XDG_CONFIG_HOME`/`~/.config/localpilot` elsewhere). Returns `None`
+/// when no suitable base directory is set. The store is global and tagged with
+/// each prompt's originating directory; recall filters it to the current project.
+#[must_use]
+pub fn prompt_history_path() -> Option<PathBuf> {
+    config_base_dir().map(|base| base.join("localpilot").join("prompt-history.jsonl"))
+}
+
 #[cfg(windows)]
 fn config_base_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(PathBuf::from)
@@ -268,6 +278,42 @@ mod tests {
     fn validate_rejects_empty_name_or_program() {
         assert!(validate_checks(&[check("", "cargo")]).is_err());
         assert!(validate_checks(&[check("fmt", "  ")]).is_err());
+    }
+
+    #[test]
+    fn history_persistence_defaults_on_and_loads_none_from_project_toml() {
+        use crate::schema::HistoryPersistence;
+
+        // No [history] section anywhere ⇒ persistence is on by default.
+        let on = load(&ConfigPaths::default(), &CliOverrides::default()).expect("load defaults");
+        assert_eq!(on.history.persistence, HistoryPersistence::SaveAll);
+
+        // A project file may opt out with the kebab-case `none`.
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join(".localpilot.toml");
+        std::fs::write(&project, "[history]\npersistence = \"none\"\n").unwrap();
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let off = load(&paths, &CliOverrides::default()).expect("load config");
+        assert_eq!(off.history.persistence, HistoryPersistence::None);
+    }
+
+    #[test]
+    fn prompt_history_path_sits_beside_the_user_config() {
+        // The store lives in the same per-user localpilot dir as config.toml.
+        match (prompt_history_path(), user_config_path()) {
+            (Some(history), Some(config)) => {
+                assert_eq!(history.parent(), config.parent());
+                assert_eq!(
+                    history.file_name().and_then(|n| n.to_str()),
+                    Some("prompt-history.jsonl")
+                );
+            }
+            // No base dir on this host (no APPDATA/XDG/HOME): both resolve to None.
+            (history, _) => assert!(history.is_none()),
+        }
     }
 
     #[test]

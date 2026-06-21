@@ -23,6 +23,11 @@ pub enum StoreError {
     /// A record was written by a format version this build cannot read.
     #[error("unsupported record format version {found} (this build reads up to {supported})")]
     UnsupportedFormat { found: u64, supported: u32 },
+
+    /// The per-user base directory for the global prompt-history store could not
+    /// be resolved (no `APPDATA`/`XDG_CONFIG_HOME`/`HOME` set).
+    #[error("could not resolve a per-user directory for the prompt-history store")]
+    NoUserDir,
 }
 
 impl StoreError {

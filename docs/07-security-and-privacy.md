@@ -70,6 +70,40 @@ best-effort and silent at chat startup, every limit is configurable, `0`/`false`
 disables it, and `localpilot session prune --dry-run` reports what would be
 removed without deleting. Cache and provider metadata are out of scope.
 
+## Prompt History At Rest
+
+The interactive composer persists submitted prompts so Up/Down recall survives a
+restart (ADR-0040). This store has a **different** posture from transcripts, and
+the difference is deliberate:
+
+- **Stored raw, not redacted.** Transcripts and tool outputs are redacted before
+  write (see Secret Redaction); prompt-history entries are not. An entry exists
+  only to be recalled verbatim into the composer — redacting it would recall
+  `[REDACTED]` and defeat the feature. A prompt can therefore contain a secret the
+  user typed, in cleartext, on disk.
+- **The controls instead are:** an opt-out, a restrictive file mode, a per-user
+  location, and a bounded size.
+  - **Opt-out:** `[history] persistence = "none"` disables it entirely — no read at
+    startup, no write on submit, no file created. The default is `save-all`. See
+    [configuration.md](configuration.md) §`[history]`.
+  - **Location:** a single global file
+    (`prompt-history.jsonl`) under the per-user directory beside `config.toml`
+    (`%APPDATA%/localpilot` on Windows, `$XDG_CONFIG_HOME`/`~/.config/localpilot`
+    elsewhere), never the project-local `.localpilot/`.
+  - **File mode:** `0600` (owner read/write) on unix. Windows has no exact
+    equivalent; the per-user profile directory's own ACL is the protection there.
+    Tier-1 parity (ADR-0007) is behaviour parity — load, append, project-filter,
+    and opt-out are identical on all three platforms; only the filesystem
+    permission mechanism differs.
+  - **Bound:** the file is trimmed to a maximum entry count on write, so it cannot
+    grow without limit.
+- **To disable and purge:** set `persistence = "none"` and delete the
+  `prompt-history.jsonl` file.
+
+Recall is scoped to the current directory by default (each record is tagged with
+the directory it was submitted in); Ctrl-T toggles a view of every project's
+prompts.
+
 ## Shell Policy
 
 Commands are classified as:

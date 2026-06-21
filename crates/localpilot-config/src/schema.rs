@@ -24,6 +24,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub skills: SkillsConfig,
     pub tools: ToolsConfig,
+    pub history: HistoryConfig,
 }
 
 impl Default for Config {
@@ -42,6 +43,46 @@ impl Default for Config {
             storage: StorageConfig::default(),
             skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
+            history: HistoryConfig::default(),
+        }
+    }
+}
+
+/// Whether the interactive composer's prompt history is persisted to disk so
+/// Up/Down recall survives a restart. On by default; `none` is a full opt-out
+/// that neither reads nor writes the store. Prompts can carry secrets, so the
+/// off-switch (with the store's restrictive mode and user-profile location) is
+/// the privacy control rather than redacting the recalled text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryPersistence {
+    /// Persist every submitted prompt and seed recall from the store at startup.
+    #[default]
+    SaveAll,
+    /// Disable persistence entirely: no read at startup, no write on submit.
+    None,
+}
+
+impl HistoryPersistence {
+    /// Whether persistence reads at startup and writes on submit.
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, HistoryPersistence::SaveAll)
+    }
+}
+
+/// Interactive prompt-history persistence configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    /// How (or whether) submitted prompts are persisted across restarts.
+    pub persistence: HistoryPersistence,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            persistence: HistoryPersistence::SaveAll,
         }
     }
 }
@@ -731,6 +772,42 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ToolsConfig>(value).unwrap(),
             partial
+        );
+    }
+
+    #[test]
+    fn history_persistence_defaults_to_save_all() {
+        // On by default: a config with no [history] section persists prompts.
+        assert_eq!(
+            HistoryConfig::default().persistence,
+            HistoryPersistence::SaveAll
+        );
+        assert!(HistoryPersistence::default().is_enabled());
+        assert!(!HistoryPersistence::None.is_enabled());
+
+        // A whole Config with no history key fills the default.
+        let config: Config = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(config.history, HistoryConfig::default());
+    }
+
+    #[test]
+    fn history_persistence_parses_kebab_values_and_rejects_unknown() {
+        // The documented surface is the kebab-case string `save-all` / `none`.
+        assert_eq!(
+            serde_json::from_value::<HistoryPersistence>(json!("save-all")).unwrap(),
+            HistoryPersistence::SaveAll
+        );
+        let off: HistoryConfig = serde_json::from_value(json!({ "persistence": "none" })).unwrap();
+        assert_eq!(off.persistence, HistoryPersistence::None);
+        assert!(!off.persistence.is_enabled());
+
+        // An unknown value is a typed parse error, never a panic.
+        assert!(serde_json::from_value::<HistoryPersistence>(json!("sometimes")).is_err());
+
+        // Round-trips through serialization as the kebab string.
+        assert_eq!(
+            serde_json::to_value(HistoryPersistence::SaveAll).unwrap(),
+            json!("save-all")
         );
     }
 

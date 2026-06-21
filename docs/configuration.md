@@ -188,6 +188,22 @@ broker is off and the full tool set is advertised.
 keeps working unchanged. Opt in with `[tools] broker = true`; see
 [05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
 
+### `[history]`
+
+Durable prompt history for the interactive `chat` composer: submitted prompts are
+persisted so Up/Down recall survives a restart (ADR-0040).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `persistence` | `"save-all"` \| `"none"` | `"save-all"` | `save-all` persists each submitted prompt and seeds recall at startup; `none` is a full opt-out — no read, no write, no file created. |
+
+Recall is scoped to the current directory by default; **Ctrl-T** toggles a view of
+every project's history. The store is one global `prompt-history.jsonl` under the
+per-user directory beside this config file, mode `0600` on unix. Because prompts
+are stored **raw** (not redacted — recall must be faithful), the opt-out and the
+restrictive mode/location are the privacy controls; see
+[07-security-and-privacy.md](07-security-and-privacy.md) §Prompt History At Rest.
+
 ## Example
 
 ```toml
@@ -226,4 +242,7 @@ auto_resume = "ask"
 [mcp.servers.files]
 command = "my-mcp-file-server"
 args = ["--root", "."]
+
+[history]
+persistence = "save-all"
 ```

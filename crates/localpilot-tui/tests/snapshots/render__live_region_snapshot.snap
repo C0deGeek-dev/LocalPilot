@@ -2,7 +2,7 @@
 source: crates/localpilot-tui/tests/render.rs
 expression: "render_natural(&state, 90)"
 ---
-╭ input  (Enter sends · Alt+Enter, Ctrl+J, or trailing \ make a newline)─────────────────╮
+╭ input  (Enter sends · Alt+Enter/Ctrl+J/trailing \ newline · Ctrl+T history scope)──────╮
 │what changed?                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        

@@ -18,10 +18,13 @@ pub use context::{
     DEFAULT_IMPORT_DEPTH,
 };
 pub use error::ConfigError;
-pub use load::{load, project_config_path, user_config_path, CliOverrides, ConfigPaths};
+pub use load::{
+    load, project_config_path, prompt_history_path, user_config_path, CliOverrides, ConfigPaths,
+};
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
-    DocsConfig, HarnessConfig, IngestConfig, IngestMode, LookupPolicy, McpConfig, McpServerConfig,
-    Mode, PermissionProfile, PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume,
-    QuotaConfig, RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
+    DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
+    LookupPolicy, McpConfig, McpServerConfig, Mode, PermissionProfile, PermissionsConfig,
+    ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RuleSeverity, SkillsConfig,
+    StorageConfig, ToolsConfig,
 };

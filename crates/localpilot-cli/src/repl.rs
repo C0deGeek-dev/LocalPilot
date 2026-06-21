@@ -69,6 +69,8 @@ struct CommandHost<'a> {
     cwd: &'a std::path::Path,
     model: &'a str,
     provider_id: Option<&'a str>,
+    /// The durable prompt-history store; submitted prompts are appended here.
+    history: &'a localpilot_store::PromptHistory,
 }
 
 /// An [`Approver`] that suspends the turn and asks the user through the TUI.
@@ -250,6 +252,17 @@ pub async fn run_chat(
     // Seed the `@`-mention file list; refreshed after each turn (files may change).
     state.set_workspace_files(workspace_files(&cwd));
 
+    // Seed prompt recall from the durable global history so Up/Down survives a
+    // restart, scoped to this project (Ctrl-T views all projects). The store
+    // honours the `[history] persistence` opt-out; when off it loads nothing and
+    // appends nothing. A read never fails the session — the load is tolerant.
+    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    let history_entries = history.load();
+    state.seed_input_history(
+        localpilot_store::project_texts(&history_entries, &cwd),
+        localpilot_store::all_texts(&history_entries),
+    );
+
     // Build the project knowledge index in the background on first use, so
     // `knowledge_search` has data without the first turn paying for a full walk.
     // Interactive REPL only (non-interactive paths never create project files),
@@ -283,6 +296,7 @@ pub async fn run_chat(
             cwd: &cwd,
             model: &model,
             provider_id,
+            history: &history,
         },
     )
     .await;
@@ -387,6 +401,14 @@ async fn submit_current_input(
     let (shown, prompt) = state.take_input_for_submit();
     if prompt.trim().is_empty() {
         return Ok(());
+    }
+    // Persist the visible prompt to the durable history, mirroring the in-session
+    // recall record. Best-effort: a write failure surfaces as a notice and never
+    // blocks the turn or breaks the session; the no-op opt-out is honoured inside.
+    if let Err(error) = host.history.append(&shown, host.cwd) {
+        state.apply(UiEvent::Notice(format!(
+            "could not save prompt history: {error}"
+        )));
     }
     let result = if let Some(action) = parse_slash(&prompt) {
         run_slash(terminal, state, runtime, approval_rx, host, action).await
@@ -1323,6 +1345,7 @@ fn handle_paste_burst(
 fn map_key(key: KeyEvent) -> Option<Key> {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlC),
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlT),
         KeyCode::Char(c) => Some(Key::Char(c)),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Tab => Some(Key::Tab),
@@ -1782,6 +1805,19 @@ mod tests {
         terminal
             .draw(|frame| render(frame, state))
             .expect("draw live region");
+    }
+
+    #[test]
+    fn history_persistence_none_disables_the_store_end_to_end() {
+        // The config opt-out (`[history] persistence = "none"`) must produce a
+        // store that neither reads nor writes: a submit-shaped append is a no-op
+        // and load returns nothing, so a full open→submit cycle persists nothing.
+        use localpilot_config::HistoryPersistence;
+        let off = localpilot_store::PromptHistory::new(HistoryPersistence::None.is_enabled());
+        assert!(!off.is_enabled());
+        off.append("a prompt with a secret", std::path::Path::new("."))
+            .expect("disabled append never errors");
+        assert!(off.load().is_empty());
     }
 
     #[test]

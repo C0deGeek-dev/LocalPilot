@@ -2,6 +2,62 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0040: Prompt History Is A Global Per-User JSONL Store With Project-Scoped Recall
+
+Status: accepted. Adds a per-user persistence surface beside the project-local
+session store (`localpilot-store`); the committed storage conventions (atomic
+temp-then-rename writes, line-delimited JSON) are unchanged.
+
+The interactive composer's Up/Down recall was in-memory only: every launch
+started empty and a restart lost everything. Recall is now seeded from a durable
+store so it survives a restart.
+
+The store is a single global append-only JSONL file under the per-user directory
+(`%APPDATA%/localpilot` on Windows, `$XDG_CONFIG_HOME`/`~/.config/localpilot`
+elsewhere — the same base as `config.toml`), **not** the project-local
+`.localpilot/`. Each record carries the visible prompt text, the directory it was
+submitted in, and a timestamp. At session start the store is loaded and recall is
+seeded with **only the current directory's** entries; a key (Ctrl-T) toggles a
+view of every project's entries. Each submitted prompt is appended.
+
+Decisions folded in:
+
+- **One global file, per-project recall filter (not a file per project).** A
+  single store is simpler to manage and crash-safe; the directory tag keeps recall
+  relevant to the repo, while the toggle preserves cross-project reach. A per-repo
+  file would fragment the store and break "view all".
+- **Opt-out, default-on (`[history] persistence = "save-all" | "none"`).** The
+  best default is recall that survives a restart, but prompts can hold secrets, so
+  a full off-switch is mandatory. `none` reads nothing and writes nothing.
+- **Stored raw, not redacted (the deliberate divergence from transcripts).**
+  Transcripts redact before write; a history entry exists only to be recalled
+  verbatim into the composer, so redacting it would recall `[REDACTED]` and defeat
+  the feature. The privacy controls are instead the opt-out, mode `0600` on unix
+  (the per-user directory's ACL on Windows — tier-1 parity is behaviour parity,
+  ADR-0007), the per-user location, and a bounded on-disk cap.
+
+Consequences:
+
+- Recall survives restarts and stays scoped to the project by default; the full
+  store is one keystroke away.
+- The store is line-crash-safe: a partial final line from an interrupted append is
+  skipped on load, and the file is trimmed to a maximum entry count on write so it
+  cannot grow unbounded.
+- A prompt that carried a collapsed large paste recalls the placeholder, not the
+  expanded content — identical to the pre-existing in-session recall behaviour.
+- Disk I/O is off the hot path: one bounded, tolerant read at session open and a
+  single appended line per submit, never blocking the turn loop; a write failure is
+  surfaced as a notice and never breaks the session.
+
+Reason:
+
+- a durable, project-aware recall is a real ergonomic win for a terminal REPL, and
+  the secret-leak risk it introduces is fully controlled by the opt-out plus the
+  restrictive mode and location. The shape (global JSONL + directory tag +
+  per-project filter + opt-out + `0600`) was cross-checked against read-only
+  behaviour references; the implementation, config keys, paths, and tests are
+  original to this repository (clean-room, ADR-0005).
+
 ## ADR-0039: The Inline Live Region Is A Fixed-Height Band, Re-initialised Only On Terminal Resize
 
 Status: accepted. Refines ADR-0021 (inline rendering); the committed ratatui +
