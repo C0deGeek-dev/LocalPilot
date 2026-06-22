@@ -88,11 +88,19 @@ enum Command {
     },
     /// Local project memory: inspect, search, delete, disable.
     Memory {
+        /// Pin the LocalMind store root explicitly, skipping the walk-up from the
+        /// current directory. Use it when running from outside the project.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
         #[command(subcommand)]
         command: MemoryCommand,
     },
     /// LocalMind learning: closeout, review queue, memory.
     Learning {
+        /// Pin the LocalMind store root explicitly, skipping the walk-up from the
+        /// current directory. Use it when running from outside the project.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
         #[command(subcommand)]
         command: LearningCommand,
     },
@@ -630,6 +638,48 @@ enum GateCommand {
     Ratify,
 }
 
+/// Resolve the LocalMind store root for a `learning`/`memory` command and log the
+/// resolved root to stderr so the caller knows which store answered. An explicit
+/// `--workspace` pins the root and skips the walk-up; otherwise the store is
+/// resolved by walking up from `cwd` (git-style). The returned [`StoreRoot`]
+/// preserves the found-vs-absent distinction so a read can stay read-only instead
+/// of silently creating a second, empty store beside the cwd.
+fn resolve_learning_store(
+    workspace: Option<PathBuf>,
+    cwd: &std::path::Path,
+) -> localpilot_localmind::StoreRoot {
+    use localpilot_localmind::StoreRoot;
+    match workspace {
+        Some(path) => {
+            let found = localpilot_localmind::is_store_root(&path);
+            eprintln!(
+                "localmind: using store root {} (--workspace)",
+                path.display()
+            );
+            if found {
+                StoreRoot::Found(path)
+            } else {
+                StoreRoot::NotFound(path)
+            }
+        }
+        None => {
+            let resolved = localpilot_localmind::resolve_store_root(cwd);
+            if let StoreRoot::Found(root) = &resolved {
+                if root == cwd {
+                    eprintln!("localmind: store root {}", root.display());
+                } else {
+                    eprintln!(
+                        "localmind: resolved store root {} (walked up from {})",
+                        root.display(),
+                        cwd.display()
+                    );
+                }
+            }
+            resolved
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -772,43 +822,53 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Memory { command } => {
+        Command::Memory { workspace, command } => {
             let cwd = std::env::current_dir()?;
+            let resolution = resolve_learning_store(workspace, &cwd);
+            let root = resolution.path();
             let mut stdout = io::stdout().lock();
             match command {
-                MemoryCommand::Status => memory_cmd::status(&cwd, &mut stdout)?,
-                MemoryCommand::Inspect => memory_cmd::inspect(&cwd, &mut stdout)?,
-                MemoryCommand::Used => memory_cmd::used(&cwd, &mut stdout)?,
+                MemoryCommand::Status => memory_cmd::status(root, &mut stdout)?,
+                MemoryCommand::Inspect => memory_cmd::inspect(root, &mut stdout)?,
+                MemoryCommand::Used => memory_cmd::used(root, &mut stdout)?,
                 MemoryCommand::Search { query } => {
-                    memory_cmd::search(&cwd, &query, &mut stdout)?;
+                    memory_cmd::search(
+                        root,
+                        resolution.is_found(),
+                        &query,
+                        &mut stdout,
+                        &mut io::stderr(),
+                    )?;
                 }
-                MemoryCommand::Delete { id } => memory_cmd::delete(&cwd, &id, &mut stdout)?,
-                MemoryCommand::Disable => memory_cmd::disable(&cwd, &mut stdout)?,
-                MemoryCommand::Enable => memory_cmd::enable(&cwd, &mut stdout)?,
+                MemoryCommand::Delete { id } => memory_cmd::delete(root, &id, &mut stdout)?,
+                MemoryCommand::Disable => memory_cmd::disable(root, &mut stdout)?,
+                MemoryCommand::Enable => memory_cmd::enable(root, &mut stdout)?,
                 MemoryCommand::Graph { symbol } => {
-                    memory_cmd::graph(&cwd, &symbol, &mut stdout)?;
+                    memory_cmd::graph(root, &symbol, &mut stdout)?;
                 }
                 MemoryCommand::Export { path, html } => {
-                    memory_cmd::export(&cwd, &path, html, &mut stdout)?;
+                    memory_cmd::export(root, &path, html, &mut stdout)?;
                 }
             }
         }
-        Command::Learning { command } => {
+        Command::Learning { workspace, command } => {
             use localpilot_localmind::ReviewVerdict;
             let cwd = std::env::current_dir()?;
+            let resolution = resolve_learning_store(workspace, &cwd);
+            let root = resolution.path();
             let mut stdout = io::stdout().lock();
             match command {
                 LearningCommand::Closeout { session } => {
-                    learning_cmd::closeout(&cwd, &session, &mut stdout)?;
+                    learning_cmd::closeout(root, &session, &mut stdout)?;
                 }
                 LearningCommand::Review { command } => match command {
-                    ReviewCommand::List => learning_cmd::review_list(&cwd, &mut stdout)?,
+                    ReviewCommand::List => learning_cmd::review_list(root, &mut stdout)?,
                     ReviewCommand::Show { id } => {
-                        learning_cmd::review_show(&cwd, &id, &mut stdout)?;
+                        learning_cmd::review_show(root, &id, &mut stdout)?;
                     }
                     ReviewCommand::Accept { id, reviewer, note } => {
                         learning_cmd::review_decide(
-                            &cwd,
+                            root,
                             &id,
                             ReviewVerdict::Accept,
                             &reviewer,
@@ -818,7 +878,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ReviewCommand::Reject { id, reviewer, note } => {
                         learning_cmd::review_decide(
-                            &cwd,
+                            root,
                             &id,
                             ReviewVerdict::Reject,
                             &reviewer,
@@ -828,7 +888,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ReviewCommand::Defer { id, reviewer, note } => {
                         learning_cmd::review_decide(
-                            &cwd,
+                            root,
                             &id,
                             ReviewVerdict::Defer,
                             &reviewer,
@@ -843,7 +903,7 @@ async fn main() -> anyhow::Result<()> {
                         note,
                     } => {
                         learning_cmd::review_decide(
-                            &cwd,
+                            root,
                             &id,
                             ReviewVerdict::Edit { replacement },
                             &reviewer,
@@ -852,25 +912,32 @@ async fn main() -> anyhow::Result<()> {
                         )?;
                     }
                     ReviewCommand::Purge { yes } => {
-                        learning_cmd::review_purge(&cwd, yes, &mut stdout)?;
+                        learning_cmd::review_purge(root, yes, &mut stdout)?;
                     }
                 },
                 LearningCommand::Seed { file, dry_run } => {
-                    learning_cmd::seed(&cwd, &file, dry_run, &mut stdout)?
+                    learning_cmd::seed(root, &file, dry_run, &mut stdout)?
                 }
-                LearningCommand::Promote { id } => learning_cmd::promote(&cwd, &id, &mut stdout)?,
+                LearningCommand::Promote { id } => learning_cmd::promote(root, &id, &mut stdout)?,
                 LearningCommand::Search { query, json } => {
-                    learning_cmd::search(&cwd, &query, json, &mut stdout)?;
+                    learning_cmd::search(
+                        root,
+                        resolution.is_found(),
+                        &query,
+                        json,
+                        &mut stdout,
+                        &mut io::stderr(),
+                    )?;
                 }
                 LearningCommand::Skills { command } => match command {
-                    SkillsCommand::Generate => learning_cmd::skills_generate(&cwd, &mut stdout)?,
-                    SkillsCommand::List => learning_cmd::skills_list(&cwd, &mut stdout)?,
-                    SkillsCommand::Show { id } => learning_cmd::skill_show(&cwd, &id, &mut stdout)?,
+                    SkillsCommand::Generate => learning_cmd::skills_generate(root, &mut stdout)?,
+                    SkillsCommand::List => learning_cmd::skills_list(root, &mut stdout)?,
+                    SkillsCommand::Show { id } => learning_cmd::skill_show(root, &id, &mut stdout)?,
                     SkillsCommand::Export { id, out } => {
-                        learning_cmd::skill_export(&cwd, &id, out, &mut stdout)?;
+                        learning_cmd::skill_export(root, &id, out, &mut stdout)?;
                     }
                 },
-                LearningCommand::Audit => learning_cmd::audit(&cwd, &mut stdout)?,
+                LearningCommand::Audit => learning_cmd::audit(root, &mut stdout)?,
             }
         }
         Command::Ingest { command } => {
@@ -1155,6 +1222,80 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use localpilot_localmind::StoreRoot;
+
+    #[test]
+    fn workspace_override_pins_the_root_and_skips_the_walk_up() {
+        // --workspace wins over the cwd walk-up: even with no store at the pinned
+        // path, the resolver returns that path (NotFound), never an ancestor's.
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = dir.path().join("pinned");
+        std::fs::create_dir_all(&pinned).unwrap();
+        let cwd = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_learning_store(Some(pinned.clone()), &cwd);
+        assert_eq!(resolved, StoreRoot::NotFound(pinned.clone()));
+
+        // With a store at the pinned path it resolves Found there.
+        std::fs::write(
+            pinned.join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_learning_store(Some(pinned.clone()), &cwd),
+            StoreRoot::Found(pinned)
+        );
+    }
+
+    #[test]
+    fn no_workspace_walks_up_from_cwd_to_the_root_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let resolved = resolve_learning_store(None, &deep);
+        assert!(resolved.is_found());
+        assert_eq!(
+            resolved.path().canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn learning_and_memory_accept_a_workspace_override() {
+        // The `--workspace` flag parses on both parent commands, ahead of the
+        // subcommand (`localpilot learning --workspace <path> search <query>`).
+        let cli = Cli::try_parse_from([
+            "localpilot",
+            "learning",
+            "--workspace",
+            "some/dir",
+            "search",
+            "q",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Learning {
+                workspace: Some(_),
+                ..
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["localpilot", "memory", "--workspace", "some/dir", "status"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Memory {
+                workspace: Some(_),
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn login_and_logout_subcommands_parse() {

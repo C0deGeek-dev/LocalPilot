@@ -31,6 +31,7 @@ mod rule_cue;
 mod seed;
 mod skill_drafts_tool;
 mod tool_use;
+mod workspace;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -70,9 +71,9 @@ pub use ops::{
     audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, lessons_flagged_for_review,
     memory_delete, memory_disable_injection, memory_enable_injection, memory_injection_enabled,
     memory_list, promote, review_decide, review_list, review_purge, review_show, search,
-    skill_activate, skill_body, skill_show, skills_active, skills_generate, skills_list,
-    ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict, SearchHit,
-    SkillDraftInfo,
+    search_readonly, skill_activate, skill_body, skill_show, skills_active, skills_generate,
+    skills_list, ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict,
+    SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
 pub use primer::{accepted_primer, distill_primer_into_review};
@@ -83,6 +84,7 @@ pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
 pub use seed::{seed_memory, SeedLesson, SeedPack, SeedReport};
 pub use skill_drafts_tool::SkillDrafts;
 pub use tool_use::{tool_use_candidate, ToolUseSignal};
+pub use workspace::{is_store_root, resolve_store_root, StoreRoot};
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
 use localmind_store::{

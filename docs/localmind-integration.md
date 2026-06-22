@@ -143,6 +143,28 @@ Close-out is best-effort and non-fatal, and an empty session writes nothing.
 State is project-local under `.localmind/`. Durable memory is readable Markdown;
 queue, audit, search index, and the code-structure graph live in SQLite.
 
+## Store resolution
+
+`localpilot learning` and `localpilot memory` resolve the store like `git`
+resolves its repository root: starting from the current directory, they walk up to
+the nearest ancestor that holds a store (`.localmind.toml` or the `.localmind/`
+directory). So running a command from a project subdirectory answers from the
+*project's* store instead of silently using — or creating — a different, empty one
+beside the cwd. The resolved root is logged to stderr so the caller can see which
+store answered.
+
+- **`--workspace <path>`** pins the store root explicitly and skips the walk-up.
+  Use it when running from outside the project (`localpilot learning --workspace
+  /path/to/project search "query"`). It is accepted on both `learning` and
+  `memory`, ahead of the subcommand.
+- **A read never creates a store.** `learning search` and `memory search` are
+  read-only: when no store is found they report it and write nothing. Their stdout
+  stays script-stable — an empty `--json` result is still a valid empty array.
+- **Three empty outcomes are distinguished** on stderr so a bare `no matches` is
+  never ambiguous: (a) *no store found* at or above the cwd; (b) a store exists but
+  holds *no accepted memory yet*; (c) a non-empty store whose memory the *query
+  missed*.
+
 ## Loop-Outcome Lesson Writeback
 
 When a human accepts or rejects a self-improvement patch proposal, the outcome is

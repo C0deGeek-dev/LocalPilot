@@ -5,6 +5,18 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Workspace-aware LocalMind store resolution.** `localpilot learning` and
+  `localpilot memory` now resolve the store like `git` resolves its repo root —
+  walking up from the current directory to the nearest ancestor holding
+  `.localmind` — so running from a project subdirectory answers from the project's
+  store instead of silently using or creating a different, empty one. The resolved
+  root is logged to stderr. A new `--workspace <path>` flag pins the root
+  explicitly (skipping the walk-up). `learning search` / `memory search` are now
+  read-only (a search never creates a store) and distinguish three empty outcomes
+  on stderr — no store found, an empty store, and a non-empty store the query
+  missed — so a bare `no matches` is no longer ambiguous. Stdout stays
+  script-stable (an empty `--json` result is still a valid empty array).
+
 - **`learning search --json`.** Accepted-memory search can emit a JSON array (id, score,
   path, snippet, category) for agent consumption, alongside the default human-readable
   text. Empty results are a valid empty array.

@@ -60,6 +60,14 @@ large or scattered. The merged context is derived, disposable state under
 `.localmind/ingest/` like any other ingested knowledge (ADR-0013); it is never
 written to accepted memory without review.
 
+**Store location.** `localpilot learning` and `localpilot memory` find the
+LocalMind store by walking up from the current directory to the nearest ancestor
+holding `.localmind` (git-style), so a subdirectory answers from the project's
+store rather than a second empty one. `--workspace <path>` pins the root
+explicitly. The full contract — including the read-only, never-create search
+behaviour and the three distinguished empty states — is in
+[`localmind-integration.md`](localmind-integration.md#store-resolution).
+
 ## Reference
 
 ### `[provider]`

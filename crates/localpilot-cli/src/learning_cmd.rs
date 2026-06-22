@@ -183,30 +183,83 @@ pub fn promote(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::
     Ok(())
 }
 
-/// Search accepted memory.
+/// Search accepted memory in the resolved store at `root`.
+///
+/// `found` is whether an existing store was resolved (walked up from the cwd, or
+/// pinned by `--workspace`). A read never creates a store: when no store exists
+/// the search is reported as such on stderr and stdout stays script-stable (an
+/// empty JSON array stays valid). The three empty outcomes — no store, empty
+/// store, and a non-empty store that the query missed — get distinct stderr lines
+/// so a caller can tell them apart instead of reading a bare `no matches`.
 ///
 /// # Errors
 /// Returns an error if the search fails.
 pub fn search(
-    cwd: &std::path::Path,
+    root: &Path,
+    found: bool,
     query: &str,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let hits = learning::search(cwd, query)?;
+    if !found {
+        // (a) No `.localmind` at or above the search start. Diagnose on stderr;
+        // keep stdout script-stable so a `--json` consumer still parses an array.
+        writeln!(
+            err,
+            "localmind: no store found at or above {} (no ancestor holds .localmind) — \
+             create one with `localpilot learning seed`/`closeout`, or pass --workspace <path>",
+            root.display()
+        )?;
+        if json {
+            writeln!(out, "[]")?;
+        } else {
+            writeln!(out, "no matches")?;
+        }
+        return Ok(());
+    }
+    // Read-only: never initialize a store from a search.
+    let hits = learning::search_readonly(root, query)?;
     if json {
         // Structured output for agents: one JSON array of hits (id, score, path,
         // snippet, category). Empty results are a valid empty array.
         writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
-        return Ok(());
+    } else if hits.is_empty() {
+        writeln!(out, "no matches")?;
+    } else {
+        for hit in &hits {
+            writeln!(out, "{}\t{}\t{}", hit.memory_id, hit.score, hit.path)?;
+            writeln!(out, "  {}", hit.snippet)?;
+        }
     }
     if hits.is_empty() {
-        writeln!(out, "no matches")?;
-        return Ok(());
+        report_empty_search(root, query, err)?;
     }
-    for hit in hits {
-        writeln!(out, "{}\t{}\t{}", hit.memory_id, hit.score, hit.path)?;
-        writeln!(out, "  {}", hit.snippet)?;
+    Ok(())
+}
+
+/// Tell the (b) empty-store case apart from the (c) non-empty-store-missed case on
+/// stderr. Stays read-only: only counts when the store config already exists, so a
+/// diagnostic never writes one.
+fn report_empty_search(root: &Path, query: &str, err: &mut dyn Write) -> anyhow::Result<()> {
+    let count = if root.join(".localmind.toml").is_file() {
+        learning::memory_list(root).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+    if count == 0 {
+        writeln!(
+            err,
+            "localmind: store at {} has no accepted memory yet",
+            root.display()
+        )?;
+    } else {
+        writeln!(
+            err,
+            "localmind: {count} accepted {} in store at {}, none matched {query:?}",
+            if count == 1 { "memory" } else { "memories" },
+            root.display()
+        )?;
     }
     Ok(())
 }
@@ -360,6 +413,118 @@ mod tests {
                 .all(|item| item.state != "Pending"),
             "no pending candidate survives the purge"
         );
+    }
+
+    /// Seed one accepted lesson into a store at `dir` so a search can hit it.
+    fn seed_one(dir: &Path, body: &str) {
+        std::fs::write(dir.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let lesson = learning::SeedLesson {
+            body: body.to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        learning::seed_memory(dir, &[lesson], false).unwrap();
+    }
+
+    #[test]
+    fn search_with_no_store_reports_state_a_and_creates_nothing() {
+        // State (a): no `.localmind` at or above the search start. A read must not
+        // create one, stdout stays script-stable, and stderr explains the miss.
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(dir.path(), false, "anything", false, &mut out, &mut err).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("no store found at or above"), "got: {err}");
+        assert!(
+            !dir.path().join(".localmind").exists() && !dir.path().join(".localmind.toml").exists(),
+            "a read must not create a store"
+        );
+    }
+
+    #[test]
+    fn search_with_no_store_keeps_json_a_valid_empty_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(dir.path(), false, "anything", true, &mut out, &mut err).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(
+            parsed.as_array().is_some_and(|a| a.is_empty()),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn search_empty_store_reports_state_b() {
+        // State (b): a store exists but holds no accepted memory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(dir.path(), true, "anything", false, &mut out, &mut err).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("has no accepted memory yet"));
+    }
+
+    #[test]
+    fn search_nonempty_store_no_match_reports_state_c() {
+        // State (c): a non-empty store whose memory the query simply missed.
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "always redact secrets before persisting a transcript",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "an unrelated query about audio latency",
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        assert!(String::from_utf8(err).unwrap().contains("none matched"));
+    }
+
+    #[test]
+    fn search_returns_the_resolved_stores_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "propagate a subprocess exit code before reporting success",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "subprocess exit code",
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("subprocess exit code"), "got: {out}");
     }
 
     #[test]
