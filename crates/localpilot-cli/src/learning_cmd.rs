@@ -187,8 +187,19 @@ pub fn promote(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::
 ///
 /// # Errors
 /// Returns an error if the search fails.
-pub fn search(cwd: &std::path::Path, query: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+pub fn search(
+    cwd: &std::path::Path,
+    query: &str,
+    json: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let hits = learning::search(cwd, query)?;
+    if json {
+        // Structured output for agents: one JSON array of hits (id, score, path,
+        // snippet, category). Empty results are a valid empty array.
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+        return Ok(());
+    }
     if hits.is_empty() {
         writeln!(out, "no matches")?;
         return Ok(());

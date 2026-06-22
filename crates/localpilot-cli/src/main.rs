@@ -415,6 +415,9 @@ enum LearningCommand {
     Search {
         /// Search query.
         query: String,
+        /// Emit results as a JSON array (id, score, path, snippet, category).
+        #[arg(long)]
+        json: bool,
     },
     /// Skill drafts generated from accepted lessons.
     Skills {
@@ -856,8 +859,8 @@ async fn main() -> anyhow::Result<()> {
                     learning_cmd::seed(&cwd, &file, dry_run, &mut stdout)?
                 }
                 LearningCommand::Promote { id } => learning_cmd::promote(&cwd, &id, &mut stdout)?,
-                LearningCommand::Search { query } => {
-                    learning_cmd::search(&cwd, &query, &mut stdout)?;
+                LearningCommand::Search { query, json } => {
+                    learning_cmd::search(&cwd, &query, json, &mut stdout)?;
                 }
                 LearningCommand::Skills { command } => match command {
                     SkillsCommand::Generate => learning_cmd::skills_generate(&cwd, &mut stdout)?,

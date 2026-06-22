@@ -5,6 +5,10 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`learning search --json`.** Accepted-memory search can emit a JSON array (id, score,
+  path, snippet, category) for agent consumption, alongside the default human-readable
+  text. Empty results are a valid empty array.
+
 - **`doctor` reports a truthful version after a same-branch rebuild.** The embedded
   `git describe` version is captured by `build.rs`, which previously only re-ran when
   `.git/HEAD` changed — but a commit on the current branch advances the branch ref, not

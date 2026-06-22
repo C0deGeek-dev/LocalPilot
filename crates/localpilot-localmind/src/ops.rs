@@ -38,7 +38,7 @@ pub enum ReviewVerdict {
 }
 
 /// A memory search hit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
     pub memory_id: String,
     pub score: i64,
