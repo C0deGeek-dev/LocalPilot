@@ -379,3 +379,48 @@ The following remain staged behind explicit user approval and review:
 - external research/update flows. External facts must carry source citations,
   expiry/staleness metadata, and a review item before they can influence
   accepted memory.
+
+## Learning happy path
+
+The end-to-end loop, from an empty store to a lesson that shapes a later turn:
+
+```bash
+# 1. (optional) bootstrap curated, author-reviewed lessons straight into memory
+localpilot learning seed --file seed-packs/coding-lessons.json   # idempotent; audited
+
+# 2. do real work, then turn the session into candidate lessons
+localpilot print --allow-writes "…task…"
+localpilot session list                       # find the session id
+localpilot learning closeout --session <id>   # extract candidates -> review queue
+
+# 3. human gate: review and promote
+localpilot learning review list
+localpilot learning review accept <item-id> --reviewer you
+localpilot learning promote <item-id>         # -> durable accepted memory
+
+# 4. retrieve / confirm reuse
+localpilot learning search "topic"            # add --json for structured output
+localpilot memory used                        # what shaped the latest turn (provenance)
+```
+
+Notes:
+
+- **`learning seed` writes accepted memory directly** — the human gate moves to
+  *authoring* time (the pack is curated and reviewed before it is committed), so
+  seeding skips the per-session review queue. It is idempotent (body-level dedup)
+  and records one audit row per lesson, so a seeded memory has the same
+  `learning audit` provenance trail as a promoted one. Use `--dry-run` to validate
+  a pack without writing.
+- **`learning closeout` tolerates a reasoning model's output.** A local model
+  commonly wraps its extraction JSON in a `<think>…</think>` block and a
+  ```` ```json ```` code fence; closeout strips those before parsing and, on any
+  parse failure, falls back to the deterministic extractor rather than aborting.
+  A clean, successful session with no failure/correction signals may yield zero
+  deterministic candidates — that is expected, not an error.
+- **`learning search`** is keyword (FTS) by default and works offline; semantic
+  ranking requires an `[inference]` embedding endpoint in `.localmind.toml`. Pass
+  `--json` to consume results from a script or agent.
+- **`localpilot models`** lists models only for providers that expose an OpenAI
+  `GET /models` endpoint. A local model wired through the Anthropic-compatible
+  no-think proxy (the LocalBox default) is not listable that way; set
+  `[providers.local].model` so the configured model is explicit.
