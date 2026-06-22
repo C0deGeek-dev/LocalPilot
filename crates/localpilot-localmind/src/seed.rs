@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use localmind_core::{
-    Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId, MemoryScope,
-    MemoryStatus,
+    AuditEventKind, Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry,
+    MemoryEntryId, MemoryScope, MemoryStatus,
 };
 use serde::Deserialize;
 
@@ -154,7 +154,7 @@ pub fn seed_memory(
             .into_iter()
             .collect();
         let entry = MemoryEntry {
-            id: MemoryEntryId::new(id),
+            id: MemoryEntryId::new(id.clone()),
             scope: MemoryScope::Project,
             body: lesson.body.trim().to_string(),
             category: parse_category(lesson.category.as_deref()),
@@ -173,6 +173,21 @@ pub fn seed_memory(
         if let Some(persistence) = &persistence {
             persistence
                 .persist_memory_entry(&entry)
+                .map_err(|e| LearningError::Memory(e.to_string()))?;
+            // Seeding writes accepted memory directly (the human gate is at
+            // authoring time), so record an audit row per lesson — `learning
+            // audit` must show the provenance of a seeded memory the same way it
+            // shows a promoted one.
+            persistence
+                .record_custom_audit(
+                    AuditEventKind::MemoryPromoted,
+                    "seed",
+                    &id,
+                    &serde_json::json!({
+                        "source": "learning seed",
+                        "category": format!("{:?}", entry.category),
+                    }),
+                )
                 .map_err(|e| LearningError::Memory(e.to_string()))?;
         }
         report.seeded += 1;
@@ -233,6 +248,44 @@ mod tests {
         // The seeded lessons are retrievable.
         let hits = crate::ops::search(root, "discriminating test").unwrap();
         assert!(hits.iter().any(|h| h.snippet.contains("discriminating")));
+    }
+
+    #[test]
+    fn seeding_records_one_audit_row_per_lesson() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+
+        let pack = vec![
+            lesson("validate inputs at the boundary before trusting them downstream"),
+            lesson("prefer a guard clause over a deeply nested conditional branch"),
+        ];
+        assert_eq!(seed_memory(root, &pack, false).unwrap().seeded, 2);
+
+        let persistence = localmind_store::MemoryPersistence::open_project(root).unwrap();
+        let seed_audits = persistence
+            .audit_records()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.actor == "seed")
+            .count();
+        assert_eq!(seed_audits, 2, "one audit row per seeded lesson");
+    }
+
+    #[test]
+    fn dry_run_records_no_audit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+
+        seed_memory(
+            root,
+            &[lesson("a dry-run lesson with no audit trail")],
+            true,
+        )
+        .unwrap();
+        let persistence = localmind_store::MemoryPersistence::open_project(root).unwrap();
+        assert!(persistence.audit_records().unwrap().is_empty());
     }
 
     #[test]

@@ -5,6 +5,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`learning seed` now records an audit row per lesson.** Seeding writes accepted
+  memory directly (the human gate moves to authoring time), but previously left no
+  trace in `learning audit`. Each seeded lesson now writes an audit event (actor
+  `seed`, subject = memory id, metadata naming the source and category), so a seeded
+  memory has the same provenance trail as a promoted one. A dry run still writes
+  nothing.
+
 - **Advisory whole-repo teardown sweep at completion.** When `[harness]
   teardown_sweep` is enabled, the harness runs a read-only cleanup-audit pass at
   the completion seam alongside the retrospective — surfacing dead/abandoned code,
