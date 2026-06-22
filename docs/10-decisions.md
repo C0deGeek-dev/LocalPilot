@@ -111,6 +111,18 @@ Boundary: this does not change which providers *declare* constrained decoding
 (still gated to local servers), nor the fallback semantics; it only changes how a
 declared, non-rejected constraint is encoded when `constraint_mode = "json_schema"`.
 
+Live finding (2026-06-22): against a turboquant `q3635ba3bapex` server, the
+top-level `json_schema` field is **not** sufficient — it returns the same
+`400 "empty grammar stack after <think>"` as the `response_format` wrapper,
+because the json-schema→grammar conversion forbids the model's `<think>` opening.
+Only a raw **GBNF `grammar` field** engages (turboquant's lazy-grammar tolerates
+the `<think>` prefix, returns `200`). So `constraint_mode = "json_schema"` reaches
+the grammar on servers that accept the top-level field but **does not** fix this
+turboquant model. The bounded follow-up is a `constraint_mode = "grammar"` that
+emits GBNF (a json-schema→GBNF conversion of the tool-call constraint); it was
+scoped out of this pass. The lever therefore stays default-off, now on live
+evidence, not just policy.
+
 ## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
 
 Status: accepted.
