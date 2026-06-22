@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Selectable constraint encoding (`constraint_mode`).** A provider can now
+  choose how a tool-call constraint is encoded: `response_format` (default — the
+  OpenAI structured-output wrapper, unchanged) or `json_schema` (a documented
+  llama.cpp server extension that sends the schema as a top-level `json_schema`
+  field the server compiles to a grammar). Use `json_schema` for a local server,
+  such as a turboquant `llama-server` build, that rejects the `response_format`
+  wrapper — so the constraint engages the server's grammar instead of falling
+  back to native tool-calling. Opt-in per provider (`[providers.<id>.options]
+  constraint_mode = "json_schema"`); default and fallback are unchanged. See
+  ADR-0044 and docs/04-provider-contract.md.
 - **Constrained decoding is disabled after a server rejects it.** A local
   OpenAI-compatible server that declares constrained decoding but returns a
   client error on the schema-constrained request now has the constraint dropped

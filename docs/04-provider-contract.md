@@ -165,6 +165,34 @@ provider implementation must document:
 
 The session runtime should branch on provider capabilities, not provider names.
 
+### Constraint encoding (`constraint_mode`)
+
+When a provider declares constrained decoding, the constraint's **wire encoding**
+is selectable per provider via the `constraint_mode` option (default
+`response_format`):
+
+- `response_format` — the OpenAI structured-output wrapper
+  (`response_format: { type: "json_schema", json_schema: { name, schema } }`).
+  The default and the floor.
+- `json_schema` — a documented llama.cpp server extension: the schema is sent as
+  a **top-level `json_schema` field**, which the server compiles to a GBNF
+  grammar. Use this for a local server (e.g. a turboquant `llama-server` build)
+  that rejects the `response_format` wrapper with a client error. Documented in
+  the public llama.cpp HTTP server API; no private endpoint behaviour.
+
+```toml
+[providers.local]
+kind = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+
+[providers.local.options]
+constraint_mode = "json_schema"   # reach a turboquant server's grammar
+```
+
+If a server accepts neither encoding, the client error caches the rejection and
+the constraint is dropped for the session — native tool-calling, the floor. An
+unknown `constraint_mode` value falls back to `response_format`.
+
 ## Quota Semantics
 
 Quota wait/resume honors provider contracts. A provider adapter may expose:

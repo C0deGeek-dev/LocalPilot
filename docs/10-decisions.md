@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0044: Selectable Constraint Encoding To Reach A Local Server's Grammar
+
+Status: accepted.
+
+The constrained-decoding capability targets a local OpenAI-compatible server
+whose grammar engine makes tool-call arguments schema-valid by construction. We
+sent the constraint only as the OpenAI structured-output `response_format`
+wrapper (`{ type: "json_schema", json_schema: { schema } }`). Some local
+`llama-server` builds — including a turboquant build — reject that wrapper with a
+client error, so the F2 fallback drops the constraint and the server runs with
+native tool-calling, never engaging its grammar.
+
+Decision: the wire encoding of a tool-call constraint is **selectable** per
+provider via a `constraint_mode` option:
+
+- `response_format` (**default, the floor**) — the OpenAI structured-output
+  wrapper. Unchanged for every existing provider, hosted or local.
+- `json_schema` — a documented llama.cpp server extension: the JSON schema is
+  sent as a **top-level `json_schema` field**, which the server compiles to a
+  GBNF grammar internally. This reaches the same grammar engine without us
+  authoring or shipping a GBNF converter, and without the wrapper the server
+  rejects.
+
+The selector is a local concern — it never leaks into the request body — and an
+unknown value falls back to the default, so a typo cannot break a turn. The F2
+reject→native fallback (a client error on a constrained request caches the
+rejection and drops the constraint for the session) is unchanged and remains the
+floor for any server that accepts neither encoding.
+
+Provenance (clean-room): the top-level `json_schema` field and the GBNF
+`grammar` field are part of the **documented public llama.cpp HTTP server API**;
+no private or undocumented endpoint behaviour is used. A raw-GBNF `grammar` mode
+is intentionally **not** implemented — the documented `json_schema` field reaches
+the same grammar engine server-side, so a hand-written schema→GBNF converter
+would add surface for no capability gain.
+
+Rationale: this is the smallest additive change that lets a constraint engage a
+grammar on a server that rejects the OpenAI wrapper, it is opt-in and
+default-off, and it preserves the native-tool-calling floor. The mode ships
+default-off until an uplift eval clears it; this ADR records only the mechanism,
+not a default change.
+
+Boundary: this does not change which providers *declare* constrained decoding
+(still gated to local servers), nor the fallback semantics; it only changes how a
+declared, non-rejected constraint is encoded when `constraint_mode = "json_schema"`.
+
 ## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
 
 Status: accepted.

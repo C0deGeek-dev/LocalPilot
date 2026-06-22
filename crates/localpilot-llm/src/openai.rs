@@ -29,6 +29,20 @@ use crate::provider::{
 };
 use crate::request::{ModelRequest, ToolSpec};
 
+/// How a tool-call constraint is encoded in the request body. A local server may
+/// accept the OpenAI structured-output `response_format` wrapper, the documented
+/// llama.cpp top-level `json_schema` field, or neither (then the F2 fallback drops
+/// the constraint and uses native tool-calling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstraintMode {
+    /// OpenAI structured outputs: `response_format: { type: json_schema, ... }`.
+    /// The default and the floor — unchanged for every existing provider.
+    ResponseFormat,
+    /// llama.cpp server extension: a top-level `json_schema` field the server
+    /// compiles to a GBNF grammar. Opt-in for a server that rejects the wrapper.
+    JsonSchema,
+}
+
 /// An OpenAI-compatible chat-completions provider.
 pub struct OpenAiProvider {
     declaration: ProviderDeclaration,
@@ -133,18 +147,32 @@ impl OpenAiProvider {
         if !request.tools.is_empty() {
             body["tools"] = Value::Array(request.tools.iter().map(translate_tool).collect());
         }
-        // A constrained-decoding server accepts a JSON-schema constraint via the
-        // structured-output `response_format` field. Absent for every other
-        // provider, so the body is unchanged for them. Skipped once a server has
-        // rejected the constraint (`constrained_rejected`, set in `stream`): it
-        // won't be accepted later either, so don't re-send it and pay a rejected
-        // round-trip every turn.
+        // A constrained-decoding server accepts a JSON-schema constraint. Absent
+        // for every other provider, so the body is unchanged for them. Skipped
+        // once a server has rejected the constraint (`constrained_rejected`, set
+        // in `stream`): it won't be accepted later either, so don't re-send it and
+        // pay a rejected round-trip every turn. The encoding is selectable
+        // (`constraint_mode` option) because not every local server accepts the
+        // OpenAI structured-output `response_format` wrapper.
         if let Some(constraint) = &request.tool_constraint {
             if !self.constrained_rejected.load(Ordering::Relaxed) {
-                body["response_format"] = json!({
-                    "type": "json_schema",
-                    "json_schema": { "name": "tool_call", "schema": constraint },
-                });
+                match self.constraint_mode() {
+                    ConstraintMode::JsonSchema => {
+                        // A documented llama.cpp server extension: a top-level
+                        // `json_schema` field is converted to a GBNF grammar
+                        // server-side, engaging the grammar on a llama.cpp build
+                        // (e.g. a turboquant server) that rejects the OpenAI
+                        // `response_format` structured-output wrapper. See
+                        // docs/04-provider-contract.md for provenance.
+                        body["json_schema"] = constraint.clone();
+                    }
+                    ConstraintMode::ResponseFormat => {
+                        body["response_format"] = json!({
+                            "type": "json_schema",
+                            "json_schema": { "name": "tool_call", "schema": constraint },
+                        });
+                    }
+                }
             }
         }
         if self.suppresses_thinking() && !self.has_option("reasoning_effort", request) {
@@ -152,7 +180,8 @@ impl OpenAiProvider {
         }
         if let Value::Object(map) = &mut body {
             for (k, v) in self.default_options.iter().chain(request.options.iter()) {
-                if k == "suppress_thinking" || k == "reasoning_round_trip" {
+                if k == "suppress_thinking" || k == "reasoning_round_trip" || k == "constraint_mode"
+                {
                     continue;
                 }
                 map.insert(k.clone(), v.clone());
@@ -176,6 +205,22 @@ impl OpenAiProvider {
             .get("suppress_thinking")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    }
+
+    /// How a tool-call constraint is encoded on the wire. Defaults to the OpenAI
+    /// structured-output `response_format` wrapper; a provider whose local server
+    /// rejects that wrapper (e.g. a turboquant llama.cpp build) opts into the
+    /// documented top-level `json_schema` field via the `constraint_mode` option.
+    /// An unknown value falls back to the default, so a typo never breaks a turn.
+    fn constraint_mode(&self) -> ConstraintMode {
+        match self
+            .default_options
+            .get("constraint_mode")
+            .and_then(Value::as_str)
+        {
+            Some("json_schema") => ConstraintMode::JsonSchema,
+            _ => ConstraintMode::ResponseFormat,
+        }
     }
 
     fn has_option(&self, key: &str, request: &ModelRequest) -> bool {
@@ -988,6 +1033,60 @@ mod tests {
                 .is_none(),
             "the constraint must be dropped after a rejection is recorded"
         );
+    }
+
+    #[test]
+    fn json_schema_constraint_mode_emits_the_top_level_field() {
+        // A server that rejects the OpenAI `response_format` wrapper (e.g. a
+        // turboquant llama.cpp build) opts into the documented top-level
+        // `json_schema` field, which the server compiles to a grammar.
+        let mut options = IndexMap::new();
+        options.insert("constraint_mode".to_string(), json!("json_schema"));
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_default_options(options);
+        let mut request = ModelRequest::new("m", Vec::new());
+        let schema = json!({ "type": "object" });
+        request.tool_constraint = Some(schema.clone());
+
+        let body = provider.build_body(&request);
+        assert_eq!(
+            body.get("json_schema"),
+            Some(&schema),
+            "json_schema mode must send the constraint as a top-level json_schema field"
+        );
+        assert!(
+            body.get("response_format").is_none(),
+            "json_schema mode must not also send the response_format wrapper"
+        );
+        // The mode selector itself must never leak into the request body.
+        assert!(
+            body.get("constraint_mode").is_none(),
+            "constraint_mode is a local selector, not a wire field"
+        );
+    }
+
+    #[test]
+    fn default_constraint_mode_is_unchanged_response_format() {
+        // No option set: the floor is unchanged — the constraint still rides as the
+        // OpenAI `response_format` wrapper, with no top-level json_schema field.
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        );
+        let mut request = ModelRequest::new("m", Vec::new());
+        request.tool_constraint = Some(json!({ "type": "object" }));
+        let body = provider.build_body(&request);
+        assert!(body.get("response_format").is_some());
+        assert!(body.get("json_schema").is_none());
     }
 
     #[tokio::test]
