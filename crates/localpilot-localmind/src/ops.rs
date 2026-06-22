@@ -331,6 +331,39 @@ pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, 
 /// the audit record must share so it never lists a memory that was not injected.
 pub const CONTEXT_MEMORY_LIMIT: usize = 5;
 
+/// Down-weight a lesson by routing it to review — never deleting it. The host's
+/// learning loop calls this when the uplift eval shows a lesson did not improve
+/// (or hurt) outcomes; it reuses the engine's reasoned route-to-review flag, so
+/// the memory stays active but is surfaced for a human to re-judge. Returns
+/// whether an active memory matched.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read or updated.
+pub fn flag_unhelpful_lesson(project_root: &Path, memory_id: &str) -> Result<bool, LearningError> {
+    let persistence = open_memory(project_root)?;
+    persistence
+        .flag_for_review(
+            &MemoryEntryId::new(memory_id),
+            "did not improve eval outcomes",
+        )
+        .map_err(memory_err)
+}
+
+/// The lessons currently flagged for review (down-weighted or change-invalidated),
+/// the review list a host surfaces. Never includes a deleted memory.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read.
+pub fn lessons_flagged_for_review(project_root: &Path) -> Result<Vec<String>, LearningError> {
+    let persistence = open_memory(project_root)?;
+    Ok(persistence
+        .list_stale_candidates()
+        .map_err(memory_err)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect())
+}
+
 /// List accepted LocalMind memory.
 ///
 /// # Errors
@@ -674,6 +707,36 @@ mod tests {
     #[test]
     fn an_empty_queue_clusters_to_nothing() {
         assert!(cluster_by_similarity(&[]).is_empty());
+    }
+
+    #[test]
+    fn flag_unhelpful_routes_to_review_without_deleting() {
+        // Outcome-aware down-weighting flags a lesson for review (never deletes it):
+        // it appears in the review list and stays in accepted memory.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let lesson = crate::SeedLesson {
+            body: "a lesson that did not help on the eval".to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        crate::seed_memory(root, &[lesson], false).unwrap();
+        let id = memory_list(root).unwrap()[0].id.clone();
+
+        assert!(flag_unhelpful_lesson(root, &id).unwrap());
+        assert!(
+            lessons_flagged_for_review(root).unwrap().contains(&id),
+            "the flagged lesson must surface in the review list"
+        );
+        assert!(
+            memory_list(root).unwrap().iter().any(|m| m.id == id),
+            "down-weighting must never delete the memory"
+        );
     }
 
     #[test]

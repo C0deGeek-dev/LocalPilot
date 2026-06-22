@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Promote a curated lesson to an always-on rule cue.** A seed lesson tagged
+  `rule-cue` is injected every turn as terse, always-present guidance (independent
+  of prompt relevance) — a weak model acts on a short always-on rule better than
+  on a retrieved paragraph. Advisory, not an enforced harness rule (ADR-0027); the
+  cue is excluded from the relevance block so it is never injected twice. Opt-in;
+  default unchanged. See ADR-0046.
+- **Outcome-aware down-weighting routes a lesson to review.** `flag_unhelpful_lesson`
+  flags a lesson the uplift eval found unhelpful for human re-review (it stays
+  active and is never auto-deleted), reusing the engine's reasoned route-to-review
+  flag. See ADR-0046.
 - **Accepted-memory injection tuning (`[memory]`).** A new config section makes
   always-on memory injection earn its context cost, with every default preserving
   the prior behaviour: `injection_min_score` (gate out weak matches so they don't

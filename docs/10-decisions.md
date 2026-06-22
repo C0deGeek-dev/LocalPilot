@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0046: Promote A Curated Lesson To A Rule Cue; Down-Weight By Routing To Review
+
+Status: accepted.
+
+Two ways to make memory help a weak local model better:
+
+1. **Rule cue.** A curated lesson can be promoted to an **always-on rule cue** —
+   terse guidance injected every turn independent of prompt relevance. A weak
+   model acts on a short, always-present rule better than on a paragraph it must
+   retrieve. Per the rules-vs-skills model (ADR-0027) a rule cue is **advisory**
+   (content the agent reads), not an **enforced** harness rule (the rule engine's
+   `Block`/`Warn` gates are untouched): promoting a lesson never gates execution.
+   Opt-in: a seed lesson carries the `rule-cue` tag; at seed time its memory id is
+   recorded in a host-side cue registry (`.localmind/rule-cues.json`), and the
+   context hook injects those memories always-on under a `rule-cue` audit layer.
+   A cue is excluded from the relevance-retrieval block so it is never injected
+   twice. Injection assembly is the host adapter's job (ADR-0036), so the
+   promotion list is host state keyed to engine memory ids, not engine state.
+
+2. **Outcome-aware down-weight.** When the uplift eval shows a lesson did not
+   improve (or hurt) outcomes, the host's learning loop **routes it to review** —
+   it never auto-deletes. This reuses the engine's reasoned route-to-review flag
+   (LocalMind D-LM-0016): the memory stays active and a human re-judges it, the
+   same human-gated discipline as change-aware invalidation and the
+   self-improvement loop (ADR-0034).
+
+Both are additive and opt-in; the default path (no promoted cues, no flagged
+lessons) is unchanged, and each ships default-off until the uplift eval clears
+it. Rollback is removing the `rule-cue` tag / clearing the cue registry, and
+clearing a review flag.
+
 ## ADR-0045: Accepted-Memory Injection Earns Its Context Cost
 
 Status: accepted.

@@ -24,6 +24,9 @@ const ACCEPTED_MEMORY_CHAR_CAP: usize = 1_200;
 /// a small, bounded token cost.
 const PRIMER_CHAR_CAP: usize = 1_000;
 
+/// Cap on the always-on rule-cue block, so promoted curated lessons stay terse.
+const RULE_CUE_CHAR_CAP: usize = 1_000;
+
 /// The audit id for the always-on repository primer block (it is one block, not
 /// a searchable memory row).
 const PRIMER_ID: &str = "<repository-primer>";
@@ -161,6 +164,38 @@ impl ContextHook for LocalMindContext {
             });
         }
 
+        // Always-on rule cues: curated lessons a human promoted to terse,
+        // always-present rules (independent of prompt relevance). A weak model
+        // acts on a short always-on rule better than on a retrieved paragraph.
+        // Recorded under the `rule-cue` layer, and excluded from the relevance
+        // block below so a cue is never injected twice.
+        let cue_ids = crate::rule_cue::rule_cue_ids(&self.root);
+        if !cue_ids.is_empty() {
+            if let Ok(records) = crate::ops::memory_list(&self.root) {
+                let mut block = String::from("Project rule cues (always apply):\n");
+                let mut wrote = false;
+                for record in records {
+                    if !cue_ids.contains(&record.id) {
+                        continue;
+                    }
+                    let line = format!("- {}\n", record.body.trim());
+                    if block.chars().count() + line.chars().count() > RULE_CUE_CHAR_CAP {
+                        break;
+                    }
+                    block.push_str(&line);
+                    wrote = true;
+                    memories.push(MemoryUsed {
+                        id: record.id,
+                        score: 0,
+                        layer: "rule-cue".to_string(),
+                    });
+                }
+                if wrote {
+                    blocks.push(block.trim_end().to_string());
+                }
+            }
+        }
+
         // Accepted memory: one ranked, capped retrieval feeds both the injected
         // block and the recorded set, line by line under the char budget. Still
         // best-effort for the turn, but a broken store (corrupt/misconfigured) no
@@ -175,6 +210,11 @@ impl ContextHook for LocalMindContext {
                     // Relevance gate + dedup-vs-enforced: a weak match, or a
                     // category a rule already enforces, must not consume the budget.
                     if policy.skips(hit.score, &hit.category) {
+                        continue;
+                    }
+                    // A lesson already injected as an always-on rule cue is not
+                    // injected again here.
+                    if cue_ids.contains(&hit.memory_id) {
                         continue;
                     }
                     let line = format!("- {}\n", hit.snippet.trim());
@@ -412,6 +452,58 @@ mod tests {
             .memories_used("anything")
             .iter()
             .all(|m| m.layer != "memory"));
+    }
+
+    #[test]
+    fn a_promoted_rule_cue_is_injected_always_on() {
+        // A cue is injected regardless of prompt relevance and recorded under the
+        // rule-cue layer.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        seed_memory(
+            root,
+            "cue-1",
+            "always run lark verify before declaring green",
+        );
+        crate::rule_cue::register_rule_cues(root, &["cue-1".to_string()]).unwrap();
+
+        let hook = LocalMindContext::new(root);
+        let context = hook
+            .context_for("an unrelated prompt about audio latency")
+            .expect("a promoted cue is always-on context");
+        assert!(context.contains("Project rule cues"));
+        let used = hook.memories_used("an unrelated prompt about audio latency");
+        assert!(
+            used.iter()
+                .any(|m| m.id == "cue-1" && m.layer == "rule-cue"),
+            "the cue must be recorded under the rule-cue layer: {used:?}"
+        );
+    }
+
+    #[test]
+    fn a_cue_is_not_also_injected_as_a_relevance_hit() {
+        // When the prompt matches a cue-promoted memory, it is injected once (as a
+        // cue), never twice (cue + relevance).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        seed_memory(
+            root,
+            "cue-dup",
+            "always redact secrets before persisting a transcript",
+        );
+        crate::rule_cue::register_rule_cues(root, &["cue-dup".to_string()]).unwrap();
+
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        let cue = used.iter().filter(|m| m.id == "cue-dup").count();
+        assert_eq!(cue, 1, "a cue must be injected exactly once: {used:?}");
+        assert!(
+            used.iter()
+                .any(|m| m.id == "cue-dup" && m.layer == "rule-cue"),
+            "the single injection is the rule cue, not a relevance hit"
+        );
     }
 
     #[test]

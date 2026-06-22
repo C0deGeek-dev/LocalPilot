@@ -126,12 +126,24 @@ pub fn seed_memory(
         seeded: 0,
         skipped: 0,
     };
+    // Ids of lessons opting into always-on rule-cue promotion (the `rule-cue`
+    // tag), registered after the loop so a curated lesson can be a terse,
+    // always-present rule rather than a retrieval-only memory.
+    let mut promoted_cue_ids: Vec<String> = Vec::new();
 
     for lesson in lessons {
         let key = normalize(&lesson.body);
         if lesson.body.trim().is_empty() || !seen.insert(key) {
             report.skipped += 1;
             continue;
+        }
+        let id = seed_id(&lesson.body);
+        if lesson
+            .tags
+            .iter()
+            .any(|tag| tag == crate::rule_cue::RULE_CUE_TAG)
+        {
+            promoted_cue_ids.push(id.clone());
         }
         let confidence = Confidence::new(lesson.confidence.unwrap_or(0.8))
             .map_err(|e| LearningError::Memory(format!("invalid confidence: {e}")))?;
@@ -142,7 +154,7 @@ pub fn seed_memory(
             .into_iter()
             .collect();
         let entry = MemoryEntry {
-            id: MemoryEntryId::new(seed_id(&lesson.body)),
+            id: MemoryEntryId::new(id),
             scope: MemoryScope::Project,
             body: lesson.body.trim().to_string(),
             category: parse_category(lesson.category.as_deref()),
@@ -164,6 +176,11 @@ pub fn seed_memory(
                 .map_err(|e| LearningError::Memory(e.to_string()))?;
         }
         report.seeded += 1;
+    }
+    // Persist the rule-cue promotions once (host-side registry); a dry run writes
+    // nothing, matching the no-store contract above.
+    if !dry_run {
+        crate::rule_cue::register_rule_cues(project_root, &promoted_cue_ids)?;
     }
     Ok(report)
 }
@@ -234,6 +251,33 @@ mod tests {
             }
         );
         assert!(memory_list(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rule_cue_tagged_lesson_is_registered_for_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+
+        let mut cue = lesson("always run `lark verify` before declaring the suite green");
+        cue.tags = vec![crate::rule_cue::RULE_CUE_TAG.to_string()];
+        let plain = lesson("a plain retrieval-only lesson with no promotion");
+        seed_memory(root, &[cue.clone(), plain], false).unwrap();
+
+        let promoted = crate::rule_cue::rule_cue_ids(root);
+        assert_eq!(promoted.len(), 1, "only the tagged lesson is promoted");
+        assert_eq!(promoted[0], seed_id(&cue.body));
+    }
+
+    #[test]
+    fn dry_run_registers_no_cues() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let mut cue = lesson("a dry-run cue that must not register");
+        cue.tags = vec![crate::rule_cue::RULE_CUE_TAG.to_string()];
+        seed_memory(root, &[cue], true).unwrap();
+        assert!(crate::rule_cue::rule_cue_ids(root).is_empty());
     }
 
     #[test]
