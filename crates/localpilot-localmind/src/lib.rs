@@ -780,10 +780,11 @@ mod tests {
         }
     }
 
-    /// Reviewed-promotion: malformed model output is rejected and nothing reaches
-    /// the review queue or durable memory.
+    /// A reasoning model whose reply is not parseable JSON must not abort
+    /// closeout: extraction falls back to the deterministic path instead of
+    /// erroring, and the raw, unparseable model text is never promoted.
     #[test]
-    fn closeout_rejects_malformed_model_output() {
+    fn closeout_falls_back_when_model_output_is_unparseable() {
         let chat_body = serde_json::json!({
             "choices": [{ "message": { "content": "this is not json at all" } }]
         })
@@ -809,15 +810,17 @@ mod tests {
             )
             .unwrap();
 
-        // Malformed model output is rejected (not silently promoted).
+        // Unparseable model output falls back to the deterministic extractor
+        // rather than failing the whole closeout.
+        closeout_session(root, &store, session)
+            .expect("unparseable model output must fall back, not error");
+        // The raw, unparseable model text is never promoted as a candidate.
         assert!(
-            closeout_session(root, &store, session).is_err(),
-            "malformed model output must be rejected"
-        );
-        // Nothing reached the review queue.
-        assert!(
-            review_list(root).unwrap().is_empty(),
-            "rejected model output must not reach the review queue"
+            review_list(root)
+                .unwrap()
+                .iter()
+                .all(|item| !item.summary.contains("this is not json at all")),
+            "raw unparseable model output must not reach the review queue"
         );
     }
 
