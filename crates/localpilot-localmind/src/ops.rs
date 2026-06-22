@@ -44,6 +44,9 @@ pub struct SearchHit {
     pub score: i64,
     pub path: String,
     pub snippet: String,
+    /// The memory's lesson category, so a caller can gate or dedup injection by
+    /// category without a second store lookup.
+    pub category: String,
 }
 
 /// An accepted LocalMind memory entry, flattened for display.
@@ -249,6 +252,7 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, Learni
             score: result.score,
             path: result.path.display().to_string(),
             snippet: result.snippet,
+            category: result.category,
         })
         .collect())
 }
@@ -273,6 +277,7 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
             score: result.score,
             path: result.path.display().to_string(),
             snippet: result.snippet,
+            category: result.category,
         })
         .collect())
 }
@@ -317,6 +322,7 @@ pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, 
             score: hit.score,
             path: hit.path.display().to_string(),
             snippet: hit.snippet,
+            category: hit.category,
         })
         .collect())
 }

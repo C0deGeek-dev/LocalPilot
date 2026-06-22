@@ -2,6 +2,38 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0045: Accepted-Memory Injection Earns Its Context Cost
+
+Status: accepted.
+
+Always-on accepted-memory injection took every top-k match up to a fixed
+1200-char cap, regardless of match strength, regardless of the model's context
+window, and even when a memory restated guidance a harness rule already enforces.
+On a weak/small model that is wasted context the model spends effort on without a
+behaviour gain.
+
+Decision: the host injection layer (`localpilot-localmind`) gains a `[memory]`
+policy, every field of which **defaults to the prior behaviour** (additive,
+opt-in):
+
+- **Relevance gate** (`injection_min_score`, default `0`): a retrieved memory
+  whose score is below the threshold is not injected, so a weak match cannot fill
+  the per-turn budget.
+- **Context-window-aware budget** (`injection_context_aware`, default `false`):
+  when on, the injected char budget is scaled toward the default provider's
+  declared context window (a small model gets less), never above
+  `injection_char_budget` and never below a one-line floor.
+- **Dedup-vs-enforced** (`injection_skip_categories`, default empty): a memory
+  whose lesson category is listed is skipped, because a rule already enforces
+  equivalent guidance — injection should add signal, not restate a rule.
+
+The category needed for the dedup is exposed by the engine on the search result
+(LocalMind D-LM-0015), so the host does not do a second lookup. The policy is
+host-side because injection assembly is the adapter's job (ADR-0036), not the
+engine's. Every lever ships **default-off** until the uplift eval clears it; this
+ADR records the mechanism and the default-preserving contract, not a default
+change. Rollback is leaving (or resetting) the `[memory]` defaults.
+
 ## ADR-0044: Selectable Constraint Encoding To Reach A Local Server's Grammar
 
 Status: accepted.

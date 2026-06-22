@@ -121,6 +121,18 @@ Notable rule key:
 | --- | --- | --- | --- |
 | `project_analysis` | bool | `true` | Inject a compact, read-only project-facts block before each turn. LocalPilot derives it from manifests, lockfiles, package/dependency names, scripts, and common entrypoint markers so the model reuses existing project structure before inventing alternatives. |
 
+### `[memory]`
+
+Tunes always-on accepted-memory injection. Every default preserves the prior
+fixed behaviour, so the section is additive and opt-in.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `injection_min_score` | int | `0` | Minimum retrieval score a memory must clear to be injected. `0` injects every match (prior behaviour); raise it so weak matches do not fill the per-turn budget. |
+| `injection_char_budget` | int | `1200` | Char budget for the injected accepted-memory block, and the ceiling when `injection_context_aware` scales it down. |
+| `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
+| `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
+
 ### `[docs]`
 
 Controls when the agent should expand beyond local project facts into available

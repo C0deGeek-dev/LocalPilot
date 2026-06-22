@@ -5,6 +5,15 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Accepted-memory injection tuning (`[memory]`).** A new config section makes
+  always-on memory injection earn its context cost, with every default preserving
+  the prior behaviour: `injection_min_score` (gate out weak matches so they don't
+  fill the per-turn budget), `injection_context_aware` (scale the injected char
+  budget toward the model's context window — a small model gets less),
+  `injection_char_budget` (the budget / ceiling), and `injection_skip_categories`
+  (skip a category a rule already enforces, so injection adds signal not
+  redundancy). Additive and opt-in; default-off pending the uplift eval. See
+  ADR-0045 and docs/configuration.md.
 - **Selectable constraint encoding (`constraint_mode`).** A provider can now
   choose how a tool-call constraint is encoded: `response_format` (default — the
   OpenAI structured-output wrapper, unchanged) or `json_schema` (a documented

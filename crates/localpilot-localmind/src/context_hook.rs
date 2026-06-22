@@ -46,6 +46,83 @@ impl LocalMindContext {
             .ok()
             .map(|config| config.ingest)
     }
+
+    /// Resolve the accepted-memory injection policy for this project. Defaults
+    /// preserve the prior fixed behaviour (no relevance gate, a 1200-char budget,
+    /// no category dedup); a `[memory]` section opts into tuning. When
+    /// context-aware budgeting is on, the budget is scaled toward the default
+    /// provider's declared context window so a small model injects less.
+    fn injection_policy(&self) -> InjectionPolicy {
+        let Ok(config) =
+            localpilot_config::load(&ConfigPaths::standard(&self.root), &CliOverrides::default())
+        else {
+            return InjectionPolicy::fixed_default();
+        };
+        let memory = &config.memory;
+        let char_budget = if memory.injection_context_aware {
+            let context_tokens = config
+                .providers
+                .get(&config.provider.default)
+                .and_then(|provider| provider.context_window);
+            context_aware_budget(context_tokens, memory.injection_char_budget)
+        } else {
+            memory.injection_char_budget
+        };
+        InjectionPolicy {
+            min_score: memory.injection_min_score,
+            char_budget,
+            skip_categories: memory.injection_skip_categories.clone(),
+        }
+    }
+}
+
+/// The resolved accepted-memory injection policy for one turn.
+struct InjectionPolicy {
+    /// Minimum retrieval score a hit must clear to be injected.
+    min_score: i64,
+    /// Char budget for the injected accepted-memory block.
+    char_budget: usize,
+    /// Lesson categories skipped because a rule already enforces equivalent guidance.
+    skip_categories: Vec<String>,
+}
+
+impl InjectionPolicy {
+    /// The prior fixed behaviour, used when config cannot be read.
+    fn fixed_default() -> Self {
+        Self {
+            min_score: 0,
+            char_budget: ACCEPTED_MEMORY_CHAR_CAP,
+            skip_categories: Vec::new(),
+        }
+    }
+
+    /// Whether `hit` should be skipped (a weak match, or an enforced category).
+    fn skips(&self, score: i64, category: &str) -> bool {
+        score < self.min_score
+            || self
+                .skip_categories
+                .iter()
+                .any(|skip| skip.eq_ignore_ascii_case(category))
+    }
+}
+
+/// Scale the injected char budget toward the model's context window — a small
+/// model gets a smaller budget — never exceeding `ceiling` and never below a
+/// floor that keeps at least one useful memory line. With no declared context
+/// window the ceiling (the fixed budget) is used unchanged.
+fn context_aware_budget(context_tokens: Option<u64>, ceiling: usize) -> usize {
+    /// Share of the context window allotted to accepted-memory injection.
+    const INJECTION_CONTEXT_FRACTION: f64 = 0.04;
+    /// Rough chars-per-token for converting a token budget to the char cap.
+    const CHARS_PER_TOKEN: f64 = 4.0;
+    /// Floor so a tiny context still injects at least one useful line.
+    const MIN_BUDGET: usize = 400;
+    let Some(tokens) = context_tokens else {
+        return ceiling;
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounded by clamp
+    let scaled = (tokens as f64 * INJECTION_CONTEXT_FRACTION * CHARS_PER_TOKEN) as usize;
+    scaled.clamp(MIN_BUDGET.min(ceiling), ceiling)
 }
 
 impl ContextHook for LocalMindContext {
@@ -91,11 +168,17 @@ impl ContextHook for LocalMindContext {
         // instead of looking identical to "no memory".
         match crate::ops::context_hits(&self.root, prompt) {
             Ok(hits) => {
+                let policy = self.injection_policy();
                 let mut block = String::from("Relevant accepted project memory:\n");
                 let mut wrote = false;
                 for hit in hits {
+                    // Relevance gate + dedup-vs-enforced: a weak match, or a
+                    // category a rule already enforces, must not consume the budget.
+                    if policy.skips(hit.score, &hit.category) {
+                        continue;
+                    }
                     let line = format!("- {}\n", hit.snippet.trim());
-                    if block.chars().count() + line.chars().count() > ACCEPTED_MEMORY_CHAR_CAP {
+                    if block.chars().count() + line.chars().count() > policy.char_budget {
                         break;
                     }
                     block.push_str(&line);
@@ -329,6 +412,78 @@ mod tests {
             .memories_used("anything")
             .iter()
             .all(|m| m.layer != "memory"));
+    }
+
+    #[test]
+    fn context_aware_budget_shrinks_for_a_small_model() {
+        // A small context window yields a smaller budget than the ceiling; a large
+        // one is capped at the ceiling; an unknown window leaves the ceiling.
+        let small = context_aware_budget(Some(4_096), 1_200);
+        let large = context_aware_budget(Some(256_000), 1_200);
+        assert!(small < 1_200, "a small model must inject less: {small}");
+        assert!(small >= 400, "but never below the one-line floor: {small}");
+        assert_eq!(large, 1_200, "a large model is capped at the fixed ceiling");
+        assert_eq!(
+            context_aware_budget(None, 1_200),
+            1_200,
+            "no declared context window leaves the ceiling unchanged"
+        );
+    }
+
+    #[test]
+    fn the_default_policy_still_injects_a_relevant_memory() {
+        // Guard the floor: with no [memory] section, a relevant accepted memory is
+        // injected exactly as before.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        seed_memory(root, "mem-keep", "always redact secrets before persisting");
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(used.iter().any(|m| m.layer == "memory"));
+    }
+
+    #[test]
+    fn a_low_relevance_memory_is_gated_out() {
+        // With a min-score gate above any achievable bm25 score, the matching
+        // memory is not injected — a weak match no longer fills the budget.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        std::fs::write(
+            root.join(".localpilot.toml"),
+            "[memory]\ninjection_min_score = 1000000\n",
+        )
+        .unwrap();
+        seed_memory(root, "mem-weak", "always redact secrets before persisting");
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(
+            !used.iter().any(|m| m.layer == "memory"),
+            "a sub-threshold match must be gated out: {used:?}"
+        );
+    }
+
+    #[test]
+    fn an_enforced_category_memory_is_not_injected() {
+        // A category the rule engine already enforces is skipped at injection, so
+        // injection adds signal rather than restating an enforced rule.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        std::fs::write(
+            root.join(".localpilot.toml"),
+            "[memory]\ninjection_skip_categories = [\"SecurityWarning\"]\n",
+        )
+        .unwrap();
+        // seed_memory persists with category SecurityWarning.
+        seed_memory(root, "mem-sec", "always redact secrets before persisting");
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(
+            !used.iter().any(|m| m.layer == "memory"),
+            "an enforced-category memory must be skipped: {used:?}"
+        );
     }
 
     #[test]

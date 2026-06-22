@@ -20,6 +20,7 @@ pub struct Config {
     pub quota: QuotaConfig,
     pub mcp: McpConfig,
     pub ingest: IngestConfig,
+    pub memory: MemoryConfig,
     pub compaction: CompactionConfig,
     pub storage: StorageConfig,
     pub skills: SkillsConfig,
@@ -39,6 +40,7 @@ impl Default for Config {
             quota: QuotaConfig::default(),
             mcp: McpConfig::default(),
             ingest: IngestConfig::default(),
+            memory: MemoryConfig::default(),
             compaction: CompactionConfig::default(),
             storage: StorageConfig::default(),
             skills: SkillsConfig::default(),
@@ -335,6 +337,40 @@ impl Default for IngestConfig {
             max_model_calls: 0,
             contextual_prefix_enrichment: false,
             refresh_min_interval_secs: 600,
+        }
+    }
+}
+
+/// Accepted-memory injection tuning. Every default preserves the prior fixed
+/// behaviour (no relevance gate, a fixed 1200-char budget, no category dedup), so
+/// the section is purely additive and opt-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Minimum retrieval score an accepted memory must clear to be injected. The
+    /// default `0` injects every match (the prior behaviour); raise it so weak
+    /// matches do not fill the per-turn budget.
+    pub injection_min_score: i64,
+    /// Char budget for the injected accepted-memory block, and the ceiling when
+    /// `injection_context_aware` scales the budget down for a small model.
+    pub injection_char_budget: usize,
+    /// Scale the injected char budget down toward the active model's context
+    /// window (a small/weak model gets less), never above `injection_char_budget`.
+    /// Off by default — the fixed budget is used.
+    pub injection_context_aware: bool,
+    /// Lesson categories skipped at injection because the rule engine already
+    /// enforces equivalent guidance (dedup-vs-enforced). Empty by default. Values
+    /// match `LessonCategory` debug names, e.g. `SecurityWarning`.
+    pub injection_skip_categories: Vec<String>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            injection_min_score: 0,
+            injection_char_budget: 1_200,
+            injection_context_aware: false,
+            injection_skip_categories: Vec::new(),
         }
     }
 }
