@@ -35,12 +35,14 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
 /// # Errors
 /// Returns an error if configuration, the provider registry, or the workspace
 /// cannot be set up.
+#[allow(clippy::fn_params_excessive_bools)] // distinct one-shot run toggles
 pub async fn print_mode(
     prompt: &str,
     model: &str,
     provider_id: Option<&str>,
     profile: Profile,
     allow_writes: bool,
+    self_review: bool,
     resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
@@ -51,7 +53,18 @@ pub async fn print_mode(
         runtime.load_session(session)?;
     }
 
-    run_and_print(runtime, prompt).await
+    run_and_print(runtime, prompt).await?;
+
+    // Opt-in advisory cue: a read-only self-review of the workspace after the run.
+    // Reuses the existing scanner, writes to stderr (never stdout), and never fails
+    // the run — a finished one-shot is not blocked by an advisory pass.
+    if self_review {
+        let mut err = std::io::stderr();
+        if let Err(error) = crate::self_review_cmd::advisory_review(&cwd, &mut err) {
+            eprintln!("self-review skipped ({error})");
+        }
+    }
+    Ok(())
 }
 
 /// Build a non-interactive session runtime for `cwd` with the configured

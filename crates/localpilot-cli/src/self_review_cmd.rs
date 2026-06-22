@@ -117,6 +117,28 @@ pub fn run_completion_sweep(
     Ok(true)
 }
 
+/// The opt-in post-authoring cue for `print --self-review`: run the read-only
+/// self-review over `root` and write an advisory summary to `err`. It reuses the
+/// same scan as `localpilot self-review` (no new scanner) and is strictly
+/// advisory — it never edits, commits, or fails the run. Like [`teardown_review`]
+/// it skips the prior-lesson fetch so a one-shot run never initialises a store it
+/// would not otherwise create.
+///
+/// # Errors
+/// Returns an error only if writing the summary to `err` fails; the scan itself is
+/// best-effort.
+pub fn advisory_review(root: &Path, err: &mut dyn Write) -> anyhow::Result<()> {
+    let report = review(root, &ReviewOptions::default());
+    writeln!(
+        err,
+        "self-review: {} advisory finding(s) across {} file(s) (read-only, advisory)",
+        report.findings.len(),
+        report.scanned_files
+    )?;
+    write!(err, "{}", report.human_summary())?;
+    Ok(())
+}
+
 /// Read a capability scorecard JSON file and project its `process` block into the
 /// measured-friction input. The scorecard is the harness's own emitted artefact;
 /// only its `process` object is read, so the self-review crate stays decoupled
@@ -208,6 +230,30 @@ mod tests {
         assert!(run_completion_sweep(root, true, &mut on).unwrap());
         let text = String::from_utf8(on).unwrap();
         assert!(text.contains("teardown sweep"), "{text}");
+    }
+
+    /// The opt-in post-authoring cue writes an advisory summary to its writer and
+    /// leaves the workspace byte-for-byte untouched (read-only).
+    #[test]
+    fn advisory_review_summarises_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        fs::write(root.join("a.rs"), "pub fn f() {}\n").unwrap();
+
+        let before = snapshot(root);
+        let mut err = Vec::new();
+        advisory_review(root, &mut err).unwrap();
+        let after = snapshot(root);
+
+        assert_eq!(before, after, "the advisory review must be read-only");
+        assert!(
+            String::from_utf8(err).unwrap().contains("self-review:"),
+            "it writes an advisory summary"
+        );
+        // It also never initialises a LocalMind store (no prior-lesson fetch).
+        assert!(!root.join(".localmind.toml").exists());
+        assert!(!root.join(".localmind").exists());
     }
 
     /// A completion sweep leaves the finished run's files byte-for-byte untouched.

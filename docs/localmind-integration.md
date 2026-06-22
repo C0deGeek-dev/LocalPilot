@@ -92,6 +92,15 @@ truth this table mirrors.
 
 Close-out is best-effort and non-fatal, and an empty session writes nothing.
 
+The two halves are independent: a surface that does **not** close out still
+*reads* accepted memory. In particular one-shot `localpilot print` injects relevant
+accepted lessons into its turn (via `register_context_hook`, the same hook the
+interactive and serve loops use) — it simply never writes learning candidates back.
+So curated guardrails seeded into accepted memory reach even the one-shot author;
+they do not require the learning runtimes. `print --self-review` adds an opt-in,
+read-only repo-health pass after the run (advisory, on stderr; never edits or
+commits).
+
 - The agent can propose a durable lesson in-session with the `remember` tool: it
   enqueues a review candidate (permission-gated, project-local write) and never
   writes accepted memory directly — promotion stays a human, review-gated step
@@ -432,7 +441,12 @@ Notes:
   seeding skips the per-session review queue. It is idempotent (body-level dedup)
   and records one audit row per lesson, so a seeded memory has the same
   `learning audit` provenance trail as a promoted one. Use `--dry-run` to validate
-  a pack without writing.
+  a pack without writing. The shipped `seed-packs/coding-lessons.json` includes
+  general code-authoring guardrails (propagate a subprocess exit code; drain child
+  stdout/stderr without deadlocking; pass args as a list not a quoted string; guard
+  a process launch; factor duplicated parse/format logic; don't claim a build/tests
+  pass before running them) — once seeded, they ride into any turn that reads
+  memory, including one-shot `print`.
 - **`learning closeout` tolerates a reasoning model's output.** A local model
   commonly wraps its extraction JSON in a `<think>…</think>` block and a
   ```` ```json ```` code fence; closeout strips those before parsing and, on any

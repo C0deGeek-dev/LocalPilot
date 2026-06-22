@@ -5,6 +5,19 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Code-authoring guardrails in `seed-packs/coding-lessons.json` + an opt-in
+  `print --self-review`.** The curated coding pack gains six general, model-actionable
+  lessons distilled from a dogfood run where the local author wrote compilable code that
+  skipped unspecified rigor: propagate a subprocess child's exit code (and surface its
+  stderr); drain child stdout/stderr concurrently (and don't claim concurrency you didn't
+  write); pass process args as a list, not a quoted string; guard a process launch like a
+  missing argument; factor duplicated parse/format logic into one helper; and don't claim
+  a build or tests pass before running them. Because one-shot `localpilot print` *reads*
+  accepted memory (it injects lessons; it just never closes out), seeding these reaches the
+  author with no new wiring. `print --self-review` adds an opt-in, read-only repo-health
+  pass after a run (advisory, on stderr; never edits or commits), and `print --help` now
+  states the reads-memory-but-does-not-learn contract.
+
 - **Discoverable structured output for `learning search` / `memory search` (ADR-0048).**
   Adding `--json` was not enough — a dogfood run showed both the operator and the local
   model missed it and tab-parsed the human table. Now the format is resolved from context:

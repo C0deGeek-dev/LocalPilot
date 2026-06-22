@@ -182,6 +182,13 @@ enum Command {
         bypass: bool,
     },
     /// Run the agent loop once non-interactively and print the answer (pipelines).
+    ///
+    /// This one-shot path *reads* accepted project memory (it injects relevant
+    /// lessons into the turn) but deliberately does **not** close out — it never
+    /// writes learning candidates, so a bare prompt leaves no project files. Use
+    /// `harness`/`rpc`/`acp`, or an explicit `learning closeout`, when you want the
+    /// run to learn. Pass `--self-review` for an advisory repo-health pass after the
+    /// run.
     Print {
         /// The prompt text.
         prompt: String,
@@ -200,6 +207,10 @@ enum Command {
         /// Allow the run to write to the workspace (off by default).
         #[arg(long)]
         allow_writes: bool,
+        /// After the run, print an advisory `self-review` of the workspace to
+        /// stderr (read-only; never edits or commits). Off by default.
+        #[arg(long)]
+        self_review: bool,
         /// Continue the most recent session in this workspace.
         #[arg(long = "continue", conflicts_with = "resume")]
         continue_latest: bool,
@@ -1046,6 +1057,7 @@ async fn main() -> anyhow::Result<()> {
             permission,
             bypass,
             allow_writes,
+            self_review,
             continue_latest,
             resume,
         } => {
@@ -1057,6 +1069,7 @@ async fn main() -> anyhow::Result<()> {
                 provider.as_deref(),
                 profile,
                 allow_writes,
+                self_review,
                 resume,
             )
             .await?;
@@ -1112,6 +1125,7 @@ async fn main() -> anyhow::Result<()> {
                     provider.as_deref(),
                     profile,
                     allow_writes,
+                    false,
                     Some(session),
                 )
                 .await?;
@@ -1322,6 +1336,37 @@ mod tests {
             cli.command,
             Some(Command::Memory {
                 workspace: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn print_self_review_flag_defaults_off_and_parses() {
+        // Off by default: a plain `print` leaves the advisory cue disabled.
+        let cli =
+            Cli::try_parse_from(["localpilot", "print", "do a thing", "--model", "m"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Print {
+                self_review: false,
+                ..
+            })
+        ));
+        // Opt-in with the flag.
+        let cli = Cli::try_parse_from([
+            "localpilot",
+            "print",
+            "do a thing",
+            "--model",
+            "m",
+            "--self-review",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Print {
+                self_review: true,
                 ..
             })
         ));

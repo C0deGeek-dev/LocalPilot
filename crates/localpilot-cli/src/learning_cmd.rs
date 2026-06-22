@@ -643,6 +643,39 @@ mod tests {
     }
 
     #[test]
+    fn shipped_coding_lessons_pack_validates_and_dry_run_seeds_cleanly() {
+        // `learning seed --dry-run` over the shipped pack: it must parse as a
+        // SeedPack and every lesson must be valid and unique — none skipped for an
+        // empty body or a within-pack duplicate.
+        let pack_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../seed-packs/coding-lessons.json");
+        let text = std::fs::read_to_string(&pack_path).unwrap();
+        let pack: localpilot_localmind::SeedPack = serde_json::from_str(&text).unwrap();
+        assert!(!pack.lessons.is_empty(), "the pack has lessons");
+        assert!(
+            pack.lessons.iter().all(|l| !l.body.trim().is_empty()),
+            "every lesson body is non-empty"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let report = learning::seed_memory(dir.path(), &pack.lessons, true).unwrap();
+        assert_eq!(
+            report.seeded,
+            pack.lessons.len(),
+            "every shipped lesson is valid and seeds (dry run)"
+        );
+        assert_eq!(
+            report.skipped, 0,
+            "no empty or duplicate bodies in the pack"
+        );
+    }
+
+    #[test]
     fn purge_without_yes_is_a_dry_run() {
         let dir = tempfile::tempdir().unwrap();
         seed_pending(dir.path());

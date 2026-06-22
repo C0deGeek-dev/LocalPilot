@@ -110,6 +110,42 @@
       "category": "DebuggingRecipe",
       "confidence": 0.85,
       "tags": ["debugging", "environment"]
+    },
+    {
+      "body": "When you spawn a child process, check its exit status before reporting success, and surface its stderr on failure. A non-zero child you ignore is a silent failure; propagate its exit code to your own or fail loudly with what it printed.",
+      "category": "AntiPattern",
+      "confidence": 0.88,
+      "tags": ["subprocess", "exit-code", "error-handling"]
+    },
+    {
+      "body": "Drain a child process's stdout and stderr concurrently (separate threads, async tasks, or a select loop), not one stream fully and then the other: a child that fills the pipe buffer you are not reading blocks forever. And do not call a sequential read 'concurrent' — describe what the code actually does, not what you intended.",
+      "category": "AntiPattern",
+      "confidence": 0.85,
+      "tags": ["subprocess", "deadlock", "concurrency", "honesty"]
+    },
+    {
+      "body": "Pass arguments to a spawned process as a list of separate items, never by interpolating them into one quoted command string. String-built command lines mishandle spaces, quotes, and shell metacharacters and invite injection; an argument vector passes each value to the program verbatim.",
+      "category": "CodePattern",
+      "confidence": 0.88,
+      "tags": ["subprocess", "arguments", "injection", "shell"]
+    },
+    {
+      "body": "Handle a failure to launch an external program (missing executable, wrong path, no permission) as deliberately as a missing required argument: detect it, report a clear actionable error, and exit non-zero. An unhandled spawn error otherwise surfaces later as a confusing downstream symptom.",
+      "category": "Process",
+      "confidence": 0.85,
+      "tags": ["subprocess", "error-handling", "launch-guard"]
+    },
+    {
+      "body": "When the same parsing or formatting logic appears in two places, extract it into one helper both call. Duplicated logic drifts: a fix or a new edge case applied to one copy silently leaves the other wrong.",
+      "category": "CodePattern",
+      "confidence": 0.85,
+      "tags": ["dry", "duplication", "refactoring"]
+    },
+    {
+      "body": "Do not report that code 'builds' or that 'tests pass' until you have actually run the build and the tests and seen them succeed in this environment. An unverified claim of success is worse than no claim — it hides the failure you never looked for.",
+      "category": "AntiPattern",
+      "confidence": 0.9,
+      "tags": ["verification", "honesty", "build", "tests"]
     }
   ]
 }
