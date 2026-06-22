@@ -5,6 +5,8 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Curated best-practice seed packs.** `seed-packs/` ships opt-in coding and
+  research lesson packs plus long-form references; seed them with `localpilot`n  learning seed --file` or `localpilot ingest run`. Nothing is auto-loaded.
 - **Seed curated lessons + re-enable memory injection.** `localpilot learning
   seed --file <pack.json>` writes a curated, author-reviewed set of best-practice
   lessons straight into LocalMind accepted memory (idempotent — re-seeding skips
