@@ -68,6 +68,22 @@ explicitly. The full contract — including the read-only, never-create search
 behaviour and the three distinguished empty states — is in
 [`localmind-integration.md`](localmind-integration.md#store-resolution).
 
+**Search output format.** `learning search` and `memory search` choose their
+output format from context (ADR-0048), so a program reading the output gets a
+machine-readable form without having to know a flag exists:
+
+- **stdout is not a terminal** (piped or redirected) → a **JSON array** by
+  default (`memory_id`, `score`, `path`, `snippet`, `category`);
+- **stdout is a terminal** → the **human table**, plus a one-line stderr hint
+  pointing at the structured form;
+- **`--format human|json`** overrides either way (with `--json` as an alias for
+  `--format json`): `--format human` forces the table even when piped, `--format
+  json` forces JSON on a terminal.
+
+Stdout stays script-stable in every case — an empty result is a valid empty JSON
+array, and all diagnostics (the format hint, the store-resolution and empty-state
+lines) go to stderr.
+
 ## Reference
 
 ### `[provider]`

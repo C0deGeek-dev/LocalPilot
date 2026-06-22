@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Discoverable structured output for `learning search` / `memory search` (ADR-0048).**
+  Adding `--json` was not enough — a dogfood run showed both the operator and the local
+  model missed it and tab-parsed the human table. Now the format is resolved from context:
+  when stdout is **not a terminal** (piped or redirected) the commands emit a JSON array by
+  default; a real terminal still gets the human table plus a one-line stderr hint pointing
+  at the structured form. A uniform `--format human|json` overrides either way (`--json`
+  kept as an alias) — `--format human` forces the table even when piped. `memory search`
+  gains the same JSON output as `learning search`. Stdout stays script-stable; the hint and
+  diagnostics ride on stderr.
+
 - **Workspace-aware LocalMind store resolution.** `localpilot learning` and
   `localpilot memory` now resolve the store like `git` resolves its repo root —
   walking up from the current directory to the nearest ancestor holding

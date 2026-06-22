@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0048: Non-Terminal Callers Get Structured Output By Default
+
+Status: accepted.
+
+`learning search` already grew a `--json` flag, yet a dogfood run proved that
+*adding* a flag is not enough: both the human operator and the local model missed
+it and tab-parsed the human table, because the parent `--help` hides leaf flags
+and the human output advertised no structured alternative. The failure is a
+*discoverability* class, not a missing capability.
+
+Decision: the read commands resolve their output format from context rather than
+forcing the caller to know a flag.
+
+- **Non-terminal stdout defaults to structured.** When stdout is not a terminal
+  (`std::io::IsTerminal` — a pipe or a file, i.e. a program is reading),
+  `learning search` and `memory search` emit a JSON array by default; a real
+  terminal still gets the human table. The gate is strictly `!stdout.is_terminal()`
+  so an interactive session is never changed.
+- **A uniform `--format human|json` overrides either way**, with `--json` kept as
+  an alias for `--format json`. `--format human` forces the table even when piped
+  (the escape hatch for a consumer that parses the text); `--format json` forces
+  JSON on a terminal.
+- **An affordance hint points at the structured form.** When the human table is
+  shown interactively, a single stderr line names `--format json` / `--json`. It is
+  suppressed when output is already structured or non-interactive, so it can never
+  pollute a pipe.
+
+Reuse, not a second serializer: both commands emit through the existing `--json`
+writer (`SearchHit` serialization), and the format/hint logic lives in one small
+`output` module the two commands share. Stdout stays script-stable in every case —
+an empty result is a valid empty JSON array, and the diagnostics ride on stderr.
+
+Tier-1 parity: `IsTerminal` is the std cross-platform check (Windows/Linux/macOS),
+and the resolver is unit-tested independent of a real terminal. Rollback is the
+flag-gated behaviour: revert the resolver wire (no state change). Scope is the two
+search commands — the surfaces the run tab-parsed; other read commands keep their
+current output.
+
 ## ADR-0047: An Advisory Whole-Repo Teardown Sweep At The Completion Seam
 
 Status: accepted.

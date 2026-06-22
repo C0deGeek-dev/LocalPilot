@@ -3,6 +3,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::output::OutputFormat;
+
 /// Print a one-line status: entry count and whether injection is enabled.
 ///
 /// # Errors
@@ -45,9 +47,12 @@ pub fn search(
     root: &Path,
     found: bool,
     query: &str,
+    format: OutputFormat,
+    hint: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    let json = format == OutputFormat::Json;
     if !found {
         writeln!(
             err,
@@ -55,11 +60,19 @@ pub fn search(
              create one with `localpilot learning seed`/`closeout`, or pass --workspace <path>",
             root.display()
         )?;
+        // Keep stdout script-stable: a JSON consumer still parses an empty array.
+        if json {
+            writeln!(out, "[]")?;
+        }
         return Ok(());
     }
     let hits = localpilot_localmind::search_readonly(root, query)?;
-    for entry in &hits {
-        writeln!(out, "{}  {}", entry.memory_id, entry.snippet)?;
+    if json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+    } else {
+        for entry in &hits {
+            writeln!(out, "{}  {}", entry.memory_id, entry.snippet)?;
+        }
     }
     if hits.is_empty() {
         let count = if root.join(".localmind.toml").is_file() {
@@ -83,6 +96,9 @@ pub fn search(
                 root.display()
             )?;
         }
+    }
+    if hint {
+        crate::output::write_format_hint(err)?;
     }
     Ok(())
 }

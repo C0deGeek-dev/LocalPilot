@@ -13,6 +13,8 @@ use localpilot_core::SessionId;
 use localpilot_localmind::{self as learning, ReviewVerdict};
 use localpilot_store::Store;
 
+use crate::output::OutputFormat;
+
 /// Close out a session: extract candidate lessons and enqueue them for review.
 ///
 /// # Errors
@@ -192,19 +194,25 @@ pub fn promote(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::
 /// store, and a non-empty store that the query missed — get distinct stderr lines
 /// so a caller can tell them apart instead of reading a bare `no matches`.
 ///
+/// `format` is the resolved output format (a non-terminal stdout defaults to
+/// JSON); `hint` requests the one-line affordance pointing at the structured form
+/// when the human table is shown interactively.
+///
 /// # Errors
 /// Returns an error if the search fails.
 pub fn search(
     root: &Path,
     found: bool,
     query: &str,
-    json: bool,
+    format: OutputFormat,
+    hint: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    let json = format == OutputFormat::Json;
     if !found {
         // (a) No `.localmind` at or above the search start. Diagnose on stderr;
-        // keep stdout script-stable so a `--json` consumer still parses an array.
+        // keep stdout script-stable so a JSON consumer still parses an array.
         writeln!(
             err,
             "localmind: no store found at or above {} (no ancestor holds .localmind) — \
@@ -234,6 +242,9 @@ pub fn search(
     }
     if hits.is_empty() {
         report_empty_search(root, query, err)?;
+    }
+    if hint {
+        crate::output::write_format_hint(err)?;
     }
     Ok(())
 }
@@ -437,7 +448,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        search(dir.path(), false, "anything", false, &mut out, &mut err).unwrap();
+        search(
+            dir.path(),
+            false,
+            "anything",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
 
         assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
         let err = String::from_utf8(err).unwrap();
@@ -453,7 +473,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        search(dir.path(), false, "anything", true, &mut out, &mut err).unwrap();
+        search(
+            dir.path(),
+            false,
+            "anything",
+            OutputFormat::Json,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
         let out = String::from_utf8(out).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert!(
@@ -473,7 +502,16 @@ mod tests {
         .unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        search(dir.path(), true, "anything", false, &mut out, &mut err).unwrap();
+        search(
+            dir.path(),
+            true,
+            "anything",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
 
         assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
         assert!(String::from_utf8(err)
@@ -495,6 +533,7 @@ mod tests {
             dir.path(),
             true,
             "an unrelated query about audio latency",
+            OutputFormat::Human,
             false,
             &mut out,
             &mut err,
@@ -518,6 +557,7 @@ mod tests {
             dir.path(),
             true,
             "subprocess exit code",
+            OutputFormat::Human,
             false,
             &mut out,
             &mut err,
@@ -525,6 +565,81 @@ mod tests {
         .unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("subprocess exit code"), "got: {out}");
+    }
+
+    #[test]
+    fn json_format_emits_an_array_of_hits() {
+        // The structured form a non-terminal stdout resolves to: a JSON array a
+        // consumer can parse, never the tab-separated human table.
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "propagate a subprocess exit code before reporting success",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "subprocess exit code",
+            OutputFormat::Json,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let arr = parsed.as_array().expect("a JSON array");
+        assert!(!arr.is_empty(), "got: {out}");
+        assert!(arr[0].get("memory_id").is_some() && arr[0].get("score").is_some());
+    }
+
+    #[test]
+    fn the_affordance_hint_fires_only_when_requested() {
+        // The hint rides on stderr (never stdout), so it can't pollute a pipe, and
+        // appears only when the caller asks for it (resolved: human + a terminal).
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "always redact secrets before persisting a transcript",
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "redact",
+            OutputFormat::Human,
+            true,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(err).unwrap().contains("--format json"),
+            "the hint must point at the structured form"
+        );
+        assert!(
+            !String::from_utf8(out).unwrap().contains("--format json"),
+            "the hint must never reach stdout"
+        );
+
+        // Not requested → no hint.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "redact",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(!String::from_utf8(err).unwrap().contains("--format json"));
     }
 
     #[test]

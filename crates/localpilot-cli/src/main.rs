@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -23,6 +23,7 @@ mod login_cmd;
 mod mcp;
 mod memory_cmd;
 mod models_cmd;
+mod output;
 mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;
@@ -370,7 +371,16 @@ enum MemoryCommand {
     /// with provenance, confidence, epistemic status, contradictions, staleness.
     Used,
     /// Search entries by query.
-    Search { query: String },
+    Search {
+        query: String,
+        /// Output format. Defaults to a JSON array when stdout is not a terminal
+        /// (piped/redirected) and the human table on a terminal.
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete an entry by id.
     Delete { id: String },
     /// Disable memory injection for this project.
@@ -423,7 +433,12 @@ enum LearningCommand {
     Search {
         /// Search query.
         query: String,
-        /// Emit results as a JSON array (id, score, path, snippet, category).
+        /// Output format. Defaults to a JSON array (id, score, path, snippet,
+        /// category) when stdout is not a terminal (piped/redirected) and the
+        /// human table on a terminal.
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
         #[arg(long)]
         json: bool,
     },
@@ -831,11 +846,19 @@ async fn main() -> anyhow::Result<()> {
                 MemoryCommand::Status => memory_cmd::status(root, &mut stdout)?,
                 MemoryCommand::Inspect => memory_cmd::inspect(root, &mut stdout)?,
                 MemoryCommand::Used => memory_cmd::used(root, &mut stdout)?,
-                MemoryCommand::Search { query } => {
+                MemoryCommand::Search {
+                    query,
+                    format,
+                    json,
+                } => {
+                    let is_tty = io::stdout().is_terminal();
+                    let resolved = output::resolve_format(format, json, is_tty);
                     memory_cmd::search(
                         root,
                         resolution.is_found(),
                         &query,
+                        resolved,
+                        output::show_format_hint(resolved, is_tty),
                         &mut stdout,
                         &mut io::stderr(),
                     )?;
@@ -919,12 +942,19 @@ async fn main() -> anyhow::Result<()> {
                     learning_cmd::seed(root, &file, dry_run, &mut stdout)?
                 }
                 LearningCommand::Promote { id } => learning_cmd::promote(root, &id, &mut stdout)?,
-                LearningCommand::Search { query, json } => {
+                LearningCommand::Search {
+                    query,
+                    format,
+                    json,
+                } => {
+                    let is_tty = io::stdout().is_terminal();
+                    let resolved = output::resolve_format(format, json, is_tty);
                     learning_cmd::search(
                         root,
                         resolution.is_found(),
                         &query,
-                        json,
+                        resolved,
+                        output::show_format_hint(resolved, is_tty),
                         &mut stdout,
                         &mut io::stderr(),
                     )?;
