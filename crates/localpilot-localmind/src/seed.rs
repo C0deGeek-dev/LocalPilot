@@ -289,6 +289,36 @@ mod tests {
     }
 
     #[test]
+    fn seeded_lessons_are_searchable_and_serialize_as_json() {
+        // End-to-end guard for the curated loop: seed -> search -> the hits
+        // serialize to a JSON array (what `learning search --json` emits), so a
+        // regression in any link of seed/retrieve/serialize fails here.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+
+        seed_memory(
+            root,
+            &[lesson(
+                "validate command-line arguments before use and exit non-zero on a missing path",
+            )],
+            false,
+        )
+        .unwrap();
+
+        let hits = crate::ops::search(root, "validate arguments").unwrap();
+        assert!(!hits.is_empty(), "seeded lesson must be retrievable");
+
+        let json = serde_json::to_string(&hits).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array(), "search hits serialize to a JSON array");
+        assert!(
+            parsed[0].get("category").is_some() && parsed[0].get("score").is_some(),
+            "each hit carries category and score for agent consumption"
+        );
+    }
+
+    #[test]
     fn dry_run_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
