@@ -41,6 +41,14 @@ enum ConstraintMode {
     /// llama.cpp server extension: a top-level `json_schema` field the server
     /// compiles to a GBNF grammar. Opt-in for a server that rejects the wrapper.
     JsonSchema,
+    /// A top-level GBNF `grammar` string. The constraint is emitted as a hand-built
+    /// grammar (valid tool call: a known tool name + a JSON-object arguments
+    /// payload) rather than a JSON schema. A turboquant `llama-server`'s
+    /// lazy-grammar accepts this even when the model emits a `<think>` prefix that
+    /// the json-schema→grammar path rejects (live finding, ADR-0044). Argument
+    /// payloads are constrained to *valid JSON*, not to each tool's argument
+    /// schema (that finer constraint is a follow-up).
+    Grammar,
 }
 
 /// An OpenAI-compatible chat-completions provider.
@@ -166,6 +174,15 @@ impl OpenAiProvider {
                         // docs/04-provider-contract.md for provenance.
                         body["json_schema"] = constraint.clone();
                     }
+                    ConstraintMode::Grammar => {
+                        // Build the GBNF from the tool names (not the JSON-schema
+                        // constraint): a turboquant server's lazy-grammar accepts
+                        // a top-level `grammar` even with a `<think>` prefix, where
+                        // the json-schema path 400s.
+                        if !request.tools.is_empty() {
+                            body["grammar"] = json!(tool_call_grammar(&request.tools));
+                        }
+                    }
                     ConstraintMode::ResponseFormat => {
                         body["response_format"] = json!({
                             "type": "json_schema",
@@ -219,6 +236,7 @@ impl OpenAiProvider {
             .and_then(Value::as_str)
         {
             Some("json_schema") => ConstraintMode::JsonSchema,
+            Some("grammar") => ConstraintMode::Grammar,
             _ => ConstraintMode::ResponseFormat,
         }
     }
@@ -239,6 +257,38 @@ impl OpenAiProvider {
             .and_then(Value::as_bool)
             .unwrap_or(self.declaration.source_type != SourceType::OfficialApi)
     }
+}
+
+/// Build a GBNF grammar constraining the output to a single valid tool call:
+/// `{ "name": <one of the tool names>, "arguments": <any JSON object> }`. The
+/// JSON sub-grammar is authored from the JSON specification (original; not copied
+/// from any project's grammar file). Argument payloads are constrained to valid
+/// JSON, not to each tool's own argument schema — the per-schema constraint is a
+/// follow-up. `tools` is assumed non-empty (the caller skips the empty case).
+fn tool_call_grammar(tools: &[ToolSpec]) -> String {
+    // Each tool name as a GBNF double-quoted string literal, `"` and `\` escaped.
+    let names = tools
+        .iter()
+        .map(|tool| {
+            let escaped = tool.name.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"\\\"{escaped}\\\"\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        concat!(
+            "root    ::= \"{{\" ws \"\\\"name\\\"\" ws \":\" ws name ws \",\" ws ",
+            "\"\\\"arguments\\\"\" ws \":\" ws object ws \"}}\"\n",
+            "name    ::= {names}\n",
+            "value   ::= object | array | string | number | \"true\" | \"false\" | \"null\"\n",
+            "object  ::= \"{{\" ws ( string ws \":\" ws value ( ws \",\" ws string ws \":\" ws value )* )? ws \"}}\"\n",
+            "array   ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\n",
+            "string  ::= \"\\\"\" ( [^\"\\\\] | \"\\\\\" [\"\\\\/bfnrt] | \"\\\\u\" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] )* \"\\\"\"\n",
+            "number  ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [-+]? [0-9]+ )?\n",
+            "ws      ::= [ \\t\\n]*\n",
+        ),
+        names = names,
+    )
 }
 
 fn reqwest_client(timeout: Option<Duration>) -> reqwest::Client {
@@ -1069,6 +1119,42 @@ mod tests {
             body.get("constraint_mode").is_none(),
             "constraint_mode is a local selector, not a wire field"
         );
+    }
+
+    #[test]
+    fn grammar_constraint_mode_emits_a_gbnf_grammar_field() {
+        // A server whose json-schema→grammar path rejects a `<think>` prefix opts
+        // into a top-level GBNF `grammar` built from the tool names.
+        let mut options = IndexMap::new();
+        options.insert("constraint_mode".to_string(), json!("grammar"));
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_default_options(options);
+        let mut request = ModelRequest::new("m", Vec::new());
+        request.tools = vec![ToolSpec {
+            name: "read_file".to_string(),
+            description: "read".to_string(),
+            input_schema: json!({ "type": "object" }),
+        }];
+        request.tool_constraint = Some(json!({ "type": "object" }));
+
+        let body = provider.build_body(&request);
+        let grammar = body
+            .get("grammar")
+            .and_then(Value::as_str)
+            .expect("grammar mode must send a top-level grammar string");
+        assert!(grammar.contains("root"), "grammar must define a root rule");
+        assert!(
+            grammar.contains("\\\"read_file\\\""),
+            "grammar must constrain the name to the tool: {grammar}"
+        );
+        assert!(body.get("response_format").is_none());
+        assert!(body.get("json_schema").is_none());
     }
 
     #[test]

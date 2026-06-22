@@ -116,12 +116,22 @@ top-level `json_schema` field is **not** sufficient — it returns the same
 `400 "empty grammar stack after <think>"` as the `response_format` wrapper,
 because the json-schema→grammar conversion forbids the model's `<think>` opening.
 Only a raw **GBNF `grammar` field** engages (turboquant's lazy-grammar tolerates
-the `<think>` prefix, returns `200`). So `constraint_mode = "json_schema"` reaches
-the grammar on servers that accept the top-level field but **does not** fix this
-turboquant model. The bounded follow-up is a `constraint_mode = "grammar"` that
-emits GBNF (a json-schema→GBNF conversion of the tool-call constraint); it was
-scoped out of this pass. The lever therefore stays default-off, now on live
-evidence, not just policy.
+the `<think>` prefix, returns `200`).
+
+So a third encoding was added: `constraint_mode = "grammar"` emits a top-level
+GBNF `grammar` built from the tool names — a *valid tool call* grammar
+(`{ "name": <one of the tools>, "arguments": <any JSON object> }`) with a JSON
+sub-grammar authored from the JSON spec (original, not copied). Live-verified:
+the grammar engages on the turboquant server (`200`, the model emits a valid
+constrained tool call after its `<think>` prefix). Argument payloads are
+constrained to *valid JSON*, not to each tool's own argument schema — that finer
+per-schema constraint (a generic json-schema→GBNF converter) remains a follow-up.
+
+All three encodings ship **opt-in**, default `response_format`. The `grammar`
+encoding now *engages* the grammar (subject-02's goal), but a default-on change
+still needs a tool-discipline uplift eval to clear it (D002); on `q3635ba3bapex`
+discipline is near-ceiling (native already `first_call_arg=100%`), so it stays
+default-off pending that measurement.
 
 ## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
 

@@ -36,8 +36,13 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
   ADR-0044 and docs/04-provider-contract.md. **Live finding (2026-06-22):** on a
   turboquant `q3635ba3bapex` server the `json_schema` field still `400`s on the
   model's `<think>` prefix (same as `response_format`); only a raw GBNF `grammar`
-  field engages there. A `constraint_mode = "grammar"` (json-schema→GBNF) is the
-  recorded follow-up; the lever stays default-off.
+  field engages there — so a third encoding, `constraint_mode = "grammar"`, was
+  added: it emits a top-level GBNF `grammar` (a valid-tool-call grammar built from
+  the tool names, JSON sub-grammar authored from the JSON spec). Live-verified to
+  engage (`200`, valid constrained tool call after `<think>`). Per-argument schema
+  constraint (a json-schema→GBNF converter) remains a follow-up. All three
+  encodings are opt-in, default `response_format`; default-off pending a
+  discipline eval.
 - **Constrained decoding is disabled after a server rejects it.** A local
   OpenAI-compatible server that declares constrained decoding but returns a
   client error on the schema-constrained request now has the constraint dropped

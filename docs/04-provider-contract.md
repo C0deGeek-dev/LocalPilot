@@ -176,9 +176,15 @@ is selectable per provider via the `constraint_mode` option (default
   The default and the floor.
 - `json_schema` — a documented llama.cpp server extension: the schema is sent as
   a **top-level `json_schema` field**, which the server compiles to a GBNF
-  grammar. Use this for a local server (e.g. a turboquant `llama-server` build)
-  that rejects the `response_format` wrapper with a client error. Documented in
-  the public llama.cpp HTTP server API; no private endpoint behaviour.
+  grammar. Documented in the public llama.cpp HTTP server API; no private endpoint
+  behaviour. (Note: on a turboquant build whose json-schema→grammar path rejects a
+  `<think>` prefix, this still `400`s — use `grammar`.)
+- `grammar` — a top-level **GBNF `grammar`** string built from the tool names: a
+  valid-tool-call grammar (`{ "name": <one of the tools>, "arguments": <JSON
+  object> }`). Use this for a turboquant `llama-server` whose lazy-grammar engages
+  a GBNF even after a `<think>` prefix (where the json-schema path `400`s).
+  Constrains the tool-call *shape* and a valid-JSON arguments payload, not each
+  tool's argument schema.
 
 ```toml
 [providers.local]
