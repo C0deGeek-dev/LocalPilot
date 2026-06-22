@@ -282,7 +282,10 @@ spliced in, if **any** hold:
 Tier L mechanics: subjects (5-8) with stable box IDs, an append-only decision
 log, resume-safe checkpoints (update plan → run gate → commit → push), and a
 **Captain Hindsight** review at each subject close (not per box; for Tier S the
-`/code-review` + `/simplify` pass is the lighter equivalent).
+`/code-review` + `/simplify` pass is the lighter equivalent). The §7 gate also
+requires one **cleanup-audit** whole-repo teardown review before sign-off (waivable
+by a decision) — the periodic full-repo sweep, distinct from the per-subject
+Hindsight passes.
 
 Gate per checkpoint is the four-command gate in §6 (fmt/clippy/test/check);
 hygiene (`machete` on dep change, `deny`/`audit` before a release milestone) is
