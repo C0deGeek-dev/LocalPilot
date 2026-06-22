@@ -11,6 +11,8 @@
 //! private endpoint behaviour, prompts, or identifiers were copied.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -34,6 +36,12 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: Option<Secret>,
     default_options: IndexMap<String, Value>,
+    /// Set once a server that *declares* constrained decoding rejects the schema
+    /// constraint (a client error on a constrained request). After that, the
+    /// constraint is dropped up-front for the rest of this provider's life rather
+    /// than re-sent and rejected every turn. Interior-mutable so a shared
+    /// `Arc<dyn ModelProvider>` can flip it.
+    constrained_rejected: Arc<AtomicBool>,
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -87,6 +95,7 @@ impl OpenAiProvider {
             base_url: base_url.into(),
             api_key,
             default_options: IndexMap::new(),
+            constrained_rejected: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,12 +135,17 @@ impl OpenAiProvider {
         }
         // A constrained-decoding server accepts a JSON-schema constraint via the
         // structured-output `response_format` field. Absent for every other
-        // provider, so the body is unchanged for them.
+        // provider, so the body is unchanged for them. Skipped once a server has
+        // rejected the constraint (`constrained_rejected`, set in `stream`): it
+        // won't be accepted later either, so don't re-send it and pay a rejected
+        // round-trip every turn.
         if let Some(constraint) = &request.tool_constraint {
-            body["response_format"] = json!({
-                "type": "json_schema",
-                "json_schema": { "name": "tool_call", "schema": constraint },
-            });
+            if !self.constrained_rejected.load(Ordering::Relaxed) {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "tool_call", "schema": constraint },
+                });
+            }
         }
         if self.suppresses_thinking() && !self.has_option("reasoning_effort", request) {
             body["reasoning_effort"] = json!("minimal");
@@ -221,8 +235,9 @@ impl ModelProvider for OpenAiProvider {
             tracing::warn!(
                 status = status.as_u16(),
                 model = %request.model,
-                "constrained-decoding request was rejected; falling back to native tool-calling"
+                "constrained-decoding request was rejected; disabling it for this provider and falling back to native tool-calling"
             );
+            self.constrained_rejected.store(true, Ordering::Relaxed);
             let mut fallback = request.clone();
             fallback.tool_constraint = None;
             return self.stream(fallback).await;
@@ -938,6 +953,41 @@ mod tests {
         let serialized = body.to_string();
         assert!(serialized.contains("deduce"));
         assert!(serialized.contains("sig-123"));
+    }
+
+    #[test]
+    fn constrained_request_is_dropped_after_a_rejection() {
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        );
+        let mut request = ModelRequest::new("m", Vec::new());
+        request.tool_constraint = Some(serde_json::json!({ "type": "object" }));
+
+        // Before any rejection, the schema constraint rides as `response_format`.
+        assert!(
+            provider
+                .build_body(&request)
+                .get("response_format")
+                .is_some(),
+            "the constraint must be sent before any rejection"
+        );
+
+        // Once a server has rejected it, the constraint is dropped up-front so it
+        // is not re-sent and rejected every turn.
+        provider
+            .constrained_rejected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            provider
+                .build_body(&request)
+                .get("response_format")
+                .is_none(),
+            "the constraint must be dropped after a rejection is recorded"
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,12 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Constrained decoding is disabled after a server rejects it.** A local
+  OpenAI-compatible server that declares constrained decoding but returns a
+  client error on the schema-constrained request now has the constraint dropped
+  for the rest of the session after the first rejection, instead of re-sending
+  it (and logging a fallback warning) every turn. Native tool-calling is the
+  fallback, unchanged.
 - **Curated best-practice seed packs.** `seed-packs/` ships opt-in coding and
   research lesson packs plus long-form references; seed them with `localpilot
   learning seed --file` or `localpilot ingest run`. Nothing is auto-loaded.
