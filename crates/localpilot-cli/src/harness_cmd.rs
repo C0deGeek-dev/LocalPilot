@@ -37,8 +37,14 @@ lookup_policy = \"evidence\"\n\n\
 [permissions]\n\
 profile = \"default\"\n\n\
 [provider]\n\
-default = \"local\"\n\n\
-# Configure your default provider, then `localpilot` launches the REPL against it.\n\
+# Configure a provider below, then uncomment `default` to point at it. Until\n\
+# then `localpilot` prints this doctor report instead of launching the REPL,\n\
+# and `ask`/`print`/`chat` report that no provider is configured (rather than\n\
+# referencing a provider that does not exist).\n\
+# default = \"local\"\n\n\
+# Point base_url at your local OpenAI-compatible server (llama.cpp, Ollama,\n\
+# vLLM, LM Studio, ...) and set the model it serves. For an Anthropic-compatible\n\
+# endpoint, use kind = \"anthropic\" and the /v1 base URL.\n\
 # [providers.local]\n\
 # kind = \"openai-compatible\"\n\
 # base_url = \"http://localhost:8080/v1\"\n\
@@ -787,5 +793,24 @@ mod tests {
             gate: vec!["fmt (step)".to_string(), "test (phase)".to_string()],
         };
         insta::assert_snapshot!(report.render());
+    }
+
+    #[test]
+    fn default_config_has_no_dangling_default_provider() {
+        // The starter config must stay internally consistent: an active
+        // `default = "..."` line requires an active `[providers.<id>]` table.
+        // Shipping `default = "local"` with the provider commented out made the
+        // first `ask`/`print`/`chat` fail to resolve a provider.
+        let active = |prefix: &str| {
+            DEFAULT_CONFIG.lines().any(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with('#') && trimmed.starts_with(prefix)
+            })
+        };
+        assert_eq!(
+            active("default ="),
+            active("[providers."),
+            "starter config: an active default provider must have an active [providers.*] table"
+        );
     }
 }

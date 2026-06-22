@@ -5,6 +5,21 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`doctor` reports a truthful version after a same-branch rebuild.** The embedded
+  `git describe` version is captured by `build.rs`, which previously only re-ran when
+  `.git/HEAD` changed — but a commit on the current branch advances the branch ref, not
+  HEAD, so the reported version went stale after a pull + rebuild. The build script now
+  also retriggers on the resolved branch ref and `packed-refs`.
+- **`localpilot init` no longer writes a dangling default provider.** The starter
+  `.localpilot.toml` shipped `default = "local"` with `[providers.local]` commented out,
+  so the first `ask`/`print`/`chat` failed to resolve a provider. The `default` line is
+  now commented alongside the provider block, with guidance to uncomment both once a
+  provider is configured.
+- **`localpilot models` explains an empty result.** When the only configured providers
+  speak a protocol with no `GET /models` listing (e.g. `anthropic`), the command names
+  them and explains the served model is whatever the local server has loaded, rather than
+  printing a blanket "no providers ... configured".
+
 - **`learning seed` now records an audit row per lesson.** Seeding writes accepted
   memory directly (the human gate moves to authoring time), but previously left no
   trace in `learning audit`. Each seeded lesson now writes an audit event (actor
