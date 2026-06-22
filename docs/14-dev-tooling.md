@@ -39,6 +39,15 @@ Slash-invoked skills that map cleanly onto this project's workflow:
   [13-rust-best-practices.md](13-rust-best-practices.md).
 - **`/simplify`** — quality-only pass for reuse/simplification/efficiency on the
   changed code. Good after a feature lands and before review.
+- **`cleanup-audit`** *(c0degeek plugin skill, not a built-in slash command)* —
+  a whole-repo teardown review: finds dead/duplicate/over-engineered/legacy code,
+  redundant queries, unused dependencies, and doc/test drift, then emits a triaged,
+  report-only cleanup plan. This is the periodic full-repo sweep that `/code-review`
+  and `/simplify` (diff-scoped) and Captain Hindsight (per-subject close-out) leave
+  uncovered — run it deliberately, not every PR. It should lean on `cargo machete`,
+  `clippy`, and `cargo deny`/`audit` (§3) rather than re-deriving what they report,
+  and stay clean-room (recommend removal/consolidation only, never importing
+  external code).
 - **`/security-review`** — security pass on pending branch changes. Run it on
   anything touching `localpilot-sandbox`, `run_shell`, path handling, or secret
   redaction.
