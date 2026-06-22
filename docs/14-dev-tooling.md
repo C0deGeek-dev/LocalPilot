@@ -47,7 +47,10 @@ Slash-invoked skills that map cleanly onto this project's workflow:
   uncovered — run it deliberately, not every PR. It should lean on `cargo machete`,
   `clippy`, and `cargo deny`/`audit` (§3) rather than re-deriving what they report,
   and stay clean-room (recommend removal/consolidation only, never importing
-  external code).
+  external code). The product harness mirrors this skill as a built-in **advisory
+  completion teardown sweep** — the same categories run at the completion seam under
+  `[harness] teardown_sweep`, and on demand via `localpilot self-review --cleanup`
+  (ADR-0047, [06-harness-spec.md](06-harness-spec.md)).
 - **`/security-review`** — security pass on pending branch changes. Run it on
   anything touching `localpilot-sandbox`, `run_shell`, path handling, or secret
   redaction.
@@ -285,7 +288,9 @@ log, resume-safe checkpoints (update plan → run gate → commit → push), and
 `/code-review` + `/simplify` pass is the lighter equivalent). The §7 gate also
 requires one **cleanup-audit** whole-repo teardown review before sign-off (waivable
 by a decision) — the periodic full-repo sweep, distinct from the per-subject
-Hindsight passes.
+Hindsight passes. The product harness ships the same sweep built in as an advisory
+completion-seam pass (`[harness] teardown_sweep`; ADR-0047), so a dogfooded run can
+surface the cleanup findings without a separate skill invocation.
 
 Gate per checkpoint is the four-command gate in §6 (fmt/clippy/test/check);
 hygiene (`machete` on dep change, `deny`/`audit` before a release milestone) is

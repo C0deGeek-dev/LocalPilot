@@ -252,6 +252,12 @@ enum Command {
         /// Include the heuristic, low-confidence missing-test detector.
         #[arg(long)]
         missing_tests: bool,
+        /// Run the whole-repo teardown sweep: add the cleanup-audit detectors
+        /// (dead/abandoned code, duplicate logic, over-engineering, redundant data
+        /// access, plus tool-owned pointers). This is the on-demand path to the
+        /// sweep the harness runs at completion under `[harness] teardown_sweep`.
+        #[arg(long)]
+        cleanup: bool,
         /// Fold in a model's harness-friction block read from this file.
         #[arg(long)]
         friction_file: Option<PathBuf>,
@@ -1050,6 +1056,7 @@ async fn main() -> anyhow::Result<()> {
         Command::SelfReview {
             json,
             missing_tests,
+            cleanup,
             friction_file,
             process_file,
             audit_prompt,
@@ -1067,6 +1074,7 @@ async fn main() -> anyhow::Result<()> {
                     &self_review_cmd::SelfReviewArgs {
                         json,
                         missing_tests,
+                        cleanup,
                         friction_file: friction_file.as_deref(),
                         process_file: process_file.as_deref(),
                     },

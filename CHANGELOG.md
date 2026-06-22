@@ -5,6 +5,18 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Advisory whole-repo teardown sweep at completion.** When `[harness]
+  teardown_sweep` is enabled, the harness runs a read-only cleanup-audit pass at
+  the completion seam alongside the retrospective — surfacing dead/abandoned code,
+  duplicate/parallel logic, over-engineering, redundant data access, and doc/test
+  drift as ranked advisory findings (each with a category, confidence, risk,
+  recommended action, and the hidden-usage channels ruled out). It extends the
+  existing `localpilot-selfreview` scanner (no second scanner), leans on
+  `cargo machete`/`clippy`/`cargo deny` for tool-owned categories rather than
+  re-deriving them, and is advisory by construction: it never blocks completion,
+  edits code, or commits. Off by default; the same pass is available on demand via
+  `localpilot self-review --cleanup`. See ADR-0047 and docs/06-harness-spec.md.
+
 - **Promote a curated lesson to an always-on rule cue.** A seed lesson tagged
   `rule-cue` is injected every turn as terse, always-present guidance (independent
   of prompt relevance) — a weak model acts on a short always-on rule better than

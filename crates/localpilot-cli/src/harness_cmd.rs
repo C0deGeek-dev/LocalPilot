@@ -487,6 +487,17 @@ where
                     writeln!(out, "  {offered} lesson(s) offered to LocalMind review")?;
                 }
             }
+            // Advisory whole-repo teardown sweep (best-effort): when opted in, run
+            // the read-only cleanup-audit pass alongside the retrospective and print
+            // its ranked findings. It is deterministic and offline — no provider
+            // call — and read-only by construction, so it never blocks completion,
+            // edits code, or commits. The result is ignored so even a write hiccup
+            // on `out` cannot break a finished run.
+            let _ = crate::self_review_cmd::run_completion_sweep(
+                root,
+                config.harness.teardown_sweep,
+                out,
+            );
             break;
         }
 

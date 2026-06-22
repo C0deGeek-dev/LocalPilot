@@ -503,6 +503,13 @@ pub struct HarnessConfig {
     /// The no-unsupported-claim gate over the final reply. `off` (default) skips
     /// it; `warn` flags a completed-action claim no verified tool call supports.
     pub claim_gate: ClaimGate,
+    /// Run the advisory whole-repo teardown sweep at the completion seam, after
+    /// the final step is committed, alongside the completion retrospective. It is
+    /// read-only and advisory — it surfaces cleanup-audit findings (dead code,
+    /// duplicate logic, over-engineering, redundant access, doc/test drift) and
+    /// never blocks completion, edits code, or commits. Off by default (features
+    /// ship off); the on-demand path is `self-review --cleanup`.
+    pub teardown_sweep: bool,
 }
 
 impl Default for HarnessConfig {
@@ -518,6 +525,7 @@ impl Default for HarnessConfig {
             tool_call_budget: None,
             tool_call_budget_max: None,
             claim_gate: ClaimGate::default(),
+            teardown_sweep: false,
         }
     }
 }
@@ -961,6 +969,28 @@ mod tests {
             );
         }
         assert!(HarnessConfig::default().rules.is_empty());
+    }
+
+    #[test]
+    fn teardown_sweep_is_off_by_default_and_parses_on() {
+        // The completion teardown sweep ships off: the default config and a config
+        // that omits the key both leave it disabled.
+        assert!(!HarnessConfig::default().teardown_sweep);
+        let omitted: HarnessConfig =
+            serde_json::from_str(r#"{"context_token_limit": 8000}"#).unwrap();
+        assert!(!omitted.teardown_sweep);
+        // A whole Config with no harness key keeps it off.
+        let config: Config = serde_json::from_value(json!({})).unwrap();
+        assert!(!config.harness.teardown_sweep);
+        // It opts in explicitly and round-trips.
+        let on: HarnessConfig = serde_json::from_value(json!({ "teardown_sweep": true })).unwrap();
+        assert!(on.teardown_sweep);
+        let value = serde_json::to_value(&on).unwrap();
+        assert!(
+            serde_json::from_value::<HarnessConfig>(value)
+                .unwrap()
+                .teardown_sweep
+        );
     }
 
     #[test]

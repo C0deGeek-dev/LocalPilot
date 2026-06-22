@@ -2,6 +2,47 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0047: An Advisory Whole-Repo Teardown Sweep At The Completion Seam
+
+Status: accepted.
+
+The harness mirrors the developer-process ceremonies it asks of its own builders:
+the completion **retrospective** (ADR-0035) is the backward look at the brief, and
+the quality gate (ADR-0009) blocks a step on failing checks. What it lacked is the
+whole-repo **cruft sweep** the plan template now requires at a plan's §7 gate (the
+c0degeek `cleanup-audit`): dead/abandoned code, duplicate/parallel logic,
+over-engineering, redundant data access, and doc/test drift surfaced as triaged,
+advisory findings before work is called done.
+
+Decision: extend the existing read-only scanner `localpilot-selfreview` — already
+the whole-repo analog of `cleanup-audit` — with detectors for those categories, and
+run it at the completion seam alongside the retrospective behind a default-off
+`[harness] teardown_sweep` flag. It is **not** a second scanner and **not** a new
+gate:
+
+- **Extend, don't fork.** New detectors join the one bounded walk and the one
+  ranked `Report`; findings carry the existing severity/confidence plus a new
+  `risk`, a recommended action, and the hidden-usage channels the detector ruled
+  out (the cleanup-audit safety invariant). No finding reaches high confidence from
+  the absence of local references alone.
+- **Lean on tools, don't re-derive them.** Categories tooling owns — unused deps
+  (`cargo machete`), unused imports/vars and dead-code warnings (`clippy`),
+  advisories (`cargo deny`) — are surfaced as pointer findings that name the
+  command to run, never reimplemented.
+- **Advisory by construction (ADR-0034/0035 lineage).** The sweep is deterministic
+  and offline (no provider call), read-only, and human-gated: it never blocks
+  completion, edits code, or commits, and nothing is auto-enqueued as accepted
+  memory (review-gated only, ADR-0037). A finding opens a *new* plan; it is never
+  folded back into the run that surfaced it.
+
+Opt-in and default-off: the completion sweep runs only under `[harness]
+teardown_sweep = true`; the same pass is available on demand as `self-review
+--cleanup`. Rollback is the flag (off) or reverting the one-line seam wire. The
+`localpilot-selfreview` report schema stays `localpilot-selfreview-v1` — the new
+fields are additive and serde-defaulted, so an existing consumer is unaffected.
+Refines ADR-0034 (self-improvement loop) and ADR-0035 (advisory completion
+retrospective).
+
 ## ADR-0046: Promote A Curated Lesson To A Rule Cue; Down-Weight By Routing To Review
 
 Status: accepted.

@@ -10,6 +10,7 @@ use std::path::Path;
 
 use regex::Regex;
 
+use crate::cleanup::{self, DuplicateAggregate, TraitImplAggregate};
 use crate::finding::{Finding, FindingKind, Severity, Span};
 
 /// Files larger than this are skipped (a health scan needn't read blobs).
@@ -19,11 +20,22 @@ const MAX_DIR_DEPTH: usize = 32;
 
 /// Run every detector over `root` in one read-only walk. Returns the findings and
 /// the number of files read.
+///
+/// `include_cleanup` turns on the whole-repo teardown-sweep detectors (the
+/// cleanup-audit categories); it is off by default so the always-on `self-review`
+/// surface is unchanged unless a caller opts in.
 #[must_use]
-pub fn scan(root: &Path, include_missing_tests: bool) -> (Vec<Finding>, usize) {
+pub fn scan(
+    root: &Path,
+    include_missing_tests: bool,
+    include_cleanup: bool,
+) -> (Vec<Finding>, usize) {
     let mut findings = Vec::new();
     let mut scanned = 0_usize;
     let mut adr = AdrAggregate::default();
+    let mut duplicates = DuplicateAggregate::default();
+    let mut traits = TraitImplAggregate::default();
+    let mut saw_cargo_manifest = false;
 
     let walker = ignore::WalkBuilder::new(root)
         .max_depth(Some(MAX_DIR_DEPTH))
@@ -51,10 +63,27 @@ pub fn scan(root: &Path, include_missing_tests: bool) -> (Vec<Finding>, usize) {
         if include_missing_tests && is_rust_source(path) {
             findings.extend(missing_tests(&rel, &text));
         }
+        if include_cleanup {
+            saw_cargo_manifest |= is_cargo_manifest(path);
+            findings.extend(cleanup::legacy_file(&rel));
+            if is_rust_source(path) {
+                findings.extend(cleanup::dead_code_allows(&rel, &text));
+                findings.extend(cleanup::redundant_access(&rel, &text));
+                duplicates.observe(&rel, &text);
+                traits.observe(&rel, &text);
+            }
+        }
         adr.observe(&rel, &text);
     }
 
     findings.extend(adr.stale_findings());
+    if include_cleanup {
+        findings.extend(duplicates.findings());
+        findings.extend(traits.findings());
+        if saw_cargo_manifest {
+            findings.extend(cleanup::tool_pointers());
+        }
+    }
     (findings, scanned)
 }
 
@@ -307,6 +336,13 @@ fn is_rust_source(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e == "rs")
+}
+
+/// Whether a file is a `Cargo.toml` (the marker that tool-owned categories apply).
+fn is_cargo_manifest(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("Cargo.toml"))
 }
 
 /// Display a path project-relative with forward slashes, for stable, portable
