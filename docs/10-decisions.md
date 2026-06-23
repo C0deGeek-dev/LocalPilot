@@ -2,6 +2,65 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0051: Tool Arguments Get A Schema-Aware Error And An Opt-In, Contract-Gated Repair
+
+Status: accepted.
+
+A local/open model often emits a tool call whose arguments are well-formed JSON
+but violate the tool's contract — a bare string where an array is expected, a
+stringified array, a markdown autolink in a path. Today the model was handed the
+raw serde error string and wasted a turn (or degraded the session). The validity
+metric scaffold (`CallRecord.schema_valid`, `DisciplineMetrics.schema_valid_rate`)
+shipped but was never lit up.
+
+Decision: add three coordinated, measurement-gated stages on the existing
+deserialize chokepoint — no new crate, no global preprocess — built as additions
+to `localpilot-tools` and wired once at the pre-dispatch seam.
+
+- **A shared schema validator** (`localpilot-tools::validate`) classifies a call's
+  structural issues by failure mode. It lights up `schema_valid` in the evidence
+  projection and the `eval` scorecard (`schema_valid_rate`), and emits redacted
+  `tool_input_valid` / `tool_input_invalid` session events. The raw `schema_valid`
+  signal stays honest — a repaired call is recorded as raw-invalid plus repaired,
+  never flipped, so the anti-gaming paired metric can see the model's real rate.
+- **A model-readable error** replaces the raw serde blob with a concise,
+  schema-aware message (offending field, expected shape, a valid example from the
+  tool's `ToolContract.examples`), built value-free so it cannot leak a secret.
+  It is delivered as the tool result at the pre-dispatch seam (the validator-first
+  / retry-with-error pattern). `[tools] readable_errors` defaults **on**; off
+  restores the raw message exactly. The arg-shape retry loop is bounded by the
+  per-turn tool-call budget (ADR-0029), not the bad-output degrade counter — a
+  recoverable argument mistake is not degenerate output, so the new
+  `RecoveryAction::RepairToolArguments` rung is non-degrading.
+- **A validator-first repair stage** repairs **only** the validator-reported
+  fields with three schema-typed rules (`wrap_bare_string_as_array`,
+  `parse_stringified_json`, `unwrap_markdown_autolink`), re-validates, and either
+  runs the repaired call (with a model-visible note) or falls back to the readable
+  error. `[tools] repair` is `off|warn|on`, default **off**, warn-before-on.
+
+Safety is provable from the contract: repair runs only on a `ReadOnly`/`ProjectWrite`,
+non-`Irreversible`, non-MCP tool, and never on a content/command field. To make
+that gate provable, three under-classified git contracts are corrected to their
+honest side-effect class (`git_restore` → `Destructive`, `git_commit` →
+`ExternalWrite`, `apply_patch` → `Destructive`); this is advisory metadata only —
+the permission path and the prompts are unchanged, and the verifier does not read
+`side_effect`. A schema-intent marker (`#[schemars(schema_with = "...")]` helpers
+emitting `x-localpilot-intent`) declares each field's intent so a rule keys off the
+declared meaning, not a field-name guess, and a content/command field is provably
+repair-exempt. Repair changes arguments, never authority: the permission engine
+runs on the repaired input (reveal-never-grant). Every repair and every high-risk
+refusal is a redacted session event.
+
+LocalMind participation is reuse-only and opt-in (`[tools] repair_learning`,
+default off): the session's repair patterns are offered to the existing
+review-gated queue as aggregate, redacted candidates — no raw inputs, no accepted
+memory, no new store. Reject the marketing (repair does not make a weak model
+out-reason a strong one); the offline `localbench-uplift-v1` A/B closes the work
+with a `task_completeness`-paired-with-`tool_call_validity` headline (a validity-only
+lift is a no-win) and a cheap-prompt control; the live local-model arm is
+opportunistic (D008). Supersedes nothing; extends the Tool Discipline track (the
+cure sibling of grammar's prevent, ADR-0044, and the model re-prompt, ADR-0038).
+
 ## ADR-0050: `doctor` And `models` Are Agent-Consumable Under The `--format` Contract
 
 Status: accepted.

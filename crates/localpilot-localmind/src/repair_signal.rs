@@ -5,11 +5,11 @@
 //! to LocalMind as a **review-gated** candidate, so a human can learn "this model
 //! tends to send this tool's arguments in the wrong shape — emit the right one."
 //!
-//! Reuse-only (D009): it wires the previously-unwired [`tool_use_candidate`]
-//! producer onto the existing review queue ([`write_retrospective_lesson`]'s
-//! ADR-0037 path), stores **no** raw inputs/paths/content (only model id, tool
-//! name, malformed-class label, and a count), writes no accepted memory, and adds
-//! no new store. A model-specific *rule cue* (always-on injection) is deliberately
+//! Reuse-only: it wires the previously-unwired [`tool_use_candidate`] producer
+//! onto the existing review queue ([`write_retrospective_lesson`]'s ADR-0037
+//! path), stores **no** raw inputs/paths/content (only model id, tool name,
+//! malformed-class label, and a count), writes no accepted memory, and adds no
+//! new store. A model-specific *rule cue* (always-on injection) is deliberately
 //! **not** auto-created here — that is an open question (per-model lesson sprawl);
 //! a human may promote an accepted candidate to a cue through the existing
 //! `register_rule_cues` path.
@@ -29,7 +29,7 @@ use crate::tool_use::{tool_use_candidate, ToolUseSignal};
 const REPAIR_CONFIDENCE: f32 = 0.4;
 
 /// The review session label repair candidates are enqueued under.
-const REPAIR_SESSION: &str = "tool-input-repair";
+const REPAIR_SESSION: &str = "argument-repair";
 
 /// An aggregate, redacted argument-repair signal for one `(model, tool)` pair:
 /// which malformed-argument classes the model needed repaired, and how often.

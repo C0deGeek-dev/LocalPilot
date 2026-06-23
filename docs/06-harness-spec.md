@@ -541,8 +541,24 @@ retry:
   [`append_file`](05-tool-system.md). This recovers the write instead of replaying
   the same oversized call until the budget is spent. See ADR-0038.
 
+A third lever acts on a tool call whose arguments are *well-formed JSON but do not
+match the tool's schema* — a distinct failure from the wire-malformed cases above
+(it parses, so it is not a bad-output turn):
+
+- **Schema-aware argument correction.** At the pre-dispatch seam the runtime
+  validates the call's arguments; a shape-invalid call is answered with a concise,
+  schema-aware error (the `RepairToolArguments` rung, sibling of the chunked-write
+  rung) instead of the raw deserializer string, so the model self-corrects on the
+  next turn. Unlike the bad-output ladder this rung is **non-degrading** — a
+  recoverable argument mistake is bounded by the per-turn tool-call budget, not the
+  degrade counter. When `[tools] repair` is enabled the runtime first repairs the
+  validator-reported fields and runs the repaired call (with a model-visible note);
+  see [`05-tool-system.md`](05-tool-system.md) §Input Validation and ADR-0051.
+
 Pinned by the `localpilot-harness` session tests (a malformed large write
-recovers by writing in pieces; a repeated bad turn compacts history).
+recovers by writing in pieces; a repeated bad turn compacts history; a
+shape-invalid call gets a schema-aware error and the model recovers on the next
+call without a repair engine).
 
 ## Per-Turn Tool-Call Budget
 

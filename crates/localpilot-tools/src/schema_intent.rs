@@ -12,8 +12,8 @@
 //!   to look JSON- or markdown-shaped.
 //! - `one_or_many_string` — a path list the model may give as one or many; the
 //!   wrap/parse repairs target it.
-//! - `line_range` — a 1-based line endpoint. Marker only: relational repair is
-//!   deferred (D006), so no rule consumes it; it documents intent for readers and
+//! - `line_range` — a 1-based line endpoint. Marker only: there is no relational
+//!   repair rule, so nothing consumes it; it documents intent for readers and
 //!   future work.
 
 use schemars::gen::SchemaGenerator;
@@ -102,7 +102,7 @@ pub fn one_or_many_string(gen: &mut SchemaGenerator) -> Schema {
 }
 
 /// A 1-based line endpoint (a nullable integer carrying the `line` intent). Marker
-/// only — no repair rule consumes it (relational repair is deferred, D006).
+/// only — there is no relational repair rule, so nothing consumes it.
 #[must_use]
 pub fn line_range(_gen: &mut SchemaGenerator) -> Schema {
     let mut obj = SchemaObject {
