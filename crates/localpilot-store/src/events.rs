@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 5;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 6;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -202,6 +202,15 @@ pub enum SessionEventKind {
         /// The JSON type seen at the first issue path (e.g. `string`); no value.
         before_type: String,
     },
+    /// A schema-aware, model-readable validation error was sent to the model in
+    /// place of the raw deserializer string, so it can self-correct on the next
+    /// turn. Redacted: identifiers only, never the argument value or the message
+    /// body. Paired with a preceding `ToolInputInvalid` for the same call.
+    ToolInputRetryMessageSent {
+        tool: String,
+        provider: String,
+        model: String,
+    },
     /// A pull-discovery broker resolution (ADR-0031): a need was resolved to a
     /// tool and revealed. The durable, redacted audit of the learning loop's
     /// input; the retry outcome is the paired `ToolFinished` for `chosen`.
@@ -293,6 +302,15 @@ fn migrate(
             4 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(5));
+                }
+                value
+            }
+            // v5 -> v6: additive only. v6 introduced the `ToolInputRetryMessageSent`
+            // event kind; existing v5 events keep their shape, so the migration only
+            // stamps the current version.
+            5 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(6));
                 }
                 value
             }
@@ -467,6 +485,11 @@ mod tests {
                 class: "bare_string_for_array".to_string(),
                 issue_paths: vec!["paths".to_string()],
                 before_type: "string".to_string(),
+            },
+            SessionEventKind::ToolInputRetryMessageSent {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
             },
         ];
         let mut parent = None;

@@ -229,10 +229,15 @@ broker is off and the full tool set is advertised.
 | `marker` | bool | `false` | Enable the loose `NEED: <capability>` marker trigger. Off by default; the always-on failure-driven trigger does not need it. |
 | `learning` | bool | `false` | Re-rank by past success, graduate hot tools into the always-advertised set, and record redacted resolution telemetry. Off keeps the broker working with mechanical freshness only. |
 | `graduation_threshold` | int | `3` | Reveals of one tool before it graduates into the always-advertised set (when `learning`). |
+| `readable_errors` | bool | `true` | When a tool call's arguments do not match the tool schema, hand the model a concise, schema-aware error (the offending field, the expected shape, and a valid example) instead of the raw deserializer string, so it can self-correct on the next turn. Set `false` to restore the raw message (the rollback). The raw detail is always kept in the logs/telemetry. |
 
 **Migration:** these defaults reproduce prior behaviour, so an existing config
 keeps working unchanged. Opt in with `[tools] broker = true`; see
 [05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
+
+`readable_errors` defaults **on** — a pure message improvement with no behaviour
+change beyond the text the model reads — so a shape-invalid tool call is answered
+with an actionable, schema-aware correction by default.
 
 ### `[history]`
 

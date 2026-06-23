@@ -225,6 +225,14 @@ pub struct SessionConfig {
     /// hanging — the bound a non-interactive caller relies on. `None` (the
     /// default) leaves a turn unbounded, so existing flows are unchanged.
     pub turn_timeout: Option<std::time::Duration>,
+    /// When set, a tool call whose arguments do not match the tool schema is
+    /// answered with a concise, schema-aware error (built from the schema and the
+    /// tool's curated examples) instead of the raw deserializer string, so the
+    /// model can self-correct on the next turn. Off in this programmatic default
+    /// (so existing flows see the raw message); the production config maps
+    /// `[tools] readable_errors`, which defaults on. The raw detail is always
+    /// retained in the logs/telemetry.
+    pub enforce_readable_errors: bool,
 }
 
 impl Default for SessionConfig {
@@ -245,6 +253,7 @@ impl Default for SessionConfig {
             rules: IndexMap::new(),
             tool_marker_enabled: false,
             turn_timeout: None,
+            enforce_readable_errors: false,
         }
     }
 }
@@ -818,6 +827,26 @@ impl SessionRuntime {
             },
         };
         self.record_event(kind);
+    }
+
+    /// A concise, schema-aware error for a shape-invalid tool call, or `None`
+    /// when readable errors are off, the tool is unknown, or the arguments are
+    /// valid (so dispatch proceeds normally). The message is value-free by
+    /// construction — built from the schema, the offending field types, and the
+    /// tool's curated examples — and redacted for defence in depth, so it can
+    /// never echo a secret-bearing argument.
+    fn readable_input_error(&self, name: &str, input: &serde_json::Value) -> Option<String> {
+        if !self.config.enforce_readable_errors {
+            return None;
+        }
+        let tool = self.tools.get(name)?;
+        let issues = localpilot_tools::tool_input_issues(&tool.schema(), input);
+        if issues.is_empty() {
+            return None;
+        }
+        let contract = tool.contract();
+        let message = localpilot_tools::readable_input_error(name, &issues, contract.examples);
+        Some(localpilot_config::redact::redact(&message))
     }
 
     /// Apply the no-unsupported-claim gate to a final reply, returning the
@@ -2077,7 +2106,14 @@ impl SessionRuntime {
                     self.precondition_block(name, input),
                     self.check_before_launch_verdict(name, input),
                 );
+                // Phase 1: a shape-invalid call cannot run, so when readable
+                // errors are on, hand the model a concise schema-aware correction
+                // (the validator-first / retry-with-error pattern) instead of
+                // letting dispatch fail with a raw serde blob. `None` falls
+                // through to dispatch, which surfaces today's raw message exactly.
+                let readable_error = self.readable_input_error(name, input);
                 let mut launch_warn: Option<String> = None;
+                let mut readable_error_sent = false;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
                         // The broker narrowed the surface and this tool is not
@@ -2109,27 +2145,59 @@ impl SessionRuntime {
                     }
                     PreDispatch::Proceed { warn } => {
                         launch_warn = warn;
-                        let retention = StoreRetention(&self.store);
-                        let ctx = ToolContext {
-                            workspace: &self.workspace,
-                            interactivity: self.config.interactivity,
-                            trusted: self.config.trusted,
-                            retention: Some(&retention),
-                            processes: Some(self.background.as_ref()),
-                        };
-                        let gates = self.hooks.gates();
-                        tokio::select! {
-                            () = cancel.cancelled() => None,
-                            result = self.tools.dispatch_gated(
-                                &call,
-                                &ctx,
-                                &self.engine,
-                                self.approver.as_ref(),
-                                &gates,
-                            ) => Some(result),
+                        if let Some(message) = &readable_error {
+                            // Deliver the schema-aware error as the tool result;
+                            // the call never reaches dispatch (it could not run).
+                            readable_error_sent = true;
+                            Some(localpilot_core::ToolResult::error(
+                                ToolUseId::from(id.as_str()),
+                                message.clone(),
+                            ))
+                        } else {
+                            let retention = StoreRetention(&self.store);
+                            let ctx = ToolContext {
+                                workspace: &self.workspace,
+                                interactivity: self.config.interactivity,
+                                trusted: self.config.trusted,
+                                retention: Some(&retention),
+                                processes: Some(self.background.as_ref()),
+                            };
+                            let gates = self.hooks.gates();
+                            tokio::select! {
+                                () = cancel.cancelled() => None,
+                                result = self.tools.dispatch_gated(
+                                    &call,
+                                    &ctx,
+                                    &self.engine,
+                                    self.approver.as_ref(),
+                                    &gates,
+                                ) => Some(result),
+                            }
                         }
                     }
                 };
+                // The readable-error recovery rung (sibling of the chunked-write
+                // rung): record that a schema-aware correction was sent so it is
+                // observable, and let the model retry on the next turn. It is
+                // non-degrading — bounded by the per-turn tool-call budget, not
+                // the bad-output degrade counter.
+                if readable_error_sent {
+                    debug_assert_eq!(
+                        self.recovery.tool_input_repair_rung(),
+                        localpilot_recovery::RecoveryAction::RepairToolArguments
+                    );
+                    let provider = self.active_provider_id().to_string();
+                    let model = self.config.model.clone();
+                    self.record_event(SessionEventKind::ToolInputRetryMessageSent {
+                        tool: name.clone(),
+                        provider,
+                        model,
+                    });
+                    let _ = events.send(RuntimeEvent::Warning(format!(
+                        "`{name}` arguments did not match its schema; sent a schema-aware \
+                         correction for the model to retry"
+                    )));
+                }
                 let Some(mut result) = result else {
                     let aborted = localpilot_core::ToolResult::error(
                         ToolUseId::from(id.as_str()),

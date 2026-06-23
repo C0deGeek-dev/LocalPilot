@@ -40,5 +40,6 @@ pub use error::ToolError;
 pub use registry::ToolRegistry;
 pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
 pub use validate::{
-    is_input_valid, required_fields_present, tool_input_issues, MalformedClass, SchemaIssue,
+    is_input_valid, readable_input_error, required_fields_present, tool_input_issues,
+    MalformedClass, SchemaIssue,
 };

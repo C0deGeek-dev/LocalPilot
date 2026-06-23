@@ -83,6 +83,7 @@ pub async fn run(
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
+            enforce_readable_errors: config.tools.readable_errors,
             ..SessionConfig::default()
         },
         Vec::new(),

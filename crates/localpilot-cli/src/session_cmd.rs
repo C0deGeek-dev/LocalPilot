@@ -165,6 +165,7 @@ pub async fn build_runtime(
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
+            enforce_readable_errors: config.tools.readable_errors,
             turn_timeout: config
                 .harness
                 .turn_timeout_secs

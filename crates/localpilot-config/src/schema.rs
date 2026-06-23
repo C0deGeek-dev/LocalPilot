@@ -158,6 +158,12 @@ pub struct ToolsConfig {
     pub learning: bool,
     /// Reveals of one tool before it graduates into the always-advertised set.
     pub graduation_threshold: usize,
+    /// Hand the model a concise, schema-aware error when a tool call's arguments
+    /// do not match the tool's schema, instead of the raw serde error string.
+    /// Default `true`: a pure message improvement that helps the model self-correct
+    /// on the next turn. Set `false` to restore the raw deserializer message (the
+    /// rollback). The raw detail is always kept in the logs/telemetry regardless.
+    pub readable_errors: bool,
 }
 
 impl Default for ToolsConfig {
@@ -170,6 +176,7 @@ impl Default for ToolsConfig {
             marker: false,
             learning: false,
             graduation_threshold: 3,
+            readable_errors: true,
         }
     }
 }
@@ -811,6 +818,8 @@ mod tests {
         assert_eq!(tools.working_set_cap, 24);
         assert_eq!(tools.score_floor, 1);
         assert_eq!(tools.graduation_threshold, 3);
+        // Readable errors are a pure message improvement, so they default on.
+        assert!(tools.readable_errors);
 
         // A whole Config with no tools key fills the defaults.
         let config: Config = serde_json::from_value(json!({})).unwrap();

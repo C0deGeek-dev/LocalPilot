@@ -5,6 +5,20 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Schema-aware tool-input validation errors and a dormant validity metric, lit up.**
+  When a tool call's arguments are well-formed JSON but do not match the tool's
+  schema, the model now receives a concise, schema-aware message — the offending
+  field, the expected shape, and a valid example drawn from the tool's contract —
+  instead of the raw deserializer string, so it can self-correct on the next turn
+  (the validator-first / retry-with-error pattern). On by default; set
+  `[tools] readable_errors = false` to restore the raw message (the rollback). The
+  raw detail is always retained in the logs/telemetry. Independently, the
+  previously dormant tool-input validity metric is now lit up: each tool call is
+  validated against its schema and recorded as a redacted `tool_input_valid` /
+  `tool_input_invalid` session event (classified by malformed-argument shape, never
+  carrying a raw value), and the `eval` scorecard reports `schema_valid_rate`. This
+  is measurement plus a message improvement — dispatch behaviour is unchanged.
+
 - **`doctor` and `models` are agent-consumable (ADR-0048 `--format`, extended).**
   `doctor` gains `--format human|json` (`--json` alias; JSON by default off a
   terminal): the JSON adds the resolved **binary path**, the `git describe`

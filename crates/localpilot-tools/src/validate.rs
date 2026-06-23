@@ -17,6 +17,8 @@
 
 use serde_json::Value;
 
+use crate::contract::ToolExample;
+
 /// The malformed-argument class of one schema issue, mapped to the failure-mode
 /// taxonomy in the tool-input research (classes 2/3/4/7). Markdown-autolink and
 /// relational classes are intent/cross-field shaped and are not detectable from
@@ -247,6 +249,67 @@ pub fn is_input_valid(schema: &Value, input: &Value) -> bool {
     tool_input_issues(schema, input).is_empty()
 }
 
+/// A concise, schema-aware, model-readable message describing why a tool call's
+/// arguments were rejected, built from the structural `issues` and the tool's
+/// curated `examples` — never from the raw input, so it cannot echo a secret.
+/// This replaces the raw deserializer string handed to the model, so the model
+/// can self-correct on the next turn. Each line names the offending field, what
+/// is wrong, and the exact shape to use; a valid example is appended when the
+/// tool contract supplies one.
+#[must_use]
+pub fn readable_input_error(
+    tool: &str,
+    issues: &[SchemaIssue],
+    examples: &[ToolExample],
+) -> String {
+    let mut out = format!("the `{tool}` call's arguments did not match its schema:");
+    for issue in issues {
+        out.push('\n');
+        out.push_str("  - ");
+        out.push_str(&describe_issue(issue));
+    }
+    if let Some(example) = examples.first() {
+        out.push_str(&format!(
+            "\na valid `{tool}` call looks like: {}",
+            example.input
+        ));
+    }
+    out
+}
+
+/// A one-line, value-free description of a single schema issue and how to fix it.
+fn describe_issue(issue: &SchemaIssue) -> String {
+    let field = &issue.path;
+    if field.is_empty() {
+        return format!(
+            "the arguments must be a JSON object, but a {} was sent",
+            issue.actual
+        );
+    }
+    match issue.class {
+        MalformedClass::MissingRequiredField => format!(
+            "`{field}` is required (expected {}) but was not provided",
+            issue.expected
+        ),
+        MalformedClass::StringifiedJson => format!(
+            "`{field}` must be a JSON {0}, but was sent as a quoted string; pass it as an \
+             actual {0}, not a string (remove the surrounding quotes)",
+            issue.expected
+        ),
+        MalformedClass::BareStringForArray => format!(
+            "`{field}` must be an array, but a single string was sent; wrap the value in an \
+             array, e.g. [\"value\"]"
+        ),
+        MalformedClass::ObjectForArray => {
+            format!("`{field}` must be an array, but an object was sent")
+        }
+        MalformedClass::TypeMismatch => format!(
+            "`{field}` must be {}, but {} was sent",
+            issue.expected, issue.actual
+        ),
+    }
+}
+
 /// Whether `input` supplies every field the schema marks as required — the
 /// missing-field component of validity, kept as a named, reusable check.
 #[must_use]
@@ -355,6 +418,56 @@ mod tests {
     fn extra_unknown_fields_are_ignored() {
         let input = json!({ "paths": ["a.rs"], "name": "x", "extra": true });
         assert!(is_input_valid(&schema(), &input));
+    }
+
+    #[test]
+    fn the_readable_error_names_the_field_the_fix_and_an_example() {
+        let issues = tool_input_issues(&schema(), &json!({ "paths": "README.md" }));
+        let examples = [ToolExample {
+            input: r#"{"paths": ["src/lib.rs"]}"#,
+            note: "list specific paths",
+        }];
+        let message = readable_input_error("git_diff", &issues, &examples);
+        assert!(message.contains("git_diff"));
+        assert!(message.contains("`paths`"));
+        assert!(message.contains("array"), "states the expected shape");
+        assert!(
+            message.contains(r#"["src/lib.rs"]"#),
+            "shows a valid example"
+        );
+    }
+
+    #[test]
+    fn the_readable_error_for_a_missing_field_and_a_stringified_array() {
+        let missing = readable_input_error(
+            "read_file",
+            &tool_input_issues(
+                &json!({"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}),
+                &json!({}),
+            ),
+            &[],
+        );
+        assert!(missing.contains("`path` is required"));
+
+        let stringified = readable_input_error(
+            "git_add",
+            &tool_input_issues(&schema(), &json!({ "paths": "[\"a.rs\"]", "name": "x" })),
+            &[],
+        );
+        assert!(stringified.contains("quoted string"));
+    }
+
+    #[test]
+    fn the_readable_error_never_echoes_the_raw_value() {
+        // A secret-bearing argument must not appear in the model-visible message:
+        // the formatter builds from field names, types, and curated examples only.
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+        let input = json!({ "paths": secret, "name": "x" });
+        let message = readable_input_error("git_diff", &tool_input_issues(&schema(), &input), &[]);
+        assert!(
+            !message.contains(secret),
+            "the readable error must not echo the raw argument value"
+        );
     }
 
     #[test]

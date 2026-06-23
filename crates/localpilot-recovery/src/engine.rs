@@ -43,6 +43,15 @@ pub enum RecoveryAction {
     /// section appended. The output-side counterpart to `ReduceContext`, which
     /// only shrinks the input.
     RequestChunkedWrite,
+    /// A tool call's arguments were well-formed JSON but did not match the tool's
+    /// schema. The model is handed a concise, schema-aware error as the tool
+    /// result and asked to retry with the right shape (the validator-first /
+    /// retry-with-error pattern). Sibling of `RequestChunkedWrite`, but for a
+    /// shape-invalid call rather than an oversized one — and, unlike the bad-output
+    /// ladder, it never degrades the model: a recoverable argument mistake is
+    /// bounded by the per-turn tool-call budget (ADR-0029), not the degrade
+    /// counter.
+    RepairToolArguments,
     LowerImageCount,
     MarkDegraded,
     StopHarnessProgress,
@@ -148,6 +157,16 @@ impl RecoveryEngine {
     pub fn step_completable(&self) -> bool {
         self.last_turn_clean && self.health != ModelHealth::Degraded
     }
+
+    /// The recovery rung for a tool call whose arguments were shape-invalid: the
+    /// model is handed a schema-aware error and asked to retry. This rung is
+    /// **non-degrading** — a recoverable argument mistake is bounded by the
+    /// per-turn tool-call budget (ADR-0029), not the bad-output degrade counter —
+    /// so it returns the action without touching health or the attempt count.
+    #[must_use]
+    pub fn tool_input_repair_rung(&self) -> RecoveryAction {
+        RecoveryAction::RepairToolArguments
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +202,19 @@ mod tests {
         assert!(diag.actions.contains(&RecoveryAction::MarkDegraded));
         assert!(diag.actions.contains(&RecoveryAction::StopHarnessProgress));
         assert!(!engine.step_completable());
+    }
+
+    #[test]
+    fn the_tool_input_repair_rung_is_available_and_does_not_degrade() {
+        // A shape-invalid argument is recoverable, not a degenerate-output turn:
+        // the rung exists and consulting it leaves model health untouched.
+        let engine = RecoveryEngine::new(RecoveryBudget::default());
+        assert_eq!(
+            engine.tool_input_repair_rung(),
+            RecoveryAction::RepairToolArguments
+        );
+        assert_eq!(engine.health(), ModelHealth::Healthy);
+        assert!(engine.step_completable());
     }
 
     #[test]
