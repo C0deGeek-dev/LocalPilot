@@ -1107,6 +1107,11 @@ struct FetchInput {
 
 const FETCH_DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+/// Cap on the TCP/TLS connect phase, so a stalled connect fails fast instead of
+/// waiting out the full request timeout. A hung network tool otherwise blocks the
+/// agent loop with no output; bounded well under the total timeout.
+const FETCH_CONNECT_TIMEOUT_SECS: u64 = 10;
+
 /// Validate that a URL uses an http/https scheme before any network effect is
 /// resolved. Rejecting other schemes (`file:`, `ftp:`, …) keeps `fetch` from
 /// reading local resources and sidestepping the workspace boundary.
@@ -1164,6 +1169,9 @@ impl Tool for Fetch {
         let timeout = Duration::from_secs(input.timeout_secs.unwrap_or(FETCH_DEFAULT_TIMEOUT_SECS));
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            // Fail fast on a stalled connect instead of hanging out the full
+            // request timeout (a never-completing network call blocks the loop).
+            .connect_timeout(timeout.min(Duration::from_secs(FETCH_CONNECT_TIMEOUT_SECS)))
             .build()
             .map_err(|e| ToolError::Failed(format!("failed to build HTTP client: {e}")))?;
 

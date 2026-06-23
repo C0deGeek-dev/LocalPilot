@@ -5,6 +5,10 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`fetch` fails fast on a stalled connect.** The network tool now sets a connect
+  timeout (bounded under the request timeout) so a hung TCP/TLS connect errors
+  quickly instead of blocking the agent loop for the full request window.
+
 - **Always-on degenerate-loop guard.** A turn can no longer spin unbounded when the
   tool-call budget is off. Even with the budget disabled, the loop now stops with
   `NoProgress` if the no-progress detector trips (a repeated or cyclic successful
