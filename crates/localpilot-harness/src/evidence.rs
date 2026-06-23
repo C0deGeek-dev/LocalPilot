@@ -173,6 +173,21 @@ impl EvidenceLedger {
         &mut self.records
     }
 
+    /// Fill [`CallRecord::schema_valid`] for every projected call from a caller
+    /// that holds the tool schemas. `validate` maps a call's `(name, input)` to
+    /// `Some(true)`/`Some(false)` when the tool is known and its arguments can be
+    /// checked, or `None` when the tool is unknown (an unavailable-tool trap, or
+    /// an MCP tool with no typed schema). This is the production hook that lights
+    /// up the dormant validity metric — the projection itself reads no schemas.
+    pub fn fill_schema_validity(
+        &mut self,
+        validate: impl Fn(&str, &serde_json::Value) -> Option<bool>,
+    ) {
+        for record in &mut self.records {
+            record.schema_valid = validate(&record.name, &record.input);
+        }
+    }
+
     /// How many calls invoked the named tool.
     #[must_use]
     pub fn count_for(&self, tool: &str) -> usize {
@@ -353,6 +368,29 @@ mod tests {
         let after = std::fs::read_dir(dir.path()).expect("read tempdir").count();
         assert_eq!(before, 0);
         assert_eq!(after, 0, "a compute-only projection must not write");
+    }
+
+    #[test]
+    fn fill_schema_validity_sets_each_call_from_the_validator() {
+        let events = vec![
+            assistant(vec![call_block(
+                "c1",
+                "read_file",
+                serde_json::json!({ "path": "a.rs" }),
+            )]),
+            assistant(vec![call_block("c2", "read_file", serde_json::json!({}))]),
+            assistant(vec![call_block("c3", "mystery", serde_json::json!({}))]),
+        ];
+        let mut ledger = EvidenceLedger::project(&events);
+        // A valid call, a known-invalid call, and an unknown tool.
+        ledger.fill_schema_validity(|name, input| match name {
+            "read_file" => Some(input.get("path").is_some()),
+            _ => None,
+        });
+        let calls = ledger.calls();
+        assert_eq!(calls[0].schema_valid, Some(true));
+        assert_eq!(calls[1].schema_valid, Some(false));
+        assert_eq!(calls[2].schema_valid, None, "unknown tool stays None");
     }
 
     #[test]

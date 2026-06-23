@@ -33,6 +33,10 @@ use crate::quality::CheckOutcome;
 /// or renamed field); additive fields keep the version.
 pub const SCORECARD_SCHEMA: u32 = 1;
 
+/// A borrowed validator mapping a call's `(tool, input)` to `Some(valid)` when
+/// the tool is known and checkable, or `None` for an unknown/MCP tool.
+pub type SchemaValidator<'a> = &'a dyn Fn(&str, &serde_json::Value) -> Option<bool>;
+
 /// One task run, graded on three layers plus a reported speed guardrail.
 ///
 /// `speed` is a guardrail, never the headline metric — correctness gates, then
@@ -97,6 +101,12 @@ pub struct RunInputs<'a> {
     pub events: &'a [SessionEvent],
     /// Runner-measured wall-clock duration, in milliseconds.
     pub wall_ms: u64,
+    /// Optional schema validator that fills `schema_valid` on each projected
+    /// call (mapping a call's `(tool, input)` to `Some(valid)`, or `None` for an
+    /// unknown/MCP tool) so the process block can report `schema_valid_rate`.
+    /// `None` leaves the validity metric dormant (`process.discipline = None`),
+    /// reproducing the prior behaviour exactly.
+    pub schema_validator: Option<SchemaValidator<'a>>,
 }
 
 /// Assemble a [`Scorecard`] from one completed run's artefacts — the shared
@@ -105,7 +115,17 @@ pub struct RunInputs<'a> {
 #[must_use]
 pub fn build_scorecard(inputs: RunInputs) -> Scorecard {
     let diff = DiffStat::from_unified(inputs.diff_text);
-    let ledger = EvidenceLedger::project(inputs.events);
+    let mut ledger = EvidenceLedger::project(inputs.events);
+    // When the caller supplies the tool schemas, light up the validity metric:
+    // fill `schema_valid` on each call and attach the per-run discipline rates so
+    // the scorecard reports `schema_valid_rate`. With no validator the block stays
+    // `None`, exactly as before.
+    let discipline = inputs.schema_validator.map(|validate| {
+        ledger.fill_schema_validity(validate);
+        single_run_discipline(&ledger)
+    });
+    let mut process = extract_process(inputs.events, &ledger);
+    process.discipline = discipline;
     Scorecard {
         schema: SCORECARD_SCHEMA,
         task: inputs.task,
@@ -119,9 +139,79 @@ pub fn build_scorecard(inputs: RunInputs) -> Scorecard {
             Some(complexity_delta_in_diff(inputs.diff_text)),
             tests_added_in_diff(inputs.diff_text),
         ),
-        process: extract_process(inputs.events, &ledger),
+        process,
         speed: SpeedBlock::from_events(inputs.events, inputs.wall_ms),
         judge: None,
+    }
+}
+
+/// `numerator / denominator`, or `default` when nothing applies.
+fn ratio(numerator: usize, denominator: usize, default: f64) -> f64 {
+    if denominator == 0 {
+        default
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+/// The per-capability discipline rates derivable from a single run's evidence
+/// ledger, with `schema_valid_rate` the headline. The per-call rates (schema
+/// validity, first-call accuracy, redundancy, recovery) are real; the
+/// cross-scenario-only rates (required-tool usage, selection precision, the claim
+/// violations) have no meaning for one task and take their vacuous-best value.
+/// `schema_valid` must already be filled (via [`EvidenceLedger::fill_schema_validity`]).
+#[must_use]
+pub fn single_run_discipline(ledger: &EvidenceLedger) -> DisciplineMetrics {
+    let calls = ledger.calls();
+
+    let mut schema = (0usize, 0usize);
+    for call in calls {
+        if let Some(valid) = call.schema_valid {
+            schema.1 += 1;
+            if valid {
+                schema.0 += 1;
+            }
+        }
+    }
+
+    let first_call_arg_accuracy = match calls.first().map(|c| c.schema_valid) {
+        Some(Some(false)) => 0.0,
+        _ => 1.0, // valid, unknown, or no first call: vacuous-best
+    };
+
+    let mut redundant = 0usize;
+    for (i, call) in calls.iter().enumerate() {
+        if calls[..i]
+            .iter()
+            .any(|earlier| earlier.name == call.name && earlier.input == call.input)
+        {
+            redundant += 1;
+        }
+    }
+
+    let any_error = calls.iter().any(|c| c.outcome == CallOutcome::Error);
+    let recovered = match calls.iter().position(|c| c.outcome == CallOutcome::Error) {
+        Some(idx) => calls[idx + 1..]
+            .iter()
+            .any(|c| c.outcome == CallOutcome::Ok && c.claim_referenced),
+        None => false,
+    };
+
+    DisciplineMetrics {
+        scenarios: 1,
+        required_tool_usage: 1.0,
+        tool_selection_precision: 1.0,
+        schema_valid_rate: ratio(schema.0, schema.1, 1.0),
+        first_call_arg_accuracy,
+        recovery_success: if any_error {
+            f64::from(u8::from(recovered))
+        } else {
+            1.0
+        },
+        unsupported_claim_rate: 0.0,
+        false_success_rate: 0.0,
+        redundant_call_rate: ratio(redundant, calls.len(), 0.0),
+        avg_calls_per_success: calls.len() as f64,
     }
 }
 
@@ -718,6 +808,7 @@ mod tests {
             gate: &[],
             events: &events,
             wall_ms: 250,
+            schema_validator: None,
         });
         assert_eq!(card.task, "t1");
         assert_eq!(card.quality.diff_added, 1);
@@ -726,6 +817,60 @@ mod tests {
         assert_eq!(card.process.exit_reason, "Done");
         assert_eq!(card.speed.input_tokens, 12);
         assert!(card.judge.is_none());
+        assert!(
+            card.process.discipline.is_none(),
+            "with no validator the validity metric stays dormant"
+        );
+    }
+
+    #[test]
+    fn a_schema_validator_lights_up_the_validity_rate_in_the_scorecard() {
+        // One valid write_file call, one invalid (missing both required fields).
+        let events = vec![
+            assistant(vec![call(
+                "c1",
+                "write_file",
+                serde_json::json!({ "path": "a.rs", "content": "x" }),
+            )]),
+            tool_result("c1", "ok", false),
+            assistant(vec![call("c2", "write_file", serde_json::json!({}))]),
+            tool_result("c2", "invalid input: missing field `path`", true),
+            event(SessionEventKind::TurnEnded {
+                stop: "Done".to_string(),
+            }),
+        ];
+        // A toy validator: write_file requires `path` and `content`.
+        let validate = |name: &str, input: &serde_json::Value| -> Option<bool> {
+            (name == "write_file")
+                .then(|| input.get("path").is_some() && input.get("content").is_some())
+        };
+        let card = build_scorecard(RunInputs {
+            task: "t".to_string(),
+            arm: "baseline".to_string(),
+            model: "fake".to_string(),
+            results: ResultsBlock {
+                passed: false,
+                regression_safe: true,
+                partial_credit: 0.0,
+                tests_total: 0,
+                tests_passed: 0,
+            },
+            diff_text: "",
+            gold: None,
+            gate: &[],
+            events: &events,
+            wall_ms: 0,
+            schema_validator: Some(&validate),
+        });
+        let discipline = card
+            .process
+            .discipline
+            .expect("a validator attaches the discipline rates");
+        // One of two calls validated ⇒ 0.5; the rate appears in the JSON too.
+        assert!((discipline.schema_valid_rate - 0.5).abs() < f64::EPSILON);
+        let value: serde_json::Value =
+            serde_json::from_str(&card.to_json().expect("serialize")).expect("parse");
+        assert!(value["process"]["discipline"]["schema_valid_rate"].is_number());
     }
 
     #[test]

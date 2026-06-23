@@ -788,6 +788,38 @@ impl SessionRuntime {
         .to_string()
     }
 
+    /// Record whether a tool call's arguments validate against the tool's JSON
+    /// schema, as redacted baseline telemetry, before the call is dispatched.
+    /// Emits one [`SessionEventKind::ToolInputValid`] or
+    /// [`SessionEventKind::ToolInputInvalid`] per call, carrying identifiers, the
+    /// malformed class, the offending field path(s), and the JSON type seen there
+    /// — never a raw argument value. A no-op for an unknown tool (no schema to
+    /// check). Pure measurement: dispatch behaviour is unchanged either way.
+    fn record_tool_input_validity(&mut self, name: &str, input: &serde_json::Value) {
+        let Some(schema) = self.tools.get(name).map(localpilot_tools::Tool::schema) else {
+            return;
+        };
+        let issues = localpilot_tools::tool_input_issues(&schema, input);
+        let provider = self.active_provider_id().to_string();
+        let model = self.config.model.clone();
+        let kind = match issues.first() {
+            Some(first) => SessionEventKind::ToolInputInvalid {
+                tool: name.to_string(),
+                provider,
+                model,
+                class: first.class.label().to_string(),
+                issue_paths: issues.iter().map(|issue| issue.path.clone()).collect(),
+                before_type: first.actual.clone(),
+            },
+            None => SessionEventKind::ToolInputValid {
+                tool: name.to_string(),
+                provider,
+                model,
+            },
+        };
+        self.record_event(kind);
+    }
+
     /// Apply the no-unsupported-claim gate to a final reply, returning the
     /// (possibly rewritten) text. A no-op unless `enforce_claim_gate` is set.
     fn gate_final_reply(&self, text: String) -> String {
@@ -2019,6 +2051,11 @@ impl SessionRuntime {
                     id: id.clone(),
                     name: name.clone(),
                 });
+                // Light up the dormant validity metric: record, as redacted
+                // baseline telemetry, whether this call's arguments validate
+                // against the tool schema. Measurement only — dispatch is
+                // unchanged whatever the verdict.
+                self.record_tool_input_validity(name, input);
                 let call = ToolCall::new(ToolUseId::from(id.as_str()), name.clone(), input.clone());
                 // Cancellation races the executing tool: an abort synthesizes
                 // an error result (the pairing contract holds), and dropping

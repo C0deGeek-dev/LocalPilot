@@ -81,6 +81,16 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     };
     let events = Store::open(&cwd).read_events(session)?;
 
+    // Light up the validity metric: validate each call's arguments against the
+    // builtin tool schemas so the scorecard reports `schema_valid_rate`. MCP
+    // tools have no typed schema and stay unvalidated (`None`).
+    let registry = localpilot_tools::ToolRegistry::with_builtins();
+    let schema_validator = |name: &str, input: &serde_json::Value| -> Option<bool> {
+        registry
+            .get(name)
+            .map(|tool| localpilot_tools::is_input_valid(&tool.schema(), input))
+    };
+
     let card = build_scorecard(RunInputs {
         task: opts.task.to_string(),
         arm: opts.arm.to_string(),
@@ -91,6 +101,7 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
         gate: &[],
         events: &events,
         wall_ms,
+        schema_validator: Some(&schema_validator),
     });
     println!("{}", card.to_json()?);
     Ok(())

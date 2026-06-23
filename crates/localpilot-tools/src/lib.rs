@@ -16,6 +16,7 @@ mod contract;
 mod error;
 mod registry;
 mod tool;
+mod validate;
 
 pub use broker::{
     learned_boost, resolve, Broker, BrokerConfig, Locator, Resolution, ResolutionRecord,
@@ -38,3 +39,6 @@ pub use contract::{
 pub use error::ToolError;
 pub use registry::ToolRegistry;
 pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
+pub use validate::{
+    is_input_valid, required_fields_present, tool_input_issues, MalformedClass, SchemaIssue,
+};

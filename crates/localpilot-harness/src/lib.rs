@@ -71,8 +71,9 @@ pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QU
 pub use retrospective::{run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT};
 pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
 pub use scorecard::{
-    build_scorecard, complexity_delta_in_diff, extract_process, tests_added_in_diff, DiffStat,
-    ProcessBlock, QualityBlock, ResultsBlock, RunInputs, Scorecard, SpeedBlock, SCORECARD_SCHEMA,
+    build_scorecard, complexity_delta_in_diff, extract_process, single_run_discipline,
+    tests_added_in_diff, DiffStat, ProcessBlock, QualityBlock, ResultsBlock, RunInputs,
+    SchemaValidator, Scorecard, SpeedBlock, SCORECARD_SCHEMA,
 };
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,

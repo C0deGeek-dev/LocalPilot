@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 4;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 5;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -179,6 +179,29 @@ pub enum SessionEventKind {
     MemoriesUsed {
         memories: Vec<MemoryUsed>,
     },
+    /// A tool call's arguments validated against the tool's JSON schema before
+    /// dispatch. Redacted by construction: it carries identifiers and never a
+    /// raw argument value. Additive, replay-safe baseline telemetry — the
+    /// tool-input validity metric the discipline scorecard reads.
+    ToolInputValid {
+        tool: String,
+        provider: String,
+        model: String,
+    },
+    /// A tool call's arguments failed schema validation before dispatch. Carries
+    /// the offending field path(s), the JSON type seen there (`before_type`), and
+    /// the malformed-argument class label — never the raw value.
+    ToolInputInvalid {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The malformed-argument class label (e.g. `bare_string_for_array`).
+        class: String,
+        /// Field path(s) of the offending argument(s); names only, no values.
+        issue_paths: Vec<String>,
+        /// The JSON type seen at the first issue path (e.g. `string`); no value.
+        before_type: String,
+    },
     /// A pull-discovery broker resolution (ADR-0031): a need was resolved to a
     /// tool and revealed. The durable, redacted audit of the learning loop's
     /// input; the retry outcome is the paired `ToolFinished` for `chosen`.
@@ -261,6 +284,15 @@ fn migrate(
             3 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(4));
+                }
+                value
+            }
+            // v4 -> v5: additive only. v5 introduced the `ToolInputValid` /
+            // `ToolInputInvalid` event kinds; existing v4 events keep their shape,
+            // so the migration only stamps the current version.
+            4 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(5));
                 }
                 value
             }
@@ -422,6 +454,19 @@ mod tests {
                 chosen: Some("fetch".to_string()),
                 score: 3,
                 trigger: "failure_driven".to_string(),
+            },
+            SessionEventKind::ToolInputValid {
+                tool: "read_file".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+            },
+            SessionEventKind::ToolInputInvalid {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                class: "bare_string_for_array".to_string(),
+                issue_paths: vec!["paths".to_string()],
+                before_type: "string".to_string(),
             },
         ];
         let mut parent = None;

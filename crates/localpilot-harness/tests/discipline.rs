@@ -99,29 +99,15 @@ fn git(root: &Path, args: &[&str]) {
         .success());
 }
 
-/// Whether `input` supplies every field the schema marks as required. A
-/// dependency-free proxy for schema validity that catches a missing argument.
-fn required_fields_present(schema: &Value, input: &Value) -> bool {
-    let Some(required) = schema.get("required").and_then(Value::as_array) else {
-        return true;
-    };
-    let Some(obj) = input.as_object() else {
-        return required.is_empty();
-    };
-    required
-        .iter()
-        .filter_map(Value::as_str)
-        .all(|field| obj.contains_key(field))
-}
-
-/// Fill each call's schema validity from the real tool's schema. Unknown tools
-/// (e.g. a scenario's unavailable-tool trap) stay `None`.
+/// Fill each call's schema validity from the real tool's schema, via the
+/// production projection hook and the shared validator. Unknown tools (e.g. a
+/// scenario's unavailable-tool trap) stay `None`.
 fn fill_schema_validity(ledger: &mut EvidenceLedger, registry: &ToolRegistry) {
-    for call in ledger.calls_mut() {
-        call.schema_valid = registry
-            .get(&call.name)
-            .map(|tool| required_fields_present(&tool.schema(), &call.input));
-    }
+    ledger.fill_schema_validity(|name, input| {
+        registry
+            .get(name)
+            .map(|tool| localpilot_tools::is_input_valid(&tool.schema(), input))
+    });
 }
 
 /// Drive one scenario through the real loop offline and project its event log.
