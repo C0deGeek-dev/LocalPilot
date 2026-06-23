@@ -255,6 +255,54 @@ head and tail stay in context with an explicit truncation note, and the full
 redacted output spills to the retention store under the call id, where
 `read_tool_output` can fetch it.
 
+## Input Validation, Readable Errors, and Repair
+
+Before dispatch, a tool call's arguments are validated against the tool's
+generated JSON schema. The outcome drives one of three paths:
+
+- **Valid** — the call dispatches byte-unchanged.
+- **Invalid** — when `[tools] readable_errors` is on (the default), the model
+  receives a concise, schema-aware message (the offending field, the expected
+  shape, and a valid example from the tool's contract) instead of the raw
+  deserializer string, so it can self-correct on the next turn. The raw detail is
+  always kept in the logs/telemetry. Off restores the raw message (the rollback).
+- **Repaired** — when `[tools] repair` is `warn`/`on` (default `off`), a small set
+  of conservative, schema-guided rules fix the *validator-reported* fields only —
+  wrapping a bare string as a one-element array, parsing a stringified array/object
+  of the matching item type, or unwrapping a degenerate markdown autolink on a path
+  field — then re-validate. A repaired call runs with the rewritten arguments and
+  carries a model-visible note; `warn` additionally logs each repair loudly.
+
+Repair is **validate-first** (a valid input is never preprocessed),
+**issue-path-localized**, **schema-guided** (a rule fires only when the schema
+proves the target type), and **auditable** (every repair and refusal is a redacted
+session event). It changes arguments, never authority: the permission engine and
+gate chain run on the repaired input. It is gated by the tool's safety contract —
+a `Destructive`, `ExternalWrite`, or `Irreversible` tool, an MCP tool (no typed
+schema), and any content/command field are **never** repaired.
+
+### Declaring a field's repair intent
+
+A tool author marks what a field *means* so the repair stage keys off declared
+intent rather than a field-name guess. The markers are `#[schemars(schema_with =
+"...")]` helpers in `localpilot-tools::schema_intent`; they annotate the generated
+schema with an `x-localpilot-intent` extension and leave the field's Rust type and
+deserialization unchanged:
+
+- `path_string` / `glob_string` — a single path / glob. The markdown-autolink
+  repair fires only on a `path`-intent field.
+- `file_content_string` / `command_string` — a file body / shell string, marked
+  **repair-exempt**: no rule ever parses or rewrites it, even if it looks JSON- or
+  markdown-shaped.
+- `one_or_many_string` — a path list (an `array<string>`) the model may give as one
+  or many; the wrap/parse repairs target it.
+- `line_range` — a 1-based line endpoint. A marker only — no rule consumes it
+  (relational repair is deferred); it documents intent for readers and future work.
+
+Marking content/command fields is what makes a file body or shell string
+*provably* repair-exempt, so the safety guarantee is structural rather than a
+heuristic over field names.
+
 ## Tool Gates
 
 Dispatch accepts an ordered chain of tighten-only gates consulted *after* the

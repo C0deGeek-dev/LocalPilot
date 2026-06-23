@@ -168,12 +168,15 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ToolError> {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadFileInput {
     /// Workspace-relative or absolute path to read.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// First line to include (1-based, inclusive).
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::line_range")]
     start_line: Option<usize>,
     /// Last line to include (1-based, inclusive).
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::line_range")]
     end_line: Option<usize>,
 }
 
@@ -237,8 +240,10 @@ impl Tool for ReadFile {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WriteFileInput {
     /// Path to write within the workspace.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// File contents.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     content: String,
     /// Allow replacing an existing file. Defaults to true (overwrite is gated by
     /// the permission engine).
@@ -313,8 +318,10 @@ impl Tool for WriteFile {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct AppendFileInput {
     /// Path to append to within the workspace.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// Content to append to the end of the file.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     content: String,
 }
 
@@ -396,10 +403,13 @@ impl Tool for AppendFile {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditFileInput {
     /// Path to edit within the workspace.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// Exact text to replace; must match exactly once.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     old_text: String,
     /// Replacement text.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     new_text: String,
 }
 
@@ -461,6 +471,7 @@ impl Tool for EditFile {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MultiEditInput {
     /// Path to edit within the workspace.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// Ordered exact-text replacements. Each `old_text` must match exactly once
     /// at the point that edit is applied.
@@ -470,8 +481,10 @@ struct MultiEditInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TextEditInput {
     /// Exact text to replace.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     old_text: String,
     /// Replacement text.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     new_text: String,
 }
 
@@ -552,6 +565,7 @@ impl Tool for MultiEdit {
 struct ListFilesInput {
     /// Directory to list, relative to the workspace. Defaults to the root.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: Option<String>,
     /// Include hidden files. Defaults to false.
     #[serde(default)]
@@ -625,9 +639,11 @@ impl Tool for ListFiles {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct FindFilesInput {
     /// Glob-like filename pattern. Supports `*` and `?`.
+    #[schemars(schema_with = "crate::schema_intent::glob_string")]
     pattern: String,
     /// Directory to search, relative to the workspace. Defaults to the root.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: Option<String>,
     /// Include hidden files. Defaults to false.
     #[serde(default)]
@@ -723,6 +739,7 @@ struct SearchTextInput {
     query: String,
     /// Directory to search, relative to the workspace. Defaults to the root.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: Option<String>,
     /// Treat `query` as a regular expression. Defaults to false (literal).
     #[serde(default)]
@@ -1007,9 +1024,11 @@ struct ReadToolOutputInput {
     id: String,
     /// First line to include (1-based, inclusive).
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::line_range")]
     start_line: Option<usize>,
     /// Last line to include (1-based, inclusive).
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::line_range")]
     end_line: Option<usize>,
 }
 
@@ -1193,11 +1212,14 @@ impl Tool for Fetch {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReplaceInFileInput {
     /// Path to edit within the workspace.
+    #[schemars(schema_with = "crate::schema_intent::path_string")]
     path: String,
     /// Text to find — an exact block that may span multiple lines. A
     /// platform-native regex when `regex` is true.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     find: String,
     /// Replacement text. May span multiple lines.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     replace: String,
     /// Treat `find` as a regex (.NET on Windows, Perl on Unix). Defaults to
     /// false (literal block).
@@ -1421,6 +1443,7 @@ impl Tool for GitStatus {
 struct GitDiffInput {
     /// Optional paths to limit the diff.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::one_or_many_string")]
     paths: Vec<String>,
     /// Show staged changes. Defaults to false.
     #[serde(default)]
@@ -1496,6 +1519,7 @@ impl Tool for GitLog {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GitPathInput {
     /// Paths to operate on.
+    #[schemars(schema_with = "crate::schema_intent::one_or_many_string")]
     paths: Vec<String>,
 }
 
@@ -1581,9 +1605,11 @@ impl Tool for GitRestore {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GitCommitInput {
     /// Commit message. Must not contain secrets.
+    #[schemars(schema_with = "crate::schema_intent::file_content_string")]
     message: String,
     /// Specific paths to stage and commit. Empty commits already-staged changes.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::one_or_many_string")]
     paths: Vec<String>,
 }
 

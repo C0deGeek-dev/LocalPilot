@@ -25,9 +25,11 @@ use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, To
 struct RunShellInput {
     /// Shell command line to execute through the platform shell.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::command_string")]
     command: Option<String>,
     /// Program to execute directly when `args` is provided; otherwise treated as a shell command line.
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_intent::command_string")]
     program: Option<String>,
     /// Arguments passed to `program` for direct execution.
     #[serde(default)]

@@ -11,26 +11,25 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "end_line": {
           "default": null,
           "description": "Last line to include (1-based, inclusive).",
-          "format": "uint",
-          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "x-localpilot-intent": "line"
         },
         "path": {
           "description": "Workspace-relative or absolute path to read.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         },
         "start_line": {
           "default": null,
           "description": "First line to include (1-based, inclusive).",
-          "format": "uint",
-          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "x-localpilot-intent": "line"
         }
       },
       "required": [
@@ -47,7 +46,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
       "properties": {
         "content": {
           "description": "File contents.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "overwrite": {
           "default": null,
@@ -59,7 +59,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         },
         "path": {
           "description": "Path to write within the workspace.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         }
       },
       "required": [
@@ -77,11 +78,13 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
       "properties": {
         "content": {
           "description": "Content to append to the end of the file.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "path": {
           "description": "Path to append to within the workspace.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         }
       },
       "required": [
@@ -99,15 +102,18 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
       "properties": {
         "new_text": {
           "description": "Replacement text.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "old_text": {
           "description": "Exact text to replace; must match exactly once.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "path": {
           "description": "Path to edit within the workspace.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         }
       },
       "required": [
@@ -128,11 +134,13 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "properties": {
             "new_text": {
               "description": "Replacement text.",
-              "type": "string"
+              "type": "string",
+              "x-localpilot-intent": "content"
             },
             "old_text": {
               "description": "Exact text to replace.",
-              "type": "string"
+              "type": "string",
+              "x-localpilot-intent": "content"
             }
           },
           "required": [
@@ -152,7 +160,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         },
         "path": {
           "description": "Path to edit within the workspace.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         }
       },
       "required": [
@@ -178,11 +187,13 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         },
         "find": {
           "description": "Text to find — an exact block that may span multiple lines. A platform-native regex when `regex` is true.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "path": {
           "description": "Path to edit within the workspace.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "path"
         },
         "regex": {
           "default": false,
@@ -191,7 +202,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         },
         "replace": {
           "description": "Replacement text. May span multiple lines.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         }
       },
       "required": [
@@ -216,10 +228,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "path": {
           "default": null,
           "description": "Directory to list, relative to the workspace. Defaults to the root.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "x-localpilot-intent": "path"
         }
       },
       "title": "ListFilesInput",
@@ -249,14 +259,13 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "path": {
           "default": null,
           "description": "Directory to search, relative to the workspace. Defaults to the root.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "x-localpilot-intent": "path"
         },
         "pattern": {
           "description": "Glob-like filename pattern. Supports `*` and `?`.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "glob"
         }
       },
       "required": [
@@ -289,10 +298,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "path": {
           "default": null,
           "description": "Directory to search, relative to the workspace. Defaults to the root.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "x-localpilot-intent": "path"
         },
         "query": {
           "description": "Text or regular expression to search for.",
@@ -434,18 +441,14 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "command": {
           "default": null,
           "description": "Shell command line to execute through the platform shell.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "x-localpilot-intent": "command"
         },
         "program": {
           "default": null,
           "description": "Program to execute directly when `args` is provided; otherwise treated as a shell command line.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "x-localpilot-intent": "command"
         },
         "timeout_secs": {
           "default": null,
@@ -601,12 +604,11 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "end_line": {
           "default": null,
           "description": "Last line to include (1-based, inclusive).",
-          "format": "uint",
-          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "x-localpilot-intent": "line"
         },
         "id": {
           "description": "The retention id from a truncated tool result.",
@@ -615,12 +617,11 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "start_line": {
           "default": null,
           "description": "First line to include (1-based, inclusive).",
-          "format": "uint",
-          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "x-localpilot-intent": "line"
         }
       },
       "required": [
@@ -649,7 +650,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "x-localpilot-intent": "path-list"
         },
         "staged": {
           "default": false,
@@ -691,7 +693,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "x-localpilot-intent": "path-list"
         }
       },
       "required": [
@@ -711,7 +714,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "x-localpilot-intent": "path-list"
         }
       },
       "required": [
@@ -728,7 +732,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
       "properties": {
         "message": {
           "description": "Commit message. Must not contain secrets.",
-          "type": "string"
+          "type": "string",
+          "x-localpilot-intent": "content"
         },
         "paths": {
           "default": [],
@@ -736,7 +741,8 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "x-localpilot-intent": "path-list"
         }
       },
       "required": [

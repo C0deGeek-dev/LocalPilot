@@ -19,6 +19,7 @@
 use serde_json::Value;
 
 use crate::contract::{Reversibility, SideEffectClass, ToolExample};
+use crate::schema_intent::{field_intent, is_repair_exempt, INTENT_PATH};
 use crate::validate::{readable_input_error, tool_input_issues, MalformedClass, SchemaIssue};
 
 /// The outcome of validating (and possibly repairing) a tool call's arguments.
@@ -99,13 +100,6 @@ pub fn is_repair_eligible(
             SideEffectClass::ReadOnly | SideEffectClass::ProjectWrite
         )
         && !matches!(reversibility, Reversibility::Irreversible)
-}
-
-/// Whether a field name denotes a single path/URL the markdown-autolink rule may
-/// clean. The Phase-2 heuristic; Phase 3 replaces it with a declared schema
-/// intent marker so a content/command field can never be mistaken for a path.
-fn is_path_like_field(name: &str) -> bool {
-    matches!(name, "path" | "url")
 }
 
 /// The single complete degenerate markdown autolink `[text](target)`, returning
@@ -212,18 +206,20 @@ fn property<'a>(schema: &'a Value, name: &str) -> Option<&'a Value> {
 }
 
 /// Intent-shaped issues the structural validator cannot see from the JSON type
-/// alone: a path/URL field whose value is a degenerate markdown autolink (a valid
-/// JSON string, so structurally fine, but not a usable path).
+/// alone: a field **declared** a path (schema intent `path`) whose value is a
+/// degenerate markdown autolink (a valid JSON string, so structurally fine, but
+/// not a usable path). Keying off the declared intent — not a field-name guess —
+/// is what makes a content/command field provably exempt.
 fn intent_issues(schema: &Value, input: &Value) -> Vec<SchemaIssue> {
     let mut issues = Vec::new();
-    let (Some(_props), Some(obj)) = (
-        schema.get("properties").and_then(Value::as_object),
-        input.as_object(),
-    ) else {
+    let Some(obj) = input.as_object() else {
         return issues;
     };
     for (field, value) in obj {
-        if !is_path_like_field(field) {
+        let Some(prop) = property(schema, field) else {
+            continue;
+        };
+        if field_intent(prop) != Some(INTENT_PATH) {
             continue;
         }
         if let Some(text) = value.as_str() {
@@ -249,6 +245,12 @@ fn apply_rule(
     value: &Value,
 ) -> Option<(Value, &'static str, String)> {
     let prop = property(schema, &issue.path);
+    // A field the schema declares as content/command is never parsed or rewritten,
+    // even if it happens to look JSON- or markdown-shaped. This is the structural
+    // guard that makes a file body or shell string provably repair-exempt.
+    if prop.is_some_and(is_repair_exempt) {
+        return None;
+    }
     match issue.class {
         MalformedClass::BareStringForArray => {
             let repaired = wrap_bare_string_as_array(prop?, value)?;
@@ -547,13 +549,39 @@ mod tests {
     }
 
     #[test]
+    fn the_path_rules_are_platform_agnostic() {
+        // Tier-1 parity (ADR-0007): the path-field rules are pure string operations
+        // that run before `Workspace::normalize`, so they behave identically on every
+        // platform and never normalize slashes — a Windows drive/backslash path or a
+        // UNC path is preserved verbatim.
+        assert_eq!(
+            unwrap_markdown_autolink("[C:\\a\\b.rs](C:\\a\\b.rs)"),
+            Some("C:\\a\\b.rs".to_string())
+        );
+        assert_eq!(
+            unwrap_markdown_autolink("[src/main.rs](src/main.rs)"),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            unwrap_markdown_autolink("[\\\\srv\\share\\f.rs](x)"),
+            Some("\\\\srv\\share\\f.rs".to_string())
+        );
+        let prop = json!({ "type": "array", "items": { "type": "string" } });
+        assert_eq!(
+            wrap_bare_string_as_array(&prop, &json!("C:\\a\\b.rs")),
+            Some(json!(["C:\\a\\b.rs"]))
+        );
+    }
+
+    #[test]
     fn the_pipeline_unwraps_a_markdown_autolink_on_a_path_field() {
         // A markdown autolink in a path field is a *valid JSON string* (structurally
-        // fine) but not a usable path — the intent rule catches it.
+        // fine) but not a usable path — the intent rule, keyed off the declared
+        // `path` intent marker, catches it.
         let schema = json!({
             "type": "object",
             "required": ["path"],
-            "properties": { "path": { "type": "string" } }
+            "properties": { "path": { "type": "string", "x-localpilot-intent": "path" } }
         });
         let req = request(
             &schema,
@@ -569,13 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bracketed_content_field_is_left_untouched() {
-        // `content` is not a path-like field, so a bracketed/markdown value is never
-        // unwrapped — and a valid string is not an issue at all.
+    fn a_content_field_is_provably_repair_exempt() {
+        // A field declared `content` carries the repair-exempt marker: even a value
+        // that looks like a markdown autolink (or JSON) is never unwrapped or
+        // parsed — it is not a `path`, and the exemption guard double-ensures it.
         let schema = json!({
             "type": "object",
             "required": ["content"],
-            "properties": { "content": { "type": "string" } }
+            "properties": { "content": { "type": "string", "x-localpilot-intent": "content" } }
         });
         let req = request(
             &schema,
@@ -584,6 +613,7 @@ mod tests {
             false,
             true,
         );
+        // A bracketed/markdown content value is a valid string and is left alone.
         let result = evaluate(&req, &json!({ "content": "[a.rs](a.rs)" }));
         assert_eq!(result.outcome, RepairOutcome::Valid);
         assert!(result.repaired_input.is_none());
