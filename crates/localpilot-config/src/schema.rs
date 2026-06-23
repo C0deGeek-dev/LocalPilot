@@ -128,6 +128,39 @@ pub struct DocsConfig {
     pub lookup_policy: LookupPolicy,
 }
 
+/// How the harness handles a tool call whose arguments are well-formed JSON but
+/// do not match the tool's schema. `off` (the default) never rewrites arguments
+/// — a shape-invalid call gets a readable error and the model retries. `warn` and
+/// `on` apply the conservative, schema-guided repairs (only on read-only /
+/// project-write tools, never on destructive/external/MCP tools or content
+/// fields) and attach a model-visible note; `warn` additionally logs every repair
+/// loudly, so it can be vetted before any default change to `on`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairMode {
+    /// Never repair; a shape-invalid call gets a readable error and retries.
+    #[default]
+    Off,
+    /// Repair, and loudly log every repair (the warn-before-on stage).
+    Warn,
+    /// Repair, attaching a model-visible note but without the loud log.
+    On,
+}
+
+impl RepairMode {
+    /// Whether arguments may be repaired (`warn` or `on`).
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        matches!(self, RepairMode::Warn | RepairMode::On)
+    }
+
+    /// Whether each repair is logged loudly (the `warn` stage).
+    #[must_use]
+    pub fn is_loud(self) -> bool {
+        matches!(self, RepairMode::Warn)
+    }
+}
+
 /// Pull-discovery broker configuration (ADR-0031). The broker narrows each turn's
 /// advertised tool *schemas* to a small working set and resolves a need to the
 /// right tool on demand, revealing its schema. Every field defaults so an absent
@@ -164,6 +197,10 @@ pub struct ToolsConfig {
     /// on the next turn. Set `false` to restore the raw deserializer message (the
     /// rollback). The raw detail is always kept in the logs/telemetry regardless.
     pub readable_errors: bool,
+    /// Conservative, schema-guided repair of a shape-invalid tool call's arguments
+    /// (`off|warn|on`, default `off`). See [`RepairMode`]. Never touches a
+    /// destructive/external/MCP tool or a content/command field.
+    pub repair: RepairMode,
 }
 
 impl Default for ToolsConfig {
@@ -177,6 +214,7 @@ impl Default for ToolsConfig {
             learning: false,
             graduation_threshold: 3,
             readable_errors: true,
+            repair: RepairMode::Off,
         }
     }
 }
@@ -820,6 +858,16 @@ mod tests {
         assert_eq!(tools.graduation_threshold, 3);
         // Readable errors are a pure message improvement, so they default on.
         assert!(tools.readable_errors);
+        // Argument repair carries intent-drift risk, so it ships off.
+        assert_eq!(tools.repair, RepairMode::Off);
+        assert!(!tools.repair.is_enabled());
+        // `warn` and `on` both repair; only `warn` logs loudly.
+        assert!(RepairMode::Warn.is_enabled() && RepairMode::Warn.is_loud());
+        assert!(RepairMode::On.is_enabled() && !RepairMode::On.is_loud());
+        assert_eq!(
+            serde_json::from_value::<RepairMode>(json!("warn")).unwrap(),
+            RepairMode::Warn
+        );
 
         // A whole Config with no tools key fills the defaults.
         let config: Config = serde_json::from_value(json!({})).unwrap();

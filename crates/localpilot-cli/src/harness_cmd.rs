@@ -745,6 +745,7 @@ fn build_runtime(
             enforce_claim_gate,
             tool_marker_enabled: tools.marker,
             enforce_readable_errors: tools.readable_errors,
+            repair_mode: tools.repair,
             ..SessionConfig::default()
         },
         Vec::new(),

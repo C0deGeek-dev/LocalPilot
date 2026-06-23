@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 6;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 7;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -211,6 +211,28 @@ pub enum SessionEventKind {
         provider: String,
         model: String,
     },
+    /// A shape-invalid tool call's arguments were repaired to a valid shape and
+    /// executed, with a model-visible note. Redacted: identifiers, the malformed
+    /// class, and the rule ids applied — never the argument value.
+    ToolInputRepaired {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The malformed-argument class label that was repaired.
+        class: String,
+        /// The ids of the repair rules applied (e.g. `wrap_bare_string_as_array`).
+        rules: Vec<String>,
+    },
+    /// A shape-invalid call to a destructive/external/irreversible/MCP tool was
+    /// **refused** repair — it gets a readable error, never a silent rewrite. The
+    /// auditable record that the safety gate held.
+    ToolRepairRejectedHighRisk {
+        tool: String,
+        provider: String,
+        model: String,
+        /// The tool's side-effect class that triggered the refusal.
+        risk: String,
+    },
     /// A pull-discovery broker resolution (ADR-0031): a need was resolved to a
     /// tool and revealed. The durable, redacted audit of the learning loop's
     /// input; the retry outcome is the paired `ToolFinished` for `chosen`.
@@ -311,6 +333,15 @@ fn migrate(
             5 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(6));
+                }
+                value
+            }
+            // v6 -> v7: additive only. v7 introduced the `ToolInputRepaired` /
+            // `ToolRepairRejectedHighRisk` event kinds; existing v6 events keep their
+            // shape, so the migration only stamps the current version.
+            6 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(7));
                 }
                 value
             }
@@ -490,6 +521,19 @@ mod tests {
                 tool: "git_diff".to_string(),
                 provider: "local".to_string(),
                 model: "q3635ba3bapex".to_string(),
+            },
+            SessionEventKind::ToolInputRepaired {
+                tool: "git_diff".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                class: "bare_string_for_array".to_string(),
+                rules: vec!["wrap_bare_string_as_array".to_string()],
+            },
+            SessionEventKind::ToolRepairRejectedHighRisk {
+                tool: "git_restore".to_string(),
+                provider: "local".to_string(),
+                model: "q3635ba3bapex".to_string(),
+                risk: "destructive".to_string(),
             },
         ];
         let mut parent = None;

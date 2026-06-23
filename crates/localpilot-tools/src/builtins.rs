@@ -874,7 +874,12 @@ impl Tool for ApplyPatch {
     fn contract(&self) -> ToolContract {
         ToolContract {
             model_description: "Apply a unified-diff patch to the workspace.",
-            side_effect: SideEffectClass::ProjectWrite,
+            // apply_patch can delete files in a batch, so it is classified
+            // destructive — which also keeps the argument-repair gate from ever
+            // reshaping a patch (e.g. un-stringifying an operations array that
+            // contains a delete). create/update remain ordinary project writes at
+            // the permission layer; this is advisory metadata only.
+            side_effect: SideEffectClass::Destructive,
             reversibility: Reversibility::ReversibleWithArtifact,
             idempotency: Idempotency::NonIdempotent,
             postconditions: RESULT_STATUS,
@@ -1533,6 +1538,21 @@ impl Tool for GitRestore {
     fn name(&self) -> &'static str {
         "git_restore"
     }
+    fn contract(&self) -> ToolContract {
+        // `git restore` discards working-tree changes that may never have been
+        // saved, so it is genuinely destructive — classified here so the
+        // argument-repair gate refuses it (a destructive call is never silently
+        // reshaped). The reversibility/confirmation are left at their defaults so
+        // this is metadata-only: the permission path and the prompt are unchanged.
+        ToolContract {
+            model_description: "Discard working-tree changes for specific paths.",
+            side_effect: SideEffectClass::Destructive,
+            idempotency: Idempotency::Idempotent,
+            postconditions: RESULT_STATUS,
+            verification: VerificationMethod::Postconditions,
+            ..ToolContract::default()
+        }
+    }
     fn approval_detail(&self, input: &Value) -> String {
         paths_detail(input, "git restore")
     }
@@ -1577,7 +1597,11 @@ impl Tool for GitCommit {
     fn contract(&self) -> ToolContract {
         ToolContract {
             model_description: "Create a git commit from staged changes.",
-            side_effect: SideEffectClass::ProjectWrite,
+            // A commit writes durable VCS history that outlives the working tree
+            // (and is often shared), so it is external write — classified so the
+            // argument-repair gate refuses it: a commit's arguments are never
+            // silently reshaped.
+            side_effect: SideEffectClass::ExternalWrite,
             reversibility: Reversibility::ReversibleWithArtifact,
             idempotency: Idempotency::NonIdempotent,
             postconditions: RESULT_STATUS,

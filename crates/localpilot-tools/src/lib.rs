@@ -15,6 +15,7 @@ mod catalog;
 mod contract;
 mod error;
 mod registry;
+mod repair;
 mod tool;
 mod validate;
 
@@ -38,6 +39,11 @@ pub use contract::{
 };
 pub use error::ToolError;
 pub use registry::ToolRegistry;
+pub use repair::{
+    evaluate as evaluate_tool_input, is_repair_eligible, parse_stringified_json,
+    unwrap_markdown_autolink, wrap_bare_string_as_array, RepairOutcome, RepairRequest,
+    ToolInputValidationResult,
+};
 pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
 pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,

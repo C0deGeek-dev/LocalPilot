@@ -28,6 +28,6 @@ pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
     DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
     LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
-    PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig,
+    PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RepairMode,
     RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
 };

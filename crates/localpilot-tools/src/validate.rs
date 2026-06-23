@@ -36,6 +36,11 @@ pub enum MalformedClass {
     BareStringForArray,
     /// An object (often `{}`) where the schema expects an array.
     ObjectForArray,
+    /// A degenerate markdown autolink `[text](target)` supplied for a path/URL
+    /// field. Structurally a valid JSON string, so it is an *intent* issue
+    /// detected by the repair stage (with a field-intent marker), not a type
+    /// failure the structural validator reports.
+    MarkdownAutolink,
     /// A confident type mismatch that fits none of the more specific classes.
     TypeMismatch,
 }
@@ -49,6 +54,7 @@ impl MalformedClass {
             MalformedClass::StringifiedJson => "stringified_json",
             MalformedClass::BareStringForArray => "bare_string_for_array",
             MalformedClass::ObjectForArray => "object_for_array",
+            MalformedClass::MarkdownAutolink => "markdown_autolink",
             MalformedClass::TypeMismatch => "type_mismatch",
         }
     }
@@ -303,6 +309,10 @@ fn describe_issue(issue: &SchemaIssue) -> String {
         MalformedClass::ObjectForArray => {
             format!("`{field}` must be an array, but an object was sent")
         }
+        MalformedClass::MarkdownAutolink => format!(
+            "`{field}` looks like a markdown link `[text](target)`; pass just the path or URL, \
+             not the markdown form"
+        ),
         MalformedClass::TypeMismatch => format!(
             "`{field}` must be {}, but {} was sent",
             issue.expected, issue.actual

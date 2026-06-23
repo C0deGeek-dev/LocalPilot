@@ -109,6 +109,18 @@ impl ToolRegistry {
             .map(AsRef::as_ref)
     }
 
+    /// Whether the named tool is served by an MCP server (vs. a builtin). An MCP
+    /// tool has no typed schema to guide a safe repair, so the argument-repair
+    /// stage refuses it. An unknown name reports `false`.
+    #[must_use]
+    pub fn is_mcp(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .zip(&self.sources)
+            .find(|(tool, _)| tool.name() == name)
+            .is_some_and(|(_, source)| matches!(source, ToolSource::Mcp(_)))
+    }
+
     /// The registered tool names.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
@@ -377,6 +389,27 @@ mod catalog_tests {
             catalog.get("beta").map(|e| &e.source),
             Some(&ToolSource::Mcp("files".to_string()))
         );
+    }
+
+    #[test]
+    fn is_mcp_distinguishes_an_mcp_tool_from_a_builtin() {
+        // The repair stage refuses MCP tools (no typed schema); the registry is how
+        // it tells an MCP tool from a builtin.
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(FakeTool {
+            name: "builtin_tool",
+            description: "b",
+        }));
+        registry.register_from(
+            Box::new(FakeTool {
+                name: "mcp_tool",
+                description: "m",
+            }),
+            ToolSource::Mcp("server".to_string()),
+        );
+        assert!(!registry.is_mcp("builtin_tool"));
+        assert!(registry.is_mcp("mcp_tool"));
+        assert!(!registry.is_mcp("unknown"), "an unknown tool is not MCP");
     }
 
     #[test]

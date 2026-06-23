@@ -5,6 +5,23 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Opt-in, conservative tool-argument repair (`[tools] repair`, default off).** A
+  validator-first stage that, when enabled, repairs a *shape-invalid* tool call
+  (a bare string where an array of strings is expected, a stringified array/object
+  of the right item type, or a markdown autolink in a path field) on **only** the
+  fields the validator flagged, re-validates, and either runs the repaired call —
+  with a model-visible note saying what changed — or falls back to the readable
+  error. It is gated by the tool's safety contract: a destructive, external-write,
+  irreversible, or MCP tool, and any content/command field, is **never** repaired
+  (`run_shell`, `apply_patch`, `git_commit`, `git_restore`, `fetch` get a readable
+  error, never a silent rewrite). Repair changes arguments, never authority — the
+  permission engine runs on the repaired input. `warn` applies and logs each repair
+  loudly; `off` (the default) reproduces the prior behaviour exactly. Every repair
+  and every high-risk refusal is a redacted session event. (The git contracts
+  `git_restore`/`git_commit`/`apply_patch` are reclassified to their honest
+  side-effect class so this gate is provable from the contract alone; this is
+  advisory metadata only — the permission path and prompts are unchanged.)
+
 - **Schema-aware tool-input validation errors and a dormant validity metric, lit up.**
   When a tool call's arguments are well-formed JSON but do not match the tool's
   schema, the model now receives a concise, schema-aware message — the offending

@@ -233,6 +233,12 @@ pub struct SessionConfig {
     /// `[tools] readable_errors`, which defaults on. The raw detail is always
     /// retained in the logs/telemetry.
     pub enforce_readable_errors: bool,
+    /// Conservative, schema-guided repair of a shape-invalid tool call's arguments
+    /// (`off|warn|on`). `off` (this programmatic default) never rewrites arguments;
+    /// the production config maps `[tools] repair`. Repair never touches a
+    /// destructive/external/MCP tool or a content/command field, and a repaired
+    /// call carries a model-visible note.
+    pub repair_mode: localpilot_config::RepairMode,
 }
 
 impl Default for SessionConfig {
@@ -254,6 +260,7 @@ impl Default for SessionConfig {
             tool_marker_enabled: false,
             turn_timeout: None,
             enforce_readable_errors: false,
+            repair_mode: localpilot_config::RepairMode::Off,
         }
     }
 }
@@ -829,24 +836,32 @@ impl SessionRuntime {
         self.record_event(kind);
     }
 
-    /// A concise, schema-aware error for a shape-invalid tool call, or `None`
-    /// when readable errors are off, the tool is unknown, or the arguments are
-    /// valid (so dispatch proceeds normally). The message is value-free by
-    /// construction — built from the schema, the offending field types, and the
-    /// tool's curated examples — and redacted for defence in depth, so it can
-    /// never echo a secret-bearing argument.
-    fn readable_input_error(&self, name: &str, input: &serde_json::Value) -> Option<String> {
-        if !self.config.enforce_readable_errors {
-            return None;
-        }
+    /// Validate — and, when `[tools] repair` is enabled, repair — a tool call's
+    /// arguments before dispatch. `None` for an unknown tool (the unknown-tool path
+    /// answers it). The result drives the dispatch choice: a repaired input is
+    /// dispatched in place of the original (with a model-visible note), a
+    /// shape-invalid input yields a schema-aware readable error (when readable
+    /// errors are on), and a valid input dispatches byte-unchanged. The readable
+    /// message is value-free and redacted by the repair stage, so it cannot echo a
+    /// secret.
+    fn tool_input_decision(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<localpilot_tools::ToolInputValidationResult> {
         let tool = self.tools.get(name)?;
-        let issues = localpilot_tools::tool_input_issues(&tool.schema(), input);
-        if issues.is_empty() {
-            return None;
-        }
+        let schema = tool.schema();
         let contract = tool.contract();
-        let message = localpilot_tools::readable_input_error(name, &issues, contract.examples);
-        Some(localpilot_config::redact::redact(&message))
+        let request = localpilot_tools::RepairRequest {
+            tool: name,
+            schema: &schema,
+            side_effect: contract.side_effect,
+            reversibility: contract.reversibility,
+            is_mcp: self.tools.is_mcp(name),
+            attempt_repair: self.config.repair_mode.is_enabled(),
+            examples: contract.examples,
+        };
+        Some(localpilot_tools::evaluate_tool_input(&request, input))
     }
 
     /// Apply the no-unsupported-claim gate to a final reply, returning the
@@ -2085,7 +2100,6 @@ impl SessionRuntime {
                 // against the tool schema. Measurement only — dispatch is
                 // unchanged whatever the verdict.
                 self.record_tool_input_validity(name, input);
-                let call = ToolCall::new(ToolUseId::from(id.as_str()), name.clone(), input.clone());
                 // Cancellation races the executing tool: an abort synthesizes
                 // an error result (the pairing contract holds), and dropping
                 // the dispatch future drops spawned children, which are
@@ -2106,14 +2120,27 @@ impl SessionRuntime {
                     self.precondition_block(name, input),
                     self.check_before_launch_verdict(name, input),
                 );
-                // Phase 1: a shape-invalid call cannot run, so when readable
-                // errors are on, hand the model a concise schema-aware correction
-                // (the validator-first / retry-with-error pattern) instead of
-                // letting dispatch fail with a raw serde blob. `None` falls
-                // through to dispatch, which surfaces today's raw message exactly.
-                let readable_error = self.readable_input_error(name, input);
+                // Phase 1 + 2: validate the arguments; when `[tools] repair` is on,
+                // repair a shape-invalid call to a valid shape and dispatch that;
+                // otherwise (and on an unrepairable or refused call) hand the model
+                // a schema-aware error when readable errors are on. A valid call
+                // dispatches byte-unchanged, exactly as before. Repaired and invalid
+                // are mutually exclusive outcomes of the one validate-or-repair pass.
+                let tool_decision = self.tool_input_decision(name, input);
+                let repaired_input = tool_decision.as_ref().and_then(|d| {
+                    matches!(d.outcome, localpilot_tools::RepairOutcome::Repaired)
+                        .then(|| d.repaired_input.clone())
+                        .flatten()
+                });
+                let readable_error = tool_decision.as_ref().and_then(|d| {
+                    (matches!(d.outcome, localpilot_tools::RepairOutcome::Invalid)
+                        && self.config.enforce_readable_errors)
+                        .then(|| d.readable_message.clone())
+                        .flatten()
+                });
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
+                let mut repaired_dispatched = false;
                 let result = match decision {
                     PreDispatch::Redirect(resolution) => {
                         // The broker narrowed the surface and this tool is not
@@ -2154,6 +2181,22 @@ impl SessionRuntime {
                                 message.clone(),
                             ))
                         } else {
+                            // Dispatch the repaired input in place of the original
+                            // when a repair fired; otherwise the model's own input.
+                            // The permission engine + gates run on whichever is sent
+                            // (reveal-never-grant: repair changes args, not authority).
+                            let active_input = match &repaired_input {
+                                Some(repaired) => {
+                                    repaired_dispatched = true;
+                                    repaired.clone()
+                                }
+                                None => input.clone(),
+                            };
+                            let active_call = ToolCall::new(
+                                ToolUseId::from(id.as_str()),
+                                name.clone(),
+                                active_input,
+                            );
                             let retention = StoreRetention(&self.store);
                             let ctx = ToolContext {
                                 workspace: &self.workspace,
@@ -2166,7 +2209,7 @@ impl SessionRuntime {
                             tokio::select! {
                                 () = cancel.cancelled() => None,
                                 result = self.tools.dispatch_gated(
-                                    &call,
+                                    &active_call,
                                     &ctx,
                                     &self.engine,
                                     self.approver.as_ref(),
@@ -2176,6 +2219,23 @@ impl SessionRuntime {
                         }
                     }
                 };
+                // Safety-gate audit: a refusal to repair a destructive/external/
+                // irreversible/MCP tool is recorded even when readable errors are
+                // off, so the gate holding is always observable.
+                if tool_decision.as_ref().is_some_and(|d| d.rejected_high_risk) {
+                    let provider = self.active_provider_id().to_string();
+                    let model = self.config.model.clone();
+                    let risk = tool_decision
+                        .as_ref()
+                        .map(|d| format!("{:?}", d.risk).to_lowercase())
+                        .unwrap_or_default();
+                    self.record_event(SessionEventKind::ToolRepairRejectedHighRisk {
+                        tool: name.clone(),
+                        provider,
+                        model,
+                        risk,
+                    });
+                }
                 // The readable-error recovery rung (sibling of the chunked-write
                 // rung): record that a schema-aware correction was sent so it is
                 // observable, and let the model retry on the next turn. It is
@@ -2219,6 +2279,46 @@ impl SessionRuntime {
                     ));
                     return self.stop(events, StopReason::Cancelled);
                 };
+
+                // A repaired call ran with rewritten arguments: attach the
+                // model-visible note (so the model sees what changed and learns the
+                // right shape), emit the redacted repair telemetry, and — in `warn`
+                // mode — log the repair loudly so it can be vetted before `on`.
+                if repaired_dispatched {
+                    if let Some(decision) = &tool_decision {
+                        if let Some(note) = &decision.model_note {
+                            result
+                                .output
+                                .push_str(&format!("\n\n[arguments repaired] {note}"));
+                        }
+                        let provider = self.active_provider_id().to_string();
+                        let model = self.config.model.clone();
+                        let class = decision
+                            .issues
+                            .first()
+                            .map(|issue| issue.class.label().to_string())
+                            .unwrap_or_default();
+                        let rules = decision
+                            .repairs_applied
+                            .iter()
+                            .map(|rule| (*rule).to_string())
+                            .collect();
+                        self.record_event(SessionEventKind::ToolInputRepaired {
+                            tool: name.clone(),
+                            provider,
+                            model,
+                            class,
+                            rules,
+                        });
+                        if self.config.repair_mode.is_loud() {
+                            if let Some(note) = &decision.model_note {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "[repair] `{name}`: {note}"
+                                )));
+                            }
+                        }
+                    }
+                }
 
                 // Scrub raw control bytes from tool output before it reaches the
                 // model context, the event stream, or the same-error breaker.
