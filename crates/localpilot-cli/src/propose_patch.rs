@@ -261,6 +261,7 @@ async fn run_propose(
             friction_block: None,
             process: None,
             include_missing_tests: false,
+            include_cleanup: false,
         },
     );
     let finding = report.findings.get(finding_rank - 1).ok_or_else(|| {

@@ -20,6 +20,7 @@ pub struct Config {
     pub quota: QuotaConfig,
     pub mcp: McpConfig,
     pub ingest: IngestConfig,
+    pub memory: MemoryConfig,
     pub compaction: CompactionConfig,
     pub storage: StorageConfig,
     pub skills: SkillsConfig,
@@ -39,6 +40,7 @@ impl Default for Config {
             quota: QuotaConfig::default(),
             mcp: McpConfig::default(),
             ingest: IngestConfig::default(),
+            memory: MemoryConfig::default(),
             compaction: CompactionConfig::default(),
             storage: StorageConfig::default(),
             skills: SkillsConfig::default(),
@@ -339,6 +341,40 @@ impl Default for IngestConfig {
     }
 }
 
+/// Accepted-memory injection tuning. Every default preserves the prior fixed
+/// behaviour (no relevance gate, a fixed 1200-char budget, no category dedup), so
+/// the section is purely additive and opt-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Minimum retrieval score an accepted memory must clear to be injected. The
+    /// default `0` injects every match (the prior behaviour); raise it so weak
+    /// matches do not fill the per-turn budget.
+    pub injection_min_score: i64,
+    /// Char budget for the injected accepted-memory block, and the ceiling when
+    /// `injection_context_aware` scales the budget down for a small model.
+    pub injection_char_budget: usize,
+    /// Scale the injected char budget down toward the active model's context
+    /// window (a small/weak model gets less), never above `injection_char_budget`.
+    /// Off by default — the fixed budget is used.
+    pub injection_context_aware: bool,
+    /// Lesson categories skipped at injection because the rule engine already
+    /// enforces equivalent guidance (dedup-vs-enforced). Empty by default. Values
+    /// match `LessonCategory` debug names, e.g. `SecurityWarning`.
+    pub injection_skip_categories: Vec<String>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            injection_min_score: 0,
+            injection_char_budget: 1_200,
+            injection_context_aware: false,
+            injection_skip_categories: Vec::new(),
+        }
+    }
+}
+
 /// Model Context Protocol servers to connect to. Each server's tools are exposed
 /// through the same permission engine and redaction as builtin tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +503,13 @@ pub struct HarnessConfig {
     /// The no-unsupported-claim gate over the final reply. `off` (default) skips
     /// it; `warn` flags a completed-action claim no verified tool call supports.
     pub claim_gate: ClaimGate,
+    /// Run the advisory whole-repo teardown sweep at the completion seam, after
+    /// the final step is committed, alongside the completion retrospective. It is
+    /// read-only and advisory — it surfaces cleanup-audit findings (dead code,
+    /// duplicate logic, over-engineering, redundant access, doc/test drift) and
+    /// never blocks completion, edits code, or commits. Off by default (features
+    /// ship off); the on-demand path is `self-review --cleanup`.
+    pub teardown_sweep: bool,
 }
 
 impl Default for HarnessConfig {
@@ -482,6 +525,7 @@ impl Default for HarnessConfig {
             tool_call_budget: None,
             tool_call_budget_max: None,
             claim_gate: ClaimGate::default(),
+            teardown_sweep: false,
         }
     }
 }
@@ -925,6 +969,28 @@ mod tests {
             );
         }
         assert!(HarnessConfig::default().rules.is_empty());
+    }
+
+    #[test]
+    fn teardown_sweep_is_off_by_default_and_parses_on() {
+        // The completion teardown sweep ships off: the default config and a config
+        // that omits the key both leave it disabled.
+        assert!(!HarnessConfig::default().teardown_sweep);
+        let omitted: HarnessConfig =
+            serde_json::from_str(r#"{"context_token_limit": 8000}"#).unwrap();
+        assert!(!omitted.teardown_sweep);
+        // A whole Config with no harness key keeps it off.
+        let config: Config = serde_json::from_value(json!({})).unwrap();
+        assert!(!config.harness.teardown_sweep);
+        // It opts in explicitly and round-trips.
+        let on: HarnessConfig = serde_json::from_value(json!({ "teardown_sweep": true })).unwrap();
+        assert!(on.teardown_sweep);
+        let value = serde_json::to_value(&on).unwrap();
+        assert!(
+            serde_json::from_value::<HarnessConfig>(value)
+                .unwrap()
+                .teardown_sweep
+        );
     }
 
     #[test]

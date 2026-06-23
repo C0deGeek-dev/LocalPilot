@@ -13,6 +13,8 @@ use localpilot_core::SessionId;
 use localpilot_localmind::{self as learning, ReviewVerdict};
 use localpilot_store::Store;
 
+use crate::output::OutputFormat;
+
 /// Close out a session: extract candidate lessons and enqueue them for review.
 ///
 /// # Errors
@@ -26,6 +28,30 @@ pub fn closeout(cwd: &std::path::Path, session: &str, out: &mut dyn Write) -> an
         out,
         "closed out {} — {} candidate(s), {} enqueued for review",
         summary.session_id, summary.candidate_count, summary.enqueued_count
+    )?;
+    Ok(())
+}
+
+/// Seed curated lessons from a JSON pack (`{ "lessons": [ ... ] }`) directly into
+/// accepted memory. Idempotent: lessons whose body already exists are skipped.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or parsed, or if seeding fails.
+pub fn seed(cwd: &Path, file: &Path, dry_run: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("read seed file '{}': {e}", file.display()))?;
+    let pack: localpilot_localmind::SeedPack = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parse seed file '{}': {e}", file.display()))?;
+    let report = learning::seed_memory(cwd, &pack.lessons, dry_run)?;
+    let suffix = if dry_run {
+        " (dry run — nothing written)"
+    } else {
+        ""
+    };
+    writeln!(
+        out,
+        "seeded {} lesson(s), skipped {}{}",
+        report.seeded, report.skipped, suffix
     )?;
     Ok(())
 }
@@ -159,19 +185,92 @@ pub fn promote(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyhow::
     Ok(())
 }
 
-/// Search accepted memory.
+/// Search accepted memory in the resolved store at `root`.
+///
+/// `found` is whether an existing store was resolved (walked up from the cwd, or
+/// pinned by `--workspace`). A read never creates a store: when no store exists
+/// the search is reported as such on stderr and stdout stays script-stable (an
+/// empty JSON array stays valid). The three empty outcomes — no store, empty
+/// store, and a non-empty store that the query missed — get distinct stderr lines
+/// so a caller can tell them apart instead of reading a bare `no matches`.
+///
+/// `format` is the resolved output format (a non-terminal stdout defaults to
+/// JSON); `hint` requests the one-line affordance pointing at the structured form
+/// when the human table is shown interactively.
 ///
 /// # Errors
 /// Returns an error if the search fails.
-pub fn search(cwd: &std::path::Path, query: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    let hits = learning::search(cwd, query)?;
-    if hits.is_empty() {
-        writeln!(out, "no matches")?;
+pub fn search(
+    root: &Path,
+    found: bool,
+    query: &str,
+    format: OutputFormat,
+    hint: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let json = format == OutputFormat::Json;
+    if !found {
+        // (a) No `.localmind` at or above the search start. Diagnose on stderr;
+        // keep stdout script-stable so a JSON consumer still parses an array.
+        writeln!(
+            err,
+            "localmind: no store found at or above {} (no ancestor holds .localmind) — \
+             create one with `localpilot learning seed`/`closeout`, or pass --workspace <path>",
+            root.display()
+        )?;
+        if json {
+            writeln!(out, "[]")?;
+        } else {
+            writeln!(out, "no matches")?;
+        }
         return Ok(());
     }
-    for hit in hits {
-        writeln!(out, "{}\t{}\t{}", hit.memory_id, hit.score, hit.path)?;
-        writeln!(out, "  {}", hit.snippet)?;
+    // Read-only: never initialize a store from a search.
+    let hits = learning::search_readonly(root, query)?;
+    if json {
+        // Structured output for agents: one JSON array of hits (id, score, path,
+        // snippet, category). Empty results are a valid empty array.
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+    } else if hits.is_empty() {
+        writeln!(out, "no matches")?;
+    } else {
+        for hit in &hits {
+            writeln!(out, "{}\t{}\t{}", hit.memory_id, hit.score, hit.path)?;
+            writeln!(out, "  {}", hit.snippet)?;
+        }
+    }
+    if hits.is_empty() {
+        report_empty_search(root, query, err)?;
+    }
+    if hint {
+        crate::output::write_format_hint(err)?;
+    }
+    Ok(())
+}
+
+/// Tell the (b) empty-store case apart from the (c) non-empty-store-missed case on
+/// stderr. Stays read-only: only counts when the store config already exists, so a
+/// diagnostic never writes one.
+fn report_empty_search(root: &Path, query: &str, err: &mut dyn Write) -> anyhow::Result<()> {
+    let count = if root.join(".localmind.toml").is_file() {
+        learning::memory_list(root).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+    if count == 0 {
+        writeln!(
+            err,
+            "localmind: store at {} has no accepted memory yet",
+            root.display()
+        )?;
+    } else {
+        writeln!(
+            err,
+            "localmind: {count} accepted {} in store at {}, none matched {query:?}",
+            if count == 1 { "memory" } else { "memories" },
+            root.display()
+        )?;
     }
     Ok(())
 }
@@ -324,6 +423,255 @@ mod tests {
                 .iter()
                 .all(|item| item.state != "Pending"),
             "no pending candidate survives the purge"
+        );
+    }
+
+    /// Seed one accepted lesson into a store at `dir` so a search can hit it.
+    fn seed_one(dir: &Path, body: &str) {
+        std::fs::write(dir.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let lesson = learning::SeedLesson {
+            body: body.to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        learning::seed_memory(dir, &[lesson], false).unwrap();
+    }
+
+    #[test]
+    fn search_with_no_store_reports_state_a_and_creates_nothing() {
+        // State (a): no `.localmind` at or above the search start. A read must not
+        // create one, stdout stays script-stable, and stderr explains the miss.
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            false,
+            "anything",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.contains("no store found at or above"), "got: {err}");
+        assert!(
+            !dir.path().join(".localmind").exists() && !dir.path().join(".localmind.toml").exists(),
+            "a read must not create a store"
+        );
+    }
+
+    #[test]
+    fn search_with_no_store_keeps_json_a_valid_empty_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            false,
+            "anything",
+            OutputFormat::Json,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(
+            parsed.as_array().is_some_and(|a| a.is_empty()),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn search_empty_store_reports_state_b() {
+        // State (b): a store exists but holds no accepted memory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "anything",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("has no accepted memory yet"));
+    }
+
+    #[test]
+    fn search_nonempty_store_no_match_reports_state_c() {
+        // State (c): a non-empty store whose memory the query simply missed.
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "always redact secrets before persisting a transcript",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "an unrelated query about audio latency",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "no matches\n");
+        assert!(String::from_utf8(err).unwrap().contains("none matched"));
+    }
+
+    #[test]
+    fn search_returns_the_resolved_stores_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "propagate a subprocess exit code before reporting success",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "subprocess exit code",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("subprocess exit code"), "got: {out}");
+    }
+
+    #[test]
+    fn json_format_emits_an_array_of_hits() {
+        // The structured form a non-terminal stdout resolves to: a JSON array a
+        // consumer can parse, never the tab-separated human table.
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "propagate a subprocess exit code before reporting success",
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "subprocess exit code",
+            OutputFormat::Json,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let arr = parsed.as_array().expect("a JSON array");
+        assert!(!arr.is_empty(), "got: {out}");
+        assert!(arr[0].get("memory_id").is_some() && arr[0].get("score").is_some());
+    }
+
+    #[test]
+    fn the_affordance_hint_fires_only_when_requested() {
+        // The hint rides on stderr (never stdout), so it can't pollute a pipe, and
+        // appears only when the caller asks for it (resolved: human + a terminal).
+        let dir = tempfile::tempdir().unwrap();
+        seed_one(
+            dir.path(),
+            "always redact secrets before persisting a transcript",
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "redact",
+            OutputFormat::Human,
+            true,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(err).unwrap().contains("--format json"),
+            "the hint must point at the structured form"
+        );
+        assert!(
+            !String::from_utf8(out).unwrap().contains("--format json"),
+            "the hint must never reach stdout"
+        );
+
+        // Not requested → no hint.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        search(
+            dir.path(),
+            true,
+            "redact",
+            OutputFormat::Human,
+            false,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(!String::from_utf8(err).unwrap().contains("--format json"));
+    }
+
+    #[test]
+    fn shipped_coding_lessons_pack_validates_and_dry_run_seeds_cleanly() {
+        // `learning seed --dry-run` over the shipped pack: it must parse as a
+        // SeedPack and every lesson must be valid and unique — none skipped for an
+        // empty body or a within-pack duplicate.
+        let pack_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../seed-packs/coding-lessons.json");
+        let text = std::fs::read_to_string(&pack_path).unwrap();
+        let pack: localpilot_localmind::SeedPack = serde_json::from_str(&text).unwrap();
+        assert!(!pack.lessons.is_empty(), "the pack has lessons");
+        assert!(
+            pack.lessons.iter().all(|l| !l.body.trim().is_empty()),
+            "every lesson body is non-empty"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        let report = learning::seed_memory(dir.path(), &pack.lessons, true).unwrap();
+        assert_eq!(
+            report.seeded,
+            pack.lessons.len(),
+            "every shipped lesson is valid and seeds (dry run)"
+        );
+        assert_eq!(
+            report.skipped, 0,
+            "no empty or duplicate bodies in the pack"
         );
     }
 

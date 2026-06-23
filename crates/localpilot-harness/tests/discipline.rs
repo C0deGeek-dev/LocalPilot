@@ -614,6 +614,41 @@ fn discipline_scorecard_and_negative_controls() {
 
 /// Drive one behaviour scenario against a real provider: the model chooses the
 /// tools, and the ledger scores what it actually did.
+/// Curated tool-discipline lessons for the lessons-on A/B arm, one per behaviour
+/// the scorecard measures (ground claims, recover a malformed call, abstain on an
+/// unavailable tool, verify before claiming done). Seeded into the scenario
+/// workspace and injected via the LocalMind context hook when
+/// `LOCALPILOT_LIVE_LESSONS` is set.
+fn discipline_lessons() -> Vec<localpilot_localmind::SeedLesson> {
+    let make = |body: &str, category: &str| localpilot_localmind::SeedLesson {
+        body: body.to_string(),
+        category: Some(category.to_string()),
+        confidence: Some(0.9),
+        related_files: Vec::new(),
+        related_entities: Vec::new(),
+        evidence: Some("tool-discipline".to_string()),
+        tags: Vec::new(),
+    };
+    vec![
+        make(
+            "Before claiming a tool found or did something, actually call the tool and ground the claim in its result; never report a success the tool result does not support.",
+            "ToolUse",
+        ),
+        make(
+            "If a tool call fails with a malformed-argument error, retry it once with corrected, minimal arguments instead of giving up or claiming success.",
+            "ToolUse",
+        ),
+        make(
+            "If a required tool is not available, say so and abstain; do not substitute a different tool or invent a result.",
+            "AntiPattern",
+        ),
+        make(
+            "Before reporting a task done, verify the end state with a tool (check status, read the file); do not claim completion you have not checked.",
+            "Process",
+        ),
+    ]
+}
+
 async fn run_live_discipline(
     task: &DisciplineTask,
     provider: Arc<dyn ModelProvider>,
@@ -648,6 +683,16 @@ async fn run_live_discipline(
         Vec::new(),
     );
     let session = runtime.session_id();
+
+    // Optional lessons-on arm: seed curated discipline lessons into this
+    // scenario's workspace and register the LocalMind injection hook, so the
+    // model sees them at turn time. Off by default; set LOCALPILOT_LIVE_LESSONS
+    // to enable, giving a lesson-on/off A/B over the same scenarios + model.
+    if std::env::var("LOCALPILOT_LIVE_LESSONS").is_ok() {
+        let lessons = discipline_lessons();
+        let _ = localpilot_localmind::seed_memory(root, &lessons, false);
+        localpilot_localmind::register_context_hook(root, &mut runtime);
+    }
 
     let prompt = format!(
         "Complete this task using the available tools, and claim only what your \

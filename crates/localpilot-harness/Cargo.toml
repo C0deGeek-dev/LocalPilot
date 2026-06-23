@@ -31,6 +31,11 @@ localpilot-verify = { path = "../localpilot-verify" }
 [dev-dependencies]
 async-trait = { workspace = true }
 insta = { workspace = true }
+# Test-only: the live discipline benchmark can opt into LocalMind lesson
+# injection for a lesson-on/off A/B. The adapter depends on this crate, so this
+# is a dev-dependency cycle — allowed by cargo (dev-deps are excluded from the
+# normal dependency graph) — used only by tests/discipline.rs.
+localpilot-localmind = { path = "../localpilot-localmind" }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

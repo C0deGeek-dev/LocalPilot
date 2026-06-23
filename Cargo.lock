@@ -1455,6 +1455,7 @@ dependencies = [
  "localpilot-config",
  "localpilot-core",
  "localpilot-llm",
+ "localpilot-localmind",
  "localpilot-quota",
  "localpilot-recovery",
  "localpilot-sandbox",

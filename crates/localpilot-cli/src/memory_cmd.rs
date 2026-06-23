@@ -3,6 +3,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::output::OutputFormat;
+
 /// Print a one-line status: entry count and whether injection is enabled.
 ///
 /// # Errors
@@ -33,13 +35,70 @@ pub fn inspect(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// List entries relevant to a query.
+/// List entries relevant to a query in the resolved store at `root`.
+///
+/// `found` is whether an existing store was resolved. A read never creates a
+/// store: when none exists the miss is reported on stderr and stdout stays empty.
+/// The empty-store and query-missed cases get distinct stderr lines.
 ///
 /// # Errors
 /// Returns an error if the store cannot be read or output written.
-pub fn search(root: &Path, query: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    for entry in localpilot_localmind::search(root, query)? {
-        writeln!(out, "{}  {}", entry.memory_id, entry.snippet)?;
+pub fn search(
+    root: &Path,
+    found: bool,
+    query: &str,
+    format: OutputFormat,
+    hint: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let json = format == OutputFormat::Json;
+    if !found {
+        writeln!(
+            err,
+            "localmind: no store found at or above {} (no ancestor holds .localmind) — \
+             create one with `localpilot learning seed`/`closeout`, or pass --workspace <path>",
+            root.display()
+        )?;
+        // Keep stdout script-stable: a JSON consumer still parses an empty array.
+        if json {
+            writeln!(out, "[]")?;
+        }
+        return Ok(());
+    }
+    let hits = localpilot_localmind::search_readonly(root, query)?;
+    if json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&hits)?)?;
+    } else {
+        for entry in &hits {
+            writeln!(out, "{}  {}", entry.memory_id, entry.snippet)?;
+        }
+    }
+    if hits.is_empty() {
+        let count = if root.join(".localmind.toml").is_file() {
+            localpilot_localmind::memory_list(root)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if count == 0 {
+            writeln!(
+                err,
+                "localmind: store at {} has no accepted memory yet",
+                root.display()
+            )?;
+        } else {
+            writeln!(
+                err,
+                "localmind: {count} accepted {} in store at {}, none matched {query:?}",
+                if count == 1 { "memory" } else { "memories" },
+                root.display()
+            )?;
+        }
+    }
+    if hint {
+        crate::output::write_format_hint(err)?;
     }
     Ok(())
 }
@@ -87,6 +146,16 @@ pub fn delete(root: &Path, id: &str, out: &mut dyn Write) -> anyhow::Result<()> 
 pub fn disable(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     localpilot_localmind::memory_disable_injection(root)?;
     writeln!(out, "memory injection disabled for this project")?;
+    Ok(())
+}
+
+/// Re-enable memory injection for this project (clears the disable flag).
+///
+/// # Errors
+/// Returns an error if the flag cannot be cleared.
+pub fn enable(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    localpilot_localmind::memory_enable_injection(root)?;
+    writeln!(out, "memory injection enabled for this project")?;
     Ok(())
 }
 

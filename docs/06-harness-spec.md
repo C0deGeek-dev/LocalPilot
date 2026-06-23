@@ -601,6 +601,28 @@ shape degrades to "no findings" rather than an error. The worker prompt also
 carries a doc-currency cue, so a step that changes observable behaviour,
 configuration, or interfaces updates the matching documentation in the same step.
 
+## Completion Teardown Sweep
+
+At the same completion seam, when `[harness] teardown_sweep` is enabled, the
+harness also runs an advisory **whole-repo teardown sweep** — the in-harness mirror
+of the plan template's `cleanup-audit` §7 gate (ADR-0047). Where the retrospective
+looks back at the brief, the sweep looks across the whole tree for cruft to clean
+up before work is called done: dead/abandoned code, duplicate/parallel logic,
+over-engineering, redundant data access, and doc/test drift. It is the same
+read-only scanner as `localpilot self-review`, with its cleanup detectors turned
+on, and its findings rank into the same advisory report (each carries a category,
+confidence, a `risk`, a recommended action, and the hidden-usage channels the
+detector ruled out).
+
+It is **off by default** (features ship off) and advisory by construction: the
+sweep is deterministic and offline (no model call), read-only, and human-gated. It
+never blocks completion, edits code, or commits — a finished run's outputs are
+untouched whether it is on or off. Categories tooling already owns (unused deps,
+unused imports/vars, advisories) are surfaced as pointers to `cargo
+machete`/`clippy`/`cargo deny`, not re-derived. Findings are report-only and open a
+*new* plan when acted on; nothing is auto-applied or auto-enqueued as accepted
+memory. The same pass is available on demand as `self-review --cleanup`.
+
 ## Background Processes
 
 A long-running command (a dev server or watcher) does not exit, so `run_shell`

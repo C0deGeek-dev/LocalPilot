@@ -14,12 +14,13 @@
 //! fully offline-testable.
 #![forbid(unsafe_code)]
 
+mod cleanup;
 mod detectors;
 mod finding;
 mod friction;
 mod process_friction;
 
-pub use finding::{Finding, FindingKind, Report, Severity, Span, REPORT_SCHEMA};
+pub use finding::{Finding, FindingKind, Report, Risk, Severity, Span, REPORT_SCHEMA};
 pub use friction::{parse_friction_findings, FRICTION_AUDIT_PROMPT};
 pub use process_friction::{process_friction_findings, ProcessFriction};
 
@@ -41,13 +42,20 @@ pub struct ReviewOptions {
     /// default because it cannot see sibling test crates and is the noisiest
     /// signal; the host opts in.
     pub include_missing_tests: bool,
+    /// Include the whole-repo teardown-sweep detectors (the cleanup-audit
+    /// categories: dead/abandoned code, duplicate logic, over-engineering,
+    /// redundant data access, plus tool-owned pointers). Off by default so the
+    /// always-on `self-review` surface is unchanged; the completion sweep and
+    /// `self-review --cleanup` opt in.
+    pub include_cleanup: bool,
 }
 
 /// Run a read-only self-review of `root` and return a ranked, advisory report.
 /// Performs no writes.
 #[must_use]
 pub fn review(root: &Path, options: &ReviewOptions) -> Report {
-    let (mut findings, scanned) = detectors::scan(root, options.include_missing_tests);
+    let (mut findings, scanned) =
+        detectors::scan(root, options.include_missing_tests, options.include_cleanup);
     if let Some(block) = &options.friction_block {
         findings.extend(parse_friction_findings(block));
     }
@@ -253,6 +261,73 @@ mod tests {
             "a prior lesson should boost confidence"
         );
         assert!(todo.evidence.contains("prior lesson"), "{}", todo.evidence);
+    }
+
+    /// The teardown sweep surfaces the cleanup categories only when opted in, and
+    /// it stays read-only.
+    #[test]
+    fn cleanup_sweep_is_opt_in_and_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "Cargo.toml", "[package]\nname = \"x\"\n");
+        write(root, "src/old.rs.bak", "pub fn gone() {}\n");
+        write(root, "src/keep.rs", "#[allow(dead_code)]\npub fn f() {}\n");
+
+        // Default options do not run the cleanup detectors.
+        let baseline = review(root, &ReviewOptions::default());
+        assert!(
+            !baseline.findings.iter().any(|f| f.kind.is_cleanup()),
+            "cleanup is opt-in: {:?}",
+            baseline.findings
+        );
+
+        let before = snapshot(root);
+        let swept = review(
+            root,
+            &ReviewOptions {
+                include_cleanup: true,
+                ..ReviewOptions::default()
+            },
+        );
+        let after = snapshot(root);
+        assert_eq!(before, after, "the sweep must be read-only");
+
+        let kinds: Vec<FindingKind> = swept.findings.iter().map(|f| f.kind).collect();
+        assert!(kinds.contains(&FindingKind::DeadCode), "{kinds:?}");
+        assert!(kinds.contains(&FindingKind::ToolPointer), "{kinds:?}");
+    }
+
+    /// The safety invariant at the report level: no cleanup finding reaches high
+    /// confidence, and dead-code findings record the channels they weighed.
+    #[test]
+    fn cleanup_findings_respect_the_safety_invariant() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "Cargo.toml", "[package]\nname = \"x\"\n");
+        write(root, "src/legacy.rs.old", "pub fn gone() {}\n");
+        write(root, "src/keep.rs", "#[allow(dead_code)]\npub fn f() {}\n");
+
+        let report = review(
+            root,
+            &ReviewOptions {
+                include_cleanup: true,
+                ..ReviewOptions::default()
+            },
+        );
+        for finding in report.findings.iter().filter(|f| f.kind.is_cleanup()) {
+            assert!(
+                finding.confidence <= 0.75,
+                "a cleanup signal must never be high-confidence: {finding:?}"
+            );
+        }
+        assert!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.kind == FindingKind::DeadCode)
+                .all(|f| !f.hidden_usage_checked.is_empty()),
+            "dead-code findings record the channels weighed"
+        );
     }
 
     /// Friction findings join the same ranked stream as repo-scan findings.

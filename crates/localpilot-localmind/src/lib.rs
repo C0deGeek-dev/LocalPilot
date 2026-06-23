@@ -27,8 +27,11 @@ mod primer;
 mod remember_tool;
 mod retrospective_lesson;
 mod review_list_tool;
+mod rule_cue;
+mod seed;
 mod skill_drafts_tool;
 mod tool_use;
+mod workspace;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -65,9 +68,10 @@ pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
 pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
-    audit, cluster_by_similarity, context_for, memory_delete, memory_disable_injection,
-    memory_injection_enabled, memory_list, promote, review_decide, review_list, review_purge,
-    review_show, search, skill_activate, skill_body, skill_show, skills_active, skills_generate,
+    audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, lessons_flagged_for_review,
+    memory_delete, memory_disable_injection, memory_enable_injection, memory_injection_enabled,
+    memory_list, promote, review_decide, review_list, review_purge, review_show, search,
+    search_readonly, skill_activate, skill_body, skill_show, skills_active, skills_generate,
     skills_list, ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict,
     SearchHit, SkillDraftInfo,
 };
@@ -76,8 +80,11 @@ pub use primer::{accepted_primer, distill_primer_into_review};
 pub use remember_tool::Remember;
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
+pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
+pub use seed::{seed_memory, SeedLesson, SeedPack, SeedReport};
 pub use skill_drafts_tool::SkillDrafts;
 pub use tool_use::{tool_use_candidate, ToolUseSignal};
+pub use workspace::{is_store_root, resolve_store_root, StoreRoot};
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};
 use localmind_store::{
@@ -775,10 +782,11 @@ mod tests {
         }
     }
 
-    /// Reviewed-promotion: malformed model output is rejected and nothing reaches
-    /// the review queue or durable memory.
+    /// A reasoning model whose reply is not parseable JSON must not abort
+    /// closeout: extraction falls back to the deterministic path instead of
+    /// erroring, and the raw, unparseable model text is never promoted.
     #[test]
-    fn closeout_rejects_malformed_model_output() {
+    fn closeout_falls_back_when_model_output_is_unparseable() {
         let chat_body = serde_json::json!({
             "choices": [{ "message": { "content": "this is not json at all" } }]
         })
@@ -804,15 +812,17 @@ mod tests {
             )
             .unwrap();
 
-        // Malformed model output is rejected (not silently promoted).
+        // Unparseable model output falls back to the deterministic extractor
+        // rather than failing the whole closeout.
+        closeout_session(root, &store, session)
+            .expect("unparseable model output must fall back, not error");
+        // The raw, unparseable model text is never promoted as a candidate.
         assert!(
-            closeout_session(root, &store, session).is_err(),
-            "malformed model output must be rejected"
-        );
-        // Nothing reached the review queue.
-        assert!(
-            review_list(root).unwrap().is_empty(),
-            "rejected model output must not reach the review queue"
+            review_list(root)
+                .unwrap()
+                .iter()
+                .all(|item| !item.summary.contains("this is not json at all")),
+            "raw unparseable model output must not reach the review queue"
         );
     }
 

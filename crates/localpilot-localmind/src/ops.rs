@@ -38,12 +38,15 @@ pub enum ReviewVerdict {
 }
 
 /// A memory search hit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
     pub memory_id: String,
     pub score: i64,
     pub path: String,
     pub snippet: String,
+    /// The memory's lesson category, so a caller can gate or dedup injection by
+    /// category without a second store lookup.
+    pub category: String,
 }
 
 /// An accepted LocalMind memory entry, flattened for display.
@@ -249,6 +252,7 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, Learni
             score: result.score,
             path: result.path.display().to_string(),
             snippet: result.snippet,
+            category: result.category,
         })
         .collect())
 }
@@ -273,6 +277,7 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
             score: result.score,
             path: result.path.display().to_string(),
             snippet: result.snippet,
+            category: result.category,
         })
         .collect())
 }
@@ -317,6 +322,7 @@ pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, 
             score: hit.score,
             path: hit.path.display().to_string(),
             snippet: hit.snippet,
+            category: hit.category,
         })
         .collect())
 }
@@ -324,6 +330,39 @@ pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, 
 /// The number of accepted-memory hits injected into a turn's context — the cap
 /// the audit record must share so it never lists a memory that was not injected.
 pub const CONTEXT_MEMORY_LIMIT: usize = 5;
+
+/// Down-weight a lesson by routing it to review — never deleting it. The host's
+/// learning loop calls this when the uplift eval shows a lesson did not improve
+/// (or hurt) outcomes; it reuses the engine's reasoned route-to-review flag, so
+/// the memory stays active but is surfaced for a human to re-judge. Returns
+/// whether an active memory matched.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read or updated.
+pub fn flag_unhelpful_lesson(project_root: &Path, memory_id: &str) -> Result<bool, LearningError> {
+    let persistence = open_memory(project_root)?;
+    persistence
+        .flag_for_review(
+            &MemoryEntryId::new(memory_id),
+            "did not improve eval outcomes",
+        )
+        .map_err(memory_err)
+}
+
+/// The lessons currently flagged for review (down-weighted or change-invalidated),
+/// the review list a host surfaces. Never includes a deleted memory.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read.
+pub fn lessons_flagged_for_review(project_root: &Path) -> Result<Vec<String>, LearningError> {
+    let persistence = open_memory(project_root)?;
+    Ok(persistence
+        .list_stale_candidates()
+        .map_err(memory_err)?
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect())
+}
 
 /// List accepted LocalMind memory.
 ///
@@ -365,6 +404,20 @@ pub fn memory_disable_injection(project_root: &Path) -> Result<(), LearningError
         b"context injection disabled\n",
     )
     .map_err(memory_err)
+}
+
+/// Re-enable LocalMind context injection for this project by clearing the
+/// disable flag. Idempotent: a no-op when injection is already enabled.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the flag file exists but cannot be removed.
+pub fn memory_enable_injection(project_root: &Path) -> Result<(), LearningError> {
+    let path = injection_disabled_path(project_root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(memory_err(e)),
+    }
 }
 
 /// Retrieve relevant accepted memory for `query`, formatted as a compact context
@@ -575,7 +628,7 @@ fn open_queue(project_root: &Path) -> Result<ReviewQueue, LearningError> {
 }
 
 /// Open memory persistence, ensuring the project is initialized first.
-fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> {
+pub(crate) fn open_memory(project_root: &Path) -> Result<MemoryPersistence, LearningError> {
     crate::initialize(project_root)?;
     MemoryPersistence::open_project(project_root).map_err(memory_err)
 }
@@ -621,6 +674,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn injection_toggle_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(memory_injection_enabled(root), "enabled by default");
+        memory_disable_injection(root).unwrap();
+        assert!(!memory_injection_enabled(root), "disabled after disable");
+        memory_enable_injection(root).unwrap();
+        assert!(memory_injection_enabled(root), "enabled after enable");
+        // Enable is idempotent — a second call on an already-enabled project is a no-op.
+        memory_enable_injection(root).unwrap();
+        assert!(memory_injection_enabled(root));
+    }
+
+    #[test]
     fn clusters_group_near_duplicates_and_isolate_distinct_lessons() {
         let summaries = vec![
             "run the integration suite after every exporter change".to_string(),
@@ -640,6 +707,36 @@ mod tests {
     #[test]
     fn an_empty_queue_clusters_to_nothing() {
         assert!(cluster_by_similarity(&[]).is_empty());
+    }
+
+    #[test]
+    fn flag_unhelpful_routes_to_review_without_deleting() {
+        // Outcome-aware down-weighting flags a lesson for review (never deletes it):
+        // it appears in the review list and stays in accepted memory.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        let lesson = crate::SeedLesson {
+            body: "a lesson that did not help on the eval".to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        crate::seed_memory(root, &[lesson], false).unwrap();
+        let id = memory_list(root).unwrap()[0].id.clone();
+
+        assert!(flag_unhelpful_lesson(root, &id).unwrap());
+        assert!(
+            lessons_flagged_for_review(root).unwrap().contains(&id),
+            "the flagged lesson must surface in the review list"
+        );
+        assert!(
+            memory_list(root).unwrap().iter().any(|m| m.id == id),
+            "down-weighting must never delete the memory"
+        );
     }
 
     #[test]

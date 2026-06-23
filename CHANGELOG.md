@@ -5,6 +5,132 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Code-authoring guardrails in `seed-packs/coding-lessons.json` + an opt-in
+  `print --self-review`.** The curated coding pack gains six general, model-actionable
+  lessons distilled from a dogfood run where the local author wrote compilable code that
+  skipped unspecified rigor: propagate a subprocess child's exit code (and surface its
+  stderr); drain child stdout/stderr concurrently (and don't claim concurrency you didn't
+  write); pass process args as a list, not a quoted string; guard a process launch like a
+  missing argument; factor duplicated parse/format logic into one helper; and don't claim
+  a build or tests pass before running them. Because one-shot `localpilot print` *reads*
+  accepted memory (it injects lessons; it just never closes out), seeding these reaches the
+  author with no new wiring. `print --self-review` adds an opt-in, read-only repo-health
+  pass after a run (advisory, on stderr; never edits or commits), and `print --help` now
+  states the reads-memory-but-does-not-learn contract.
+
+- **Discoverable structured output for `learning search` / `memory search` (ADR-0048).**
+  Adding `--json` was not enough — a dogfood run showed both the operator and the local
+  model missed it and tab-parsed the human table. Now the format is resolved from context:
+  when stdout is **not a terminal** (piped or redirected) the commands emit a JSON array by
+  default; a real terminal still gets the human table plus a one-line stderr hint pointing
+  at the structured form. A uniform `--format human|json` overrides either way (`--json`
+  kept as an alias) — `--format human` forces the table even when piped. `memory search`
+  gains the same JSON output as `learning search`. Stdout stays script-stable; the hint and
+  diagnostics ride on stderr.
+
+- **Workspace-aware LocalMind store resolution.** `localpilot learning` and
+  `localpilot memory` now resolve the store like `git` resolves its repo root —
+  walking up from the current directory to the nearest ancestor holding
+  `.localmind` — so running from a project subdirectory answers from the project's
+  store instead of silently using or creating a different, empty one. The resolved
+  root is logged to stderr. A new `--workspace <path>` flag pins the root
+  explicitly (skipping the walk-up). `learning search` / `memory search` are now
+  read-only (a search never creates a store) and distinguish three empty outcomes
+  on stderr — no store found, an empty store, and a non-empty store the query
+  missed — so a bare `no matches` is no longer ambiguous. Stdout stays
+  script-stable (an empty `--json` result is still a valid empty array).
+
+- **`learning search --json`.** Accepted-memory search can emit a JSON array (id, score,
+  path, snippet, category) for agent consumption, alongside the default human-readable
+  text. Empty results are a valid empty array.
+
+- **`doctor` reports a truthful version after a same-branch rebuild.** The embedded
+  `git describe` version is captured by `build.rs`, which previously only re-ran when
+  `.git/HEAD` changed — but a commit on the current branch advances the branch ref, not
+  HEAD, so the reported version went stale after a pull + rebuild. The build script now
+  also retriggers on the resolved branch ref and `packed-refs`.
+- **`localpilot init` no longer writes a dangling default provider.** The starter
+  `.localpilot.toml` shipped `default = "local"` with `[providers.local]` commented out,
+  so the first `ask`/`print`/`chat` failed to resolve a provider. The `default` line is
+  now commented alongside the provider block, with guidance to uncomment both once a
+  provider is configured.
+- **`localpilot models` explains an empty result.** When the only configured providers
+  speak a protocol with no `GET /models` listing (e.g. `anthropic`), the command names
+  them and explains the served model is whatever the local server has loaded, rather than
+  printing a blanket "no providers ... configured".
+
+- **`learning seed` now records an audit row per lesson.** Seeding writes accepted
+  memory directly (the human gate moves to authoring time), but previously left no
+  trace in `learning audit`. Each seeded lesson now writes an audit event (actor
+  `seed`, subject = memory id, metadata naming the source and category), so a seeded
+  memory has the same provenance trail as a promoted one. A dry run still writes
+  nothing.
+
+- **Advisory whole-repo teardown sweep at completion.** When `[harness]
+  teardown_sweep` is enabled, the harness runs a read-only cleanup-audit pass at
+  the completion seam alongside the retrospective — surfacing dead/abandoned code,
+  duplicate/parallel logic, over-engineering, redundant data access, and doc/test
+  drift as ranked advisory findings (each with a category, confidence, risk,
+  recommended action, and the hidden-usage channels ruled out). It extends the
+  existing `localpilot-selfreview` scanner (no second scanner), leans on
+  `cargo machete`/`clippy`/`cargo deny` for tool-owned categories rather than
+  re-deriving them, and is advisory by construction: it never blocks completion,
+  edits code, or commits. Off by default; the same pass is available on demand via
+  `localpilot self-review --cleanup`. See ADR-0047 and docs/06-harness-spec.md.
+
+- **Promote a curated lesson to an always-on rule cue.** A seed lesson tagged
+  `rule-cue` is injected every turn as terse, always-present guidance (independent
+  of prompt relevance) — a weak model acts on a short always-on rule better than
+  on a retrieved paragraph. Advisory, not an enforced harness rule (ADR-0027); the
+  cue is excluded from the relevance block so it is never injected twice. Opt-in;
+  default unchanged. See ADR-0046.
+- **Outcome-aware down-weighting routes a lesson to review.** `flag_unhelpful_lesson`
+  flags a lesson the uplift eval found unhelpful for human re-review (it stays
+  active and is never auto-deleted), reusing the engine's reasoned route-to-review
+  flag. See ADR-0046.
+- **Accepted-memory injection tuning (`[memory]`).** A new config section makes
+  always-on memory injection earn its context cost, with every default preserving
+  the prior behaviour: `injection_min_score` (gate out weak matches so they don't
+  fill the per-turn budget), `injection_context_aware` (scale the injected char
+  budget toward the model's context window — a small model gets less),
+  `injection_char_budget` (the budget / ceiling), and `injection_skip_categories`
+  (skip a category a rule already enforces, so injection adds signal not
+  redundancy). Additive and opt-in; default-off pending the uplift eval. See
+  ADR-0045 and docs/configuration.md.
+- **Selectable constraint encoding (`constraint_mode`).** A provider can now
+  choose how a tool-call constraint is encoded: `response_format` (default — the
+  OpenAI structured-output wrapper, unchanged) or `json_schema` (a documented
+  llama.cpp server extension that sends the schema as a top-level `json_schema`
+  field the server compiles to a grammar). Use `json_schema` for a local server,
+  such as a turboquant `llama-server` build, that rejects the `response_format`
+  wrapper — so the constraint engages the server's grammar instead of falling
+  back to native tool-calling. Opt-in per provider (`[providers.<id>.options]
+  constraint_mode = "json_schema"`); default and fallback are unchanged. See
+  ADR-0044 and docs/04-provider-contract.md. **Live finding (2026-06-22):** on a
+  turboquant `q3635ba3bapex` server the `json_schema` field still `400`s on the
+  model's `<think>` prefix (same as `response_format`); only a raw GBNF `grammar`
+  field engages there — so a third encoding, `constraint_mode = "grammar"`, was
+  added: it emits a top-level GBNF `grammar` (a valid-tool-call grammar built from
+  the tool names, JSON sub-grammar authored from the JSON spec). Live-verified to
+  engage (`200`, valid constrained tool call after `<think>`). Per-argument schema
+  constraint (a json-schema→GBNF converter) remains a follow-up. All three
+  encodings are opt-in, default `response_format`; default-off pending a
+  discipline eval.
+- **Constrained decoding is disabled after a server rejects it.** A local
+  OpenAI-compatible server that declares constrained decoding but returns a
+  client error on the schema-constrained request now has the constraint dropped
+  for the rest of the session after the first rejection, instead of re-sending
+  it (and logging a fallback warning) every turn. Native tool-calling is the
+  fallback, unchanged.
+- **Curated best-practice seed packs.** `seed-packs/` ships opt-in coding and
+  research lesson packs plus long-form references; seed them with `localpilot
+  learning seed --file` or `localpilot ingest run`. Nothing is auto-loaded.
+- **Seed curated lessons + re-enable memory injection.** `localpilot learning
+  seed --file <pack.json>` writes a curated, author-reviewed set of best-practice
+  lessons straight into LocalMind accepted memory (idempotent — re-seeding skips
+  lessons already present; `--dry-run` validates without writing). `localpilot
+  memory enable` clears the injection-disable flag that `memory disable` sets, so
+  a lesson-on/off comparison is scriptable. See ADR-0043.
 - **Switch provider/model mid-conversation with `/model`.** In the `chat` REPL,
   `/model` lists the configured providers and their models; `/model <provider>`
   or `/model <provider> <model>` re-points the active session — for example start

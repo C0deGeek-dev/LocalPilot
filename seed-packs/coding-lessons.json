@@ -1,0 +1,151 @@
+{
+  "//": "Opt-in curated coding best-practice lessons. Seed with: localpilot learning seed --file seed-packs/coding-lessons.json. Original, general, model-actionable; not auto-seeded.",
+  "lessons": [
+    {
+      "body": "When output is wrong, isolate the cause with the single cheapest test that distinguishes your top hypotheses before changing code: run the same input on a different backend, with randomness turned off, or on a smaller case. One decisive test beats three speculative edits.",
+      "category": "DebuggingRecipe",
+      "confidence": 0.9,
+      "tags": ["debugging", "root-cause", "isolation"],
+      "evidence": "Distilled from a GPU/driver miscompute investigation: a temp-0 greedy run and a CPU-only run isolated the cause to the build, not the model."
+    },
+    {
+      "body": "Do not ship a guess as a finding. If you have not run the test that would confirm a cause, say 'likely' and name the discriminating test; reserve a definite claim for after you have run it.",
+      "category": "AntiPattern",
+      "confidence": 0.9,
+      "tags": ["evidence", "honesty", "debugging"],
+      "evidence": "Two wrong premature conclusions (context size, then GPU contention) were overturned by the decisive test that should have come first."
+    },
+    {
+      "body": "Reproduce a failure and capture the exact command, environment, and output before attempting a fix. A bug you cannot reproduce, you cannot verify you have fixed.",
+      "category": "Process",
+      "confidence": 0.88,
+      "tags": ["debugging", "reproducibility"]
+    },
+    {
+      "body": "A plausible first hypothesis is not a confirmed cause. Rule out the confound before concluding: correlation with a recent change is not proof that the change is the cause.",
+      "category": "AntiPattern",
+      "confidence": 0.88,
+      "tags": ["debugging", "reasoning"]
+    },
+    {
+      "body": "Check whether a target already exists or is already running before creating or launching your own: inspect the directory, hit the health endpoint, or list the processes first. Launching a duplicate hides the real state.",
+      "category": "ToolUse",
+      "confidence": 0.85,
+      "tags": ["tools", "check-before-launch"]
+    },
+    {
+      "body": "Tool-call arguments must be valid, minimal JSON. Prefer the smallest first call that makes real progress over a large speculative one; oversized or malformed arguments fail the whole call. If a write is too big for one call, split it.",
+      "category": "ToolUse",
+      "confidence": 0.85,
+      "tags": ["tools", "tool-calls"]
+    },
+    {
+      "body": "Write code that matches the surrounding file's style, naming, and altitude. New code should read as if the file's original author wrote it, not as a transplant.",
+      "category": "CodePattern",
+      "confidence": 0.85,
+      "tags": ["style", "readability"]
+    },
+    {
+      "body": "A test exists to pin one observable behaviour and prevent a named regression. If you cannot say which bug it prevents, it is noise: delete it. Coverage percentage is a smell detector, not a goal.",
+      "category": "TestingStrategy",
+      "confidence": 0.85,
+      "tags": ["testing", "coverage"]
+    },
+    {
+      "body": "Do not pin tests to implementation details such as private call shapes or exact log strings. Pin the contract, the observable behaviour, so a refactor that preserves behaviour keeps the tests green.",
+      "category": "AntiPattern",
+      "confidence": 0.85,
+      "tags": ["testing", "contracts"]
+    },
+    {
+      "body": "Make a checkpoint after each coherent unit of work: build, test, commit, push. Unpushed work is not done; future you or a teammate must be able to resume from it.",
+      "category": "Process",
+      "confidence": 0.82,
+      "tags": ["workflow", "checkpoints"]
+    },
+    {
+      "body": "When a build or lint gate fails, read the first error, not the last; later errors are often cascades from the first. Fix the root and re-run before reading further.",
+      "category": "DebuggingRecipe",
+      "confidence": 0.85,
+      "tags": ["build", "errors"]
+    },
+    {
+      "body": "Verify the exit code of the command you care about, not a pipe's. 'cmd | tail' reports tail's success, always zero; check the real command's status or you will let failures slip past.",
+      "category": "Process",
+      "confidence": 0.85,
+      "tags": ["shell", "verification"]
+    },
+    {
+      "body": "An unused-looking symbol is not automatically removable: it may be a drop-guard, a serialized schema contract, or a security fixture. Identify the boundary it serves before deleting it.",
+      "category": "AntiPattern",
+      "confidence": 0.82,
+      "tags": ["refactoring", "dead-code"]
+    },
+    {
+      "body": "Make safety structural, not procedural: encode an invariant in the type system, such as a token only a human can mint or a constructor that validates its input, so the compiler keeps enforcing it instead of relying on a reviewer to notice.",
+      "category": "ArchitectureRule",
+      "confidence": 0.85,
+      "tags": ["design", "safety", "types"]
+    },
+    {
+      "body": "When a change spans a shared boundary such as a submodule or a generated interface, commit it as a coordinated checkpoint and rebuild the consumer. Code that compiles in isolation can still break its caller.",
+      "category": "Process",
+      "confidence": 0.82,
+      "tags": ["integration", "submodules"]
+    },
+    {
+      "body": "Prefer guard clauses and small extracted helpers over deep nesting. A branch-heavy function is a signal to simplify, not a place to add one more branch.",
+      "category": "CodePattern",
+      "confidence": 0.82,
+      "tags": ["complexity", "readability"]
+    },
+    {
+      "body": "Update the user-facing doc in the same change as the behaviour it describes: README, CHANGELOG, configuration reference. Documentation that lags the code becomes a lie.",
+      "category": "Process",
+      "confidence": 0.82,
+      "tags": ["documentation"]
+    },
+    {
+      "body": "If a change 'should work' but does not, question your assumption about the environment such as the driver, runtime, or version, not only your code. A correct program on a broken substrate still fails.",
+      "category": "DebuggingRecipe",
+      "confidence": 0.85,
+      "tags": ["debugging", "environment"]
+    },
+    {
+      "body": "When you spawn a child process, check its exit status before reporting success, and surface its stderr on failure. A non-zero child you ignore is a silent failure; propagate its exit code to your own or fail loudly with what it printed.",
+      "category": "AntiPattern",
+      "confidence": 0.88,
+      "tags": ["subprocess", "exit-code", "error-handling"]
+    },
+    {
+      "body": "Drain a child process's stdout and stderr concurrently (separate threads, async tasks, or a select loop), not one stream fully and then the other: a child that fills the pipe buffer you are not reading blocks forever. And do not call a sequential read 'concurrent' — describe what the code actually does, not what you intended.",
+      "category": "AntiPattern",
+      "confidence": 0.85,
+      "tags": ["subprocess", "deadlock", "concurrency", "honesty"]
+    },
+    {
+      "body": "Pass arguments to a spawned process as a list of separate items, never by interpolating them into one quoted command string. String-built command lines mishandle spaces, quotes, and shell metacharacters and invite injection; an argument vector passes each value to the program verbatim.",
+      "category": "CodePattern",
+      "confidence": 0.88,
+      "tags": ["subprocess", "arguments", "injection", "shell"]
+    },
+    {
+      "body": "Handle a failure to launch an external program (missing executable, wrong path, no permission) as deliberately as a missing required argument: detect it, report a clear actionable error, and exit non-zero. An unhandled spawn error otherwise surfaces later as a confusing downstream symptom.",
+      "category": "Process",
+      "confidence": 0.85,
+      "tags": ["subprocess", "error-handling", "launch-guard"]
+    },
+    {
+      "body": "When the same parsing or formatting logic appears in two places, extract it into one helper both call. Duplicated logic drifts: a fix or a new edge case applied to one copy silently leaves the other wrong.",
+      "category": "CodePattern",
+      "confidence": 0.85,
+      "tags": ["dry", "duplication", "refactoring"]
+    },
+    {
+      "body": "Do not report that code 'builds' or that 'tests pass' until you have actually run the build and the tests and seen them succeed in this environment. An unverified claim of success is worse than no claim — it hides the failure you never looked for.",
+      "category": "AntiPattern",
+      "confidence": 0.9,
+      "tags": ["verification", "honesty", "build", "tests"]
+    }
+  ]
+}

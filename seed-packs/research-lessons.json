@@ -1,0 +1,79 @@
+{
+  "//": "Opt-in curated research / investigation best-practice lessons. Seed with: localpilot learning seed --file seed-packs/research-lessons.json. Original, general, model-actionable; not auto-seeded.",
+  "lessons": [
+    {
+      "body": "State a falsifiable hypothesis, then pick the single test that most cheaply tells it apart from the alternatives, and run that test first. Investigation is a sequence of discriminating tests, not a pile of observations.",
+      "category": "Process",
+      "confidence": 0.9,
+      "tags": ["research", "hypothesis", "method"]
+    },
+    {
+      "body": "Do not anchor on the first plausible explanation. Hold two or three hypotheses at once and design a test that discriminates them; abandon a hypothesis the moment a clean test refutes it, even one you favoured.",
+      "category": "AntiPattern",
+      "confidence": 0.9,
+      "tags": ["research", "bias", "reasoning"],
+      "evidence": "Distilled from an investigation where two favoured hypotheses were each refuted by a decisive test before the real cause was found."
+    },
+    {
+      "body": "Separate what you verified from what you assumed. Tag each claim with its evidence; an unverified claim is a question, not a conclusion, and should be labelled as such.",
+      "category": "Process",
+      "confidence": 0.88,
+      "tags": ["research", "evidence", "honesty"]
+    },
+    {
+      "body": "Record the exact command, environment, and raw numbers behind every measured result so it can be reproduced and re-run. A number without its setup is not evidence.",
+      "category": "Process",
+      "confidence": 0.88,
+      "tags": ["research", "measurement", "reproducibility"]
+    },
+    {
+      "body": "A null or negative result is a result. Record it as observed; do not re-run the experiment until it turns favourable, and do not quietly drop it.",
+      "category": "AntiPattern",
+      "confidence": 0.88,
+      "tags": ["research", "evidence", "honesty"]
+    },
+    {
+      "body": "Prefer primary and official sources over summaries when a fact matters: the spec, the API documentation, the source code, the changelog. Note the date, because facts expire.",
+      "category": "Process",
+      "confidence": 0.85,
+      "tags": ["research", "sources"]
+    },
+    {
+      "body": "When elimination narrows a problem, test the common factor directly. If A and B both fail and share C, test C in isolation before blaming A or B.",
+      "category": "DebuggingRecipe",
+      "confidence": 0.88,
+      "tags": ["research", "isolation", "debugging"],
+      "evidence": "When two builds and two models all produced garbage, the shared factor (the runtime) was the cause."
+    },
+    {
+      "body": "Beware confirmation bias in tooling: a flag, a warning, or a search hit can mislead. Confirm the mechanism behind a signal, not just the correlated signal itself.",
+      "category": "AntiPattern",
+      "confidence": 0.85,
+      "tags": ["research", "tools", "bias"]
+    },
+    {
+      "body": "Adversarially verify your own conclusion: try to refute it with one more test before committing to it. The cheapest skeptic is you, before you ship the claim.",
+      "category": "Process",
+      "confidence": 0.88,
+      "tags": ["research", "verification"]
+    },
+    {
+      "body": "Re-validate carried-forward findings against the current state before acting on them. A known issue may already be fixed; acting blindly churns working things and wastes effort.",
+      "category": "Process",
+      "confidence": 0.85,
+      "tags": ["research", "validation"]
+    },
+    {
+      "body": "Scope the question before researching it. An underspecified question yields an unfocused answer; pin the constraints — version, platform, budget, goal — first.",
+      "category": "Process",
+      "confidence": 0.83,
+      "tags": ["research", "scoping"]
+    },
+    {
+      "body": "Bisect to localize: when something broke between a known-good and a known-bad state, halve the search space repeatedly rather than guessing the cause.",
+      "category": "DebuggingRecipe",
+      "confidence": 0.85,
+      "tags": ["research", "bisect", "debugging"]
+    }
+  ]
+}

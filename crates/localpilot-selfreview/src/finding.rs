@@ -26,6 +26,20 @@ pub enum FindingKind {
     DocDrift,
     /// A friction finding emitted by a model auditing the harness during work.
     Friction,
+    /// Dead/abandoned code: a backup/legacy file, or an explicitly silenced
+    /// dead-code allowance — a teardown-sweep cleanup signal.
+    DeadCode,
+    /// Duplicate/parallel logic: a substantive block of source repeated across
+    /// two files, a consolidation candidate.
+    DuplicateLogic,
+    /// Over-engineering: a private abstraction with a single user (e.g. a
+    /// non-public trait with exactly one implementor).
+    OverEngineering,
+    /// Redundant data access: the same fetch/query repeated within one file.
+    RedundantDataAccess,
+    /// A pointer to the authoritative tool that owns a category (unused
+    /// dependencies, unused imports, advisories) rather than re-deriving it.
+    ToolPointer,
 }
 
 impl FindingKind {
@@ -38,8 +52,42 @@ impl FindingKind {
             FindingKind::Friction => 3,
             FindingKind::MissingTest => 4,
             FindingKind::Todo => 5,
+            FindingKind::DeadCode => 6,
+            FindingKind::DuplicateLogic => 7,
+            FindingKind::OverEngineering => 8,
+            FindingKind::RedundantDataAccess => 9,
+            FindingKind::ToolPointer => 10,
         }
     }
+
+    /// Whether this kind is a whole-repo teardown-sweep (cleanup-audit) category,
+    /// as opposed to the always-on repo-health and friction signals.
+    #[must_use]
+    pub fn is_cleanup(self) -> bool {
+        matches!(
+            self,
+            FindingKind::DeadCode
+                | FindingKind::DuplicateLogic
+                | FindingKind::OverEngineering
+                | FindingKind::RedundantDataAccess
+                | FindingKind::ToolPointer
+        )
+    }
+}
+
+/// How risky acting on a finding is — distinct from severity (how serious the
+/// problem is). A cleanup whose removal could change behaviour is high-risk even
+/// when its severity is low. Defaults to [`Risk::Low`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Risk {
+    /// Acting on it is unlikely to change behaviour (e.g. deleting a `.bak` file).
+    #[default]
+    Low,
+    /// Acting on it needs verification first (e.g. consolidating duplicate logic).
+    Medium,
+    /// Acting on it is behaviour-sensitive and needs careful validation.
+    High,
 }
 
 /// How serious a finding is. Ordered low → high; the weight feeds the rank score.
@@ -96,8 +144,22 @@ pub struct Finding {
     pub severity: Severity,
     /// Confidence in `[0.0, 1.0]` — how sure the detector is this is real.
     pub confidence: f32,
+    /// How risky acting on the finding is (distinct from `severity`). Defaults to
+    /// [`Risk::Low`] for the always-on repo-health signals; cleanup findings set
+    /// it explicitly.
+    #[serde(default)]
+    pub risk: Risk,
     /// A short, human-readable description grounding the finding in evidence.
     pub evidence: String,
+    /// The recommended action a reader could take, when the detector has one
+    /// (cleanup findings carry it; always-on health findings usually do not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    /// Hidden-usage channels the detector considered and ruled out before
+    /// flagging (the cleanup-audit safety invariant). Empty for findings that do
+    /// not reason from the absence of references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_usage_checked: Vec<String>,
     /// Who is best placed to act on it (a role hint), when known.
     pub suggested_owner: Option<String>,
 }
@@ -112,9 +174,38 @@ impl Finding {
             span: None,
             severity,
             confidence: confidence.clamp(0.0, 1.0),
+            risk: Risk::Low,
             evidence,
+            recommendation: None,
+            hidden_usage_checked: Vec::new(),
             suggested_owner: None,
         }
+    }
+
+    /// Set how risky acting on the finding is.
+    #[must_use]
+    pub fn with_risk(mut self, risk: Risk) -> Self {
+        self.risk = risk;
+        self
+    }
+
+    /// Attach a recommended action for the reader.
+    #[must_use]
+    pub fn recommending(mut self, action: impl Into<String>) -> Self {
+        self.recommendation = Some(action.into());
+        self
+    }
+
+    /// Record the hidden-usage channels the detector ruled out before flagging
+    /// (the cleanup-audit safety invariant).
+    #[must_use]
+    pub fn channels_checked<I, S>(mut self, channels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.hidden_usage_checked = channels.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Attach a file path.
@@ -203,7 +294,9 @@ impl Report {
             self.findings.len(),
             self.scanned_files
         );
+        let mut any_cleanup = false;
         for finding in &self.findings {
+            any_cleanup |= finding.kind.is_cleanup();
             let location = match (&finding.path, &finding.span) {
                 (Some(path), Some(span)) => format!("{path}:{}", span.start_line),
                 (Some(path), None) => path.clone(),
@@ -211,8 +304,20 @@ impl Report {
             };
             let _ = writeln!(
                 out,
-                "- [{:?}/{:?} {:.2}] {location}: {}",
-                finding.severity, finding.kind, finding.confidence, finding.evidence
+                "- [{:?}/{:?} {:.2} risk:{:?}] {location}: {}",
+                finding.severity, finding.kind, finding.confidence, finding.risk, finding.evidence
+            );
+            if let Some(action) = &finding.recommendation {
+                let _ = writeln!(out, "    recommend: {action}");
+            }
+        }
+        if any_cleanup {
+            // Advisory triage routing for the teardown-sweep findings. Text only —
+            // the sweep takes no action. A cleanup finding opens a *new* plan; it
+            // is never folded back into the run that surfaced it.
+            let _ = writeln!(
+                out,
+                "triage each cleanup finding: fix-now, fold into a new plan, or won't-fix (report-only; findings open a new plan, never the current run)."
             );
         }
         out
@@ -263,5 +368,45 @@ mod tests {
         let parsed: Report = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, report);
         assert!(json.contains(REPORT_SCHEMA));
+    }
+
+    #[test]
+    fn cleanup_finding_renders_category_risk_recommendation_and_triage() {
+        let cleanup = Finding::new(
+            FindingKind::DeadCode,
+            Severity::Low,
+            0.7,
+            "'old.rs.bak' looks like a backup/abandoned file".to_string(),
+        )
+        .at_path("src/old.rs.bak")
+        .with_risk(Risk::Medium)
+        .recommending("remove if superseded")
+        .channels_checked(["external callers", "tests"]);
+        let report = Report::ranked(vec![cleanup], 1);
+
+        // Human summary carries the category, confidence, risk, recommendation,
+        // and the advisory triage routing.
+        let human = report.human_summary();
+        assert!(human.contains("DeadCode"), "{human}");
+        assert!(human.contains("risk:Medium"), "{human}");
+        assert!(human.contains("recommend: remove if superseded"), "{human}");
+        assert!(human.contains("triage each cleanup finding"), "{human}");
+
+        // JSON carries the new structured fields and round-trips.
+        let json = report.to_json().unwrap();
+        assert!(json.contains("dead_code"));
+        assert!(json.contains("\"risk\""));
+        assert!(json.contains("recommendation"));
+        assert!(json.contains("hidden_usage_checked"));
+        let parsed: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
+    }
+
+    #[test]
+    fn non_cleanup_report_has_no_triage_footer() {
+        // A plain health report (no cleanup findings) renders no triage line, so
+        // the always-on `self-review` surface is unchanged.
+        let report = Report::ranked(vec![finding(Severity::Low, 0.5)], 1);
+        assert!(!report.human_summary().contains("triage each cleanup"));
     }
 }

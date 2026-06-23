@@ -92,6 +92,15 @@ truth this table mirrors.
 
 Close-out is best-effort and non-fatal, and an empty session writes nothing.
 
+The two halves are independent: a surface that does **not** close out still
+*reads* accepted memory. In particular one-shot `localpilot print` injects relevant
+accepted lessons into its turn (via `register_context_hook`, the same hook the
+interactive and serve loops use) — it simply never writes learning candidates back.
+So curated guardrails seeded into accepted memory reach even the one-shot author;
+they do not require the learning runtimes. `print --self-review` adds an opt-in,
+read-only repo-health pass after the run (advisory, on stderr; never edits or
+commits).
+
 - The agent can propose a durable lesson in-session with the `remember` tool: it
   enqueues a review candidate (permission-gated, project-local write) and never
   writes accepted memory directly — promotion stays a human, review-gated step
@@ -142,6 +151,28 @@ Close-out is best-effort and non-fatal, and an empty session writes nothing.
 
 State is project-local under `.localmind/`. Durable memory is readable Markdown;
 queue, audit, search index, and the code-structure graph live in SQLite.
+
+## Store resolution
+
+`localpilot learning` and `localpilot memory` resolve the store like `git`
+resolves its repository root: starting from the current directory, they walk up to
+the nearest ancestor that holds a store (`.localmind.toml` or the `.localmind/`
+directory). So running a command from a project subdirectory answers from the
+*project's* store instead of silently using — or creating — a different, empty one
+beside the cwd. The resolved root is logged to stderr so the caller can see which
+store answered.
+
+- **`--workspace <path>`** pins the store root explicitly and skips the walk-up.
+  Use it when running from outside the project (`localpilot learning --workspace
+  /path/to/project search "query"`). It is accepted on both `learning` and
+  `memory`, ahead of the subcommand.
+- **A read never creates a store.** `learning search` and `memory search` are
+  read-only: when no store is found they report it and write nothing. Their stdout
+  stays script-stable — an empty `--json` result is still a valid empty array.
+- **Three empty outcomes are distinguished** on stderr so a bare `no matches` is
+  never ambiguous: (a) *no store found* at or above the cwd; (b) a store exists but
+  holds *no accepted memory yet*; (c) a non-empty store whose memory the *query
+  missed*.
 
 ## Loop-Outcome Lesson Writeback
 
@@ -379,3 +410,53 @@ The following remain staged behind explicit user approval and review:
 - external research/update flows. External facts must carry source citations,
   expiry/staleness metadata, and a review item before they can influence
   accepted memory.
+
+## Learning happy path
+
+The end-to-end loop, from an empty store to a lesson that shapes a later turn:
+
+```bash
+# 1. (optional) bootstrap curated, author-reviewed lessons straight into memory
+localpilot learning seed --file seed-packs/coding-lessons.json   # idempotent; audited
+
+# 2. do real work, then turn the session into candidate lessons
+localpilot print --allow-writes "…task…"
+localpilot session list                       # find the session id
+localpilot learning closeout --session <id>   # extract candidates -> review queue
+
+# 3. human gate: review and promote
+localpilot learning review list
+localpilot learning review accept <item-id> --reviewer you
+localpilot learning promote <item-id>         # -> durable accepted memory
+
+# 4. retrieve / confirm reuse
+localpilot learning search "topic"            # add --json for structured output
+localpilot memory used                        # what shaped the latest turn (provenance)
+```
+
+Notes:
+
+- **`learning seed` writes accepted memory directly** — the human gate moves to
+  *authoring* time (the pack is curated and reviewed before it is committed), so
+  seeding skips the per-session review queue. It is idempotent (body-level dedup)
+  and records one audit row per lesson, so a seeded memory has the same
+  `learning audit` provenance trail as a promoted one. Use `--dry-run` to validate
+  a pack without writing. The shipped `seed-packs/coding-lessons.json` includes
+  general code-authoring guardrails (propagate a subprocess exit code; drain child
+  stdout/stderr without deadlocking; pass args as a list not a quoted string; guard
+  a process launch; factor duplicated parse/format logic; don't claim a build/tests
+  pass before running them) — once seeded, they ride into any turn that reads
+  memory, including one-shot `print`.
+- **`learning closeout` tolerates a reasoning model's output.** A local model
+  commonly wraps its extraction JSON in a `<think>…</think>` block and a
+  ```` ```json ```` code fence; closeout strips those before parsing and, on any
+  parse failure, falls back to the deterministic extractor rather than aborting.
+  A clean, successful session with no failure/correction signals may yield zero
+  deterministic candidates — that is expected, not an error.
+- **`learning search`** is keyword (FTS) by default and works offline; semantic
+  ranking requires an `[inference]` embedding endpoint in `.localmind.toml`. Pass
+  `--json` to consume results from a script or agent.
+- **`localpilot models`** lists models only for providers that expose an OpenAI
+  `GET /models` endpoint. A local model wired through the Anthropic-compatible
+  no-think proxy (the LocalBox default) is not listable that way; set
+  `[providers.local].model` so the configured model is explicit.

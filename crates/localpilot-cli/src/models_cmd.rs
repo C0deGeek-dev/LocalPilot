@@ -19,11 +19,16 @@ pub async fn run(provider_filter: Option<&str>) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
 
     let mut any = false;
+    // Providers that matched the filter but speak a protocol with no `GET
+    // /models` listing (e.g. `anthropic`); named in the no-result message so the
+    // empty output is explained rather than mysterious.
+    let mut unlistable: Vec<String> = Vec::new();
     for (id, entry) in &config.providers {
         if provider_filter.is_some_and(|filter| filter != id) {
             continue;
         }
         let Some(base_url) = listing_base_url(entry) else {
+            unlistable.push(format!("{id} ({})", entry.kind));
             continue;
         };
         any = true;
@@ -70,10 +75,20 @@ pub async fn run(provider_filter: Option<&str>) -> anyhow::Result<()> {
     }
 
     if !any {
-        writeln!(
-            stdout,
-            "no providers with an OpenAI-compatible model listing are configured"
-        )?;
+        if unlistable.is_empty() {
+            writeln!(
+                stdout,
+                "no providers configured to list models — run `localpilot init` and configure one"
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "no model listing for: {}. These providers don't expose a `GET /models` \
+                 endpoint, so the served model is whatever the local server has loaded — \
+                 set `[providers.<id>].model` in .localpilot.toml or query the server directly.",
+                unlistable.join(", ")
+            )?;
+        }
     }
     Ok(())
 }

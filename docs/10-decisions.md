@@ -2,6 +2,216 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0048: Non-Terminal Callers Get Structured Output By Default
+
+Status: accepted.
+
+`learning search` already grew a `--json` flag, yet a dogfood run proved that
+*adding* a flag is not enough: both the human operator and the local model missed
+it and tab-parsed the human table, because the parent `--help` hides leaf flags
+and the human output advertised no structured alternative. The failure is a
+*discoverability* class, not a missing capability.
+
+Decision: the read commands resolve their output format from context rather than
+forcing the caller to know a flag.
+
+- **Non-terminal stdout defaults to structured.** When stdout is not a terminal
+  (`std::io::IsTerminal` — a pipe or a file, i.e. a program is reading),
+  `learning search` and `memory search` emit a JSON array by default; a real
+  terminal still gets the human table. The gate is strictly `!stdout.is_terminal()`
+  so an interactive session is never changed.
+- **A uniform `--format human|json` overrides either way**, with `--json` kept as
+  an alias for `--format json`. `--format human` forces the table even when piped
+  (the escape hatch for a consumer that parses the text); `--format json` forces
+  JSON on a terminal.
+- **An affordance hint points at the structured form.** When the human table is
+  shown interactively, a single stderr line names `--format json` / `--json`. It is
+  suppressed when output is already structured or non-interactive, so it can never
+  pollute a pipe.
+
+Reuse, not a second serializer: both commands emit through the existing `--json`
+writer (`SearchHit` serialization), and the format/hint logic lives in one small
+`output` module the two commands share. Stdout stays script-stable in every case —
+an empty result is a valid empty JSON array, and the diagnostics ride on stderr.
+
+Tier-1 parity: `IsTerminal` is the std cross-platform check (Windows/Linux/macOS),
+and the resolver is unit-tested independent of a real terminal. Rollback is the
+flag-gated behaviour: revert the resolver wire (no state change). Scope is the two
+search commands — the surfaces the run tab-parsed; other read commands keep their
+current output.
+
+## ADR-0047: An Advisory Whole-Repo Teardown Sweep At The Completion Seam
+
+Status: accepted.
+
+The harness mirrors the developer-process ceremonies it asks of its own builders:
+the completion **retrospective** (ADR-0035) is the backward look at the brief, and
+the quality gate (ADR-0009) blocks a step on failing checks. What it lacked is the
+whole-repo **cruft sweep** the plan template now requires at a plan's §7 gate (the
+c0degeek `cleanup-audit`): dead/abandoned code, duplicate/parallel logic,
+over-engineering, redundant data access, and doc/test drift surfaced as triaged,
+advisory findings before work is called done.
+
+Decision: extend the existing read-only scanner `localpilot-selfreview` — already
+the whole-repo analog of `cleanup-audit` — with detectors for those categories, and
+run it at the completion seam alongside the retrospective behind a default-off
+`[harness] teardown_sweep` flag. It is **not** a second scanner and **not** a new
+gate:
+
+- **Extend, don't fork.** New detectors join the one bounded walk and the one
+  ranked `Report`; findings carry the existing severity/confidence plus a new
+  `risk`, a recommended action, and the hidden-usage channels the detector ruled
+  out (the cleanup-audit safety invariant). No finding reaches high confidence from
+  the absence of local references alone.
+- **Lean on tools, don't re-derive them.** Categories tooling owns — unused deps
+  (`cargo machete`), unused imports/vars and dead-code warnings (`clippy`),
+  advisories (`cargo deny`) — are surfaced as pointer findings that name the
+  command to run, never reimplemented.
+- **Advisory by construction (ADR-0034/0035 lineage).** The sweep is deterministic
+  and offline (no provider call), read-only, and human-gated: it never blocks
+  completion, edits code, or commits, and nothing is auto-enqueued as accepted
+  memory (review-gated only, ADR-0037). A finding opens a *new* plan; it is never
+  folded back into the run that surfaced it.
+
+Opt-in and default-off: the completion sweep runs only under `[harness]
+teardown_sweep = true`; the same pass is available on demand as `self-review
+--cleanup`. Rollback is the flag (off) or reverting the one-line seam wire. The
+`localpilot-selfreview` report schema stays `localpilot-selfreview-v1` — the new
+fields are additive and serde-defaulted, so an existing consumer is unaffected.
+Refines ADR-0034 (self-improvement loop) and ADR-0035 (advisory completion
+retrospective).
+
+## ADR-0046: Promote A Curated Lesson To A Rule Cue; Down-Weight By Routing To Review
+
+Status: accepted.
+
+Two ways to make memory help a weak local model better:
+
+1. **Rule cue.** A curated lesson can be promoted to an **always-on rule cue** —
+   terse guidance injected every turn independent of prompt relevance. A weak
+   model acts on a short, always-present rule better than on a paragraph it must
+   retrieve. Per the rules-vs-skills model (ADR-0027) a rule cue is **advisory**
+   (content the agent reads), not an **enforced** harness rule (the rule engine's
+   `Block`/`Warn` gates are untouched): promoting a lesson never gates execution.
+   Opt-in: a seed lesson carries the `rule-cue` tag; at seed time its memory id is
+   recorded in a host-side cue registry (`.localmind/rule-cues.json`), and the
+   context hook injects those memories always-on under a `rule-cue` audit layer.
+   A cue is excluded from the relevance-retrieval block so it is never injected
+   twice. Injection assembly is the host adapter's job (ADR-0036), so the
+   promotion list is host state keyed to engine memory ids, not engine state.
+
+2. **Outcome-aware down-weight.** When the uplift eval shows a lesson did not
+   improve (or hurt) outcomes, the host's learning loop **routes it to review** —
+   it never auto-deletes. This reuses the engine's reasoned route-to-review flag
+   (LocalMind D-LM-0016): the memory stays active and a human re-judges it, the
+   same human-gated discipline as change-aware invalidation and the
+   self-improvement loop (ADR-0034).
+
+Both are additive and opt-in; the default path (no promoted cues, no flagged
+lessons) is unchanged, and each ships default-off until the uplift eval clears
+it. Rollback is removing the `rule-cue` tag / clearing the cue registry, and
+clearing a review flag.
+
+## ADR-0045: Accepted-Memory Injection Earns Its Context Cost
+
+Status: accepted.
+
+Always-on accepted-memory injection took every top-k match up to a fixed
+1200-char cap, regardless of match strength, regardless of the model's context
+window, and even when a memory restated guidance a harness rule already enforces.
+On a weak/small model that is wasted context the model spends effort on without a
+behaviour gain.
+
+Decision: the host injection layer (`localpilot-localmind`) gains a `[memory]`
+policy, every field of which **defaults to the prior behaviour** (additive,
+opt-in):
+
+- **Relevance gate** (`injection_min_score`, default `0`): a retrieved memory
+  whose score is below the threshold is not injected, so a weak match cannot fill
+  the per-turn budget.
+- **Context-window-aware budget** (`injection_context_aware`, default `false`):
+  when on, the injected char budget is scaled toward the default provider's
+  declared context window (a small model gets less), never above
+  `injection_char_budget` and never below a one-line floor.
+- **Dedup-vs-enforced** (`injection_skip_categories`, default empty): a memory
+  whose lesson category is listed is skipped, because a rule already enforces
+  equivalent guidance — injection should add signal, not restate a rule.
+
+The category needed for the dedup is exposed by the engine on the search result
+(LocalMind D-LM-0015), so the host does not do a second lookup. The policy is
+host-side because injection assembly is the adapter's job (ADR-0036), not the
+engine's. Every lever ships **default-off** until the uplift eval clears it; this
+ADR records the mechanism and the default-preserving contract, not a default
+change. Rollback is leaving (or resetting) the `[memory]` defaults.
+
+## ADR-0044: Selectable Constraint Encoding To Reach A Local Server's Grammar
+
+Status: accepted.
+
+The constrained-decoding capability targets a local OpenAI-compatible server
+whose grammar engine makes tool-call arguments schema-valid by construction. We
+sent the constraint only as the OpenAI structured-output `response_format`
+wrapper (`{ type: "json_schema", json_schema: { schema } }`). Some local
+`llama-server` builds — including a turboquant build — reject that wrapper with a
+client error, so the F2 fallback drops the constraint and the server runs with
+native tool-calling, never engaging its grammar.
+
+Decision: the wire encoding of a tool-call constraint is **selectable** per
+provider via a `constraint_mode` option:
+
+- `response_format` (**default, the floor**) — the OpenAI structured-output
+  wrapper. Unchanged for every existing provider, hosted or local.
+- `json_schema` — a documented llama.cpp server extension: the JSON schema is
+  sent as a **top-level `json_schema` field**, which the server compiles to a
+  GBNF grammar internally. This reaches the same grammar engine without us
+  authoring or shipping a GBNF converter, and without the wrapper the server
+  rejects.
+
+The selector is a local concern — it never leaks into the request body — and an
+unknown value falls back to the default, so a typo cannot break a turn. The F2
+reject→native fallback (a client error on a constrained request caches the
+rejection and drops the constraint for the session) is unchanged and remains the
+floor for any server that accepts neither encoding.
+
+Provenance (clean-room): the top-level `json_schema` field and the GBNF
+`grammar` field are part of the **documented public llama.cpp HTTP server API**;
+no private or undocumented endpoint behaviour is used. A raw-GBNF `grammar` mode
+is intentionally **not** implemented — the documented `json_schema` field reaches
+the same grammar engine server-side, so a hand-written schema→GBNF converter
+would add surface for no capability gain.
+
+Rationale: this is the smallest additive change that lets a constraint engage a
+grammar on a server that rejects the OpenAI wrapper, it is opt-in and
+default-off, and it preserves the native-tool-calling floor. The mode ships
+default-off until an uplift eval clears it; this ADR records only the mechanism,
+not a default change.
+
+Boundary: this does not change which providers *declare* constrained decoding
+(still gated to local servers), nor the fallback semantics; it only changes how a
+declared, non-rejected constraint is encoded when `constraint_mode = "json_schema"`.
+
+Live finding (2026-06-22): against a turboquant `q3635ba3bapex` server, the
+top-level `json_schema` field is **not** sufficient — it returns the same
+`400 "empty grammar stack after <think>"` as the `response_format` wrapper,
+because the json-schema→grammar conversion forbids the model's `<think>` opening.
+Only a raw **GBNF `grammar` field** engages (turboquant's lazy-grammar tolerates
+the `<think>` prefix, returns `200`).
+
+So a third encoding was added: `constraint_mode = "grammar"` emits a top-level
+GBNF `grammar` built from the tool names — a *valid tool call* grammar
+(`{ "name": <one of the tools>, "arguments": <any JSON object> }`) with a JSON
+sub-grammar authored from the JSON spec (original, not copied). Live-verified:
+the grammar engages on the turboquant server (`200`, the model emits a valid
+constrained tool call after its `<think>` prefix). Argument payloads are
+constrained to *valid JSON*, not to each tool's own argument schema — that finer
+per-schema constraint (a generic json-schema→GBNF converter) remains a follow-up.
+
+All three encodings ship **opt-in**, default `response_format`. The `grammar`
+encoding now *engages* the grammar (subject-02's goal), but a default-on change
+still needs a tool-discipline uplift eval to clear it (D002); on `q3635ba3bapex`
+discipline is near-ceiling (native already `first_call_arg=100%`), so it stays
+default-off pending that measurement.
+
 ## ADR-0042: BYOK Credential Storage; No Subscription-OAuth Login
 
 Status: accepted.
@@ -1672,3 +1882,40 @@ Reason:
 - easier clean-room review
 - smaller test surfaces
 - easier future embedding
+
+## ADR-0043: Curated Lesson Seeding And A Re-Enable Toggle For The Memory A/B
+
+Status: accepted.
+
+LocalPilot can seed a curated, author-reviewed set of best-practice lessons
+directly into LocalMind accepted memory, and can re-enable context injection it
+previously disabled. Two host-side additions, no engine change:
+
+- **`localpilot learning seed --file <pack.json>`** reads a seed pack
+  (`{ "lessons": [ { "body", "category"?, "confidence"?, "related_files"?,
+  "related_entities"?, "evidence"?, "tags"? } ] }`) and writes each lesson as
+  active accepted memory through `MemoryPersistence::persist_memory_entry` — the
+  write path `localmind-store` already sanctions for "hosts accepting memory
+  through their own review surface". It is **idempotent**: a lesson whose
+  whitespace-normalised body already exists is skipped, and the memory id is a
+  stable FNV-1a hash of that body. `--dry-run` validates and counts without
+  writing.
+- **`localpilot memory enable`** clears the `.localmind/context-injection-disabled`
+  flag that `memory disable` writes (idempotent), giving the previously one-way
+  toggle a counterpart.
+
+Rationale: the in-session candidate→review→promote queue is the right path for
+lessons *discovered* during work, but a curated pack of durable best-practice
+lessons is reviewed *at authoring time* — routing dozens of hand-written lessons
+through the per-session queue adds no safety and much friction. The human gate
+moves to authoring, not the queue; nothing is auto-extracted. The enable toggle
+exists so a lesson-on vs lesson-off measurement can be scripted (disable → run →
+enable → run) rather than hand-deleting a flag file, and the
+memories-used audit (`localpilot memory used`) proves an arm actually injected.
+
+Boundary: seeding writes accepted memory directly and therefore skips the
+contradiction-detection and code-graph anchoring that promotion-through-review
+adds; that is acceptable for curated prose lessons, and `related_entities` can
+still be supplied for retrieval. The seed path is additive — projects that never
+run `learning seed` are unchanged, and seeded memory is ordinary accepted memory
+(searchable, deletable, injection-gated like any other).

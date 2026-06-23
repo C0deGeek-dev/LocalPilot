@@ -27,7 +27,7 @@ pub use load::{
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
     DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
-    LookupPolicy, McpConfig, McpServerConfig, Mode, PermissionProfile, PermissionsConfig,
-    ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RuleSeverity, SkillsConfig,
-    StorageConfig, ToolsConfig,
+    LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
+    PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig,
+    RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
 };
