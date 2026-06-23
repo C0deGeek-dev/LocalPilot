@@ -174,9 +174,7 @@ pub async fn run(
         }
     }
 
-    let had_failure = results
-        .iter()
-        .any(|r| matches!(r.status, Status::Unreachable | Status::ApprovalRequired));
+    let had_failure = listing_incomplete(&results);
 
     let mut stdout = std::io::stdout();
     match format {
@@ -184,6 +182,16 @@ pub async fn run(
         OutputFormat::Human => render_human(&mut stdout, &results)?,
     }
     Ok(ModelsOutcome { had_failure })
+}
+
+/// Whether the listing is incomplete and so the run should exit non-zero: an
+/// endpoint was unreachable, or approval was required but the run was
+/// non-interactive without `--yes` (so it was reported, not silently skipped). A
+/// policy `Deny` or a `NoListingEndpoint` is a configuration fact, not a failure.
+fn listing_incomplete(results: &[ProviderModels]) -> bool {
+    results
+        .iter()
+        .any(|r| matches!(r.status, Status::Unreachable | Status::ApprovalRequired))
 }
 
 /// A provider entry that produced no models, for one of the non-`Ok` statuses.
@@ -375,6 +383,26 @@ mod tests {
             serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
         assert_eq!(parsed[0]["status"], "unreachable");
         assert_eq!(parsed[0]["error"], "connection refused");
+    }
+
+    #[test]
+    fn an_incomplete_listing_exits_nonzero_but_policy_facts_do_not() {
+        // The offline guard for the agent contract: an unreachable endpoint or a
+        // non-interactive approval-required state makes the run fail (non-zero exit);
+        // a policy Deny or a no-listing-endpoint provider is a fact, not a failure.
+        let mk = |status: Status| ProviderModels {
+            provider: "p".to_string(),
+            kind: "local".to_string(),
+            base_url: Some("http://localhost:1/v1".to_string()),
+            status,
+            models: Vec::new(),
+            error: None,
+        };
+        assert!(listing_incomplete(&[mk(Status::Unreachable)]));
+        assert!(listing_incomplete(&[mk(Status::ApprovalRequired)]));
+        assert!(!listing_incomplete(&[mk(Status::Denied)]));
+        assert!(!listing_incomplete(&[mk(Status::NoListingEndpoint)]));
+        assert!(!listing_incomplete(&[ok_entry("local", "m")]));
     }
 
     #[test]

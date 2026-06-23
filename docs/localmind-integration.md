@@ -460,3 +460,12 @@ Notes:
   `GET /models` endpoint. A local model wired through the Anthropic-compatible
   no-think proxy (the LocalBox default) is not listable that way; set
   `[providers.local].model` so the configured model is explicit.
+- **`localpilot print` always returns a readable terminal state.** A reader that
+  closes stdout mid-stream (a closed pipe) is a clean stop, not a crash — `print`
+  exits `141` (the SIGPIPE convention) so a wrapper can tell "the reader left" from
+  a real failure. Set `[harness] turn_timeout_secs` to bound a long turn by
+  wall-clock (off by default). Either way `print` ends with a one-line, parseable
+  `handoff:` summary on stderr — stop reason, tool calls, files changed, and whether
+  memory was written (always `false` for one-shot `print`, which reads memory but
+  never closes out) — so a non-interactive caller always has a terminal state to act
+  on. See ADR-0049.

@@ -130,6 +130,14 @@ variable, and an existing env-only setup keeps working unchanged.
 `localpilot doctor` reports the resolved *source* per provider — `keychain`,
 `file`, `env`, or `not set` — never the secret itself.
 
+`localpilot doctor --format json` (or `--json`; JSON is the default when stdout
+is not a terminal) emits the same report as a machine-readable object for a
+wrapper: the resolved binary path and `git describe` version (compare them to
+detect a stale PATH binary vs the repo build — drift *detection* is the caller's
+job), each provider's kind/base URL/model/context window and credential *source*,
+the resolved memory store root, and a list of capability tokens a wrapper can
+feature-detect against. See ADR-0050.
+
 ## Switching provider/model mid-session: `/model`
 
 In the `chat` REPL, `/model` switches the active provider/model without losing
@@ -178,6 +186,14 @@ window where the server reports one. The request is a network effect and
 passes the permission engine like any other. In the interactive REPL the same
 listing is consulted at startup (best-effort, silent on failure) to derive the
 session budget when no `context_window` is configured.
+
+For agent use, `localpilot models` is non-interactive-safe: it takes
+`--format human|json` (`--json`; JSON by default off a terminal) and a `--yes`
+flag. Run with no terminal (or `--yes`) it never blocks on an approval prompt — an
+`Ask` policy without `--yes` is reported as `approval_required`, a `Deny` as
+`denied`, and an unreachable endpoint as `unreachable` — and the command exits
+non-zero when a listing is incomplete, instead of silently skipping. The JSON is a
+script-stable array (an empty result is a valid `[]`). See ADR-0050.
 
 ## Reasoning effort
 
