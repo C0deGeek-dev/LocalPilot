@@ -25,6 +25,7 @@ mod ops;
 mod pack;
 mod primer;
 mod remember_tool;
+mod repair_signal;
 mod retrospective_lesson;
 mod review_list_tool;
 mod rule_cue;
@@ -78,6 +79,9 @@ pub use ops::{
 pub use pack::{PackEntry, PackSource};
 pub use primer::{accepted_primer, distill_primer_into_review};
 pub use remember_tool::Remember;
+pub use repair_signal::{
+    enqueue_repair_signals, repair_lesson_candidate, repair_signals_from_events, RepairSignal,
+};
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
 pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
@@ -217,11 +221,10 @@ pub fn closeout_session(
     // (failed tools, recovery events, committed steps) so extraction keys on the
     // fact LocalPilot already recorded, not just re-parsed prose. Best-effort:
     // the deterministic text path stays the baseline if the event log is absent.
-    if let Ok(events) = store.read_events(session) {
-        transcript.push_str(&render_session_signals(
-            events.iter().map(|event| &event.kind),
-        ));
-    }
+    let events = store.read_events(session).unwrap_or_default();
+    transcript.push_str(&render_session_signals(
+        events.iter().map(|event| &event.kind),
+    ));
 
     initialize(project_root)?;
     let config =
@@ -263,11 +266,33 @@ pub fn closeout_session(
     }
     .map_err(|e| LearningError::Closeout(e.to_string()))?;
 
+    // Phase 5 (opt-in): when `[tools] repair_learning` is on, offer this session's
+    // argument-repair patterns as aggregate, redacted, review-gated candidates.
+    // Best-effort and reuse-only — a failure here never breaks closeout, and it
+    // stores no raw inputs and writes no accepted memory.
+    if repair_learning_enabled(project_root) {
+        let _ = repair_signal::enqueue_repair_signals(project_root, &events);
+    }
+
     Ok(CloseoutSummary {
         session_id: report.session_id.to_string(),
         candidate_count: report.candidate_count,
         enqueued_count: report.enqueued_count,
     })
+}
+
+/// Whether `[tools] repair_learning` is enabled for this project. Project-scoped
+/// only (never the machine's user config), like the inference-endpoint detection,
+/// so behaviour depends on the project, not the host. Defaults to `false` on any
+/// read error.
+fn repair_learning_enabled(project_root: &Path) -> bool {
+    let paths = localpilot_config::ConfigPaths {
+        user: None,
+        project: Some(localpilot_config::project_config_path(project_root)),
+    };
+    localpilot_config::load(&paths, &localpilot_config::CliOverrides::default())
+        .map(|config| config.tools.repair_learning)
+        .unwrap_or(false)
 }
 
 /// Whether session closeout should use the model-backed extractor for this

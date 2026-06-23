@@ -5,6 +5,14 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Opt-in argument-repair feedback to LocalMind (`[tools] repair_learning`, default
+  off).** At session close, the session's argument-repair patterns are offered to
+  LocalMind's existing review-gated queue as aggregate, redacted candidates (which
+  model needed which repair on which tool). Reuse-only: it stores no raw
+  inputs/paths/content, writes no accepted memory, and adds no new store — a human
+  promotes a candidate or it expires in review. A repair signal is never auto-promoted
+  to an always-on rule cue.
+
 - **Opt-in, conservative tool-argument repair (`[tools] repair`, default off).** A
   validator-first stage that, when enabled, repairs a *shape-invalid* tool call
   (a bare string where an array of strings is expected, a stringified array/object

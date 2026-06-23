@@ -228,6 +228,29 @@ review instead of living only in an un-gated file (ADR-0037).
   promotion to accepted memory stays a human step (ADR-0011), and a rejected
   candidate never reaches memory.
 
+## Argument-Repair Feedback (opt-in)
+
+When `[tools] repair_learning` is on (default off), a closed session's
+argument-repair patterns are offered to the **same** review-gated queue, so a
+human can learn "this model tends to send this tool's arguments in the wrong
+shape." It wires the previously-unused `tool_use_candidate` producer onto the
+review path — no new store.
+
+- The host surface is `localpilot_localmind::enqueue_repair_signals`, called from
+  `closeout_session` only when the flag is on.
+- **Aggregate and redacted (reuse-only).** A signal is one `(model, tool)` pair
+  with malformed-class labels and counts — derived from the redacted
+  `tool_input_repaired` events. It stores **no** raw inputs, paths, or content; the
+  candidate's evidence is redacted before persistence (the best-effort-redactor
+  caveat in `redaction.rs` is acknowledged, which is why only labels/counts — never
+  values — are ever carried).
+- **Review-gated, low prior.** A `ToolUse` candidate at `0.4` confidence,
+  `PromoteToMemory`; promotion to accepted memory stays a human step (ADR-0011), and
+  the review queue's canonical-hash dedup keeps a repeated pattern from piling up.
+- **No automatic rule cue.** A repair signal is *not* auto-promoted to an always-on
+  rule cue — per-model cue sprawl is an open question. A human may promote an
+  accepted candidate to a cue through the existing `register_rule_cues` path.
+
 ## Code Graph
 
 LocalMind owns a code-structure knowledge graph (schema, tree-sitter ingestion,

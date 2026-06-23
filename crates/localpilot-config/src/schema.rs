@@ -201,6 +201,12 @@ pub struct ToolsConfig {
     /// (`off|warn|on`, default `off`). See [`RepairMode`]. Never touches a
     /// destructive/external/MCP tool or a content/command field.
     pub repair: RepairMode,
+    /// Offer the session's argument-repair patterns to LocalMind as aggregate,
+    /// redacted, **review-gated** candidates at session close (which model needed
+    /// which repair on which tool). Default `false`. Reuse-only: it stores no raw
+    /// inputs/paths/content, writes no accepted memory, and adds no new store — a
+    /// human promotes a candidate or it expires in review.
+    pub repair_learning: bool,
 }
 
 impl Default for ToolsConfig {
@@ -215,6 +221,7 @@ impl Default for ToolsConfig {
             graduation_threshold: 3,
             readable_errors: true,
             repair: RepairMode::Off,
+            repair_learning: false,
         }
     }
 }
@@ -858,6 +865,8 @@ mod tests {
         assert_eq!(tools.graduation_threshold, 3);
         // Readable errors are a pure message improvement, so they default on.
         assert!(tools.readable_errors);
+        // Repair learning (LocalMind feedback) ships off.
+        assert!(!tools.repair_learning);
         // Argument repair carries intent-drift risk, so it ships off.
         assert_eq!(tools.repair, RepairMode::Off);
         assert!(!tools.repair.is_enabled());
