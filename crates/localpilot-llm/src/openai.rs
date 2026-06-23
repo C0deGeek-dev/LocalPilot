@@ -99,11 +99,7 @@ impl OpenAiProvider {
                 id,
                 display_name: display_name.into(),
                 source_type,
-                supported_input_blocks: vec![
-                    InputBlockKind::Text,
-                    InputBlockKind::Reasoning,
-                    InputBlockKind::ToolResult,
-                ],
+                supported_input_blocks,
                 tool_call_shape: ToolCallShape::OpenAiToolCalls,
                 reasoning_shape: ReasoningShape::Content,
                 capabilities: Capabilities {
@@ -1122,7 +1118,6 @@ mod tests {
             .supported_input_blocks
             .contains(&InputBlockKind::Image));
     }
-
 
     #[test]
     fn constrained_request_is_dropped_after_a_rejection() {
