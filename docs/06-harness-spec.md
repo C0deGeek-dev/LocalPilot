@@ -563,8 +563,9 @@ call without a repair engine).
 ## Per-Turn Tool-Call Budget
 
 The budget is **off by default**: with neither key set in `[harness]`, a turn
-runs unbounded — no cost ceiling and no no-progress stop — and is bounded only by
-its other exit paths. The bound is opt-in; set it to cap an unattended loop. When
+runs with no cost ceiling — bounded only by its other exit paths, including the
+always-on degenerate-loop guard below (ADR-0052). The cost bound is opt-in; set it
+to cap an unattended loop. When
 enabled it is progress-aware (ADR-0029), set by two numbers in `[harness]`:
 
 - `tool_call_budget` — the **soft start**. A turn that keeps making forward
@@ -588,6 +589,21 @@ model-visible synthetic message and honour the tool-pairing invariant above, lik
 every other exit path. With `tool_call_budget_max == tool_call_budget` the bound
 is a flat fixed ceiling; raise the maximum above the soft start to let a
 productive turn extend.
+
+### Always-On Degenerate-Loop Guard
+
+Independent of the opt-in budget, the loop carries an always-on guard so a turn
+can never spin unbounded even with the budget off (ADR-0052). When the budget is
+disabled, the turn still stops with `NoProgress` if either the no-progress
+detector trips (a repeated or cyclic *successful* call set) or a run of
+consecutive *failing* calls — the denied/failing spin the detector never sees,
+since it is fed only by successful calls — exceeds a fixed conservative limit. The
+failure streak resets on any successful call, so a productive turn is never cut;
+when the budget is configured the controller above owns the no-progress stop and
+this guard is inert. It is a safety backstop, not a cost control — "budget off"
+still means no *cost* ceiling. Pinned by the `localpilot-harness` budget tests
+(a spinning loop and a run of failing calls both halt with the budget off; a long
+productive turn is not).
 
 ## Anti-Sunk-Cost Loop
 

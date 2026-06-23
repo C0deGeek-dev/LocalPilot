@@ -45,6 +45,27 @@ fn runtime(root: &std::path::Path, provider: FakeProvider, budget: usize) -> Ses
     runtime_budgets(root, provider, budget, budget)
 }
 
+/// A runtime with the tool-call budget left at its default (off), to exercise the
+/// always-on degenerate-loop guard rather than the opt-in cost budget.
+fn runtime_no_budget(root: &std::path::Path, provider: FakeProvider) -> SessionRuntime {
+    SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            // tool_call_budget / tool_call_budget_max left at their default None.
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    )
+}
+
 #[test]
 fn a_runaway_tool_loop_hits_the_budget_and_stops() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,36 +118,22 @@ fn a_normal_task_stays_under_a_configured_budget() {
 }
 
 #[test]
-fn an_unset_budget_runs_a_runaway_loop_to_completion() {
+fn an_unset_budget_still_halts_a_spinning_loop() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
 
-    // The same read repeats many times — a loop that a budget of 3 would stop.
-    // With the budget left at its default (off), nothing pre-empts it: every
-    // scripted call runs and the turn ends on its own final answer.
+    // The same read repeats many times. The opt-in cost budget is off, but the
+    // always-on degenerate-loop guard still stops a turn the no-progress detector
+    // flags as spinning — so a repeat-call loop can no longer run unbounded the
+    // way it did before the guard. See ADR-0052.
     let mut provider = FakeProvider::new();
     for _ in 0..40 {
         provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
     }
     provider = provider.text("done");
 
-    let mut runtime = SessionRuntime::new(
-        Arc::new(provider),
-        ToolRegistry::with_builtins(),
-        PermissionEngine::new(Profile::Bypass, Vec::new()),
-        Box::new(ScriptedApprover::always()),
-        Store::open(root),
-        Workspace::new(root).unwrap(),
-        RecoveryEngine::new(RecoveryBudget::default()),
-        SessionConfig {
-            interactivity: Interactivity::NonInteractive,
-            trusted: true,
-            // tool_call_budget / tool_call_budget_max left at their default None.
-            ..SessionConfig::default()
-        },
-        Vec::new(),
-    );
+    let mut runtime = runtime_no_budget(root, provider);
     let (events, _rx) = broadcast::channel(64);
     let cancel = CancellationToken::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -134,8 +141,66 @@ fn an_unset_budget_runs_a_runaway_loop_to_completion() {
 
     assert_eq!(
         reason,
+        StopReason::NoProgress,
+        "with the budget off, the always-on guard still halts a spinning loop"
+    );
+}
+
+#[test]
+fn an_unset_budget_halts_a_run_of_failing_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Many calls that fail the same way (reading a file that does not exist). The
+    // no-progress detector is fed only by successful calls, so it never sees this
+    // denied/failing spin — the always-on consecutive-failure guard catches it
+    // even with the budget off, instead of running every scripted call.
+    let mut provider = FakeProvider::new();
+    for _ in 0..40 {
+        provider = provider.tool_call("c", "read_file", json!({ "path": "missing.txt" }));
+    }
+    provider = provider.text("gave up");
+
+    let mut runtime = runtime_no_budget(root, provider);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason =
+        rt.block_on(runtime.run_turn("read the missing file repeatedly", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::NoProgress,
+        "a run of consecutive failing calls halts under the always-on guard"
+    );
+}
+
+#[test]
+fn an_unset_budget_does_not_cut_a_productive_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Thirty *distinct* reads, each making progress: the no-progress detector
+    // never trips and there are no failures, so the always-on guard must not fire
+    // — a long but productive turn still finishes on its own answer.
+    let mut provider = FakeProvider::new();
+    for i in 0..30 {
+        let name = format!("f{i}.txt");
+        std::fs::write(root.join(&name), format!("contents {i}\n")).unwrap();
+        provider = provider.tool_call(&format!("c{i}"), "read_file", json!({ "path": name }));
+    }
+    provider = provider.text("read them all");
+
+    let mut runtime = runtime_no_budget(root, provider);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("read each file", &events, &cancel));
+
+    assert_eq!(
+        reason,
         StopReason::Done,
-        "with the budget off, the turn is unbounded and ends on its own answer"
+        "a productive turn is never cut by the always-on guard"
     );
 }
 

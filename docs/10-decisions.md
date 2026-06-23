@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0052: An Always-On Degenerate-Loop Guard Bounds A Spinning Turn Even When The Cost Budget Is Off
+
+Status: accepted.
+
+The per-turn tool-call budget (ADR-0029) is opt-in: with neither `tool_call_budget`
+key set it is `Unlimited`, and a turn runs with no cost ceiling and no no-progress
+stop. That left one unbounded path — a turn that keeps calling tools without making
+progress, most sharply a weak local model whose tool calls are all denied or all
+fail, loops until the model happens to stop. Observed live: under a permission
+profile that denied the probe tools, a model produced ~1240 messages over ~17
+minutes. The per-turn timeout (ADR-0049) bounds one turn, not the loop, and the
+per-tool failure threshold only nudges (a model evades it by cycling tools).
+
+Decision: add an always-on degenerate-loop guard in the session loop, independent
+of the opt-in budget. When the budget is `Unlimited`, the turn still stops with
+`StopReason::NoProgress` if either signal fires:
+
+- the progress-aware no-progress detector (ADR-0029) trips — a repeated or cyclic
+  *successful* call set, which previously only stopped a turn when the budget was
+  configured; or
+- a run of `UNPRODUCTIVE_CALL_LIMIT` consecutive *failing* calls with no successful
+  call in between — the denied/failing spin the no-progress detector never sees (it
+  is fed only by successful calls). The streak resets on any successful call.
+
+This narrows, it does not widen, the budget contract: "budget off" still means no
+*cost* ceiling, and the bound never fires on a productive turn (distinct,
+progressing calls never trip the detector and never accumulate a failure streak).
+When the budget is configured, the controller (ADR-0029) still owns the no-progress
+stop and this guard is inert. The limit is a fixed conservative constant, not a
+config knob — it is a safety backstop, not a cost control, and the opt-in budget
+remains the tunable lever. Pinned by the `localpilot-harness` budget tests: a
+spinning loop and a run of failing calls both halt with the budget off, and a long
+productive turn is not cut. Refines ADR-0029.
+
 ## ADR-0051: Tool Arguments Get A Schema-Aware Error And An Opt-In, Contract-Gated Repair
 
 Status: accepted.

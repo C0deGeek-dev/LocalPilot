@@ -357,6 +357,13 @@ fn file_write_path(input: &serde_json::Value) -> Option<String> {
 /// intervenes.
 const DEFAULT_TOOL_FAILURE_THRESHOLD: u32 = 6;
 
+/// Always-on degenerate-loop guard (independent of the opt-in tool-call budget):
+/// the number of consecutive failing tool calls, with no successful call in
+/// between, that ends a turn even when the budget is off. A short error-recovery
+/// streak is normal; this many failures in a row with nothing landing is a spin.
+/// See ADR-0052.
+const UNPRODUCTIVE_CALL_LIMIT: usize = 12;
+
 /// Stable store key under which the broker's graduated tools persist across
 /// sessions (local and disposable, ADR-0012). Keyed by no session id so it is
 /// shared by the project's sessions.
@@ -1673,6 +1680,10 @@ impl SessionRuntime {
             self.config.tool_call_budget_max,
         );
         let mut no_progress = NoProgressDetector::default();
+        // Always-on degenerate-loop guard: consecutive failing calls with no
+        // successful call between them. Resets on any successful call. Unlike the
+        // opt-in budget, this bounds a spin even when the budget is off.
+        let mut unproductive_streak = 0usize;
 
         loop {
             if cancel.is_cancelled() {
@@ -2043,6 +2054,24 @@ impl SessionRuntime {
                 // cleanly with a model-visible, recorded reason before the next
                 // call runs. The hard cost ceiling always wins; a no-progress
                 // stop is distinct so it is diagnosable.
+                // Always-on degenerate-loop guard. The cost budget is opt-in, but
+                // a turn that is provably not progressing must still stop instead
+                // of spinning unbounded: a tripped no-progress detector (a repeated
+                // or cyclic call set) or a long run of consecutive failing calls
+                // ends the turn even with the budget off. When the budget is on,
+                // the controller below owns the no-progress stop. See ADR-0052.
+                if budget.hard_max().is_none()
+                    && (no_progress.is_tripped() || unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT)
+                {
+                    let notice = "no forward progress this turn (repeated or failing \
+                                  calls); stopping instead of spinning"
+                        .to_string();
+                    let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+                    self.append(
+                        Message::text(Role::User, notice).into_synthetic("no tool-call progress"),
+                    );
+                    return self.stop(events, StopReason::NoProgress);
+                }
                 match budget.decide(tool_calls_used, no_progress.is_tripped()) {
                     BudgetDecision::Continue => {}
                     BudgetDecision::StopCostMax => {
@@ -2352,6 +2381,7 @@ impl SessionRuntime {
 
                 // Track per-tool failure counts for the safeguard.
                 if result.is_error {
+                    unproductive_streak += 1;
                     let count = self.tool_failure_guard.record_failure(name);
                     match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
                         std::cmp::Ordering::Less => {
@@ -2389,6 +2419,7 @@ impl SessionRuntime {
                         result.output.push_str(&hint);
                     }
                 } else {
+                    unproductive_streak = 0;
                     self.tool_failure_guard.record_success(name);
                     // Feed the broker's learned re-rank: a revealed tool that ran
                     // successfully ranks higher next time (no-op when learning off

@@ -5,6 +5,16 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Always-on degenerate-loop guard.** A turn can no longer spin unbounded when the
+  tool-call budget is off. Even with the budget disabled, the loop now stops with
+  `NoProgress` if the no-progress detector trips (a repeated or cyclic successful
+  call set) or a run of consecutive *failing* calls exceeds a fixed conservative
+  limit — the denied/failing spin the detector never saw (it is fed only by
+  successful calls), which had let a weak local model loop for thousands of
+  messages. A productive turn is never cut, and when the budget is configured the
+  existing controller still owns the no-progress stop. "Budget off" still means no
+  *cost* ceiling. (ADR-0052.)
+
 - **Opt-in argument-repair feedback to LocalMind (`[tools] repair_learning`, default
   off).** At session close, the session's argument-repair patterns are offered to
   LocalMind's existing review-gated queue as aggregate, redacted candidates (which
