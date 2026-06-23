@@ -34,6 +34,8 @@ pub enum InputBlockKind {
     Text,
     Reasoning,
     ToolResult,
+    /// An inline image attachment (multimodal input).
+    Image,
 }
 
 /// The tool-call wire shape a provider uses.

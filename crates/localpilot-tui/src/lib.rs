@@ -19,8 +19,8 @@ pub use app::{
 };
 pub use render::{banner_text, history_block_text, live_region_height, render};
 pub use state::{
-    ActiveTool, AppState, ApprovalRequest, BackgroundProcess, FooterStats, Header, Mode, Paste,
-    PlanItem, Profile, ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
+    ActiveTool, AppState, ApprovalRequest, BackgroundProcess, FooterStats, Header, ImageAttachment,
+    Mode, Paste, PlanItem, Profile, ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
 };
 
 /// The product name shown in the UI.

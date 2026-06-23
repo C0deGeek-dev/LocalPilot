@@ -105,6 +105,9 @@ pub enum ContentBlock {
     ToolUse(ToolCall),
     /// The outcome of a tool invocation.
     ToolResult(ToolResult),
+    /// An inline image attachment: base64-encoded data plus its media type
+    /// (e.g. "image/png"). Sent to vision-capable providers as multimodal input.
+    Image { media_type: String, data: String },
 }
 
 impl ContentBlock {
@@ -112,6 +115,15 @@ impl ContentBlock {
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
+    }
+
+    /// An inline image block, carrying base64 data and its media type.
+    #[must_use]
+    pub fn image(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self::Image {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
     }
 }
 
@@ -143,6 +155,7 @@ mod tests {
             ToolUseId::from("call_1"),
             "ok",
         )));
+        roundtrip(&ContentBlock::image("image/png", "aGVsbG8="));
     }
 
     #[test]

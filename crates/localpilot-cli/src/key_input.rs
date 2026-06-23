@@ -123,6 +123,13 @@ pub(crate) fn is_cancel(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
+/// Ctrl+V — the request to attach an image from the OS clipboard. Terminals that
+/// translate Ctrl+V into a bracketed paste are handled separately (an empty paste
+/// also probes the clipboard).
+pub(crate) fn is_clipboard_image_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 pub(crate) fn is_submit(key: KeyEvent, input: &str) -> bool {
     is_plain_enter(key)
         && key.modifiers.is_empty()

@@ -70,6 +70,7 @@ impl AnthropicProvider {
                     InputBlockKind::Text,
                     InputBlockKind::Reasoning,
                     InputBlockKind::ToolResult,
+                    InputBlockKind::Image,
                 ],
                 tool_call_shape: ToolCallShape::AnthropicToolUse,
                 reasoning_shape: ReasoningShape::Content,
@@ -299,6 +300,14 @@ fn translate_blocks(message: &Message) -> Vec<Value> {
                 "tool_use_id": result.id.as_str(),
                 "content": result.output,
                 "is_error": result.is_error,
+            })),
+            ContentBlock::Image { media_type, data } => blocks.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
             })),
             _ => {}
         }
@@ -1117,5 +1126,22 @@ mod tests {
         let quota = quota_from_headers(&headers);
         assert_eq!(quota.retry_after, None);
         assert_eq!(quota.reset_at, None);
+    }
+
+    #[test]
+    fn image_block_serializes_as_base64_source() {
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::text("what is this?"),
+                ContentBlock::image("image/png", "aGVsbG8="),
+            ],
+        );
+        let blocks = translate_blocks(&message);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
     }
 }

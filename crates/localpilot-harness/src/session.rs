@@ -16,8 +16,8 @@ use localpilot_core::{
     ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
 };
 use localpilot_llm::{
-    ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError, ProviderRegistry,
-    QuotaInfo, ToolSpec,
+    InputBlockKind, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError,
+    ProviderRegistry, QuotaInfo, ToolSpec,
 };
 use localpilot_recovery::{
     detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryAction,
@@ -469,7 +469,7 @@ pub struct SessionRuntime {
     /// Long-running processes started by `run_background` this session. In-memory
     /// and session-scoped: every child is killed when the session closes (or this
     /// runtime drops), so no background server outlives the session.
-    background: localpilot_tools::BackgroundProcesses,
+    background: Arc<localpilot_tools::BackgroundProcesses>,
     /// The already-built provider registry, when the host attaches one. Present in
     /// interactive sessions so the active provider/model can be re-pointed
     /// mid-conversation (the switch is a lookup here, never a rebuild). `None`
@@ -527,7 +527,7 @@ impl SessionRuntime {
             rule_engine,
             named_targets: Vec::new(),
             broker: None,
-            background: localpilot_tools::BackgroundProcesses::new(),
+            background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
             turn_in_flight: false,
         };
@@ -834,7 +834,7 @@ impl SessionRuntime {
             interactivity: self.config.interactivity,
             trusted: self.config.trusted,
             retention: Some(&retention),
-            processes: Some(&self.background),
+            processes: Some(self.background.as_ref()),
         };
         let result = self
             .tools
@@ -952,6 +952,16 @@ impl SessionRuntime {
         &self.provider.declaration().id
     }
 
+    /// Whether the active provider declares it accepts image input blocks, so the
+    /// UI can offer (or refuse) pasting an image for this model.
+    #[must_use]
+    pub fn active_accepts_images(&self) -> bool {
+        self.provider
+            .declaration()
+            .supported_input_blocks
+            .contains(&InputBlockKind::Image)
+    }
+
     /// The active model.
     #[must_use]
     pub fn active_model(&self) -> &str {
@@ -1028,6 +1038,21 @@ impl SessionRuntime {
     #[must_use]
     pub fn background_processes(&self) -> Vec<localpilot_tools::ProcStatus> {
         self.background.list()
+    }
+
+    /// A clonable handle to the background-process registry, so the UI can list
+    /// and stop processes while a turn is in flight (the registry is
+    /// interior-mutable behind a single lock).
+    #[must_use]
+    pub fn background_handle(&self) -> Arc<localpilot_tools::BackgroundProcesses> {
+        Arc::clone(&self.background)
+    }
+
+    /// A borrowed view of the background-process registry, for the idle-path UI
+    /// commands that already hold the runtime.
+    #[must_use]
+    pub fn background_registry(&self) -> &localpilot_tools::BackgroundProcesses {
+        self.background.as_ref()
     }
 
     /// Stop and forget the background process `id`, returning whether it existed.
@@ -1409,6 +1434,21 @@ impl SessionRuntime {
         events: &broadcast::Sender<RuntimeEvent>,
         cancel: &CancellationToken,
     ) -> StopReason {
+        self.run_turn_with_attachments(user_input, &[], events, cancel)
+            .await
+    }
+
+    /// Run a turn whose opening user message carries `attachments` (e.g. pasted
+    /// image blocks) alongside the typed `user_input` text. The text still drives
+    /// hooks, target extraction, and token estimation; the attachments ride only
+    /// in the user message sent to the provider.
+    pub async fn run_turn_with_attachments(
+        &mut self,
+        user_input: &str,
+        attachments: &[ContentBlock],
+        events: &broadcast::Sender<RuntimeEvent>,
+        cancel: &CancellationToken,
+    ) -> StopReason {
         // Context hooks contribute system context for this turn. It is computed
         // once from the prompt and injected into the outgoing request adjacent to
         // the leading system prompt — never appended to history or persisted — so
@@ -1443,7 +1483,14 @@ impl SessionRuntime {
                 self.named_targets.push(target);
             }
         }
-        self.append(Message::text(Role::User, user_input));
+        if attachments.is_empty() {
+            self.append(Message::text(Role::User, user_input));
+        } else {
+            let mut blocks = Vec::with_capacity(attachments.len() + 1);
+            blocks.push(ContentBlock::text(user_input));
+            blocks.extend(attachments.iter().cloned());
+            self.append(Message::new(Role::User, blocks));
+        }
         self.last_quota = None;
         self.tool_failure_guard.reset();
         self.error_breaker.reset();
@@ -1928,7 +1975,7 @@ impl SessionRuntime {
                             interactivity: self.config.interactivity,
                             trusted: self.config.trusted,
                             retention: Some(&retention),
-                            processes: Some(&self.background),
+                            processes: Some(self.background.as_ref()),
                         };
                         let gates = self.hooks.gates();
                         tokio::select! {

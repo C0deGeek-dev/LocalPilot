@@ -9,8 +9,10 @@
 use std::future::Future;
 use std::io::{self, Stdout};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -18,6 +20,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
+use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime, SwitchError};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -25,10 +28,11 @@ use localpilot_sandbox::{
     Approver, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile, Workspace,
 };
 use localpilot_store::Store;
+use localpilot_tools::BackgroundProcesses;
 use localpilot_tui::{
     banner_text, handle_input, history_block_text, parse_slash, render, AppInput, AppState,
-    ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, IngestAction, Key, Mode,
-    PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
+    ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, ImageAttachment, IngestAction,
+    Key, Mode, PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
@@ -38,8 +42,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{
-    is_cancel, is_key_action, is_newline, is_submit, is_unbracketed_paste_newline_key,
-    may_be_unbracketed_paste_key, PasteAction, PasteBurst,
+    is_cancel, is_clipboard_image_key, is_key_action, is_newline, is_submit,
+    is_unbracketed_paste_newline_key, may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
 
 /// Fixed height of the inline live region. The region reserves a constant, modest
@@ -358,6 +362,8 @@ async fn event_loop(
                         if state.trusted {
                             crate::trust::remember(host.cwd);
                         }
+                    } else if is_clipboard_image_key(key) {
+                        attach_clipboard_image(state, runtime, false);
                     } else if handle_paste_burst(state, &mut paste_burst, key, buffered_after) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
@@ -378,8 +384,16 @@ async fn event_loop(
                     }
                 }
                 // Bracketed paste: insert small pastes inline, but collapse large
-                // ones to a placeholder so the input line stays readable.
-                Event::Paste(text) if state.trust.is_none() => insert_paste(state, text),
+                // ones to a placeholder so the input line stays readable. A paste
+                // that carries no usable text may be a terminal routing Ctrl+V of a
+                // clipboard image through paste, so probe the clipboard for one.
+                Event::Paste(text) if state.trust.is_none() => {
+                    if text.trim().is_empty() {
+                        attach_clipboard_image(state, runtime, true);
+                    } else {
+                        insert_paste(state, text);
+                    }
+                }
                 _ => {}
             }
             if submitted || state.should_quit {
@@ -404,7 +418,8 @@ async fn submit_current_input(
     // Expand collapsed pastes for the model, but keep the compact form in the
     // transcript.
     let (shown, prompt) = state.take_input_for_submit();
-    if prompt.trim().is_empty() {
+    let images = state.take_images();
+    if prompt.trim().is_empty() && images.is_empty() {
         return Ok(());
     }
     // Persist the visible prompt to the durable history, mirroring the in-session
@@ -416,11 +431,33 @@ async fn submit_current_input(
         )));
     }
     let result = if let Some(action) = parse_slash(&prompt) {
+        // A slash command takes no image attachments; the captured set is dropped.
         run_slash(terminal, state, runtime, approval_rx, host, action).await
     } else {
+        // The image placeholders are stand-ins for the attachment blocks, so strip
+        // them from the text the model receives while leaving `shown` intact.
+        let model_prompt = strip_image_placeholders(&prompt, &images);
+        let attachments: Vec<ContentBlock> = images
+            .iter()
+            .map(|image| ContentBlock::image(&image.media_type, &image.data))
+            .collect();
         state.apply(UiEvent::UserMessage(shown));
+        if !attachments.is_empty() {
+            state.apply(UiEvent::Notice(format!(
+                "sending {} image(s) with this prompt",
+                attachments.len()
+            )));
+        }
         state.busy = true;
-        let outcome = run_turn(terminal, state, runtime, approval_rx, &prompt).await;
+        let outcome = run_turn(
+            terminal,
+            state,
+            runtime,
+            approval_rx,
+            &model_prompt,
+            &attachments,
+        )
+        .await;
         state.busy = false;
         // The turn may have created or removed files; refresh the @-mention list.
         state.set_workspace_files(workspace_files(host.cwd));
@@ -428,7 +465,7 @@ async fn submit_current_input(
     };
     // A turn may have started a background process and a `/bg`/`/new` may have
     // changed the set; keep the status-line indicator current either way.
-    refresh_background(state, runtime);
+    refresh_background(state, runtime.background_registry());
     result
 }
 
@@ -626,7 +663,9 @@ async fn run_slash(
             let result = crate::ingest_cmd::knowledge_pack(host.cwd, &task, &mut output);
             apply_command_result(state, output, result);
         }
-        SlashAction::Background(command) => apply_background_command(state, runtime, command),
+        SlashAction::Background(command) => {
+            apply_background_command(state, runtime.background_registry(), command)
+        }
         SlashAction::Quit => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
@@ -792,21 +831,53 @@ async fn warn_unknown_model(
 
 /// List or stop the session's background processes, posting the result as
 /// notices. Stopping is synchronous, so it runs directly off the input loop.
+/// Whether `action` is safe to run while a turn is in flight. These touch only
+/// UI state or the interior-mutable background registry, never the borrowed
+/// runtime, so they can execute from the mid-turn key handler.
+fn is_live_slash(action: &SlashAction) -> bool {
+    matches!(
+        action,
+        SlashAction::ToggleThinking | SlashAction::Background(_)
+    )
+}
+
+/// Run an allowlisted slash command mid-turn. Only the variants accepted by
+/// [`is_live_slash`] are handled here; anything else is a no-op.
+fn run_live_slash(
+    state: &mut AppState,
+    background: Option<&Arc<BackgroundProcesses>>,
+    action: SlashAction,
+) {
+    match action {
+        SlashAction::ToggleThinking => state.thinking.visible = !state.thinking.visible,
+        SlashAction::Background(command) => match background {
+            Some(processes) => {
+                apply_background_command(state, processes, command);
+                refresh_background(state, processes);
+            }
+            None => state.apply(UiEvent::Notice(
+                "background controls are unavailable right now".to_string(),
+            )),
+        },
+        _ => {}
+    }
+}
+
 fn apply_background_command(
     state: &mut AppState,
-    runtime: &SessionRuntime,
+    processes: &BackgroundProcesses,
     command: BackgroundCommand,
 ) {
     match command {
         BackgroundCommand::List => {
-            let processes = runtime.background_processes();
-            if processes.is_empty() {
+            let listed = processes.list();
+            if listed.is_empty() {
                 state.apply(UiEvent::Notice("no background processes".to_string()));
             } else {
                 state.apply(UiEvent::Notice(
                     "background processes (stop with /bg stop <id> or /bg stop all):".to_string(),
                 ));
-                for process in processes {
+                for process in listed {
                     let status = if process.alive { "running" } else { "exited" };
                     state.apply(UiEvent::Notice(format!(
                         "  {} [{}] {}s · {}",
@@ -816,15 +887,15 @@ fn apply_background_command(
             }
         }
         BackgroundCommand::Stop(id) => {
-            if runtime.stop_background_process(&id) {
+            if processes.stop_now(&id) {
                 state.apply(UiEvent::Notice(format!("stopped background process {id}")));
             } else {
                 state.apply(UiEvent::Notice(format!("no background process {id}")));
             }
         }
         BackgroundCommand::StopAll => {
-            let count = runtime.background_processes().len();
-            runtime.stop_all_background_processes();
+            let count = processes.list().len();
+            processes.kill_all();
             state.apply(UiEvent::Notice(format!(
                 "stopped {count} background process(es)"
             )));
@@ -834,9 +905,9 @@ fn apply_background_command(
 
 /// Push the current background-process set into the UI so the status-line
 /// indicator and `/bg` listing stay in sync after a turn or a `/bg` command.
-fn refresh_background(state: &mut AppState, runtime: &SessionRuntime) {
-    let processes = runtime
-        .background_processes()
+fn refresh_background(state: &mut AppState, processes: &BackgroundProcesses) {
+    let processes = processes
+        .list()
         .into_iter()
         .map(|process| BackgroundProcess {
             id: process.id,
@@ -1228,6 +1299,7 @@ async fn run_harness_command(
         &cancel,
         started,
         None,
+        None,
         operation,
     )
     .await;
@@ -1246,6 +1318,7 @@ async fn run_turn(
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     prompt: &str,
+    attachments: &[ContentBlock],
 ) -> anyhow::Result<()> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
@@ -1253,8 +1326,13 @@ async fn run_turn(
     // Input submitted while the turn runs becomes steering: admitted at the
     // next safe provider-turn boundary instead of being swallowed.
     let steer = runtime.steer_queue();
+    // A clonable Arc, so `/bg` can run mid-turn without touching the runtime the
+    // turn future has mutably borrowed.
+    let background = runtime.background_handle();
     let turn = async {
-        let _ = runtime.run_turn(prompt, &events, &cancel).await;
+        let _ = runtime
+            .run_turn_with_attachments(prompt, attachments, &events, &cancel)
+            .await;
         Ok(())
     };
     drive_runtime_operation(
@@ -1265,6 +1343,7 @@ async fn run_turn(
         &cancel,
         started,
         Some(&steer),
+        Some(&background),
         turn,
     )
     .await
@@ -1279,6 +1358,7 @@ async fn drive_runtime_operation<F, T>(
     cancel: &CancellationToken,
     started: std::time::Instant,
     steer: Option<&localpilot_harness::SteerQueue>,
+    background: Option<&Arc<BackgroundProcesses>>,
     operation: F,
 ) -> anyhow::Result<T>
 where
@@ -1315,6 +1395,7 @@ where
                         event,
                         cancel,
                         steer,
+                        background,
                         &mut paste_burst,
                         buffered_after,
                     );
@@ -1370,12 +1451,14 @@ where
 /// Apply a terminal event received mid-turn. Approval dialogs capture their
 /// decision keys; otherwise Ctrl-C cancels while ordinary editing and paste
 /// events continue updating the next prompt.
+#[allow(clippy::too_many_arguments)] // the mid-turn event handler threads these
 fn resolve_event(
     state: &mut AppState,
     pending: Option<oneshot::Sender<bool>>,
     event: Event,
     cancel: &CancellationToken,
     steer: Option<&localpilot_harness::SteerQueue>,
+    background: Option<&Arc<BackgroundProcesses>>,
     paste_burst: &mut PasteBurst,
     buffered_after: bool,
 ) -> Option<oneshot::Sender<bool>> {
@@ -1419,9 +1502,17 @@ fn resolve_event(
                     state.insert_input_newline();
                 } else if is_submit(key, &state.input) {
                     if state.input.trim_start().starts_with('/') {
-                        state.apply(UiEvent::Notice(
-                            "slash commands run when the current turn is idle".to_string(),
-                        ));
+                        match parse_slash(&state.input) {
+                            Some(action) if is_live_slash(&action) => {
+                                // Clear the input line, then run the allowlisted
+                                // command against UI state / the shared handle.
+                                let _ = state.take_input_for_submit();
+                                run_live_slash(state, background, action);
+                            }
+                            _ => state.apply(UiEvent::Notice(
+                                "slash commands run when the current turn is idle".to_string(),
+                            )),
+                        }
                         return None;
                     }
                     // Submitting while a turn runs queues steering input,
@@ -1459,6 +1550,81 @@ fn insert_paste(state: &mut AppState, text: String) {
     } else {
         state.insert_input(&text);
     }
+}
+
+/// The largest base64 payload we attach, keeping a single image comfortably under
+/// provider request limits (~5 MB encoded ≈ ~3.7 MB of image bytes).
+const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
+
+/// Read an image from the OS clipboard and attach it to the next prompt as a
+/// placeholder. Best effort: an unsupported model, an absent image, or an
+/// encode/oversize failure surfaces as a notice and never disturbs the session.
+/// `quiet_when_absent` suppresses the "no image" notice for the empty-paste
+/// fallback path, where a normal text paste simply had nothing to insert.
+fn attach_clipboard_image(state: &mut AppState, runtime: &SessionRuntime, quiet_when_absent: bool) {
+    if !runtime.active_accepts_images() {
+        state.apply(UiEvent::Notice(
+            "the current model does not accept images".to_string(),
+        ));
+        return;
+    }
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            state.apply(UiEvent::Notice(format!("clipboard unavailable: {error}")));
+            return;
+        }
+    };
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(_) => {
+            if !quiet_when_absent {
+                state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
+            }
+            return;
+        }
+    };
+    let width = image.width;
+    let height = image.height;
+    let png = match encode_png(&image) {
+        Ok(png) => png,
+        Err(message) => {
+            state.apply(UiEvent::Notice(message));
+            return;
+        }
+    };
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    if data.len() > MAX_IMAGE_BASE64_BYTES {
+        state.apply(UiEvent::Notice(
+            "clipboard image is too large to attach".to_string(),
+        ));
+        return;
+    }
+    let placeholder = state.register_image("image/png", data, png.len());
+    state.insert_input(&placeholder);
+    state.apply(UiEvent::Notice(format!("attached {width}×{height} image")));
+}
+
+/// Encode arboard's raw RGBA clipboard pixels to PNG bytes.
+fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
+    use image::{ExtendedColorType, ImageEncoder};
+    let width = u32::try_from(image.width).map_err(|_| "image width too large".to_string())?;
+    let height = u32::try_from(image.height).map_err(|_| "image height too large".to_string())?;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(&image.bytes, width, height, ExtendedColorType::Rgba8)
+        .map_err(|error| format!("could not encode image: {error}"))?;
+    Ok(out)
+}
+
+/// Remove the inline image placeholders from `prompt`; the attachment blocks carry
+/// the images, so the model receives clean text.
+fn strip_image_placeholders(prompt: &str, images: &[ImageAttachment]) -> String {
+    let mut out = prompt.to_string();
+    for image in images {
+        out = out.replace(&image.placeholder, "");
+    }
+    out.trim().to_string()
 }
 
 fn buffered_after_key(key: KeyEvent) -> anyhow::Result<bool> {
@@ -2045,6 +2211,34 @@ mod tests {
             assert!(
                 reachable.contains(&format!("turn-{i}")),
                 "turn-{i} was lost while the live-region content oscillated"
+            );
+        }
+    }
+
+    #[test]
+    fn live_slash_allowlist_admits_only_bg_and_think() {
+        // The mid-turn key handler runs only commands that touch UI state or the
+        // shared background registry — never the borrowed runtime. Everything else
+        // must stay queued behind the "run when idle" notice.
+        for input in [
+            "/bg",
+            "/bg list",
+            "/bg stop bg-1",
+            "/bg stop all",
+            "/think",
+            "/thinking",
+        ] {
+            let action = parse_slash(input).expect("parses to an action");
+            assert!(
+                is_live_slash(&action),
+                "{input} should be allowed while a turn is in flight"
+            );
+        }
+        for input in ["/model", "/new", "/clear", "/compact", "/fork", "/quit"] {
+            let action = parse_slash(input).expect("parses to an action");
+            assert!(
+                !is_live_slash(&action),
+                "{input} must wait for the turn to finish"
             );
         }
     }

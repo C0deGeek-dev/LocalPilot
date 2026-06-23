@@ -107,6 +107,18 @@ pub struct Paste {
     pub content: String,
 }
 
+/// An image attached from the clipboard, shown as a short placeholder in the
+/// input line and sent as a multimodal block when the prompt is submitted.
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    /// The placeholder shown inline in the input (e.g. "[image #1 · PNG 12 KB]").
+    pub placeholder: String,
+    /// The image media type, e.g. "image/png".
+    pub media_type: String,
+    /// Base64-encoded image bytes.
+    pub data: String,
+}
+
 /// The first-run gate asking whether the workspace folder is trusted. Until it
 /// is answered the rest of the input is blocked.
 #[derive(Debug, Clone)]
@@ -217,6 +229,8 @@ pub struct AppState {
     pub trusted: bool,
     /// Large pastes collapsed to placeholders, expanded back on submit.
     pub pastes: Vec<Paste>,
+    /// Clipboard images attached to the next prompt, shown as placeholders.
+    pub images: Vec<ImageAttachment>,
     /// Active slash-command autocomplete picker.
     pub slash_picker: Option<SlashPicker>,
     /// Active `@`-mention file autocomplete picker.
@@ -265,6 +279,7 @@ impl AppState {
             trust: None,
             trusted: false,
             pastes: Vec::new(),
+            images: Vec::new(),
             slash_picker: None,
             file_picker: None,
             workspace_files: Vec::new(),
@@ -288,6 +303,40 @@ impl AppState {
             content,
         });
         placeholder
+    }
+
+    /// Attach a clipboard image, stashing its data and inserting a short
+    /// placeholder into the input line. `byte_len` is the decoded image size,
+    /// used only to render a human-readable placeholder. Returns the placeholder.
+    pub fn register_image(
+        &mut self,
+        media_type: impl Into<String>,
+        data: impl Into<String>,
+        byte_len: usize,
+    ) -> String {
+        let media_type = media_type.into();
+        let label = media_type
+            .rsplit('/')
+            .next()
+            .unwrap_or("image")
+            .to_uppercase();
+        let placeholder = format!(
+            "[image #{} · {label} {}]",
+            self.images.len() + 1,
+            human_byte_size(byte_len)
+        );
+        self.images.push(ImageAttachment {
+            placeholder: placeholder.clone(),
+            media_type,
+            data: data.into(),
+        });
+        placeholder
+    }
+
+    /// Take the attached images, clearing the set. Called alongside
+    /// [`Self::take_input_for_submit`] when a prompt is sent.
+    pub fn take_images(&mut self) -> Vec<ImageAttachment> {
+        std::mem::take(&mut self.images)
     }
 
     /// Insert text at the current input cursor and advance past it.
@@ -955,6 +1004,19 @@ impl AppState {
 
 /// Push `input` onto a recall list, skipping a consecutive duplicate and keeping
 /// the list bounded to the most recent [`MAX_INPUT_HISTORY`] entries.
+/// A compact, human-readable byte size for an attachment placeholder.
+fn human_byte_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn push_capped(history: &mut Vec<String>, input: &str) {
     if history.last().is_some_and(|last| last == input) {
         return;
@@ -1269,6 +1331,22 @@ mod tests {
         // The set is cleared once consumed, and the input is taken.
         assert!(state.pastes.is_empty());
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn a_registered_image_yields_a_placeholder_and_is_drained_on_take() {
+        let mut state = state();
+        let placeholder = state.register_image("image/png", "aGVsbG8=", 2048);
+        assert!(placeholder.contains("#1"));
+        assert!(placeholder.contains("PNG"));
+        assert!(placeholder.contains("2 KB"));
+        assert_eq!(state.images.len(), 1);
+
+        let taken = state.take_images();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].media_type, "image/png");
+        assert_eq!(taken[0].data, "aGVsbG8=");
+        assert!(state.images.is_empty());
     }
 
     #[test]

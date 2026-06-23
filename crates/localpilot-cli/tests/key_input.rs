@@ -62,6 +62,19 @@ fn ctrl_c_cancels() {
 }
 
 #[test]
+fn ctrl_v_requests_a_clipboard_image() {
+    assert!(key_input::is_clipboard_image_key(key(
+        KeyCode::Char('v'),
+        KeyModifiers::CONTROL
+    )));
+    // A bare 'v' is ordinary text input, not an image request.
+    assert!(!key_input::is_clipboard_image_key(key(
+        KeyCode::Char('v'),
+        KeyModifiers::empty()
+    )));
+}
+
+#[test]
 fn trailing_backslash_keeps_plain_enter_as_newline() {
     let event = key(KeyCode::Enter, KeyModifiers::empty());
     let input = "hello \\".to_string();

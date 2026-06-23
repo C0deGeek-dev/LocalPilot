@@ -54,16 +54,22 @@ impl OpenAiProvider {
         } else {
             AuthRequirement::None
         };
+        // Image input is the hosted OpenAI vision path; a local OpenAI-compatible
+        // server is not assumed to accept images, so gate on the source.
+        let mut supported_input_blocks = vec![
+            InputBlockKind::Text,
+            InputBlockKind::Reasoning,
+            InputBlockKind::ToolResult,
+        ];
+        if matches!(source_type, SourceType::OfficialApi) {
+            supported_input_blocks.push(InputBlockKind::Image);
+        }
         Self {
             declaration: ProviderDeclaration {
                 id,
                 display_name: display_name.into(),
                 source_type,
-                supported_input_blocks: vec![
-                    InputBlockKind::Text,
-                    InputBlockKind::Reasoning,
-                    InputBlockKind::ToolResult,
-                ],
+                supported_input_blocks,
                 tool_call_shape: ToolCallShape::OpenAiToolCalls,
                 reasoning_shape: ReasoningShape::Content,
                 capabilities: Capabilities {
@@ -291,6 +297,7 @@ fn translate_message(
 
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut images = Vec::new();
     let mut reasoning: Option<&str> = None;
     let mut reasoning_signature: Option<&str> = None;
 
@@ -318,6 +325,12 @@ fn translate_message(
                     }
                 }));
             }
+            ContentBlock::Image { media_type, data } => {
+                images.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{media_type};base64,{data}") },
+                }));
+            }
             _ => {}
         }
     }
@@ -327,7 +340,16 @@ fn translate_message(
         "role".to_string(),
         json!(role_override.unwrap_or_else(|| role_str(message.role))),
     );
-    if tool_calls.is_empty() {
+    if !images.is_empty() {
+        // Multimodal input: content becomes an ordered parts array (text first,
+        // then the images) rather than a bare string.
+        let mut parts = Vec::with_capacity(images.len() + 1);
+        if !text.is_empty() {
+            parts.push(json!({ "type": "text", "text": text }));
+        }
+        parts.extend(images);
+        obj.insert("content".to_string(), Value::Array(parts));
+    } else if tool_calls.is_empty() {
         obj.insert("content".to_string(), json!(text));
     } else {
         // OpenAI permits null content alongside tool calls.
@@ -938,6 +960,53 @@ mod tests {
         let serialized = body.to_string();
         assert!(serialized.contains("deduce"));
         assert!(serialized.contains("sig-123"));
+    }
+
+    #[test]
+    fn hosted_openai_accepts_images_and_serializes_a_parts_array() {
+        use localpilot_core::{ContentBlock, Message, Role};
+        let provider = OpenAiProvider::new(
+            "openai",
+            "OpenAI",
+            SourceType::OfficialApi,
+            "https://api.openai.com/v1",
+            None,
+        );
+        assert!(provider
+            .declaration()
+            .supported_input_blocks
+            .contains(&InputBlockKind::Image));
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::text("describe this"),
+                ContentBlock::image("image/png", "aGVsbG8="),
+            ],
+        );
+        let body = provider.build_body(&ModelRequest::new("m", vec![message]));
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "image input must use a parts array");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn local_openai_compatible_server_does_not_advertise_image_input() {
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        );
+        assert!(!provider
+            .declaration()
+            .supported_input_blocks
+            .contains(&InputBlockKind::Image));
     }
 
     #[tokio::test]
