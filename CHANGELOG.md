@@ -5,6 +5,20 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`doctor` and `models` are agent-consumable (ADR-0048 `--format`, extended).**
+  `doctor` gains `--format human|json` (`--json` alias; JSON by default off a
+  terminal): the JSON adds the resolved **binary path**, the `git describe`
+  **version**, the **provider kind/base URL/model/context window**, the **memory
+  store root**, and a list of **capability tokens** — enough for a wrapper to
+  detect a stale PATH binary vs the repo build (drift detection is the caller's
+  job) and to feature-detect a surface (e.g. the `--workspace` flag) instead of
+  guessing from the version. `models` no longer prompts then silently skips
+  non-interactively: it gains `--format human|json`, a `--yes` flag, and a clear
+  terminal state — under no-TTY (or `--yes`) it never blocks on a prompt, reports
+  `approval_required` rather than skipping, and **exits non-zero** when an endpoint
+  is unreachable or approval was required without `--yes`. The credential is still
+  reported as a source label only, never the value.
+
 - **`print` survives a closed reader and bounds a long turn.** A dogfood `print
   --allow-writes` run hung for minutes, then panicked with `failed printing to
   stdout: The pipe is being closed` when its reader closed stdout. Two fixes: the

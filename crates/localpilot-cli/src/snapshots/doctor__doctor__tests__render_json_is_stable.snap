@@ -1,0 +1,68 @@
+---
+source: crates/localpilot-cli/tests/../src/doctor.rs
+expression: render_json(&fixture())
+---
+{
+  "version": "0.0.0-test",
+  "binary_path": "/bin/localpilot",
+  "os": "testos",
+  "arch": "testarch",
+  "config_paths": [
+    {
+      "label": "user",
+      "path": "/config/localpilot/config.toml",
+      "exists": false
+    },
+    {
+      "label": "project",
+      "path": "/work/.localpilot.toml",
+      "exists": true
+    }
+  ],
+  "providers": [
+    {
+      "name": "local",
+      "kind": "local",
+      "base_url": null,
+      "credential_env": "LOCALPILOT_LOCAL_API_KEY",
+      "credential_source": "none",
+      "model": null,
+      "context_window": null
+    },
+    {
+      "name": "openai",
+      "kind": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "credential_env": "OPENAI_API_KEY",
+      "credential_source": "keychain",
+      "model": null,
+      "context_window": null
+    }
+  ],
+  "tools": [
+    {
+      "name": "git",
+      "command": "git",
+      "available": true,
+      "optional": false
+    },
+    {
+      "name": "ripgrep",
+      "command": "rg",
+      "available": false,
+      "optional": true
+    },
+    {
+      "name": "sqlite3",
+      "command": "sqlite3",
+      "available": false,
+      "optional": true
+    }
+  ],
+  "memory_root": "/work/.localmind",
+  "capabilities": [
+    "doctor-json",
+    "models-json"
+  ],
+  "workspace_trust": "unknown"
+}

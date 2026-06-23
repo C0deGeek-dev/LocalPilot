@@ -1,4 +1,5 @@
 LocalPilot <version>
+  binary: <binary>
 
 platform:
   os:   <os>
@@ -9,12 +10,15 @@ config search paths:
   project: <workspace>/.localpilot.toml (present)
 
 providers:
-  local: credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
-  openai: credential OPENAI_API_KEY [not set]; model (none); context window unknown
-  anthropic: credential ANTHROPIC_API_KEY [not set]; model (none); context window unknown
+  local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
+  openai (openai): credential OPENAI_API_KEY [not set]; model (none); context window unknown
+  anthropic (anthropic): credential ANTHROPIC_API_KEY [not set]; model (none); context window unknown
 
 tools:
   git (git): available
   ripgrep (rg): available
+
+memory store: <memory-root>
+capabilities: doctor-json, models-json, learning-workspace-flag, print-turn-timeout
 
 workspace trust: unknown (evaluated when a session starts)

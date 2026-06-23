@@ -1,94 +1,279 @@
 //! `localpilot models` — list the models configured local servers actually
 //! have loaded, via the OpenAI-compatible `GET /models` listing.
+//!
+//! Agent-consumable: it never prompts non-interactively (it reports
+//! approval-required instead of silently skipping), emits JSON under the
+//! ADR-0048 `--format` contract, and exits non-zero when a queried endpoint is
+//! unreachable or approval is required without `--yes`.
 
 use std::io::Write as _;
 
 use localpilot_config::{CliOverrides, Config, ConfigPaths, ProviderConfig};
 use localpilot_sandbox::{Decision, Effect, Interactivity, PermissionEngine, PermissionRequest};
+use serde::Serialize;
+
+use crate::output::OutputFormat;
+
+/// The terminal state of a `models` run a caller can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModelsOutcome {
+    /// A queried endpoint was unreachable, or approval was required but the run
+    /// was non-interactive without `--yes` — either way the listing is
+    /// incomplete, so the caller should treat the run as failed.
+    pub had_failure: bool,
+}
+
+/// Why a provider produced no model list (or did).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    /// Models were listed.
+    Ok,
+    /// The endpoint answered but reported no loaded models.
+    NoModels,
+    /// The endpoint could not be reached.
+    Unreachable,
+    /// Network approval was required but the run was non-interactive without
+    /// `--yes`, so the request was not sent (reported, never silently skipped).
+    ApprovalRequired,
+    /// The permission policy denied the network request.
+    Denied,
+    /// The provider speaks a protocol with no `GET /models` listing.
+    NoListingEndpoint,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelEntry {
+    id: String,
+    context_window: Option<u64>,
+    /// Whether this is the provider's configured default model.
+    configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderModels {
+    provider: String,
+    kind: String,
+    base_url: Option<String>,
+    status: Status,
+    models: Vec<ModelEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 /// Run model discovery against every compatible configured provider (or one
-/// named provider) and print the result.
+/// named provider) and print the result in the requested format.
+///
+/// `assume_yes` approves the network request without prompting; `stdin_is_tty`
+/// gates interactive prompting — a non-interactive run never blocks on a prompt.
 ///
 /// # Errors
 /// Returns an error if configuration cannot be loaded or output cannot be
 /// written.
-pub async fn run(provider_filter: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(
+    provider_filter: Option<&str>,
+    format: OutputFormat,
+    assume_yes: bool,
+    stdin_is_tty: bool,
+) -> anyhow::Result<ModelsOutcome> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
     let engine = PermissionEngine::new(profile(&config), Vec::new());
-    let mut stdout = std::io::stdout();
 
-    let mut any = false;
-    // Providers that matched the filter but speak a protocol with no `GET
-    // /models` listing (e.g. `anthropic`); named in the no-result message so the
-    // empty output is explained rather than mysterious.
-    let mut unlistable: Vec<String> = Vec::new();
+    let mut results: Vec<ProviderModels> = Vec::new();
     for (id, entry) in &config.providers {
         if provider_filter.is_some_and(|filter| filter != id) {
             continue;
         }
         let Some(base_url) = listing_base_url(entry) else {
-            unlistable.push(format!("{id} ({})", entry.kind));
+            results.push(ProviderModels {
+                provider: id.clone(),
+                kind: entry.kind.clone(),
+                base_url: entry.base_url.clone(),
+                status: Status::NoListingEndpoint,
+                models: Vec::new(),
+                error: None,
+            });
             continue;
         };
-        any = true;
 
-        // Discovery is a network effect like any other: it passes the
-        // permission engine before a request leaves the machine.
+        // Network discovery is an effect: it passes the permission engine before a
+        // request leaves the machine. A non-interactive run (no TTY, or `--yes`)
+        // declares itself so, so an `Ask` is never a blocking stdin prompt.
+        let interactivity = if stdin_is_tty && !assume_yes {
+            Interactivity::Interactive
+        } else {
+            Interactivity::NonInteractive
+        };
         let request = PermissionRequest {
             tool: "models".to_string(),
             effect: Effect::Network,
-            interactivity: Interactivity::Interactive,
+            interactivity,
             trusted: true,
             detail: format!("{base_url}/models"),
         };
-        let allowed = match engine.decide(&request) {
+        // `--yes` is explicit approval; otherwise consult the policy.
+        let decision = if assume_yes {
+            Decision::Allow
+        } else {
+            engine.decide(&request)
+        };
+        let approved = match decision {
             Decision::Allow => true,
-            Decision::Ask => confirm(&format!("query {} for its model list?", request.detail))?,
+            Decision::Ask => {
+                if stdin_is_tty {
+                    confirm(&format!("query {} for its model list?", request.detail))?
+                } else {
+                    // Non-interactive and approval is required: report it (a nonzero
+                    // exit) rather than silently skip or hang on a prompt.
+                    results.push(provider_blocked(
+                        id,
+                        entry,
+                        &base_url,
+                        Status::ApprovalRequired,
+                    ));
+                    continue;
+                }
+            }
             Decision::Deny => false,
         };
-        if !allowed {
-            writeln!(stdout, "{id}: skipped (network request not approved)")?;
+        if !approved {
+            results.push(provider_blocked(id, entry, &base_url, Status::Denied));
             continue;
         }
 
         let credential = config.resolve_credential(id);
+        let entry_default = entry.model.as_deref();
         match localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
             Ok(models) if models.is_empty() => {
-                writeln!(stdout, "{id}: no models loaded")?;
+                results.push(provider_blocked(id, entry, &base_url, Status::NoModels));
             }
             Ok(models) => {
-                writeln!(stdout, "{id} ({base_url}):")?;
-                for model in models {
-                    let configured = entry.model.as_deref() == Some(model.id.as_str());
-                    let marker = if configured { "  * " } else { "    " };
-                    match model.context_window {
-                        Some(window) => {
-                            writeln!(stdout, "{marker}{} (context {window})", model.id)?;
-                        }
-                        None => writeln!(stdout, "{marker}{}", model.id)?,
-                    }
-                }
+                let listed = models
+                    .into_iter()
+                    .map(|model| ModelEntry {
+                        configured: entry_default == Some(model.id.as_str()),
+                        id: model.id,
+                        context_window: model.context_window,
+                    })
+                    .collect();
+                results.push(ProviderModels {
+                    provider: id.clone(),
+                    kind: entry.kind.clone(),
+                    base_url: Some(base_url.clone()),
+                    status: Status::Ok,
+                    models: listed,
+                    error: None,
+                });
             }
-            Err(err) => writeln!(stdout, "{id}: unreachable ({err})")?,
+            Err(err) => {
+                let mut blocked = provider_blocked(id, entry, &base_url, Status::Unreachable);
+                blocked.error = Some(err.to_string());
+                results.push(blocked);
+            }
         }
     }
 
-    if !any {
-        if unlistable.is_empty() {
-            writeln!(
-                stdout,
-                "no providers configured to list models — run `localpilot init` and configure one"
-            )?;
-        } else {
-            writeln!(
-                stdout,
-                "no model listing for: {}. These providers don't expose a `GET /models` \
-                 endpoint, so the served model is whatever the local server has loaded — \
-                 set `[providers.<id>].model` in .localpilot.toml or query the server directly.",
-                unlistable.join(", ")
-            )?;
+    let had_failure = results
+        .iter()
+        .any(|r| matches!(r.status, Status::Unreachable | Status::ApprovalRequired));
+
+    let mut stdout = std::io::stdout();
+    match format {
+        OutputFormat::Json => render_json(&mut stdout, &results)?,
+        OutputFormat::Human => render_human(&mut stdout, &results)?,
+    }
+    Ok(ModelsOutcome { had_failure })
+}
+
+/// A provider entry that produced no models, for one of the non-`Ok` statuses.
+fn provider_blocked(
+    id: &str,
+    entry: &ProviderConfig,
+    base_url: &str,
+    status: Status,
+) -> ProviderModels {
+    ProviderModels {
+        provider: id.to_string(),
+        kind: entry.kind.clone(),
+        base_url: Some(base_url.to_string()),
+        status,
+        models: Vec::new(),
+        error: None,
+    }
+}
+
+/// Emit the results as a JSON array (the agent-consumable surface). Stdout stays
+/// script-stable: an empty result is a valid empty array.
+fn render_json(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> anyhow::Result<()> {
+    let body = serde_json::to_string_pretty(results)?;
+    writeln!(out, "{body}")?;
+    Ok(())
+}
+
+/// Emit the human-readable listing. Mirrors the prior output, plus explicit lines
+/// for the approval-required / denied / unreachable states and the unlistable
+/// providers, so no outcome is silent.
+fn render_human(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> anyhow::Result<()> {
+    let mut listed_any = false;
+    let mut unlistable: Vec<String> = Vec::new();
+
+    for r in results {
+        match r.status {
+            Status::Ok => {
+                listed_any = true;
+                let base = r.base_url.as_deref().unwrap_or("");
+                writeln!(out, "{} ({base}):", r.provider)?;
+                for model in &r.models {
+                    let marker = if model.configured { "  * " } else { "    " };
+                    match model.context_window {
+                        Some(window) => writeln!(out, "{marker}{} (context {window})", model.id)?,
+                        None => writeln!(out, "{marker}{}", model.id)?,
+                    }
+                }
+            }
+            Status::NoModels => {
+                listed_any = true;
+                writeln!(out, "{}: no models loaded", r.provider)?;
+            }
+            Status::Unreachable => {
+                listed_any = true;
+                let err = r.error.as_deref().unwrap_or("unreachable");
+                writeln!(out, "{}: unreachable ({err})", r.provider)?;
+            }
+            Status::ApprovalRequired => {
+                listed_any = true;
+                writeln!(
+                    out,
+                    "{}: skipped — network approval required; pass --yes to query non-interactively",
+                    r.provider
+                )?;
+            }
+            Status::Denied => {
+                listed_any = true;
+                writeln!(
+                    out,
+                    "{}: skipped (network request denied by policy)",
+                    r.provider
+                )?;
+            }
+            Status::NoListingEndpoint => unlistable.push(format!("{} ({})", r.provider, r.kind)),
         }
+    }
+
+    if !listed_any && unlistable.is_empty() {
+        writeln!(
+            out,
+            "no providers configured to list models — run `localpilot init` and configure one"
+        )?;
+    } else if !unlistable.is_empty() {
+        writeln!(
+            out,
+            "no model listing for: {}. These providers don't expose a `GET /models` \
+             endpoint, so the served model is whatever the local server has loaded — \
+             set `[providers.<id>].model` in .localpilot.toml or query the server directly.",
+            unlistable.join(", ")
+        )?;
     }
     Ok(())
 }
@@ -134,4 +319,78 @@ fn env_non_empty(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok_entry(provider: &str, configured: &str) -> ProviderModels {
+        ProviderModels {
+            provider: provider.to_string(),
+            kind: "openai-compatible".to_string(),
+            base_url: Some("http://localhost:11435/v1".to_string()),
+            status: Status::Ok,
+            models: vec![ModelEntry {
+                id: configured.to_string(),
+                context_window: Some(131_072),
+                configured: true,
+            }],
+            error: None,
+        }
+    }
+
+    #[test]
+    fn json_is_a_script_stable_array() {
+        let mut out: Vec<u8> = Vec::new();
+        render_json(&mut out, &[]).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap().trim(), "[]");
+    }
+
+    #[test]
+    fn json_carries_status_and_configured_marker() {
+        let mut out: Vec<u8> = Vec::new();
+        render_json(&mut out, &[ok_entry("local", "q3635ba3bapex")]).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(parsed[0]["provider"], "local");
+        assert_eq!(parsed[0]["status"], "ok");
+        assert_eq!(parsed[0]["models"][0]["id"], "q3635ba3bapex");
+        assert_eq!(parsed[0]["models"][0]["configured"], true);
+    }
+
+    #[test]
+    fn an_unreachable_or_approval_required_endpoint_serializes_its_status() {
+        let unreachable = ProviderModels {
+            provider: "local".to_string(),
+            kind: "local".to_string(),
+            base_url: Some("http://localhost:9/v1".to_string()),
+            status: Status::Unreachable,
+            models: Vec::new(),
+            error: Some("connection refused".to_string()),
+        };
+        let mut out: Vec<u8> = Vec::new();
+        render_json(&mut out, &[unreachable]).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(parsed[0]["status"], "unreachable");
+        assert_eq!(parsed[0]["error"], "connection refused");
+    }
+
+    #[test]
+    fn noninteractive_approval_required_is_reported_not_skipped_in_human_output() {
+        let blocked = ProviderModels {
+            provider: "local".to_string(),
+            kind: "local".to_string(),
+            base_url: Some("http://localhost:11435/v1".to_string()),
+            status: Status::ApprovalRequired,
+            models: Vec::new(),
+            error: None,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        render_human(&mut out, &[blocked]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("approval required"));
+        assert!(text.contains("--yes"));
+    }
 }

@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0050: `doctor` And `models` Are Agent-Consumable Under The `--format` Contract
+
+Status: accepted.
+
+A dogfood run drove a coding-agent wrapper against the CLI and found two
+agent-hostile surfaces. `doctor` had only human text, so the wrapper string-matched
+`providers:`. `models` prompted for network approval and, run non-interactively,
+printed `skipped (network request not approved)` and exited **0** — a silent
+no-op a wrapper reads as success. The same run hit a stale PATH binary that lacked
+`--workspace`, with no way to detect the drift programmatically.
+
+Decision: extend the ADR-0048 `--format human|json` plumbing (the same `output`
+module, `--json` alias, non-terminal-defaults-to-JSON resolver) to both commands
+rather than invent a second JSON convention.
+
+- **`doctor --format json`** serializes the existing `DoctorReport`, enriched with
+  the signals a wrapper needs: the resolved executable path (`current_exe`), the
+  build's `git describe` version, provider kind + base URL + model + context
+  window, the resolved LocalMind store root, and an append-only list of **capability
+  tokens**. Drift *detection* stays the caller's job (compare exe path + version);
+  doctor only reports the facts. Capability tokens let a wrapper feature-detect a
+  surface (e.g. `learning-workspace-flag`) instead of inferring it from a version
+  number. The credential is reported as a source label (`keychain`/`file`/`env`/
+  `none`) only — never the value, the ADR-0048/secrets invariant.
+- **`models` is non-interactive-safe.** It gains `--format human|json` and a `--yes`
+  flag. Under a non-interactive run (no TTY, or `--yes`) it never blocks on a stdin
+  prompt: an `Ask` decision without `--yes` is reported as `approval_required`, a
+  policy `Deny` as `denied`, and an unreachable endpoint as `unreachable` with the
+  error — and the command **exits non-zero** when a listing was incomplete
+  (unreachable or approval-required). It no longer silently skips. JSON is a
+  script-stable array (an empty result is a valid `[]`).
+
+Reuse, not fork: one `output` resolver, one `--format` vocabulary across `learning
+search` / `memory search` / `doctor` / `models`. Additive and reversible — the human
+forms are unchanged for an interactive caller, and the JSON surfaces are new. Tier-1
+parity holds (`IsTerminal` is the std cross-platform gate). Extends ADR-0048; the
+drift signal is *detection only* — no auto-update and no PATH scan.
+
 ## ADR-0049: `print` Is Closed-Pipe-Safe And Bounds A Turn With A Parseable Handoff
 
 Status: accepted.

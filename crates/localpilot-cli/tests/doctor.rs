@@ -2,6 +2,12 @@
 #[path = "../src/doctor.rs"]
 mod doctor;
 
+// `doctor` references `crate::output::OutputFormat`; include the same module so the
+// standalone test build of `doctor.rs` resolves it (it is otherwise the bin crate's).
+#[allow(dead_code)]
+#[path = "../src/output.rs"]
+mod output;
+
 use doctor::{ConfigPath, DoctorReport, ProviderStatus, ToolStatus, TrustState};
 use localpilot_config::CredentialSource;
 
@@ -19,6 +25,8 @@ fn doctor_does_not_print_secret_values() {
     let mut report = report();
     report.providers = vec![ProviderStatus {
         name: "openai".to_string(),
+        kind: "openai".to_string(),
+        base_url: None,
         credential_env: "OPENAI_API_KEY".to_string(),
         credential_source: CredentialSource::Env,
         model: None,
@@ -35,6 +43,7 @@ fn doctor_does_not_print_secret_values() {
 fn report() -> DoctorReport {
     DoctorReport {
         version: "<version>".to_string(),
+        binary_path: Some("<binary>".to_string()),
         os: "<os>".to_string(),
         arch: "<arch>".to_string(),
         config_paths: vec![
@@ -52,6 +61,8 @@ fn report() -> DoctorReport {
         providers: vec![
             ProviderStatus {
                 name: "local".to_string(),
+                kind: "local".to_string(),
+                base_url: None,
                 credential_env: "LOCALPILOT_LOCAL_API_KEY".to_string(),
                 credential_source: CredentialSource::None,
                 model: None,
@@ -59,6 +70,8 @@ fn report() -> DoctorReport {
             },
             ProviderStatus {
                 name: "openai".to_string(),
+                kind: "openai".to_string(),
+                base_url: None,
                 credential_env: "OPENAI_API_KEY".to_string(),
                 credential_source: CredentialSource::None,
                 model: None,
@@ -66,6 +79,8 @@ fn report() -> DoctorReport {
             },
             ProviderStatus {
                 name: "anthropic".to_string(),
+                kind: "anthropic".to_string(),
+                base_url: None,
                 credential_env: "ANTHROPIC_API_KEY".to_string(),
                 credential_source: CredentialSource::None,
                 model: None,
@@ -85,6 +100,13 @@ fn report() -> DoctorReport {
                 available: true,
                 optional: true,
             },
+        ],
+        memory_root: Some("<memory-root>".to_string()),
+        capabilities: vec![
+            "doctor-json".to_string(),
+            "models-json".to_string(),
+            "learning-workspace-flag".to_string(),
+            "print-turn-timeout".to_string(),
         ],
         workspace_trust: TrustState::Unknown,
     }

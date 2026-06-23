@@ -10,21 +10,31 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use localpilot_config::{CliOverrides, ConfigPaths, CredentialSource};
+use serde::Serialize;
 
 /// A point-in-time view of the local environment relevant to running the agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DoctorReport {
+    /// The build's `git describe` version string (embedded at compile time).
     pub version: String,
+    /// The resolved path of the running executable — the signal a wrapper compares
+    /// against `version` to detect a stale PATH binary vs the repo build.
+    pub binary_path: Option<String>,
     pub os: String,
     pub arch: String,
     pub config_paths: Vec<ConfigPath>,
     pub providers: Vec<ProviderStatus>,
     pub tools: Vec<ToolStatus>,
+    /// The resolved LocalMind store root (walked up from the cwd), when one exists.
+    pub memory_root: Option<String>,
+    /// Stable capability tokens this build advertises, so a wrapper can
+    /// feature-detect against an older binary rather than guess from the version.
+    pub capabilities: Vec<String>,
     pub workspace_trust: TrustState,
 }
 
 /// A candidate configuration file location and whether it currently exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigPath {
     pub label: String,
     pub path: String,
@@ -33,11 +43,17 @@ pub struct ConfigPath {
 
 /// Where a provider's credential resolves from, and the env var it would read.
 /// The credential value itself is never stored here — only its source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderStatus {
     pub name: String,
+    /// The provider kind (`anthropic`, `openai`, `openai-compatible`, …).
+    pub kind: String,
+    /// The configured base URL, when the provider sets one explicitly.
+    pub base_url: Option<String>,
     pub credential_env: String,
     /// Which tier the credential resolves from (keychain / file / env / none).
+    /// Serialized as a label string — never the secret value.
+    #[serde(serialize_with = "serialize_credential_source")]
     pub credential_source: CredentialSource,
     /// The provider's default model, when configured.
     pub model: Option<String>,
@@ -45,8 +61,25 @@ pub struct ProviderStatus {
     pub context_window: Option<u64>,
 }
 
+/// Map a credential source to its machine token (never the value).
+fn credential_source_json(source: CredentialSource) -> &'static str {
+    match source {
+        CredentialSource::Keychain => "keychain",
+        CredentialSource::File => "file",
+        CredentialSource::Env => "env",
+        CredentialSource::None => "none",
+    }
+}
+
+fn serialize_credential_source<S: serde::Serializer>(
+    source: &CredentialSource,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(credential_source_json(*source))
+}
+
 /// Whether an external tool the agent can use was found on `PATH`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolStatus {
     pub name: String,
     pub command: String,
@@ -60,7 +93,8 @@ pub struct ToolStatus {
 // `Trusted`/`Untrusted` are produced by the sandbox trust check once a session
 // evaluates the workspace; `doctor` reports `Unknown` until then.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrustState {
     Trusted,
     Untrusted,
@@ -72,21 +106,84 @@ pub enum TrustState {
 pub fn report() -> DoctorReport {
     DoctorReport {
         version: env!("LOCALPILOT_VERSION").to_string(),
+        binary_path: binary_path(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         config_paths: config_paths(),
         providers: providers(),
         tools: tools(),
+        memory_root: memory_root(),
+        capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
     }
 }
 
-/// Gather a report and write its rendered form to `out`.
+/// The resolved path of the running executable, when discoverable. Paired with
+/// `version` it lets a wrapper detect a stale PATH binary vs the repo build —
+/// drift *detection* is the caller's job (this only reports the facts).
+fn binary_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+}
+
+/// The resolved LocalMind store root, walked up from the cwd like the `learning`
+/// and `memory` commands resolve it, or `None` when no store exists at or above.
+fn memory_root() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let resolved = localpilot_localmind::resolve_store_root(&cwd);
+    resolved
+        .is_found()
+        .then(|| resolved.path().display().to_string())
+}
+
+/// Stable capability tokens this build advertises. A wrapper checks for a token
+/// to confirm a binary supports an agent-facing surface (e.g. the `--workspace`
+/// flag a stale PATH binary lacked) instead of inferring it from the version.
+/// Append-only: removing a token is a breaking change for a consumer.
+fn capabilities() -> Vec<String> {
+    let mut caps = vec![
+        "doctor-json".to_string(),
+        "models-json".to_string(),
+        "learning-workspace-flag".to_string(),
+        "print-turn-timeout".to_string(),
+    ];
+    if cfg!(feature = "tui") {
+        caps.push("tui".to_string());
+    }
+    caps
+}
+
+/// Gather a report and write its human-readable form to `out`.
 ///
 /// # Errors
 /// Returns any error from writing to `out`.
 pub fn run(out: &mut dyn Write) -> io::Result<()> {
-    out.write_all(render(&report()).as_bytes())
+    run_with(out, crate::output::OutputFormat::Human)
+}
+
+/// Gather a report and write it in the requested format. The JSON form is the
+/// agent-consumable surface (ADR-0048's `--format` contract extended to `doctor`);
+/// the human form is unchanged for an interactive caller.
+///
+/// # Errors
+/// Returns any error from writing to `out`.
+pub fn run_with(out: &mut dyn Write, format: crate::output::OutputFormat) -> io::Result<()> {
+    let report = report();
+    let rendered = match format {
+        crate::output::OutputFormat::Human => render(&report),
+        crate::output::OutputFormat::Json => render_json(&report),
+    };
+    out.write_all(rendered.as_bytes())
+}
+
+/// Render a report as a machine-readable JSON object (one trailing newline).
+/// Serialization of the owned report is infallible; the fallback keeps the
+/// function total without an `unwrap`/`expect` on the runtime path.
+#[must_use]
+pub fn render_json(report: &DoctorReport) -> String {
+    let body = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+    format!("{body}\n")
 }
 
 /// Render a report as deterministic, human-readable text.
@@ -97,6 +194,9 @@ pub fn render(report: &DoctorReport) -> String {
 
     // `writeln!` into a String is infallible; the result is intentionally ignored.
     let _ = writeln!(s, "LocalPilot {}", report.version);
+    if let Some(path) = &report.binary_path {
+        let _ = writeln!(s, "  binary: {path}");
+    }
     let _ = writeln!(s);
     let _ = writeln!(s, "platform:");
     let _ = writeln!(s, "  os:   {}", report.os);
@@ -125,10 +225,15 @@ pub fn render(report: &DoctorReport) -> String {
             .context_window
             .map(|w| format!("{w} tokens"))
             .unwrap_or_else(|| "unknown".to_string());
+        let base = p
+            .base_url
+            .as_deref()
+            .map(|u| format!("; base {u}"))
+            .unwrap_or_default();
         let _ = writeln!(
             s,
-            "  {}: credential {} [{source}]; model {model}; context window {window}",
-            p.name, p.credential_env
+            "  {} ({}): credential {} [{source}]{base}; model {model}; context window {window}",
+            p.name, p.kind, p.credential_env
         );
     }
     let _ = writeln!(s);
@@ -142,6 +247,11 @@ pub fn render(report: &DoctorReport) -> String {
         };
         let _ = writeln!(s, "  {} ({}): {state}", t.name, t.command);
     }
+    let _ = writeln!(s);
+
+    let memory = report.memory_root.as_deref().unwrap_or("(none resolved)");
+    let _ = writeln!(s, "memory store: {memory}");
+    let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
     let _ = writeln!(s);
 
     let trust = match report.workspace_trust {
@@ -207,6 +317,8 @@ fn providers() -> Vec<ProviderStatus> {
     .into_iter()
     .map(|(name, env)| ProviderStatus {
         name: name.to_string(),
+        kind: name.to_string(),
+        base_url: None,
         credential_env: env.to_string(),
         // With no config there is no stored-credential lookup to do; presence is
         // read straight from the conventional environment variable.
@@ -246,7 +358,9 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
                     .map(str::to_string)
                     .unwrap_or_else(|| "(none required)".to_string());
                 ProviderStatus {
-                    name: format!("{id} ({})", entry.kind),
+                    name: id.clone(),
+                    kind: entry.kind.clone(),
+                    base_url: entry.base_url.clone(),
                     credential_env,
                     credential_source: source,
                     model: entry.model.clone(),
@@ -342,6 +456,7 @@ mod tests {
     fn fixture() -> DoctorReport {
         DoctorReport {
             version: "0.0.0-test".to_string(),
+            binary_path: Some("/bin/localpilot".to_string()),
             os: "testos".to_string(),
             arch: "testarch".to_string(),
             config_paths: vec![
@@ -359,6 +474,8 @@ mod tests {
             providers: vec![
                 ProviderStatus {
                     name: "local".to_string(),
+                    kind: "local".to_string(),
+                    base_url: None,
                     credential_env: "LOCALPILOT_LOCAL_API_KEY".to_string(),
                     credential_source: CredentialSource::None,
                     model: None,
@@ -366,12 +483,16 @@ mod tests {
                 },
                 ProviderStatus {
                     name: "openai".to_string(),
+                    kind: "openai".to_string(),
+                    base_url: Some("https://api.openai.com/v1".to_string()),
                     credential_env: "OPENAI_API_KEY".to_string(),
                     credential_source: CredentialSource::Keychain,
                     model: None,
                     context_window: None,
                 },
             ],
+            memory_root: Some("/work/.localmind".to_string()),
+            capabilities: vec!["doctor-json".to_string(), "models-json".to_string()],
             tools: vec![
                 ToolStatus {
                     name: "git".to_string(),
@@ -399,6 +520,41 @@ mod tests {
     #[test]
     fn render_is_stable() {
         insta::assert_snapshot!(render(&fixture()));
+    }
+
+    #[test]
+    fn render_json_is_stable() {
+        insta::assert_snapshot!(render_json(&fixture()));
+    }
+
+    #[test]
+    fn render_json_never_leaks_a_credential_value() {
+        // The JSON carries the credential *source* token, never the secret.
+        let json = render_json(&fixture());
+        assert!(json.contains("\"credential_source\": \"keychain\""));
+        assert!(json.contains("\"credential_source\": \"none\""));
+        assert!(!json.contains("sk-"));
+    }
+
+    #[test]
+    fn the_json_carries_drift_signals_and_capabilities() {
+        // A wrapper detects PATH-vs-repo binary drift from the resolved exe path +
+        // version, and feature-detects an agent surface from the capability tokens.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render_json(&fixture())).expect("doctor JSON parses");
+        assert_eq!(parsed["version"], "0.0.0-test");
+        assert_eq!(parsed["binary_path"], "/bin/localpilot");
+        assert_eq!(parsed["memory_root"], "/work/.localmind");
+        assert!(parsed["capabilities"]
+            .as_array()
+            .expect("capabilities is an array")
+            .iter()
+            .any(|c| c == "doctor-json"));
+        assert_eq!(parsed["providers"][1]["kind"], "openai");
+        assert_eq!(
+            parsed["providers"][1]["base_url"],
+            "https://api.openai.com/v1"
+        );
     }
 
     #[test]

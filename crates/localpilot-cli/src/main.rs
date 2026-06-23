@@ -46,7 +46,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Report version, platform, config, providers, tools, and trust state.
-    Doctor,
+    Doctor {
+        /// Output format. Defaults to JSON when stdout is not a terminal
+        /// (piped/redirected) and the human summary on a terminal (ADR-0048).
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Store an API key for a provider (bring-your-own-key): deep-link to the key
     /// page, paste, validate, and save it in the OS keychain (or a 0600 file).
     Login {
@@ -69,6 +77,18 @@ enum Command {
         /// Only query this configured provider id.
         #[arg(long)]
         provider: Option<String>,
+        /// Output format. Defaults to JSON when stdout is not a terminal
+        /// (piped/redirected) and the human list on a terminal (ADR-0048).
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+        /// Approve the network discovery request without prompting — required to
+        /// query when running non-interactively (no TTY), so the command never
+        /// silently skips.
+        #[arg(long)]
+        yes: bool,
     },
     /// Check the project repository for a newer release and optionally update.
     Update {
@@ -736,13 +756,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut exit_code = std::process::ExitCode::SUCCESS;
 
     match command {
-        Command::Doctor => {
+        Command::Doctor { format, json } => {
+            let is_tty = io::stdout().is_terminal();
+            let resolved = output::resolve_format(format, json, is_tty);
             let mut stdout = io::stdout().lock();
-            doctor::run(&mut stdout)?;
+            doctor::run_with(&mut stdout, resolved)?;
             stdout.flush()?;
         }
-        Command::Models { provider } => {
-            models_cmd::run(provider.as_deref()).await?;
+        Command::Models {
+            provider,
+            format,
+            json,
+            yes,
+        } => {
+            let is_tty = io::stdout().is_terminal();
+            let resolved = output::resolve_format(format, json, is_tty);
+            let stdin_is_tty = io::stdin().is_terminal();
+            let outcome = models_cmd::run(provider.as_deref(), resolved, yes, stdin_is_tty).await?;
+            if outcome.had_failure {
+                exit_code = std::process::ExitCode::FAILURE;
+            }
         }
         Command::Login {
             provider,
