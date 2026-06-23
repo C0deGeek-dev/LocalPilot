@@ -76,7 +76,7 @@ pub use scorecard::{
 };
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
-    SessionRuntime, SteerQueue, StopReason, SwitchError, SwitchOutcome,
+    SessionRuntime, SteerQueue, StopReason, SwitchError, SwitchOutcome, TurnHandoff,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::agent_system_prompt;

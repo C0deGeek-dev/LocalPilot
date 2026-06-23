@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0049: `print` Is Closed-Pipe-Safe And Bounds A Turn With A Parseable Handoff
+
+Status: accepted.
+
+A dogfood `print --allow-writes` run hung for minutes, then aborted with `failed
+printing to stdout: The pipe is being closed` when its reader closed stdout. Two
+distinct defects: the streamed-answer write used the bare `print!`/`println!`
+macros, which **panic the process** on a write error (the forbidden runtime-path
+panic — `docs/13-rust-best-practices.md`); and the turn had no bound, so a long or
+stuck turn hangs indefinitely with no terminal state a caller can read.
+
+Decision: make the non-interactive `print` path always reach a clean, readable
+terminal state.
+
+- **A closed reader is a clean stop, not a panic.** The streamed write is checked;
+  an error classified as the consumer going away — `ErrorKind::BrokenPipe`, or the
+  Windows `ERROR_BROKEN_PIPE` (109) / `ERROR_NO_DATA` (232, the observed "The pipe
+  is being closed") raw codes — cancels the turn and exits **141** (the POSIX
+  SIGPIPE convention, `128 + 13`, that broken-pipe-aware tooling already expects),
+  so a wrapper can tell "the reader left" from a real failure. Any other IO error
+  is still surfaced (to stderr), never as a panic. The raw-code check is explicit
+  so the classification holds on every tier-1 platform, not only where std maps the
+  codes to `BrokenPipe`.
+- **A turn is bounded by an optional wall-clock timeout.** `[harness]
+  turn_timeout_secs` (unset by default — no behaviour change) stops a turn that
+  runs past it with a new `StopReason::TimedOut` instead of hanging. The deadline
+  is an absolute `tokio` instant checked at the loop boundary and armed in the
+  stream `select!`, so it cannot drift across iterations.
+- **Every turn leaves a bounded, parseable handoff.** At the turn's single exit the
+  runtime records a `TurnHandoff` (stop reason, tool-call count, files changed,
+  whether memory was written) and `print` renders it as one machine-readable
+  `handoff:` JSON line on **stderr** — never stdout, so it can't pollute the
+  answer. The granular durable record stays the session event log
+  (`ToolFinished`/`MemoriesUsed`/`TurnEnded`); the handoff is a derived summary, so
+  this adds no second reporting channel. `memory_written` is always `false` on the
+  `print` one-shot path (it reads accepted memory but never closes out, per
+  ADR-0018), which is exactly the signal a caller needs to decide to run a close-out.
+
+Additive and reversible: the timeout is opt-in and off by default, the handoff is a
+new stderr line, and the exit code is raised only when the consumer actually went
+away. Rollback is reverting the checked-write wire and the deadline arm. Tier-1
+parity holds — the broken-pipe code differs per OS and all variants are matched.
+
 ## ADR-0048: Non-Terminal Callers Get Structured Output By Default
 
 Status: accepted.

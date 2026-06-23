@@ -131,6 +131,7 @@ macOS/Linux use the fallback file — ADR-0042). See
 | `tool_call_budget` | int | off | Soft start for the per-turn tool-call ceiling. A turn making forward progress runs past this up to `tool_call_budget_max`; a turn detected as making no progress stops here. Unset by default — the budget is opt-in, so an unconfigured turn runs unbounded; set this to enable enforcement |
 | `tool_call_budget_max` | int | off | Hard cost ceiling: the per-turn tool-call count that always stops the loop, regardless of progress. Unset by default (budget off); setting either budget field enables it. When set alone it doubles as the soft start; raise it above `tool_call_budget` to let a productive turn extend |
 | `claim_gate` | `off` \| `warn` | `off` | The no-unsupported-claim gate over the final reply. `warn` appends a visible, non-destructive note to a completed-action claim no verified tool call this turn supports (matched per claim); `off` skips it. Default `off` while its false-positive rate is measured (ADR-0023) |
+| `turn_timeout_secs` | int | off | Bounded per-turn wall-clock timeout in seconds. When set, a turn that runs longer stops cleanly with a parseable `handoff:` summary instead of hanging — the bound a non-interactive caller (`print`) relies on. Unset by default (no bound), so existing runs are unchanged |
 | `rules.<name>` | `off` \| `warn` \| `block` | — | Per-rule severity overrides |
 
 Notable rule key:

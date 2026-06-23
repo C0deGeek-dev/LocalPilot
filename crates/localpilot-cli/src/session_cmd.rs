@@ -44,7 +44,7 @@ pub async fn print_mode(
     allow_writes: bool,
     self_review: bool,
     resume: Option<localpilot_core::SessionId>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PrintOutcome> {
     let cwd = std::env::current_dir()?;
     let mut runtime = build_runtime(&cwd, model, provider_id, profile, allow_writes).await?;
     if let Some(session) = resume {
@@ -53,7 +53,7 @@ pub async fn print_mode(
         runtime.load_session(session)?;
     }
 
-    run_and_print(runtime, prompt).await?;
+    let outcome = run_and_print(runtime, prompt).await?;
 
     // Opt-in advisory cue: a read-only self-review of the workspace after the run.
     // Reuses the existing scanner, writes to stderr (never stdout), and never fails
@@ -64,7 +64,53 @@ pub async fn print_mode(
             eprintln!("self-review skipped ({error})");
         }
     }
-    Ok(())
+    Ok(outcome)
+}
+
+/// The terminal state of a `print` run a caller can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrintOutcome {
+    /// The output consumer closed stdout before the run finished — a clean stop,
+    /// surfaced so the caller can return a distinct exit code rather than crash.
+    pub consumer_gone: bool,
+}
+
+/// The outcome of one streamed write to the output sink.
+#[derive(Debug)]
+enum WriteStatus {
+    /// The chunk was written and flushed.
+    Ok,
+    /// The reader closed the sink — a clean stop, never a panic.
+    ConsumerGone,
+    /// A genuine IO fault, surfaced to stderr by the caller.
+    Failed(std::io::Error),
+}
+
+/// Write one streamed chunk and flush, classifying the result so a closed reader
+/// is a clean stop rather than the process panic the bare `print!` macros take.
+/// Takes `&mut dyn Write` so the classification is testable against an injected
+/// broken-pipe sink.
+fn write_streamed(out: &mut dyn std::io::Write, text: &str) -> WriteStatus {
+    match write!(out, "{text}").and_then(|()| out.flush()) {
+        Ok(()) => WriteStatus::Ok,
+        Err(error) if output_consumer_gone(&error) => WriteStatus::ConsumerGone,
+        Err(error) => WriteStatus::Failed(error),
+    }
+}
+
+/// Whether an stdout write error means the output consumer went away (the reader
+/// closed the pipe) rather than a genuine IO fault. A consumer-gone write is a
+/// clean stop, not a panic; any other IO error is still surfaced.
+#[must_use]
+pub fn output_consumer_gone(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        return true;
+    }
+    // Windows surfaces a closed read end as ERROR_BROKEN_PIPE (109) or
+    // ERROR_NO_DATA (232) — the latter is the "The pipe is being closed" message
+    // the dogfood run hit. Match both raw codes so the classification holds on
+    // every tier-1 platform, not only where std maps them to `BrokenPipe`.
+    matches!(err.raw_os_error(), Some(109) | Some(232))
 }
 
 /// Build a non-interactive session runtime for `cwd` with the configured
@@ -119,6 +165,10 @@ pub async fn build_runtime(
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
+            turn_timeout: config
+                .harness
+                .turn_timeout_secs
+                .map(std::time::Duration::from_secs),
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -253,33 +303,68 @@ pub fn prune_sessions(
     Ok(())
 }
 
-async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Result<()> {
+async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Result<PrintOutcome> {
     let (events, mut rx) = broadcast::channel(1024);
     let cancel = CancellationToken::new();
 
+    // The printer owns stdout. A broken pipe (the reader closed) is a clean stop:
+    // it cancels the turn and reports the consumer gone instead of aborting — the
+    // bare `println!`/`print!` family panics the process on a write error, which is
+    // the forbidden runtime-path panic this code must not take.
+    let printer_cancel = cancel.clone();
     let printer = tokio::spawn(async move {
         let mut out = std::io::stdout();
+        let mut consumer_gone = false;
         while let Ok(event) = rx.recv().await {
             match event {
-                RuntimeEvent::Text(text) => {
-                    let _ = write!(out, "{text}");
-                    let _ = out.flush();
-                }
+                RuntimeEvent::Text(text) => match write_streamed(&mut out, &text) {
+                    WriteStatus::Ok => {}
+                    WriteStatus::ConsumerGone => {
+                        consumer_gone = true;
+                        printer_cancel.cancel();
+                        break;
+                    }
+                    WriteStatus::Failed(error) => {
+                        // A genuine IO fault still surfaces — but never as a panic.
+                        eprintln!("print: failed writing to stdout: {error}");
+                        break;
+                    }
+                },
                 RuntimeEvent::Stopped(_) => break,
                 _ => {}
             }
         }
+        consumer_gone
     });
 
     let reason = runtime.run_turn(prompt, &events, &cancel).await;
     drop(events);
-    let _ = printer.await;
-    println!();
+    let mut consumer_gone = printer.await.unwrap_or(false);
+
+    // Terminate the streamed answer with a newline — a checked write, so a reader
+    // that closed mid-stream is a clean stop here too, not a panic.
+    if !consumer_gone {
+        match write_streamed(&mut std::io::stdout(), "\n") {
+            WriteStatus::Ok => {}
+            WriteStatus::ConsumerGone => consumer_gone = true,
+            WriteStatus::Failed(error) => {
+                eprintln!("print: failed writing to stdout: {error}");
+            }
+        }
+    }
+
+    // A bounded, parseable terminal handoff on stderr (never stdout, so it can't
+    // pollute the answer): a non-interactive caller always reads a terminal state —
+    // stop reason, tool calls, files changed, whether memory was written — even
+    // when the turn timed out or the consumer went away.
+    if let Some(handoff) = runtime.last_turn_handoff() {
+        eprintln!("handoff: {}", handoff.to_json_line());
+    }
 
     if reason == StopReason::Degraded {
         eprintln!("warning: the model was marked degraded after repeated bad output");
     }
-    Ok(())
+    Ok(PrintOutcome { consumer_gone })
 }
 
 #[cfg(test)]
@@ -295,5 +380,60 @@ mod tests {
         assert_eq!(resolve_profile(None, true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("relaxed"), true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("bypass"), false), Profile::Bypass);
+    }
+
+    /// A sink whose every write fails with the given pipe-closed error, standing in
+    /// for a reader that closed stdout mid-stream.
+    struct BrokenPipeSink(std::io::Error);
+
+    impl std::io::Write for BrokenPipeSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0.kind(), "closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(self.0.kind(), "closed"))
+        }
+    }
+
+    #[test]
+    fn a_closed_reader_is_classified_as_consumer_gone() {
+        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert!(output_consumer_gone(&broken));
+        // Windows surfaces the closed read end as ERROR_BROKEN_PIPE (109) or
+        // ERROR_NO_DATA (232 — "The pipe is being closed"); both are consumer-gone.
+        assert!(output_consumer_gone(&std::io::Error::from_raw_os_error(
+            109
+        )));
+        assert!(output_consumer_gone(&std::io::Error::from_raw_os_error(
+            232
+        )));
+    }
+
+    #[test]
+    fn a_real_io_fault_is_not_consumer_gone() {
+        assert!(!output_consumer_gone(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!output_consumer_gone(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
+
+    #[test]
+    fn streaming_to_a_closed_reader_stops_cleanly_without_panicking() {
+        // The regression: the bare `print!`/`println!` macros panic the process on
+        // a broken pipe. The checked write path reports the consumer gone instead.
+        let mut sink = BrokenPipeSink(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(matches!(
+            write_streamed(&mut sink, "streamed answer"),
+            WriteStatus::ConsumerGone
+        ));
+    }
+
+    #[test]
+    fn streaming_to_a_healthy_sink_succeeds() {
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(matches!(write_streamed(&mut buf, "hello"), WriteStatus::Ok));
+        assert_eq!(buf, b"hello");
     }
 }

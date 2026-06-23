@@ -61,6 +61,52 @@ pub enum StopReason {
     /// the loop stopped rather than spend the rest of the budget spinning.
     /// Distinct from `BudgetExceeded`, which is the absolute cost ceiling.
     NoProgress,
+    /// The turn exceeded its bounded wall-clock timeout (`turn_timeout`) and was
+    /// stopped so a non-interactive caller gets a terminal state instead of an
+    /// unbounded hang. The per-turn handoff (`last_turn_handoff`) summarizes what
+    /// the turn had done when it was cut off.
+    TimedOut,
+}
+
+/// A bounded, parseable summary of what a turn accomplished, surfaced at the
+/// turn's single exit so a non-interactive caller always has a terminal state to
+/// read — even when the turn timed out or was cut off mid-flight. It is derived
+/// from per-turn state the runtime already tracks; the granular durable record
+/// stays the session event log (`ToolFinished`/`MemoriesUsed`/`TurnEnded`), so
+/// this adds no second reporting channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnHandoff {
+    /// Why the turn stopped.
+    pub reason: StopReason,
+    /// How many tool calls the turn executed.
+    pub tool_calls: usize,
+    /// Workspace files the turn wrote, edited, or deleted (best-effort, by the
+    /// path argument of each successful file-write tool call).
+    pub files_changed: Vec<String>,
+    /// Whether the turn persisted any learning to memory. Always `false` on the
+    /// `print` one-shot path, which reads accepted memory but never closes out —
+    /// the field surfaces that so a caller knows to run an explicit close-out.
+    pub memory_written: bool,
+}
+
+impl TurnHandoff {
+    /// Render the handoff as one machine-readable JSON line (no trailing newline),
+    /// for a non-interactive caller to parse off the diagnostics stream.
+    #[must_use]
+    pub fn to_json_line(&self) -> String {
+        let files = self
+            .files_changed
+            .iter()
+            .map(|f| serde_json::Value::String(f.clone()))
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "stop": format!("{:?}", self.reason),
+            "tool_calls": self.tool_calls,
+            "files_changed": files,
+            "memory_written": self.memory_written,
+        })
+        .to_string()
+    }
 }
 
 /// A UI-agnostic runtime event. Consumers (print mode, the TUI) subscribe to a
@@ -174,6 +220,11 @@ pub struct SessionConfig {
     /// it ships opt-in (ADR-0031); failure-driven re-resolution carries the feature
     /// without it.
     pub tool_marker_enabled: bool,
+    /// Bounded per-turn wall-clock timeout. When set, a turn that runs longer is
+    /// stopped with [`StopReason::TimedOut`] and a parseable handoff instead of
+    /// hanging — the bound a non-interactive caller relies on. `None` (the
+    /// default) leaves a turn unbounded, so existing flows are unchanged.
+    pub turn_timeout: Option<std::time::Duration>,
 }
 
 impl Default for SessionConfig {
@@ -193,6 +244,7 @@ impl Default for SessionConfig {
             enforce_claim_gate: false,
             rules: IndexMap::new(),
             tool_marker_enabled: false,
+            turn_timeout: None,
         }
     }
 }
@@ -273,6 +325,16 @@ fn is_file_write_tool(name: &str) -> bool {
             | "replace_in_file"
             | "apply_patch"
     )
+}
+
+/// Best-effort target path of a file-write tool call, read from its `path`
+/// argument (the key every file-write builtin uses). `None` when the call carries
+/// no string path (e.g. a patch body), so the handoff simply omits it.
+fn file_write_path(input: &serde_json::Value) -> Option<String> {
+    input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// Default threshold at which a tool is considered stuck and the safeguard
@@ -478,6 +540,19 @@ pub struct SessionRuntime {
     /// Whether a turn is currently running. A switch is refused while this is set,
     /// so the provider/model are only ever re-pointed at a turn boundary.
     turn_in_flight: bool,
+    /// Tool calls executed in the current turn. Reset at each turn start; folded
+    /// into the per-turn handoff at the turn's exit.
+    turn_tool_calls: usize,
+    /// Workspace files written/edited/deleted in the current turn (best-effort,
+    /// by file-write tool path argument). Reset at each turn start.
+    turn_files_changed: Vec<String>,
+    /// Whether the current turn persisted learning to memory. Reset at each turn
+    /// start; the run-turn path only reads memory, so it stays `false` here.
+    turn_memory_written: bool,
+    /// The handoff summarizing the most recently finished turn, built at the
+    /// single exit (`stop`). Read by a non-interactive caller for a terminal
+    /// state even when the turn timed out.
+    last_handoff: Option<TurnHandoff>,
 }
 
 impl SessionRuntime {
@@ -530,6 +605,10 @@ impl SessionRuntime {
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
             turn_in_flight: false,
+            turn_tool_calls: 0,
+            turn_files_changed: Vec::new(),
+            turn_memory_written: false,
+            last_handoff: None,
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -1464,6 +1543,15 @@ impl SessionRuntime {
         // until it ends (cleared in `stop`, the single exit), so the transcript is
         // only ever re-pointed at a turn boundary.
         self.turn_in_flight = true;
+        self.turn_tool_calls = 0;
+        self.turn_files_changed.clear();
+        self.turn_memory_written = false;
+        // A bounded per-turn deadline, when configured: the turn stops cleanly with
+        // a handoff at this instant rather than hanging. `None` leaves it unbounded.
+        let deadline = self
+            .config
+            .turn_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
         let contribution = self.hooks.contribute(user_input);
         let retrieval_text = contribution.text.unwrap_or_default();
         if !contribution.memories.is_empty() {
@@ -1513,6 +1601,9 @@ impl SessionRuntime {
         loop {
             if cancel.is_cancelled() {
                 return self.stop(events, StopReason::Cancelled);
+            }
+            if deadline.is_some_and(|dl| tokio::time::Instant::now() >= dl) {
+                return self.stop(events, StopReason::TimedOut);
             }
 
             // Admit queued steering input at this safe boundary: after the
@@ -1586,6 +1677,17 @@ impl SessionRuntime {
                 tokio::select! {
                     () = cancel.cancelled() => {
                         return self.stop(events, StopReason::Cancelled);
+                    }
+                    // Bounded turn deadline (when configured). `sleep_until` targets
+                    // an absolute instant, so re-arming it each iteration does not
+                    // drift; with no deadline the branch parks forever and never fires.
+                    () = async {
+                        match deadline {
+                            Some(dl) => tokio::time::sleep_until(dl).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        return self.stop(events, StopReason::TimedOut);
                     }
                     event = stream.next() => match event {
                         Some(Ok(ModelEvent::TextDelta(delta))) => {
@@ -1896,6 +1998,7 @@ impl SessionRuntime {
                     }
                 }
                 tool_calls_used += 1;
+                self.turn_tool_calls = tool_calls_used;
 
                 // Surface the task plan to the UI as the model updates it.
                 if name == "update_plan" {
@@ -2021,6 +2124,16 @@ impl SessionRuntime {
                     result.output = scrubbed;
                 }
 
+                // Record a successful workspace mutation for the per-turn handoff,
+                // so a timed-out or cut-off run still reports which files it touched.
+                if !result.is_error && is_file_write_tool(name) {
+                    if let Some(path) = file_write_path(input) {
+                        if !self.turn_files_changed.contains(&path) {
+                            self.turn_files_changed.push(path);
+                        }
+                    }
+                }
+
                 // A `Warn` from check-before-launch lets the call run but appends
                 // the nudge to its result so the model reads it and can probe the
                 // named target before launching again. (A `Block` already refused
@@ -2125,9 +2238,26 @@ impl SessionRuntime {
         }
     }
 
+    /// The handoff for the most recently finished turn, if any — a bounded,
+    /// parseable terminal summary (stop reason, tool calls, files changed, whether
+    /// memory was written) a non-interactive caller can read after `run_turn`.
+    #[must_use]
+    pub fn last_turn_handoff(&self) -> Option<&TurnHandoff> {
+        self.last_handoff.as_ref()
+    }
+
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {
         // The turn has ended: a switch is allowed again at this boundary.
         self.turn_in_flight = false;
+        // Build the per-turn handoff from the state tracked across the turn, so a
+        // non-interactive caller always has a terminal summary to read — even when
+        // the turn timed out or was cut off. The durable record stays the event log.
+        self.last_handoff = Some(TurnHandoff {
+            reason,
+            tool_calls: self.turn_tool_calls,
+            files_changed: self.turn_files_changed.clone(),
+            memory_written: self.turn_memory_written,
+        });
         if reason == StopReason::Cancelled {
             self.record_event(SessionEventKind::Cancelled);
         }

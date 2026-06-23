@@ -313,7 +313,8 @@ fn stop_reason(reason: StopReason) -> &'static str {
         StopReason::Degraded
         | StopReason::ProviderError
         | StopReason::BudgetExceeded
-        | StopReason::NoProgress => "error",
+        | StopReason::NoProgress
+        | StopReason::TimedOut => "error",
     }
 }
 

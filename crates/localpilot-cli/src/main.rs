@@ -706,8 +706,15 @@ fn resolve_learning_store(
     }
 }
 
+/// Exit code returned when a `print` run stops because its output consumer closed
+/// stdout (the reader went away). A clean, distinct terminal state — not the
+/// process panic (101) the unchecked write macros used to take — so a wrapper can
+/// tell "the reader left" from a real failure. Matches the POSIX SIGPIPE
+/// convention (128 + SIGPIPE 13) that broken-pipe-aware tooling already expects.
+const EXIT_OUTPUT_CONSUMER_GONE: u8 = 141;
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(log_path) = logging::init(&cwd) {
         // The path goes to stderr (not the TUI's stdout) so the user knows where
@@ -718,8 +725,15 @@ async fn main() -> anyhow::Result<()> {
 
     let command = match cli.command {
         Some(command) => command,
-        None => return run_default().await,
+        None => {
+            return run_default()
+                .await
+                .map(|()| std::process::ExitCode::SUCCESS)
+        }
     };
+
+    // The terminal exit code, raised only by a print run whose consumer went away.
+    let mut exit_code = std::process::ExitCode::SUCCESS;
 
     match command {
         Command::Doctor => {
@@ -1063,7 +1077,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
-            session_cmd::print_mode(
+            let outcome = session_cmd::print_mode(
                 &prompt,
                 &model,
                 provider.as_deref(),
@@ -1073,6 +1087,9 @@ async fn main() -> anyhow::Result<()> {
                 resume,
             )
             .await?;
+            if outcome.consumer_gone {
+                exit_code = std::process::ExitCode::from(EXIT_OUTPUT_CONSUMER_GONE);
+            }
         }
         Command::Eval {
             problem,
@@ -1119,7 +1136,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
                 let session = id.parse::<SessionId>()?;
-                session_cmd::print_mode(
+                let outcome = session_cmd::print_mode(
                     &prompt,
                     &model,
                     provider.as_deref(),
@@ -1129,6 +1146,9 @@ async fn main() -> anyhow::Result<()> {
                     Some(session),
                 )
                 .await?;
+                if outcome.consumer_gone {
+                    exit_code = std::process::ExitCode::from(EXIT_OUTPUT_CONSUMER_GONE);
+                }
             }
             SessionCommand::Prune {
                 keep,
@@ -1199,7 +1219,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Bare `localpilot` with no subcommand. On a `tui`-enabled build it launches the

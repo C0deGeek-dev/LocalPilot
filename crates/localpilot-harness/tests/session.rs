@@ -1138,3 +1138,69 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
     let roles: Vec<_> = request.messages.iter().map(|m| m.role).collect();
     assert!(roles.contains(&localpilot_core::Role::UserShell));
 }
+
+#[tokio::test]
+async fn a_bounded_turn_timeout_stops_with_a_handoff() {
+    // A zero timeout trips the per-turn deadline on the first loop iteration, so a
+    // long or stuck turn returns a terminal state instead of hanging — the bound a
+    // non-interactive caller relies on. The provider script is never reached.
+    let provider = FakeProvider::new().text("this should never stream");
+    let config = SessionConfig {
+        turn_timeout: Some(Duration::ZERO),
+        ..SessionConfig::default()
+    };
+    let mut h = build(provider, &[], config);
+
+    let reason = h
+        .runtime
+        .run_turn("do the work", &h.events, &h.cancel)
+        .await;
+
+    assert_eq!(reason, StopReason::TimedOut);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a timed-out turn leaves a handoff");
+    assert_eq!(handoff.reason, StopReason::TimedOut);
+    assert_eq!(handoff.tool_calls, 0);
+    assert!(handoff.files_changed.is_empty());
+    assert!(!handoff.memory_written);
+    // The handoff renders one parseable JSON line a caller can read off stderr.
+    let line = handoff.to_json_line();
+    assert!(line.contains("\"stop\":\"TimedOut\""), "got: {line}");
+    assert!(line.contains("\"tool_calls\":0"), "got: {line}");
+}
+
+#[tokio::test]
+async fn the_handoff_reports_tool_calls_and_files_changed() {
+    let provider = FakeProvider::new()
+        .tool_call(
+            "c1",
+            "write_file",
+            json!({ "path": "out.txt", "content": "hi" }),
+        )
+        .text("wrote it");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+
+    let reason = h
+        .runtime
+        .run_turn("create out.txt", &h.events, &h.cancel)
+        .await;
+
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a finished turn leaves a handoff");
+    assert_eq!(handoff.reason, StopReason::Done);
+    assert!(handoff.tool_calls >= 1, "the write counts as a tool call");
+    assert!(
+        handoff.files_changed.iter().any(|f| f == "out.txt"),
+        "the written file is reported: {:?}",
+        handoff.files_changed
+    );
+    assert!(
+        !handoff.memory_written,
+        "the run-turn path never writes memory"
+    );
+}

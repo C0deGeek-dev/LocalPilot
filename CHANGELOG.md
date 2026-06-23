@@ -5,6 +5,19 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **`print` survives a closed reader and bounds a long turn.** A dogfood `print
+  --allow-writes` run hung for minutes, then panicked with `failed printing to
+  stdout: The pipe is being closed` when its reader closed stdout. Two fixes: the
+  streamed-answer writes are now checked — a closed reader (`BrokenPipe`, or the
+  Windows `ERROR_BROKEN_PIPE`/`ERROR_NO_DATA` codes) is a clean stop that cancels
+  the turn and exits `141` (the SIGPIPE convention) instead of the process panic;
+  and a new optional `[harness] turn_timeout_secs` bounds a turn by wall-clock, so
+  a long or stuck turn stops with a terminal state rather than hanging. Either way
+  `print` now emits a one-line, machine-readable `handoff:` summary on stderr —
+  stop reason, tool calls, files changed, and whether memory was written — so a
+  non-interactive caller always reads a terminal state. The timeout is unset by
+  default (no behaviour change); set it to opt a turn into the bound.
+
 - **Code-authoring guardrails in `seed-packs/coding-lessons.json` + an opt-in
   `print --self-review`.** The curated coding pack gains six general, model-actionable
   lessons distilled from a dogfood run where the local author wrote compilable code that

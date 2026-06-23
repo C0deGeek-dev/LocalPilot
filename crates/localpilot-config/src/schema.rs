@@ -500,6 +500,13 @@ pub struct HarnessConfig {
     /// Unset by default (budget off); setting either budget field enables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_budget_max: Option<usize>,
+    /// Bounded per-turn wall-clock timeout in seconds. When set, a turn that runs
+    /// longer stops cleanly with a parseable handoff instead of hanging
+    /// indefinitely — the bound a non-interactive caller (`print`) relies on so a
+    /// long or stuck turn always returns a terminal state. Unset by default (no
+    /// bound), so existing runs are unchanged; set it to opt a turn into the bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_timeout_secs: Option<u64>,
     /// The no-unsupported-claim gate over the final reply. `off` (default) skips
     /// it; `warn` flags a completed-action claim no verified tool call supports.
     pub claim_gate: ClaimGate,
@@ -524,6 +531,7 @@ impl Default for HarnessConfig {
             context_token_limit: 24_000,
             tool_call_budget: None,
             tool_call_budget_max: None,
+            turn_timeout_secs: None,
             claim_gate: ClaimGate::default(),
             teardown_sweep: false,
         }
