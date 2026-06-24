@@ -29,5 +29,5 @@ pub use schema::{
     DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
     LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
     PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RepairMode,
-    RuleSeverity, SkillsConfig, StorageConfig, ToolsConfig,
+    RuleSeverity, SelfImprovementConfig, SkillsConfig, StorageConfig, ToolsConfig,
 };

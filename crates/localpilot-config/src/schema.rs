@@ -26,6 +26,7 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub tools: ToolsConfig,
     pub history: HistoryConfig,
+    pub self_improvement: SelfImprovementConfig,
 }
 
 impl Default for Config {
@@ -46,7 +47,39 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
             history: HistoryConfig::default(),
+            self_improvement: SelfImprovementConfig::default(),
         }
+    }
+}
+
+/// The outward half of the human-gated self-improvement loop (ADR-0034 / ADR-0053):
+/// the agent may author a **draft** issue/PR proposing an improvement, but
+/// publishing one to an external repo is gated. Both controls ship **off**, so an
+/// absent `[self_improvement]` block leaves the surface inert — nothing is
+/// publishable. A draft is publishable only when `enabled` is true **and** its
+/// target repo is in the explicit `outward_targets` allowlist; publication is
+/// still draft-only, dry-run-by-default, and requires an explicit human approval.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SelfImprovementConfig {
+    /// Enable the outward draft-emit surface at all. Default `false`: the
+    /// `propose-issue`/`propose-pr`/`emit-draft` commands refuse until an operator
+    /// opts in. This is the explicit feature switch, independent of the allowlist.
+    pub enabled: bool,
+    /// The explicit allowlist of `owner/repo` targets a draft may be proposed for
+    /// or published to. Default empty → nothing is publishable even when
+    /// `enabled` is true. A target outside this list is refused at propose time,
+    /// before any draft is written.
+    pub outward_targets: Vec<String>,
+}
+
+impl SelfImprovementConfig {
+    /// Whether a draft targeting `repo` may be proposed/published: the feature is
+    /// enabled and `repo` is in the allowlist. With either control off, nothing is
+    /// publishable — the default-off, fail-closed posture.
+    #[must_use]
+    pub fn allows_target(&self, repo: &str) -> bool {
+        self.enabled && self.outward_targets.iter().any(|t| t == repo)
     }
 }
 
@@ -890,6 +923,45 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ToolsConfig>(value).unwrap(),
             partial
+        );
+    }
+
+    #[test]
+    fn self_improvement_is_off_by_default_and_fail_closed() {
+        // The outward surface ships inert: the default config and a config that
+        // omits the key both leave it disabled with an empty allowlist, so nothing
+        // is publishable.
+        let off = SelfImprovementConfig::default();
+        assert!(!off.enabled);
+        assert!(off.outward_targets.is_empty());
+        assert!(!off.allows_target("owner/repo"));
+
+        // A whole Config with no self_improvement key keeps it inert.
+        let config: Config = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(config.self_improvement, SelfImprovementConfig::default());
+
+        // Both controls are required: enabled alone (empty allowlist) is inert,
+        // and an allowlist alone (disabled) is inert — fail-closed.
+        let enabled_only: SelfImprovementConfig =
+            serde_json::from_value(json!({ "enabled": true })).unwrap();
+        assert!(!enabled_only.allows_target("owner/repo"));
+        let listed_only: SelfImprovementConfig =
+            serde_json::from_value(json!({ "outward_targets": ["owner/repo"] })).unwrap();
+        assert!(!listed_only.allows_target("owner/repo"));
+
+        // Only with both does a listed target become publishable, and an unlisted
+        // target stays refused.
+        let on: SelfImprovementConfig =
+            serde_json::from_value(json!({ "enabled": true, "outward_targets": ["owner/repo"] }))
+                .unwrap();
+        assert!(on.allows_target("owner/repo"));
+        assert!(!on.allows_target("owner/other"));
+
+        // Round-trips through serialization.
+        let value = serde_json::to_value(&on).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SelfImprovementConfig>(value).unwrap(),
+            on
         );
     }
 

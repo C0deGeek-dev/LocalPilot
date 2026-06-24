@@ -13,16 +13,27 @@
 //! code path from proposing to promoting without one, the agent never merges to
 //! `main`, nothing here ever pushes, and rollback is to drop the worktree/branch
 //! ([`ProposedPatch::discard`]).
+//!
+//! The same gate guards the *outward* half (ADR-0053): an [`OutwardDraft`] is a
+//! draft issue/PR the agent may author and persist locally, but turning one into a
+//! runnable [`PublishPlan`] requires the same [`ApprovalToken`]. See
+//! [`mod@outward`].
 #![forbid(unsafe_code)]
 
 mod error;
 mod gate;
 mod git;
+mod outward;
 mod proposal;
 mod provenance;
 
 pub use error::PatchError;
 pub use gate::ApprovalToken;
+pub use outward::{
+    discard as discard_outward_draft, list as list_outward_drafts,
+    record_event as record_outward_event, DraftRequest, EmitPhase, OutwardDraft, OutwardError,
+    OutwardEvent, OutwardKind, OutwardPolicy, PublishPlan, OUTWARD_SCHEMA,
+};
 pub use proposal::{PatchProposal, ProposedEdit};
 pub use provenance::{ChangeProvenance, EvalResult, PROVENANCE_SCHEMA};
 
