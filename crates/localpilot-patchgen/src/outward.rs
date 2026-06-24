@@ -149,7 +149,7 @@ pub struct OutwardDraft {
     pub target_repo: String,
     /// The draft title (redacted).
     pub title: String,
-    /// The draft body — redacted, and carrying the provenance block (D004).
+    /// The draft body — redacted, and carrying the provenance block.
     pub body: String,
     /// For a draft PR, the head branch to open the PR from. `None` for an issue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,7 +421,7 @@ pub fn record_event(repo_root: &Path, event: &OutwardEvent) -> Result<(), Outwar
 }
 
 /// Compose the draft body: the human-readable description, then a provenance block
-/// (D004) so a published draft is traceable to what produced it. Redaction is
+/// so a published draft is traceable to what produced it. Redaction is
 /// applied by the caller over the whole composed body.
 fn render_body(description: &str, provenance: &ChangeProvenance) -> String {
     use std::fmt::Write as _;
@@ -566,7 +566,7 @@ mod tests {
             .body
             .contains("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
         assert!(draft.body.contains(localpilot_config::redact::REDACTED));
-        // Provenance (D004) is in the body: source, model, rationale.
+        // Provenance is in the body: source, model, rationale.
         assert!(draft.body.contains("model: self-review"));
         assert!(draft.body.contains("rationale: the TODO is stale"));
         assert!(draft.body.contains("source: propose-issue for finding"));
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(plan.args, draft.publish_argv());
     }
 
-    /// The human-gate proof (§6.17): the authoring/store surface an autonomous loop
+    /// The human-gate proof: the authoring/store surface an autonomous loop
     /// uses exposes **no** way to obtain an [`ApprovalToken`] and therefore no way
     /// to reach a runnable [`PublishPlan`]. The only token constructor is
     /// [`ApprovalToken::approve`], called solely on the explicit `--approve` CLI

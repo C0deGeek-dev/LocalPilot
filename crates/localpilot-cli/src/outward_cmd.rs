@@ -86,8 +86,8 @@ fn draft_from_finding(
 ) -> anyhow::Result<OutwardDraft> {
     let spec = draft_spec_for_finding(finding)
         .ok_or_else(|| anyhow!("finding {finding_rank} carries no evidence to describe"))?;
-    // Provenance (D004): the source finding, the producing surface, the rationale,
-    // and the risk note, rendered into the (redacted) draft body.
+    // Provenance: the source finding, the producing surface, the rationale, and
+    // the risk note, rendered into the (redacted) draft body.
     let mut provenance =
         ChangeProvenance::new(spec.source, "localpilot self-review", spec.rationale);
     provenance.risks = spec.risks;

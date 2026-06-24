@@ -11,7 +11,7 @@
 use crate::finding::{Finding, Risk};
 
 /// The human-authored parts of an outward draft, derived purely from a finding.
-/// Carries the provenance components (D004) so the gated artefact can render a
+/// Carries the provenance components so the gated artefact can render a
 /// traceable body without re-deriving them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutwardDraftSpec {
@@ -111,7 +111,7 @@ mod tests {
         assert!(spec.description.contains("src/a.rs:12"));
         assert!(spec.description.contains("stale TODO marker"));
         assert!(spec.description.contains("track it in the issue tracker"));
-        // Provenance components are present (D004): source, rationale, risks.
+        // Provenance components are present: source, rationale, risks.
         assert!(spec.source.contains("self-review"));
         assert!(spec.source.contains("src/a.rs:12"));
         assert_eq!(spec.rationale, "track it in the issue tracker or remove it");
