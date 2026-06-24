@@ -23,6 +23,8 @@ use localpilot_patchgen::{
 use localpilot_selfreview::{review, Finding, ReviewOptions};
 use serde::Deserialize;
 
+use crate::outward_cmd;
+
 /// The `self-review` write-half subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ProposePatchCommand {
@@ -57,6 +59,49 @@ pub enum ProposePatchCommand {
         /// The proposal id (printed by `propose-patch`).
         #[arg(long)]
         id: String,
+    },
+    /// Author a **draft issue** for one ranked self-review finding and write it to
+    /// the local outward store for human inspection. Writes nothing to the network.
+    ProposeIssue {
+        /// The 1-based rank of the finding to describe (see `localpilot self-review`).
+        #[arg(long)]
+        finding: usize,
+        /// The `owner/repo` target (must be on the `[self_improvement] outward_targets` allowlist).
+        #[arg(long)]
+        target: String,
+    },
+    /// Author a **draft PR** for one ranked self-review finding and write it to the
+    /// local outward store for human inspection. Writes nothing to the network.
+    ProposePr {
+        /// The 1-based rank of the finding to describe (see `localpilot self-review`).
+        #[arg(long)]
+        finding: usize,
+        /// The `owner/repo` target (must be on the `[self_improvement] outward_targets` allowlist).
+        #[arg(long)]
+        target: String,
+        /// The head branch the draft PR would be opened from.
+        #[arg(long)]
+        head: String,
+    },
+    /// Inspect, show, or discard locally proposed outward drafts. No publish here.
+    Drafts {
+        #[command(subcommand)]
+        command: outward_cmd::OutwardDraftsCommand,
+    },
+    /// Publish an inspected outward draft as a **draft** issue/PR via `gh` — only
+    /// with explicit human approval. Dry-run by default (prints the plan, publishes
+    /// nothing); `--approve` is the deliberate human act the autonomous loop never
+    /// passes.
+    EmitDraft {
+        /// The draft id (printed by `propose-issue`/`propose-pr`).
+        #[arg(long)]
+        id: String,
+        /// The human reviewer recorded on the approval.
+        #[arg(long)]
+        reviewer: String,
+        /// Explicit confirmation that a human approves publishing this draft.
+        #[arg(long)]
+        approve: bool,
     },
 }
 
@@ -227,6 +272,20 @@ pub async fn dispatch(cmd: ProposePatchCommand, out: &mut dyn Write) -> anyhow::
             approve,
         } => run_promote(&cwd, &id, &reviewer, approve, out),
         ProposePatchCommand::Discard { id } => run_discard(&cwd, &id, out),
+        ProposePatchCommand::ProposeIssue { finding, target } => {
+            outward_cmd::run_propose_issue(&cwd, finding, &target, out)
+        }
+        ProposePatchCommand::ProposePr {
+            finding,
+            target,
+            head,
+        } => outward_cmd::run_propose_pr(&cwd, finding, &target, &head, out),
+        ProposePatchCommand::Drafts { command } => outward_cmd::run_drafts(&cwd, command, out),
+        ProposePatchCommand::EmitDraft {
+            id,
+            reviewer,
+            approve,
+        } => outward_cmd::run_emit_draft(&cwd, &id, &reviewer, approve, out),
     }
 }
 

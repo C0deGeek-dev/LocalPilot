@@ -5,6 +5,20 @@ stability policy is in [docs/configuration.md](docs/configuration.md).
 
 ## Unreleased
 
+- **Outward self-improvement drafts (`self-review propose-issue`/`propose-pr`/
+  `emit-draft`, default-off).** The self-improvement loop can now author a **draft**
+  issue/PR from a ranked self-review finding and — only with an explicit human
+  `--approve` — publish it as a **draft** to an allowlisted repo via the `gh` CLI.
+  It is human-gated by construction: the same value-typed approval token that
+  promotes a patch is required to publish, and the autonomous loop can never mint
+  one (it can propose but not publish). The surface is off by default
+  (`[self_improvement] enabled` + an `outward_targets` allowlist, both required and
+  fail-closed); publication is draft-only (never ready/merge), dry-run by default
+  (`emit-draft` without `--approve` prints the `gh` plan and publishes nothing),
+  redacted, and writes drafts to the git-ignored `.localpilot/outward/` store for
+  inspection before any publish. `drafts list`/`show`/`discard` inspect them.
+  (ADR-0053, extends ADR-0034.)
+
 - **`fetch` fails fast on a stalled connect.** The network tool now sets a connect
   timeout (bounded under the request timeout) so a hung TCP/TLS connect errors
   quickly instead of blocking the agent loop for the full request window.

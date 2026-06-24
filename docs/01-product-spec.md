@@ -202,6 +202,21 @@ Harness mode is entered three ways:
 Switching between modes is allowed at safe boundaries. Harness mode reuses the
 same permission engine; rule verdicts layer on top of permission decisions.
 
+### Self-Improvement Loop (opt-in, human-gated)
+
+Independent of the operating mode, LocalPilot can run a **human-gated
+self-improvement loop** (ADR-0034 / ADR-0053). Its read-only front
+(`self-review`) scans the repo for advisory health findings. From a finding it
+can **propose** — never apply — an improvement: an inward code patch in an
+isolated worktree (`self-review propose-patch`), or an **outward** draft issue/PR
+describing it (`self-review propose-issue` / `propose-pr`). Acting on a proposal
+is a separate, explicit human step behind a value-typed approval the autonomous
+loop cannot mint: a human `promote`s a patch onto the branch, or `emit-draft
+--approve` publishes a **draft** issue/PR to an allowlisted repo via `gh`
+(draft-only, dry-run by default, never ready/merge). The whole outward surface is
+**off by default** (`[self_improvement]`) and the agent can propose but never
+publish.
+
 ## Interfaces
 
 ### Interactive REPL

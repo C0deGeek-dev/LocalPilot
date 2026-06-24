@@ -340,6 +340,42 @@ structural, not a convention:
 - **Scope-bound.** A proposal may touch only the files the finding named; both
   the declared edits and the produced diff are checked against that set.
 
+## Outward Draft Emission
+
+The loop's **outward** half (ADR-0053) lets the agent author a **draft** issue/PR
+describing a proposed improvement and, only with an explicit human approval,
+publish it to an allowlisted repo as a draft. It carries the same structural gate
+as patch promotion:
+
+- **No publish without a human.** Authoring or persisting a draft mints no
+  approval token and touches no network. The only operation that yields a runnable
+  publish plan requires the same value-typed approval token used to promote a
+  patch, and that token's sole constructor is the explicit `--approve` path. The
+  autonomous loop has no path to mint one, so it can propose a draft but never
+  publish — a standing test pins this.
+- **Default-off, fail-closed allowlist.** A draft can only be built (let alone
+  published) when `[self_improvement] enabled = true` **and** its `owner/repo`
+  target is on the `outward_targets` allowlist. Both ship off; an un-allowlisted or
+  disabled target is refused at propose time, before any draft is written, and the
+  allowlist is re-checked again at emit time.
+- **Draft-only, never promote.** Publication runs `gh issue create` /
+  `gh pr create --draft` only. The constructed argv can never carry `ready`,
+  `merge`, `--web`, or an edit/comment/close on an existing item — the builder
+  cannot produce them and a test asserts it. There is no path to mark a PR ready,
+  merge it, or comment on others' issues.
+- **Dry-run by default.** Without `--approve`, `emit-draft` prints the exact `gh`
+  plan it *would* run and publishes nothing. The human reviews the plan (and the
+  resolved `gh` account, surfaced from a `gh auth status` preflight) before
+  approving.
+- **Redacted, locally inspectable.** The draft title/body are redacted with the
+  shared workspace redactor at construction, so a secret never reaches the
+  project-local `.localpilot/outward/` store even before publish. The body carries
+  the change provenance (the finding, its source, the rationale) so a published
+  draft is traceable. Every emit appends a redacted, token-free lifecycle event
+  (proposed → approved → published, with the resulting URL).
+- **No shell.** The `gh` arguments are passed as an argv array, never a shell
+  string, so a redacted title or body can never become another command.
+
 ## Quota Wait/Resume Safety
 
 Automatic quota wait/resume is allowed only when it honors the provider's

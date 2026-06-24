@@ -257,6 +257,26 @@ are stored **raw** (not redacted — recall must be faithful), the opt-out and t
 restrictive mode/location are the privacy controls; see
 [07-security-and-privacy.md](07-security-and-privacy.md) §Prompt History At Rest.
 
+### `[self_improvement]`
+
+The **outward** half of the human-gated self-improvement loop (ADR-0053, extending
+ADR-0034): the agent may author a **draft** issue/PR proposing an improvement, but
+publishing one to an external repo is gated. Both keys ship **off**, so an absent
+`[self_improvement]` block leaves the surface inert — nothing is publishable.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | The explicit feature switch for the outward `propose-issue`/`propose-pr`/`emit-draft` commands. Off refuses them entirely. |
+| `outward_targets` | array of string | `[]` | The allowlist of `owner/repo` targets a draft may be proposed for or published to. Empty → nothing is publishable even when `enabled = true`. A target outside this list is refused at propose time, before any draft is written. |
+
+A draft is publishable only when `enabled = true` **and** its target is on
+`outward_targets` (fail-closed: both are required). Even then, publishing is
+**draft-only** (`gh issue create` / `gh pr create --draft`, never ready/merge),
+**dry-run by default** (`emit-draft` prints the `gh` plan and publishes nothing
+unless `--approve` is passed), and requires an explicit human approval — the
+autonomous loop can author a draft but can never publish one. See
+[07-security-and-privacy.md](07-security-and-privacy.md) §Outward Draft Emission.
+
 ## Example
 
 ```toml

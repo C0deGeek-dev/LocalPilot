@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0053: The Outward Self-Improvement Surface Is Human-Gated By Construction, Draft-Only, And Default-Off
+
+Status: accepted.
+
+ADR-0034 built the self-improvement loop's write half so the human gate is
+structural: the agent may **propose** a code patch in an isolated worktree, but
+promoting it onto the branch requires a value-typed `ApprovalToken` the autonomous
+loop cannot mint. That ADR deferred the *outward* analogue — emitting an issue/PR
+to an external repo — as a safety call, not a scope cut. This record lifts that
+deferral and ships the narrowest publishable outward surface under the same gate.
+
+Decision: add an `OutwardDraft` to `localpilot-patchgen` as a sibling of
+`ProposedPatch`, reusing the **exact same** `ApprovalToken` — one token type, one
+mint path, no second gate.
+
+- **Human-gated by construction.** Authoring or persisting a draft mints no token
+  and touches no network. The only producer of a runnable `PublishPlan` is
+  `OutwardDraft::publish_plan(&self, &ApprovalToken)`; the token's sole constructor
+  (`ApprovalToken::approve`) is called only on the explicit `emit-draft --approve`
+  CLI path, mirroring `promote`. So the loop can author a draft but can never
+  publish one — a standing API-shape test pins that every loop-reachable operation
+  (build/persist/load/list/preview) completes token-free.
+- **Default-off, fail-closed allowlist.** New `[self_improvement]` config:
+  `enabled` (bool) + `outward_targets` (`owner/repo` allowlist), both off. A draft
+  is refused at propose time unless the feature is enabled **and** the target is
+  allowlisted; the allowlist is re-checked at emit time.
+- **Draft-only, never promote.** Publication runs `gh issue create` /
+  `gh pr create --draft` only, via the official `gh` CLI (clean-room — no private
+  endpoint). The argv is built so it can never carry `ready`/`merge`/`--web`/an
+  edit/comment/close, is passed as an array (no shell), and `emit-draft` is
+  **dry-run by default** (no `--approve` ⇒ print the plan, publish nothing). A
+  `gh auth status` preflight surfaces the resolved account before approval.
+- **Redacted and traceable.** The draft title/body are redacted with the shared
+  workspace redactor at construction (so a secret never reaches the local
+  `.localpilot/outward/` store), and the body carries the change provenance
+  (finding + source + rationale). Every emit appends a redacted, token-free
+  lifecycle event.
+
+The propose surface's pure finding→draft-spec mapping lives in the read-only
+`localpilot-selfreview`; the gated artefact, store, and `gh`-running command live
+in `localpilot-patchgen`/`localpilot-cli`, keeping the read-only scanner free of
+provider/network deps. Extends ADR-0034.
+
 ## ADR-0052: An Always-On Degenerate-Loop Guard Bounds A Spinning Turn Even When The Cost Budget Is Off
 
 Status: accepted.

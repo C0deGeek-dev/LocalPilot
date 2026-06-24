@@ -24,6 +24,7 @@ mod mcp;
 mod memory_cmd;
 mod models_cmd;
 mod output;
+mod outward_cmd;
 mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;

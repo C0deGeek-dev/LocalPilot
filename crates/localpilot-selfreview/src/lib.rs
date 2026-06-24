@@ -18,10 +18,12 @@ mod cleanup;
 mod detectors;
 mod finding;
 mod friction;
+mod outward;
 mod process_friction;
 
 pub use finding::{Finding, FindingKind, Report, Risk, Severity, Span, REPORT_SCHEMA};
 pub use friction::{parse_friction_findings, FRICTION_AUDIT_PROMPT};
+pub use outward::{draft_spec_for_finding, OutwardDraftSpec};
 pub use process_friction::{process_friction_findings, ProcessFriction};
 
 use std::path::Path;
