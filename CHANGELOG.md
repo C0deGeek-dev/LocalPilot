@@ -1,9 +1,16 @@
 # Changelog
 
-Notable changes per release. This project is pre-1.0; the configuration schema
-stability policy is in [docs/configuration.md](docs/configuration.md).
+Notable changes per release. As of 1.0.0 the public CLI/config/provider surface
+is SemVer-stable; the configuration schema stability policy is in
+[docs/configuration.md](docs/configuration.md).
 
-## Unreleased
+## v1.0.0 - 2026-06-24
+
+Coordinated LocalX 1.0 release. First stable: the CLI, configuration, and
+provider contract are now under SemVer. Validated on real local models,
+including a cross-model sweep (lesson-injection uplift holds on a second model;
+the grammar tool-call lever ships opt-in, default-off — no validity headroom on
+either model measured).
 
 - **Outward self-improvement drafts (`self-review propose-issue`/`propose-pr`/
   `emit-draft`, default-off).** The self-improvement loop can now author a **draft**
