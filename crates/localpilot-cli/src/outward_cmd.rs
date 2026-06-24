@@ -391,16 +391,24 @@ fn preflight_gh() -> anyhow::Result<String> {
             "`gh` is not authenticated; run `gh auth login` first"
         ));
     }
-    // `gh auth status` prints the account to stderr. Surface its first line so the
-    // human sees which account the draft would be attributed to.
-    let text = String::from_utf8_lossy(&auth.stderr);
-    let account = text
-        .lines()
+    // Surface the resolved account so the human sees which account the draft would
+    // be attributed to. `gh auth status` has printed this to stdout in some releases
+    // and stderr in others, so scan both rather than depend on one stream.
+    Ok(parse_gh_account(&auth.stdout, &auth.stderr))
+}
+
+/// Extract the human-readable account line from `gh auth status` output, scanning
+/// both streams (the line has moved between stdout and stderr across `gh`
+/// releases). Falls back to a generic label only when no account line is found.
+fn parse_gh_account(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stdout).into_owned();
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(stderr));
+    text.lines()
         .map(str::trim)
         .find(|l| l.contains("account") || l.contains("Logged in"))
         .unwrap_or("authenticated")
-        .to_string();
-    Ok(account)
+        .to_string()
 }
 
 /// Execute a gated [`PublishPlan`] via `gh`, returning the created issue/PR URL.
@@ -600,6 +608,17 @@ mod tests {
         let mut out = Vec::new();
         let err = run_emit_draft(root, &draft.id, "david", true, &mut out).unwrap_err();
         assert!(err.to_string().contains("not enabled/allowlisted"), "{err}");
+    }
+
+    #[test]
+    fn gh_account_is_parsed_from_either_stream() {
+        // gh 2.94 prints `auth status` to stdout; older releases used stderr. Both
+        // must surface the account line, not fall back to the generic label.
+        let line = b"  \xe2\x9c\x93 Logged in to github.com account David-c0degeek (keyring)\n";
+        assert!(parse_gh_account(line, b"").contains("David-c0degeek"));
+        assert!(parse_gh_account(b"", line).contains("David-c0degeek"));
+        // No account line ⇒ a generic, non-empty label (never blank).
+        assert_eq!(parse_gh_account(b"nothing here", b""), "authenticated");
     }
 
     #[test]
