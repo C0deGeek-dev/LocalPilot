@@ -22,7 +22,7 @@ use localpilot_core::{
     ContentBlock, Message, Role, StructuredSummary, SummarySection, SummarySectionKind,
     SummarySource, SummarySourceKind,
 };
-use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderError};
+use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -195,7 +195,7 @@ impl ProviderSummarizer {
     async fn run_stream(&self, request: ModelRequest) -> Result<String, RunError> {
         let mut stream = match self.provider.stream(request).await {
             Ok(stream) => stream,
-            Err(ProviderError::InvalidRequest { .. }) => return Err(RunError::TooLong),
+            Err(err) if err.is_context_length_error() => return Err(RunError::TooLong),
             Err(_) => return Err(RunError::Provider),
         };
         let mut text = String::new();
@@ -205,7 +205,7 @@ impl ProviderSummarizer {
                 Ok(ModelEvent::OutputLimit { .. }) => return Err(RunError::OutputLimit),
                 Ok(ModelEvent::Done) => break,
                 Ok(_) => {}
-                Err(ProviderError::InvalidRequest { .. }) => return Err(RunError::TooLong),
+                Err(err) if err.is_context_length_error() => return Err(RunError::TooLong),
                 Err(_) => return Err(RunError::Provider),
             }
         }
@@ -615,7 +615,7 @@ const SECTION_KINDS: &[&str] = &[
 mod tests {
     use super::*;
     use localpilot_core::{ToolCall, ToolResult, ToolUseId};
-    use localpilot_llm::FakeProvider;
+    use localpilot_llm::{FakeProvider, ProviderError};
 
     fn exchange() -> Vec<Message> {
         vec![
@@ -785,6 +785,25 @@ mod tests {
                 .await,
             Err(FallbackReason::ProviderError)
         );
+    }
+
+    #[tokio::test]
+    async fn non_context_invalid_request_does_not_shrink_and_retry() {
+        let provider = Arc::new(FakeProvider::new().script(vec![Err(
+            ProviderError::InvalidRequest {
+                message: "messages[2].role is unsupported".to_string(),
+            },
+        )]));
+        let provider_for_summarizer: Arc<dyn ModelProvider> = provider.clone();
+        let summarizer = ProviderSummarizer::new(provider_for_summarizer, "m");
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            summarizer
+                .summarize(&[exchange(), exchange()], &[], tuning(), &cancel)
+                .await,
+            Err(FallbackReason::ProviderError)
+        );
+        assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]

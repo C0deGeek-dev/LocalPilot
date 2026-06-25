@@ -12,6 +12,19 @@ including a cross-model sweep (lesson-injection uplift holds on a second model;
 the grammar tool-call lever ships opt-in, default-off — no validity headroom on
 either model measured).
 
+- **Google Cloud Vertex AI Gemini via ADC.** Added `kind = "google-vertex-openai"`
+  with `auth = "google_adc"` for projects that require Application Default
+  Credentials instead of API keys. LocalPilot derives the documented Vertex
+  OpenAI-compatible base URL from `google_project` + `google_location`, reads a
+  gcloud `authorized_user` ADC file (`google_adc_path`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  or the gcloud default), mints short-lived OAuth bearer tokens in-process, and
+  uses the same auth path for chat, `localpilot models`, and `/model`.
+  `doctor` reports only `google_adc` / `google_adc_file`, never ADC JSON or
+  minted tokens.
+  Gemini tool calls now also preserve and replay the OpenAI-compatible
+  `extra_content.google.thought_signature` metadata, avoiding Vertex/Gemini
+  `Function call is missing a thought_signature` errors on multi-step tool use.
+
 - **Outward self-improvement drafts (`self-review propose-issue`/`propose-pr`/
   `emit-draft`, default-off).** The self-improvement loop can now author a **draft**
   issue/PR from a ranked self-review finding and — only with an explicit human

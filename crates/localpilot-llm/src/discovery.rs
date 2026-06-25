@@ -11,6 +11,7 @@ use std::time::Duration;
 use localpilot_core::Secret;
 use serde_json::Value;
 
+use crate::auth::AuthProvider;
 use crate::error::ProviderError;
 
 /// A model reported by a server's model listing.
@@ -35,15 +36,53 @@ pub async fn discover_models(
     base_url: &str,
     api_key: Option<&Secret>,
 ) -> Result<Vec<DiscoveredModel>, ProviderError> {
+    discover_models_with_auth(base_url, DiscoveryAuth::from_api_key(api_key)).await
+}
+
+/// List models using a dynamic bearer token provider.
+///
+/// # Errors
+/// Returns [`ProviderError`] when the server cannot be reached, authentication
+/// cannot produce a token, or the response is not a model listing.
+pub async fn discover_models_with_auth_provider(
+    base_url: &str,
+    auth_provider: &(dyn AuthProvider),
+) -> Result<Vec<DiscoveredModel>, ProviderError> {
+    discover_models_with_auth(base_url, DiscoveryAuth::Dynamic(auth_provider)).await
+}
+
+enum DiscoveryAuth<'a> {
+    None,
+    ApiKey(&'a Secret),
+    Dynamic(&'a dyn AuthProvider),
+}
+
+impl<'a> DiscoveryAuth<'a> {
+    fn from_api_key(api_key: Option<&'a Secret>) -> Self {
+        api_key.map_or(Self::None, Self::ApiKey)
+    }
+}
+
+async fn discover_models_with_auth(
+    base_url: &str,
+    auth: DiscoveryAuth<'_>,
+) -> Result<Vec<DiscoveredModel>, ProviderError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(DISCOVERY_TIMEOUT)
         .build()
         .map_err(|e| ProviderError::Network(e.to_string()))?;
     let mut request = client.get(&url);
-    if let Some(key) = api_key {
-        // The credential is set as a header here and never logged.
-        request = request.bearer_auth(key.expose());
+    match auth {
+        DiscoveryAuth::None => {}
+        DiscoveryAuth::ApiKey(key) => {
+            // The credential is set as a header here and never logged.
+            request = request.bearer_auth(key.expose());
+        }
+        DiscoveryAuth::Dynamic(provider) => {
+            let token = provider.access_token().await?;
+            request = request.bearer_auth(token.expose());
+        }
     }
     let response = request.send().await?;
     let status = response.status();

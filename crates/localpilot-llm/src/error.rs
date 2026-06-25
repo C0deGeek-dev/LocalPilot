@@ -26,6 +26,10 @@ pub enum ProviderError {
     #[error("authentication failed")]
     Auth { request_id: Option<String> },
 
+    /// Authentication could not be configured or refreshed locally.
+    #[error("authentication setup failed: {message}")]
+    AuthConfig { message: String },
+
     /// The provider rate-limited the request; retry after the window.
     #[error("rate limited by provider")]
     RateLimit { quota: QuotaInfo },
@@ -75,6 +79,21 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Whether this invalid request is likely a context-window overflow.
+    #[must_use]
+    pub fn is_context_length_error(&self) -> bool {
+        let ProviderError::InvalidRequest { message } = self else {
+            return false;
+        };
+        let lower = message.to_ascii_lowercase();
+        lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("too large")
+            || lower.contains("too long")
+            || lower.contains("maximum length")
+            || lower.contains("max length")
+    }
+
     /// Classify an error raised while reading an already-open response body.
     ///
     /// `reqwest` uses decode errors for invalid or truncated HTTP body framing,

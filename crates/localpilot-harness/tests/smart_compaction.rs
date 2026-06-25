@@ -396,6 +396,22 @@ async fn a_second_provider_overflow_is_terminal() {
 }
 
 #[tokio::test]
+async fn non_context_invalid_request_does_not_retry_as_overflow() {
+    let provider = Arc::new(
+        FakeProvider::new().script(vec![Err(ProviderError::InvalidRequest {
+            message: "messages[2].role is unsupported".to_string(),
+        })]),
+    );
+    let mut h = det_runtime(Arc::clone(&provider), 4_096);
+    let reason = h
+        .runtime
+        .run_turn("do the thing", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::ProviderError);
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn repeated_compaction_folds_the_previous_summary_once() {
     // Two compaction rounds: the second digest folds the first instead of
     // stacking summary messages, and earlier facts survive.

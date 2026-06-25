@@ -444,22 +444,49 @@ mod tests {
     use super::*;
 
     /// A command that prints a line and then stays alive well past any test
-    /// grace period, run through the platform shell.
+    /// grace period.
     fn stays_up() -> RunShellExecution {
         #[cfg(windows)]
-        let command = "Write-Output hello; Start-Sleep -Seconds 30".to_string();
+        let (program, args) = (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Write-Output hello; Start-Sleep -Seconds 30".to_string(),
+            ],
+        );
         #[cfg(not(windows))]
-        let command = "echo hello; sleep 30".to_string();
-        RunShellExecution::Shell { command }
+        let (program, args) = (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), "printf 'hello\\n'; sleep 30".to_string()],
+        );
+        RunShellExecution::Direct { program, args }
     }
 
     /// A command that exits immediately.
     fn exits_now() -> RunShellExecution {
         #[cfg(windows)]
-        let command = "Write-Output bye".to_string();
+        let (program, args) = (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "echo bye".to_string()],
+        );
         #[cfg(not(windows))]
-        let command = "echo bye".to_string();
-        RunShellExecution::Shell { command }
+        let (program, args) = ("/bin/echo".to_string(), vec!["bye".to_string()]);
+        RunShellExecution::Direct { program, args }
+    }
+
+    async fn wait_for_log(procs: &BackgroundProcesses, id: &str, needle: &str) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if procs.logs(id).is_some_and(|log| log.contains(needle)) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     #[tokio::test]
@@ -476,9 +503,10 @@ mod tests {
             StartOutcome::ExitedEarly { .. } => panic!("a sleeping process must stay up"),
         };
 
-        // The drain tasks capture the startup line shortly after launch.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(procs.logs(&id).unwrap().contains("hello"));
+        assert!(
+            wait_for_log(&procs, &id, "hello").await,
+            "the drain task captures the startup line shortly after launch"
+        );
 
         let list = procs.list();
         assert_eq!(list.len(), 1);

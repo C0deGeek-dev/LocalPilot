@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod anthropic;
+mod auth;
 mod discovery;
 mod error;
 mod event;
@@ -21,7 +22,8 @@ mod request;
 mod retry;
 
 pub use anthropic::AnthropicProvider;
-pub use discovery::{discover_models, DiscoveredModel};
+pub use auth::{AccessToken, AuthProvider, GoogleAdcAuthProvider};
+pub use discovery::{discover_models, discover_models_with_auth_provider, DiscoveredModel};
 pub use error::{ProviderError, QuotaInfo};
 pub use event::{ModelEvent, ModelEventStream};
 pub use fake::FakeProvider;
@@ -30,7 +32,7 @@ pub use provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-pub use registry::ProviderRegistry;
+pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
 pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
 pub use retry::{retry, RetryPolicy};
 

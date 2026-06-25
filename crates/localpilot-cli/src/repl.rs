@@ -738,8 +738,7 @@ async fn list_models(
             )));
             continue;
         };
-        let credential = config.resolve_credential(id);
-        match localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
+        match crate::models_cmd::discover_models_for_provider(config, id, &base_url).await {
             Ok(models) if !models.is_empty() => {
                 for model in models {
                     let active = if *id == active_provider && model.id == active_model {
@@ -821,8 +820,9 @@ async fn warn_unknown_model(
     let Some(base_url) = crate::models_cmd::listing_base_url(entry) else {
         return;
     };
-    let credential = config.resolve_credential(provider_id);
-    if let Ok(models) = localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
+    if let Ok(models) =
+        crate::models_cmd::discover_models_for_provider(config, provider_id, &base_url).await
+    {
         if !models.is_empty() && !models.iter().any(|m| m.id == model) {
             state.apply(UiEvent::Notice(format!(
                 "/model: '{model}' is not in {provider_id}'s model list; using it anyway"
@@ -1891,13 +1891,8 @@ async fn discovered_window(
     if entry.kind == "anthropic" {
         return None;
     }
-    let base_url = entry.base_url.clone().or_else(|| {
-        std::env::var("OPENAI_BASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    })?;
-    let credential = config.resolve_credential(id);
-    let models = localpilot_llm::discover_models(&base_url, credential.as_ref())
+    let base_url = crate::models_cmd::listing_base_url(entry)?;
+    let models = crate::models_cmd::discover_models_for_provider(config, id, &base_url)
         .await
         .ok()?;
     models

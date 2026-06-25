@@ -1,13 +1,15 @@
 //! Provider registry: resolve configuration into live providers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use localpilot_config::{Config, ProviderConfig};
+use localpilot_config::{Config, ProviderAuth, ProviderConfig};
 use localpilot_core::Secret;
 
 use crate::anthropic::AnthropicProvider;
+use crate::auth::{AuthProvider, GoogleAdcAuthProvider};
 use crate::error::ProviderError;
 use crate::openai::OpenAiProvider;
 use crate::provider::{ModelProvider, SourceType};
@@ -152,18 +154,66 @@ fn build_provider(
         "custom" | "custom-user-endpoint" => {
             (SourceType::CustomUserEndpoint, require_base_url(id, entry)?)
         }
+        "google-vertex-openai" => (
+            SourceType::OfficialApi,
+            entry
+                .base_url
+                .clone()
+                .map_or_else(|| google_vertex_base_url(id, entry), Ok)?,
+        ),
         other => {
             return Err(ProviderError::UnsupportedFeature(format!(
                 "unknown provider kind '{other}' for provider '{id}'"
             )))
         }
     };
-    Ok(Arc::new(
-        OpenAiProvider::new(id, id, source_type, base_url, credential)
-            .with_timeout(timeout)
-            .with_default_options(options)
-            .with_max_context_tokens(entry.context_window),
-    ))
+    let provider = match configured_auth(entry, credential)? {
+        ConfiguredAuth::Static(credential) => {
+            OpenAiProvider::new(id, id, source_type, base_url, credential)
+        }
+        ConfiguredAuth::Dynamic(auth_provider) => {
+            OpenAiProvider::new_with_auth_provider(id, id, source_type, base_url, auth_provider)
+        }
+    }
+    .with_timeout(timeout)
+    .with_default_options(options)
+    .with_max_context_tokens(entry.context_window);
+    Ok(Arc::new(provider))
+}
+
+enum ConfiguredAuth {
+    Static(Option<Secret>),
+    Dynamic(Arc<dyn AuthProvider>),
+}
+
+fn configured_auth(
+    entry: &ProviderConfig,
+    credential: Option<Secret>,
+) -> Result<ConfiguredAuth, ProviderError> {
+    match entry.auth {
+        ProviderAuth::ApiKey => Ok(ConfiguredAuth::Static(credential)),
+        ProviderAuth::GoogleAdc => Ok(ConfiguredAuth::Dynamic(Arc::new(
+            GoogleAdcAuthProvider::new(entry.google_adc_path.as_ref().map(PathBuf::from)),
+        ))),
+    }
+}
+
+/// Build the dynamic auth provider, when a configured provider uses one.
+///
+/// # Errors
+/// Returns [`ProviderError`] when the provider's auth mode is not valid for
+/// model discovery.
+pub fn discovery_auth_provider_from_config(
+    config: &Config,
+    id: &str,
+) -> Result<Option<Arc<dyn AuthProvider>>, ProviderError> {
+    let Some(entry) = config.providers.get(id) else {
+        return Ok(None);
+    };
+    match configured_auth(entry, config.resolve_credential(id))? {
+        ConfiguredAuth::Static(_) => Ok(None),
+        ConfiguredAuth::Dynamic(provider) => Ok(Some(provider)),
+    }
 }
 
 fn require_base_url(id: &str, entry: &ProviderConfig) -> Result<String, ProviderError> {
@@ -171,6 +221,27 @@ fn require_base_url(id: &str, entry: &ProviderConfig) -> Result<String, Provider
         .base_url
         .clone()
         .ok_or_else(|| missing_base_url(id, entry))
+}
+
+fn google_vertex_base_url(id: &str, entry: &ProviderConfig) -> Result<String, ProviderError> {
+    let project = required_google_field(id, "google_project", entry.google_project.as_deref())?;
+    let location = required_google_field(id, "google_location", entry.google_location.as_deref())?;
+    Ok(format!(
+        "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi"
+    ))
+}
+
+fn required_google_field<'a>(
+    id: &str,
+    field: &str,
+    value: Option<&'a str>,
+) -> Result<&'a str, ProviderError> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ProviderError::InvalidRequest {
+            message: format!("provider '{id}' of kind 'google-vertex-openai' requires {field}"),
+        })
 }
 
 fn missing_base_url(id: &str, entry: &ProviderConfig) -> ProviderError {
@@ -194,12 +265,7 @@ mod tests {
         ProviderConfig {
             kind: kind.to_string(),
             base_url: base_url.map(str::to_string),
-            api_key_env: None,
-            model: None,
-            request_timeout_secs: None,
-            context_window: None,
-            suppress_thinking: None,
-            options: Default::default(),
+            ..ProviderConfig::default()
         }
     }
 
@@ -253,6 +319,35 @@ mod tests {
         assert_eq!(
             declaration.tool_call_shape,
             crate::provider::ToolCallShape::AnthropicToolUse
+        );
+    }
+
+    #[test]
+    fn resolves_google_vertex_openai_with_adc_auth() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "gemini".to_string(),
+            ProviderConfig {
+                kind: "google-vertex-openai".to_string(),
+                auth: ProviderAuth::GoogleAdc,
+                google_project: Some("my-project".to_string()),
+                google_location: Some("global".to_string()),
+                model: Some("google/gemini-3.5-flash".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.provider.default = "gemini".to_string();
+
+        let registry = ProviderRegistry::from_config(&config).unwrap();
+        let declaration = registry.get("gemini").unwrap().declaration();
+        assert_eq!(declaration.source_type, SourceType::OfficialApi);
+        assert_eq!(
+            declaration.auth,
+            crate::provider::AuthRequirement::BearerToken
+        );
+        assert_eq!(
+            registry.default_model("gemini"),
+            Some("google/gemini-3.5-flash")
         );
     }
 

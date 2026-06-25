@@ -1,16 +1,29 @@
 //! HTTP-adapter tests against a local mock server. No real credentials or
 //! network access; every response is scripted by `wiremock`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use localpilot_core::{Message, Role};
 use localpilot_llm::{
-    ModelEvent, ModelEventStream, ModelProvider, ModelRequest, OpenAiProvider, ProviderError,
-    SourceType, ToolSpec,
+    AccessToken, AuthProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest,
+    OpenAiProvider, ProviderError, SourceType, ToolSpec,
 };
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[derive(Debug)]
+struct StaticAuthProvider {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl AuthProvider for StaticAuthProvider {
+    async fn access_token(&self) -> Result<AccessToken, ProviderError> {
+        Ok(AccessToken::new(self.token.clone()))
+    }
+}
 
 /// `ModelEventStream` is not `Debug`, so `unwrap_err` is unavailable; extract the
 /// error by matching instead.
@@ -35,6 +48,38 @@ async fn mock(server: &MockServer, response: ResponseTemplate) {
         .respond_with(response)
         .mount(server)
         .await;
+}
+
+#[tokio::test]
+async fn dynamic_auth_provider_sets_bearer_token_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer adc-access-token",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    let auth = Arc::new(StaticAuthProvider {
+        token: "adc-access-token".to_string(),
+    });
+    let provider = OpenAiProvider::new_with_auth_provider(
+        "gemini",
+        "Gemini",
+        SourceType::OfficialApi,
+        server.uri(),
+        auth,
+    );
+
+    let events: Vec<_> = provider.stream(request()).await.unwrap().collect().await;
+    assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
 }
 
 #[tokio::test]
@@ -108,6 +153,26 @@ async fn rate_limit_without_quota_code_is_a_rate_limit() {
 
     let err = into_err(provider(server.uri()).stream(request()).await);
     assert!(matches!(err, ProviderError::RateLimit { .. }));
+}
+
+#[tokio::test]
+async fn invalid_request_preserves_provider_message() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":"bad_request","message":"messages[2].role is unsupported"}}"#,
+        ),
+    )
+    .await;
+
+    let err = into_err(provider(server.uri()).stream(request()).await);
+    match err {
+        ProviderError::InvalidRequest { message } => {
+            assert!(message.contains("messages[2].role is unsupported"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -211,9 +211,9 @@ fn secrets_never_appear_in_debug_output() -> TestResult {
         let project = write(
             jail,
             "project.toml",
-            "[providers.openai]\nkind = \"openai\"\napi_key_env = \"OPENAI_API_KEY\"\n",
+            "[providers.secret_test]\nkind = \"openai\"\napi_key_env = \"LOCALPILOT_TEST_SECRET_KEY\"\n",
         )?;
-        jail.set_env("OPENAI_API_KEY", "sk-super-secret-value");
+        jail.set_env("LOCALPILOT_TEST_SECRET_KEY", "sk-super-secret-value");
         let paths = ConfigPaths {
             user: None,
             project: Some(project),
@@ -223,11 +223,11 @@ fn secrets_never_appear_in_debug_output() -> TestResult {
         // The config never holds the credential, only the env-var name.
         let debug = format!("{cfg:?}");
         assert!(!debug.contains("sk-super-secret-value"));
-        assert!(debug.contains("OPENAI_API_KEY"));
+        assert!(debug.contains("LOCALPILOT_TEST_SECRET_KEY"));
 
         // The resolved credential exposes its value only on purpose.
         let secret = cfg
-            .resolve_credential("openai")
+            .resolve_credential("secret_test")
             .expect("credential present");
         assert_eq!(secret.expose(), "sk-super-secret-value");
         assert!(!format!("{secret:?}").contains("sk-super-secret-value"));
@@ -344,6 +344,45 @@ fn provider_timeout_and_thinking_config_parse() -> TestResult {
         let local = cfg.providers.get("local").expect("provider present");
         assert_eq!(local.request_timeout_secs, Some(600));
         assert_eq!(local.suppress_thinking, Some(true));
+        Ok(())
+    })
+}
+
+#[test]
+fn google_adc_provider_config_parses_without_static_secret() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[provider]\ndefault = \"gemini\"\n\n\
+             [providers.gemini]\n\
+             kind = \"google-vertex-openai\"\n\
+             auth = \"google_adc\"\n\
+             google_project = \"my-project\"\n\
+             google_location = \"global\"\n\
+             google_adc_path = \"/Users/bramhammer/.config/gcloud/application_default_credentials.json\"\n\
+             model = \"google/gemini-3.5-flash\"\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        let provider = cfg.providers.get("gemini").expect("provider present");
+
+        assert_eq!(provider.kind, "google-vertex-openai");
+        assert_eq!(provider.auth, localpilot_config::ProviderAuth::GoogleAdc);
+        assert_eq!(provider.google_project.as_deref(), Some("my-project"));
+        assert_eq!(provider.google_location.as_deref(), Some("global"));
+        assert_eq!(
+            provider.google_adc_path.as_deref(),
+            Some("/Users/bramhammer/.config/gcloud/application_default_credentials.json")
+        );
+        assert!(cfg.resolve_credential("gemini").is_none());
+        assert_eq!(
+            cfg.credential_source("gemini"),
+            localpilot_config::CredentialSource::GoogleAdcFile
+        );
         Ok(())
     })
 }

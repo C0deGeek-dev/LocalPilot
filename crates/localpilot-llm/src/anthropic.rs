@@ -651,6 +651,7 @@ impl SseDecoder {
             id: accum.id,
             name: accum.name,
             input_json,
+            provider_metadata: None,
         }));
     }
 
@@ -740,6 +741,7 @@ mod tests {
                 id,
                 name,
                 input_json,
+                ..
             }) => Some((id.clone(), name.clone(), input_json.clone())),
             _ => None,
         });

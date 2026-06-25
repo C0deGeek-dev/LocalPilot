@@ -57,6 +57,11 @@ and the credential resolution order:
 [providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)
 §Storing credentials and §Switching provider/model.
 
+For Google Cloud projects that require ADC instead of an API key, configure a
+`google-vertex-openai` provider with `auth = "google_adc"`; see
+[providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)
+§Google Cloud Vertex AI Gemini with ADC.
+
 ## Add an MCP tool server
 
 Configure a Model Context Protocol server so its tools become available to the

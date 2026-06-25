@@ -13,7 +13,7 @@ use figment::Figment;
 use localpilot_core::Secret;
 
 use crate::error::ConfigError;
-use crate::schema::{CheckConfig, Config, Mode, PermissionProfile};
+use crate::schema::{CheckConfig, Config, Mode, PermissionProfile, ProviderAuth};
 
 /// The file locations a load should consider. Either may be `None` (absent).
 #[derive(Debug, Clone, Default)]
@@ -212,6 +212,9 @@ impl Config {
         store: &crate::credentials::CredentialStore,
     ) -> Option<Secret> {
         let provider = self.providers.get(provider_id)?;
+        if provider.auth == ProviderAuth::GoogleAdc {
+            return None;
+        }
         // 1) A logged-in credential (keychain → fallback file) takes precedence, so
         // a stored key needs no environment variable.
         if let Some(secret) = store.get(provider_id) {
@@ -239,6 +242,17 @@ impl Config {
         let Some(provider) = self.providers.get(provider_id) else {
             return CredentialSource::None;
         };
+        if provider.auth == ProviderAuth::GoogleAdc {
+            return if provider
+                .google_adc_path
+                .as_ref()
+                .is_some_and(|path| !path.trim().is_empty())
+            {
+                CredentialSource::GoogleAdcFile
+            } else {
+                CredentialSource::GoogleAdc
+            };
+        }
         if let Some(source) = CredentialStore::user().source(provider_id) {
             return source;
         }

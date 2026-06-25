@@ -20,6 +20,7 @@ use indexmap::IndexMap;
 use localpilot_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 use serde_json::{json, Value};
 
+use crate::auth::AuthProvider;
 use crate::error::{ProviderError, QuotaInfo};
 use crate::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
 use crate::headers::{parse_compact_duration, parse_retry_after};
@@ -56,7 +57,7 @@ pub struct OpenAiProvider {
     declaration: ProviderDeclaration,
     client: reqwest::Client,
     base_url: String,
-    api_key: Option<Secret>,
+    auth: OpenAiAuth,
     default_options: IndexMap<String, Value>,
     /// Set once a server that *declares* constrained decoding rejects the schema
     /// constraint (a client error on a constrained request). After that, the
@@ -64,6 +65,12 @@ pub struct OpenAiProvider {
     /// than re-sent and rejected every turn. Interior-mutable so a shared
     /// `Arc<dyn ModelProvider>` can flip it.
     constrained_rejected: Arc<AtomicBool>,
+}
+
+enum OpenAiAuth {
+    None,
+    ApiKey(Secret),
+    Dynamic(Arc<dyn AuthProvider>),
 }
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -78,11 +85,40 @@ impl OpenAiProvider {
         base_url: impl Into<String>,
         api_key: Option<Secret>,
     ) -> Self {
+        let auth = api_key.map_or(OpenAiAuth::None, OpenAiAuth::ApiKey);
+        Self::new_with_auth(id, display_name, source_type, base_url, auth)
+    }
+
+    /// Build a provider whose bearer token is produced dynamically per request.
+    #[must_use]
+    pub fn new_with_auth_provider(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        source_type: SourceType,
+        base_url: impl Into<String>,
+        auth_provider: Arc<dyn AuthProvider>,
+    ) -> Self {
+        Self::new_with_auth(
+            id,
+            display_name,
+            source_type,
+            base_url,
+            OpenAiAuth::Dynamic(auth_provider),
+        )
+    }
+
+    fn new_with_auth(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        source_type: SourceType,
+        base_url: impl Into<String>,
+        auth: OpenAiAuth,
+    ) -> Self {
         let id = id.into();
-        let auth = if api_key.is_some() {
-            AuthRequirement::ApiKey
-        } else {
-            AuthRequirement::None
+        let auth_requirement = match &auth {
+            OpenAiAuth::None => AuthRequirement::None,
+            OpenAiAuth::ApiKey(_) => AuthRequirement::ApiKey,
+            OpenAiAuth::Dynamic(_) => AuthRequirement::BearerToken,
         };
         // Image input is the hosted OpenAI vision path; a local OpenAI-compatible
         // server is not assumed to accept images, so gate on the source.
@@ -116,12 +152,12 @@ impl OpenAiProvider {
                     constrained_decoding: matches!(source_type, SourceType::LocalServer),
                 },
                 max_context_tokens: None,
-                auth,
+                auth: auth_requirement,
                 rate_limit_behavior: None,
             },
             client: reqwest_client(None),
             base_url: base_url.into(),
-            api_key,
+            auth,
             default_options: IndexMap::new(),
             constrained_rejected: Arc::new(AtomicBool::new(false)),
         }
@@ -319,9 +355,16 @@ impl ModelProvider for OpenAiProvider {
             .client
             .post(self.endpoint())
             .json(&self.build_body(&request));
-        if let Some(key) = &self.api_key {
-            // The credential is set as a header here and never logged.
-            builder = builder.bearer_auth(key.expose());
+        match &self.auth {
+            OpenAiAuth::None => {}
+            OpenAiAuth::ApiKey(key) => {
+                // The credential is set as a header here and never logged.
+                builder = builder.bearer_auth(key.expose());
+            }
+            OpenAiAuth::Dynamic(provider) => {
+                let token = provider.access_token().await?;
+                builder = builder.bearer_auth(token.expose());
+            }
         }
         tracing::debug!(model = %request.model, "starting provider stream");
 
@@ -426,14 +469,24 @@ fn translate_message(
                 reasoning_signature = signature.as_deref();
             }
             ContentBlock::ToolUse(call) => {
-                tool_calls.push(json!({
-                    "id": call.id.as_str(),
-                    "type": "function",
-                    "function": {
+                let mut tool_call = serde_json::Map::new();
+                tool_call.insert("id".to_string(), json!(call.id.as_str()));
+                tool_call.insert("type".to_string(), json!("function"));
+                tool_call.insert(
+                    "function".to_string(),
+                    json!({
                         "name": call.name,
                         "arguments": serde_json::to_string(&call.input).unwrap_or_default(),
+                    }),
+                );
+                if let Some(metadata) = call.provider_metadata.as_ref().and_then(Value::as_object) {
+                    for (key, value) in metadata {
+                        tool_call
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
                     }
-                }));
+                }
+                tool_calls.push(Value::Object(tool_call));
             }
             ContentBlock::Image { media_type, data } => {
                 images.push(json!({
@@ -512,10 +565,22 @@ async fn classify_error_response(status: u16, response: reqwest::Response) -> Pr
         body = %body,
         "openai provider returned an error response"
     );
-    let code = serde_json::from_str::<Value>(&body)
+    let (code, message) = serde_json::from_str::<Value>(&body)
         .ok()
-        .and_then(|v| v["error"]["code"].as_str().map(str::to_string));
-    ProviderError::from_http(status, code.as_deref(), request_id, quota)
+        .map(|v| {
+            (
+                v["error"]["code"].as_str().map(str::to_string),
+                v["error"]["message"].as_str().map(str::to_string),
+            )
+        })
+        .unwrap_or((None, None));
+    let mut err = ProviderError::from_http(status, code.as_deref(), request_id, quota);
+    if matches!(err, ProviderError::InvalidRequest { .. }) {
+        if let Some(message) = message {
+            err = ProviderError::InvalidRequest { message };
+        }
+    }
+    err
 }
 
 fn quota_from_headers(headers: &reqwest::header::HeaderMap) -> QuotaInfo {
@@ -638,6 +703,7 @@ struct ToolAccum {
     id: Option<String>,
     name: Option<String>,
     args: String,
+    provider_metadata: Option<Value>,
 }
 
 impl SseDecoder {
@@ -747,6 +813,15 @@ impl SseDecoder {
                     if let Some(args) = tc["function"]["arguments"].as_str() {
                         acc.args.push_str(args);
                     }
+                    if let Some(extra_content) = tc.get("extra_content") {
+                        let mut metadata = acc
+                            .provider_metadata
+                            .take()
+                            .and_then(|value| value.as_object().cloned())
+                            .unwrap_or_default();
+                        metadata.insert("extra_content".to_string(), extra_content.clone());
+                        acc.provider_metadata = Some(Value::Object(metadata));
+                    }
                 }
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
@@ -817,6 +892,7 @@ impl SseDecoder {
                 id: acc.id.unwrap_or_default(),
                 name,
                 input_json,
+                provider_metadata: acc.provider_metadata,
             }));
         }
     }
@@ -904,6 +980,31 @@ mod tests {
         let (name, input) = call.expect("a tool call was emitted");
         assert_eq!(name, "read_file");
         assert_eq!(input["path"], "a.rs");
+    }
+
+    #[test]
+    fn preserves_gemini_tool_call_extra_content() {
+        let events = collect_sse(&[
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"extra_content\":{\"google\":{\"thought_signature\":\"sig-123\"}},\"function\":{\"name\":\"list_files\",\"arguments\":\"{}\"}}]}}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+            "data: [DONE]\n",
+        ]);
+        let metadata = events.iter().find_map(|e| match e {
+            Ok(ModelEvent::ToolCall {
+                provider_metadata, ..
+            }) => provider_metadata.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            metadata,
+            Some(json!({
+                "extra_content": {
+                    "google": {
+                        "thought_signature": "sig-123"
+                    }
+                }
+            }))
+        );
     }
 
     #[test]
@@ -1453,6 +1554,37 @@ mod tests {
         assert!(body.to_string().contains("reasoning_content"));
         // The switch itself never reaches the wire.
         assert!(body.get("reasoning_round_trip").is_none());
+    }
+
+    #[test]
+    fn assistant_tool_call_round_trips_provider_metadata() {
+        use localpilot_core::{ContentBlock, Message, Role, ToolCall, ToolUseId};
+        let provider = OpenAiProvider::new(
+            "gemini",
+            "Gemini",
+            SourceType::CustomUserEndpoint,
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
+            None,
+        );
+        let call = ToolCall::new(ToolUseId::from("call_1"), "list_files", json!({}))
+            .with_provider_metadata(json!({
+                "extra_content": {
+                    "google": {
+                        "thought_signature": "sig-123"
+                    }
+                }
+            }));
+        let body = provider.build_body(&ModelRequest::new(
+            "m",
+            vec![Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse(call)],
+            )],
+        ));
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "sig-123"
+        );
     }
 
     #[test]

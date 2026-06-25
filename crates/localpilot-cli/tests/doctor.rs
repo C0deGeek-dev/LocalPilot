@@ -40,6 +40,26 @@ fn doctor_does_not_print_secret_values() {
     assert!(!rendered.contains("secret-from-env"));
 }
 
+#[test]
+fn doctor_renders_google_adc_source_without_file_contents() {
+    let mut report = report();
+    report.providers = vec![ProviderStatus {
+        name: "gemini".to_string(),
+        kind: "google-vertex-openai".to_string(),
+        base_url: None,
+        credential_env: "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+        credential_source: CredentialSource::GoogleAdcFile,
+        model: Some("google/gemini-3.5-flash".to_string()),
+        context_window: None,
+    }];
+
+    let rendered = doctor::render(&report);
+
+    assert!(rendered.contains("GOOGLE_APPLICATION_CREDENTIALS [google_adc_file]"));
+    assert!(!rendered.contains("application_default_credentials"));
+    assert!(!rendered.contains("refresh_token"));
+}
+
 fn report() -> DoctorReport {
     DoctorReport {
         version: "<version>".to_string(),

@@ -89,6 +89,7 @@ impl FakeProvider {
                 id: id.to_string(),
                 name: name.to_string(),
                 input_json,
+                provider_metadata: None,
             }),
             Ok(ModelEvent::Done),
         ])

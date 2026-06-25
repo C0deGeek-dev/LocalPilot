@@ -28,6 +28,7 @@ pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
     DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
     LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
-    PermissionsConfig, ProviderConfig, ProviderSelection, QuotaAutoResume, QuotaConfig, RepairMode,
-    RuleSeverity, SelfImprovementConfig, SkillsConfig, StorageConfig, ToolsConfig,
+    PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume,
+    QuotaConfig, RepairMode, RuleSeverity, SelfImprovementConfig, SkillsConfig, StorageConfig,
+    ToolsConfig,
 };

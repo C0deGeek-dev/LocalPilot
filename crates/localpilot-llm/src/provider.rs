@@ -25,6 +25,7 @@ pub enum SourceType {
 pub enum AuthRequirement {
     None,
     ApiKey,
+    BearerToken,
 }
 
 /// A content-block kind a provider accepts as input.

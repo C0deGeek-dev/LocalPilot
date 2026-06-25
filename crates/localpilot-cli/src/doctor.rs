@@ -9,7 +9,7 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use localpilot_config::{CliOverrides, ConfigPaths, CredentialSource};
+use localpilot_config::{CliOverrides, ConfigPaths, CredentialSource, ProviderAuth};
 use serde::Serialize;
 
 /// A point-in-time view of the local environment relevant to running the agent.
@@ -67,6 +67,8 @@ fn credential_source_json(source: CredentialSource) -> &'static str {
         CredentialSource::Keychain => "keychain",
         CredentialSource::File => "file",
         CredentialSource::Env => "env",
+        CredentialSource::GoogleAdc => "google_adc",
+        CredentialSource::GoogleAdcFile => "google_adc_file",
         CredentialSource::None => "none",
     }
 }
@@ -218,6 +220,8 @@ pub fn render(report: &DoctorReport) -> String {
             CredentialSource::Keychain => "keychain",
             CredentialSource::File => "file",
             CredentialSource::Env => "env",
+            CredentialSource::GoogleAdc => "google_adc",
+            CredentialSource::GoogleAdcFile => "google_adc_file",
             CredentialSource::None => "not set",
         };
         let model = p.model.as_deref().unwrap_or("(none)");
@@ -351,12 +355,24 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
                 // fallback file → env), so a logged-in provider reads `keychain`
                 // even with no environment variable set.
                 let source = config.credential_source(id);
-                let credential_env = entry
-                    .api_key_env
-                    .as_deref()
-                    .or_else(|| default_api_key_env(&entry.kind))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "(none required)".to_string());
+                let credential_env = if entry.auth == ProviderAuth::GoogleAdc {
+                    if entry
+                        .google_adc_path
+                        .as_ref()
+                        .is_some_and(|path| !path.trim().is_empty())
+                    {
+                        "google_adc_path".to_string()
+                    } else {
+                        "GOOGLE_APPLICATION_CREDENTIALS".to_string()
+                    }
+                } else {
+                    entry
+                        .api_key_env
+                        .as_deref()
+                        .or_else(|| default_api_key_env(&entry.kind))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "(none required)".to_string())
+                };
                 ProviderStatus {
                     name: id.clone(),
                     kind: entry.kind.clone(),

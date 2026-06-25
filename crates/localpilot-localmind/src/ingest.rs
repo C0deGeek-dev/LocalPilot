@@ -1457,6 +1457,7 @@ fn update_rule(project_root: &Path, key: &str, path: &Path) -> Result<String, In
 fn walker(root: &Path) -> ignore::Walk {
     let mut builder = WalkBuilder::new(root);
     builder.standard_filters(true).hidden(false);
+    builder.require_git(false);
     builder.build()
 }
 

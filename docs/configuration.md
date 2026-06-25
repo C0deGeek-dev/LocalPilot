@@ -99,9 +99,13 @@ and `--provider`.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `kind` | string | — | `openai`, `openai-compatible` (alias `local`), `anthropic`, or `custom` |
+| `kind` | string | — | `openai`, `openai-compatible` (alias `local`), `anthropic`, `custom`, or `google-vertex-openai` |
+| `auth` | string | `api_key` | Authentication mode: `api_key` or `google_adc` |
 | `base_url` | string | per kind | API base URL (required for local/custom) |
 | `api_key_env` | string | none | Name of the env var holding the credential (never the value) |
+| `google_project` | string | none | Google Cloud project id for `google-vertex-openai` when `base_url` is omitted |
+| `google_location` | string | none | Vertex AI location for `google-vertex-openai` when `base_url` is omitted |
+| `google_adc_path` | string | ADC default | Optional path to a gcloud ADC `authorized_user` file |
 | `model` | string | none | Default model when a command does not pass `--model` |
 | `request_timeout_secs` | int | per adapter | HTTP timeout; useful for slow local inference |
 | `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
@@ -111,12 +115,14 @@ provider options (for example `max_tokens` for `anthropic`, or the
 LocalPilot-owned switches `suppress_thinking` and `reasoning_round_trip`). See
 [providers.md](providers.md).
 
-**Credentials are never config keys.** A provider's API key is never written to
-config. It is resolved at use with precedence: a stored credential (OS keychain →
-`0600` fallback file, written by `localpilot login`) → the `api_key_env`
-environment variable → none. So `login` makes `api_key_env` optional. The OS
+**Credentials are never config keys.** For `auth = "api_key"`, a provider's API
+key is never written to config. It is resolved at use with precedence: a stored
+credential (OS keychain → `0600` fallback file, written by `localpilot login`) →
+the `api_key_env` environment variable → none. So `login` makes `api_key_env`
+optional. For `auth = "google_adc"`, LocalPilot reads the ADC file path (not the
+token value) and mints a short-lived Google OAuth access token in-process. The OS
 keychain backend is an opt-in build feature (`keychain`, Windows only at present;
-macOS/Linux use the fallback file — ADR-0042). See
+macOS/Linux use the fallback file for API-key credentials — ADR-0042). See
 [providers.md](providers.md) §Storing credentials and
 [07-security-and-privacy.md](07-security-and-privacy.md) §Stored API Credentials.
 

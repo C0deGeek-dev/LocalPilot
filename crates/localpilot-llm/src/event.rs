@@ -24,6 +24,8 @@ pub enum ModelEvent {
         id: String,
         name: String,
         input_json: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<serde_json::Value>,
     },
     /// Token usage for the request.
     Usage(TokenUsage),

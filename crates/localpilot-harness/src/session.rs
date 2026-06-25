@@ -1419,7 +1419,7 @@ impl SessionRuntime {
                         let _ = events.send(RuntimeEvent::Warning(err.to_string()));
                         // A context-length rejection at open time is a missed
                         // local estimate; the turn loop shrinks and retries once.
-                        if let ProviderError::InvalidRequest { .. } = err {
+                        if err.is_context_length_error() {
                             return Err(StreamOpen::Overflow);
                         }
                         return Err(StreamOpen::Failed);
@@ -1748,7 +1748,8 @@ impl SessionRuntime {
 
             let mut text = String::new();
             let mut reasoning = String::new();
-            let mut calls: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut calls: Vec<(String, String, serde_json::Value, Option<serde_json::Value>)> =
+                Vec::new();
             let mut stream_failed = false;
             // When a tool call's arguments fail to parse, the provider reports
             // which tool — kept so a malformed *write* steers recovery to a
@@ -1796,8 +1797,13 @@ impl SessionRuntime {
                             let _ = events.send(RuntimeEvent::Reasoning(delta.clone()));
                             reasoning.push_str(&delta);
                         }
-                        Some(Ok(ModelEvent::ToolCall { id, name, input_json })) => {
-                            calls.push((id, name, input_json));
+                        Some(Ok(ModelEvent::ToolCall {
+                            id,
+                            name,
+                            input_json,
+                            provider_metadata,
+                        })) => {
+                            calls.push((id, name, input_json, provider_metadata));
                         }
                         Some(Ok(ModelEvent::Usage(usage))) => {
                             let _ = events.send(RuntimeEvent::Usage(usage));
@@ -1831,7 +1837,7 @@ impl SessionRuntime {
                             // A context-length rejection mid-stream is an
                             // overflow, not a fatal turn error: shrink and retry
                             // once before giving up.
-                            if matches!(err, ProviderError::InvalidRequest { .. }) {
+                            if err.is_context_length_error() {
                                 overflow = true;
                                 break;
                             }
@@ -1943,14 +1949,15 @@ impl SessionRuntime {
             // not enter history at all. Every persisted `tool_use` is
             // guaranteed an answer on every exit path below.
             let rejection = invalid_tool_calls(&calls);
-            let calls: Vec<(String, String, serde_json::Value)> = if rejection.is_some() {
-                calls
-                    .into_iter()
-                    .filter(|(id, _, _)| !id.trim().is_empty())
-                    .collect()
-            } else {
-                calls
-            };
+            let calls: Vec<(String, String, serde_json::Value, Option<serde_json::Value>)> =
+                if rejection.is_some() {
+                    calls
+                        .into_iter()
+                        .filter(|(id, _, _, _)| !id.trim().is_empty())
+                        .collect()
+                } else {
+                    calls
+                };
 
             // Assemble and persist the assistant message.
             let mut content = Vec::new();
@@ -1979,12 +1986,13 @@ impl SessionRuntime {
             if !text.trim().is_empty() {
                 content.push(ContentBlock::text(text));
             }
-            for (id, name, input) in &calls {
-                content.push(ContentBlock::ToolUse(ToolCall::new(
-                    ToolUseId::from(id.as_str()),
-                    name.clone(),
-                    input.clone(),
-                )));
+            for (id, name, input, provider_metadata) in &calls {
+                let mut call =
+                    ToolCall::new(ToolUseId::from(id.as_str()), name.clone(), input.clone());
+                if let Some(metadata) = provider_metadata.clone() {
+                    call = call.with_provider_metadata(metadata);
+                }
+                content.push(ContentBlock::ToolUse(call));
             }
             if !content.is_empty() {
                 self.append(Message::new(Role::Assistant, content));
@@ -1994,7 +2002,7 @@ impl SessionRuntime {
                 let _ = events.send(RuntimeEvent::Warning(reason.clone()));
                 // Answer every persisted tool_use so the wire contract holds,
                 // carrying the rejection reason back to the model.
-                for (id, _, _) in &calls {
+                for (id, _, _, _) in &calls {
                     self.append(tool_error_message(
                         id,
                         &format!("tool call rejected: {reason}"),
@@ -2049,7 +2057,7 @@ impl SessionRuntime {
             }
 
             // Execute tool calls through the permission-gated registry.
-            for (id, name, input) in &calls {
+            for (id, name, input, _) in &calls {
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
                 // cleanly with a model-visible, recorded reason before the next
                 // call runs. The hard cost ceiling always wins; a no-progress
@@ -2569,8 +2577,10 @@ fn trim_blank_boundary_lines(mut text: String) -> String {
     text
 }
 
-fn invalid_tool_calls(calls: &[(String, String, serde_json::Value)]) -> Option<String> {
-    for (id, name, input) in calls {
+fn invalid_tool_calls(
+    calls: &[(String, String, serde_json::Value, Option<serde_json::Value>)],
+) -> Option<String> {
+    for (id, name, input, _) in calls {
         if id.trim().is_empty() {
             return Some(
                 "Tool call error: missing tool-call id. Retry with a valid id.".to_string(),

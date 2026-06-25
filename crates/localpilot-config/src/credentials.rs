@@ -35,6 +35,10 @@ pub enum CredentialSource {
     File,
     /// An environment variable (`api_key_env` or a provider-kind default).
     Env,
+    /// Google Application Default Credentials from the standard ADC search path.
+    GoogleAdc,
+    /// Google Application Default Credentials from an explicitly configured file.
+    GoogleAdcFile,
     /// No credential is available from any source.
     None,
 }
@@ -47,6 +51,8 @@ impl CredentialSource {
             CredentialSource::Keychain => "keychain",
             CredentialSource::File => "file",
             CredentialSource::Env => "env",
+            CredentialSource::GoogleAdc => "google_adc",
+            CredentialSource::GoogleAdcFile => "google_adc_file",
             CredentialSource::None => "none",
         }
     }

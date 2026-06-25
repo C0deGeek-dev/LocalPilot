@@ -142,9 +142,8 @@ pub async fn run(
             continue;
         }
 
-        let credential = config.resolve_credential(id);
         let entry_default = entry.model.as_deref();
-        match localpilot_llm::discover_models(&base_url, credential.as_ref()).await {
+        match discover_models_for_provider(&config, id, &base_url).await {
             Ok(models) if models.is_empty() => {
                 results.push(provider_blocked(id, entry, &base_url, Status::NoModels));
             }
@@ -302,7 +301,32 @@ pub(crate) fn listing_base_url(entry: &ProviderConfig) -> Option<String> {
             .base_url
             .clone()
             .or_else(|| env_non_empty("OPENAI_BASE_URL")),
+        "google-vertex-openai" => entry.base_url.clone().or_else(|| {
+            let project = entry.google_project.as_deref()?.trim();
+            let location = entry.google_location.as_deref()?.trim();
+            if project.is_empty() || location.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi"
+            ))
+        }),
         _ => None,
+    }
+}
+
+pub(crate) async fn discover_models_for_provider(
+    config: &Config,
+    provider_id: &str,
+    base_url: &str,
+) -> Result<Vec<localpilot_llm::DiscoveredModel>, localpilot_llm::ProviderError> {
+    if let Some(auth_provider) =
+        localpilot_llm::discovery_auth_provider_from_config(config, provider_id)?
+    {
+        localpilot_llm::discover_models_with_auth_provider(base_url, auth_provider.as_ref()).await
+    } else {
+        let credential = config.resolve_credential(provider_id);
+        localpilot_llm::discover_models(base_url, credential.as_ref()).await
     }
 }
 

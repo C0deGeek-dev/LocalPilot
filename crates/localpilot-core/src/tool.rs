@@ -17,6 +17,13 @@ pub struct ToolCall {
     pub name: String,
     /// The tool arguments as JSON.
     pub input: serde_json::Value,
+    /// Provider-specific metadata that must round-trip with the tool call.
+    ///
+    /// For example, Gemini's OpenAI-compatible endpoint attaches
+    /// `extra_content.google.thought_signature` to tool calls and requires the
+    /// exact value to be returned with the assistant tool-call message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 impl ToolCall {
@@ -27,7 +34,15 @@ impl ToolCall {
             id,
             name: name.into(),
             input,
+            provider_metadata: None,
         }
+    }
+
+    /// Attach provider-specific metadata that should be preserved verbatim.
+    #[must_use]
+    pub fn with_provider_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.provider_metadata = Some(metadata);
+        self
     }
 }
 

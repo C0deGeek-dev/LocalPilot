@@ -250,18 +250,32 @@ api_key_env = "LOCALPILOT_LOCAL_API_KEY"
 [providers.openai]
 kind = "openai"
 api_key_env = "OPENAI_API_KEY"
+
+[providers.gemini]
+kind = "google-vertex-openai"
+auth = "google_adc"
+google_project = "your-project-id"
+google_location = "global"
+model = "google/gemini-3.5-flash"
 ```
 
 ## Credential Resolution
 
-The credential value is never stored in config — only the *name* of the
-environment variable (`api_key_env`) that may hold it. At use, a provider's
-credential is resolved with precedence: a stored credential (OS keychain → a
-`0600` fallback file, written by `localpilot login`) → the `api_key_env`
-environment variable (or a kind default) → none. So `login` makes the environment
-variable optional, while an env-only setup keeps working unchanged. The resolved
-secret is wrapped so it never reaches logs, transcripts, or error output, and
-`localpilot doctor` reports only the *source* (keychain / file / env / none).
+For `auth = "api_key"`, the credential value is never stored in config — only
+the *name* of the environment variable (`api_key_env`) that may hold it. At use,
+a provider's credential is resolved with precedence: a stored credential (OS
+keychain → a `0600` fallback file, written by `localpilot login`) → the
+`api_key_env` environment variable (or a kind default) → none. So `login` makes
+the environment variable optional, while an env-only setup keeps working
+unchanged.
+
+For `auth = "google_adc"`, LocalPilot reads a Google ADC file path (explicit
+`google_adc_path`, `GOOGLE_APPLICATION_CREDENTIALS`, or the gcloud default ADC
+path) and mints a short-lived OAuth access token in-process. The current
+implementation supports gcloud `authorized_user` ADC files. The resolved secret
+is wrapped so it never reaches logs, transcripts, or error output, and
+`localpilot doctor` reports only the *source* (keychain / file / env /
+google_adc / google_adc_file / none).
 Bring-your-own-key only — no subscription-credential or "sign in with
 Claude/ChatGPT" path (ADR-0042). See
 [providers.md](providers.md) §Storing credentials.

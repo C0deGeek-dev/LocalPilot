@@ -100,7 +100,7 @@ localpilot                      # no args: launches the REPL, or doctor if unset
 ```
 
 See [`docs/providers.md`](docs/providers.md) for provider setup (including
-per-model context windows and reasoning effort),
+per-model context windows, Google Cloud ADC, and reasoning effort),
 [`docs/configuration.md`](docs/configuration.md) for the full config reference
 and stability policy, [`docs/mcp.md`](docs/mcp.md) for MCP tool servers,
 [`docs/extending.md`](docs/extending.md) for adding providers, tools, and

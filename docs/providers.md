@@ -62,6 +62,40 @@ Credentials are read from the named environment variable at use and wrapped so
 they never appear in logs, transcripts, or error output. The config file only
 records the *name* of the variable, never the secret.
 
+## Google Cloud Vertex AI Gemini with ADC
+
+Use this when a Google Cloud project requires Application Default Credentials
+instead of an API key. LocalPilot talks to Vertex AI's documented
+OpenAI-compatible endpoint and mints a short-lived OAuth access token from the
+gcloud ADC file. The supported ADC file shape is gcloud's `authorized_user`
+`application_default_credentials.json`.
+
+```toml
+[provider]
+default = "gemini"
+
+[providers.gemini]
+kind = "google-vertex-openai"
+auth = "google_adc"
+google_project = "your-project-id"
+google_location = "global"
+model = "google/gemini-3.5-flash"
+# Optional. When omitted, LocalPilot checks GOOGLE_APPLICATION_CREDENTIALS and
+# then ~/.config/gcloud/application_default_credentials.json.
+google_adc_path = "/Users/bramhammer/.config/gcloud/application_default_credentials.json"
+request_timeout_secs = 600
+```
+
+The generated base URL is:
+
+```text
+https://aiplatform.googleapis.com/v1/projects/<project>/locations/<location>/endpoints/openapi
+```
+
+`localpilot doctor` reports `google_adc` or `google_adc_file` as the credential
+source. It never prints the ADC JSON, refresh token, client secret, or minted
+access token. `localpilot models`, `/model`, and chat use the same ADC auth path.
+
 ## The official Anthropic API
 
 Uses the documented Anthropic Messages API (a distinct wire protocol from
@@ -121,14 +155,17 @@ the `keychain` feature). On macOS and Linux, and on any host without a keychain
 backend, in a `0600` file under the per-user directory beside `config.toml`
 (`credentials.json`). The key never enters the repo or a config file.
 
-**Resolution precedence.** When a provider needs a credential it is resolved in
-order: a stored credential (keychain → fallback file) first, then the
-`api_key_env` environment variable (or the kind default `ANTHROPIC_API_KEY` /
-`OPENAI_API_KEY`), then config. So a logged-in user needs no environment
-variable, and an existing env-only setup keeps working unchanged.
+**Resolution precedence.** When an API-key provider needs a credential it is
+resolved in order: a stored credential (keychain → fallback file) first, then
+the `api_key_env` environment variable (or the kind default `ANTHROPIC_API_KEY`
+/ `OPENAI_API_KEY`), then config. So a logged-in user needs no environment
+variable, and an existing env-only setup keeps working unchanged. Google ADC
+providers do not use `localpilot login`; they read the configured ADC path or
+the standard Google ADC locations and mint OAuth access tokens at request time.
 
 `localpilot doctor` reports the resolved *source* per provider — `keychain`,
-`file`, `env`, or `not set` — never the secret itself.
+`file`, `env`, `google_adc`, `google_adc_file`, or `not set` — never the secret
+itself.
 
 `localpilot doctor --format json` (or `--json`; JSON is the default when stdout
 is not a terminal) emits the same report as a machine-readable object for a

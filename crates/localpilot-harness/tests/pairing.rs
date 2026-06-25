@@ -153,6 +153,7 @@ async fn stream_error_leaves_no_orphan() {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 input_json: json!({ "path": "a.txt" }),
+                provider_metadata: None,
             }),
             Err(ProviderError::StreamDecode("scripted failure".to_string())),
         ])
@@ -187,6 +188,7 @@ fn provider_for(turns: &[TurnShape]) -> FakeProvider {
                         id: format!("call_{next_id}"),
                         name: "git_status".to_string(),
                         input_json: json!({}),
+                        provider_metadata: None,
                     }));
                 }
                 script.push(Ok(ModelEvent::Done));

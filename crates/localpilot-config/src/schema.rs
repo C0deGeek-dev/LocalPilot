@@ -498,10 +498,18 @@ impl Default for ProviderSelection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub kind: String,
+    #[serde(default)]
+    pub auth: ProviderAuth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_adc_path: Option<String>,
     /// Default model for this provider, used when a command does not name one
     /// (for example launching the interactive REPL with no `--model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +530,17 @@ pub struct ProviderConfig {
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,
+}
+
+/// How a provider authenticates outbound HTTP requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuth {
+    /// Static API-key style credentials resolved from login storage or env vars.
+    #[default]
+    ApiKey,
+    /// Google Application Default Credentials mint OAuth access tokens.
+    GoogleAdc,
 }
 
 /// Operating mode.
