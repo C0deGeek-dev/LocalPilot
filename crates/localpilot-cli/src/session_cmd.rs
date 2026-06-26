@@ -143,6 +143,10 @@ pub async fn build_runtime(
     );
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
+    // Headless run (print/eval): apply the built-in safety rails so a project
+    // with no `[harness]` budget/timeout still self-bounds (D003). Explicit
+    // config values win inside `resolved_rails`.
+    let rails = config.harness.resolved_rails(false);
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
@@ -160,17 +164,14 @@ pub async fn build_runtime(
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
                 &config.compaction,
             ),
-            tool_call_budget: config.harness.tool_call_budget,
-            tool_call_budget_max: config.harness.tool_call_budget_max,
+            tool_call_budget: rails.tool_call_budget,
+            tool_call_budget_max: rails.tool_call_budget_max,
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
             enforce_readable_errors: config.tools.readable_errors,
             repair_mode: config.tools.repair,
-            turn_timeout: config
-                .harness
-                .turn_timeout_secs
-                .map(std::time::Duration::from_secs),
+            turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
             verify_before_done: config.harness.verify_before_done,
             verify_command: config.harness.verify_command.clone(),
             ..SessionConfig::default()

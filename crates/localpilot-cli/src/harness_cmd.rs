@@ -507,6 +507,12 @@ where
             break;
         }
 
+        // Apply the built-in safety rails so a harness step in a project with no
+        // `[harness]` budget/timeout still self-bounds (D003); harness steps run
+        // headless, so they use the headless profile. Explicit config wins.
+        let rails = config
+            .harness
+            .resolved_rails(matches!(run.interactivity, Interactivity::Interactive));
         let mut runtime = build_runtime(
             root,
             Arc::clone(&provider),
@@ -520,8 +526,9 @@ where
                 provider.declaration().max_context_tokens,
                 config.harness.context_token_limit,
             ),
-            config.harness.tool_call_budget,
-            config.harness.tool_call_budget_max,
+            rails.tool_call_budget,
+            rails.tool_call_budget_max,
+            rails.turn_timeout_secs,
             compaction_mode(config.compaction.mode),
             localpilot_harness::SummarizerTuning::from_config(&config.compaction),
             gate_allowance.clone(),
@@ -714,6 +721,7 @@ fn build_runtime(
     context_token_limit: usize,
     tool_call_budget: Option<usize>,
     tool_call_budget_max: Option<usize>,
+    turn_timeout_secs: Option<u64>,
     compaction_mode: localpilot_harness::CompactionMode,
     summarizer_tuning: localpilot_harness::SummarizerTuning,
     allowlist: Vec<String>,
@@ -739,6 +747,7 @@ fn build_runtime(
             context_token_limit,
             tool_call_budget,
             tool_call_budget_max,
+            turn_timeout: turn_timeout_secs.map(std::time::Duration::from_secs),
             compaction_mode,
             summarizer_tuning,
             rules,

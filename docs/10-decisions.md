@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0055: A Fresh Project Self-Bounds — Built-In Loop Safety Rails When The Config Is Silent
+
+Status: accepted.
+
+Context: the per-turn tool-call budget (ADR-0029) and `turn_timeout_secs`
+(ADR-0049) both ship **off by default**. With neither set — an empty or minimal
+`.localpilot.toml`, the out-of-the-box state — a turn ran with no cost ceiling and
+no wall-clock bound. The always-on degenerate-loop guard (ADR-0052) catches a
+*spinning* turn (repeated/cyclic or failing calls), but not a long
+varied-but-non-converging trajectory or a single hung operation: a weak local
+model could run a turn to an external SIGKILL that printed no scorecard. An
+unbounded out-of-the-box loop is a defect, not a feature default.
+
+Decision: when `[harness]` leaves a rail unset, apply a **conservative built-in
+bound** rather than running unbounded. An explicit `[harness]` value always wins;
+the default only fills an unset rail. The bound is profile-aware, because the
+safety need is strongest where no human is watching:
+
+- **Headless** (`eval` / `print` / a `harness` step): a tool-call ceiling (200)
+  **and** a wall-clock bound (600 s).
+- **Interactive** (REPL / `serve`): a higher tool-call ceiling (500) and **no**
+  default wall-clock — a long interactive turn is legitimate and the user can
+  cancel it; the ceiling still stops an unattended runaway.
+
+Resolution lives in one place — `HarnessConfig::resolved_rails(interactive)` in
+`localpilot-config` — which every runtime-construction site (the headless
+`build_runtime`, the harness step runner, the REPL, and `serve`) calls, so the
+default is consistent and explicit-wins is enforced once. The verify gate
+(ADR-0054) is also tied to the no-progress signal: when its build never goes
+green within the re-entry cap the turn stops with `StopReason::NoProgress`, not a
+clean `Done`.
+
+Consequences: this is a **safety default, not a feature lever** — unlike the
+verify gate, broker, and global memory (which ship off pending evidence, D002),
+an unbounded loop is a bug, so the rails ship on (D003). The values are
+conservative enough not to cut a legitimate run (an ordinary task stays well
+under 200/500 calls and a step finishes well under 600 s); the soft/hard budget
+split (ADR-0029) and the clean `TimedOut`/`BudgetExceeded` finalize + handoff
+(ADR-0049/0052) are unchanged — this only fills the *default*. Rollback/tuning is
+config: set explicit `tool_call_budget`/`turn_timeout_secs`. Refines
+ADR-0029 (progress-aware budget) and ADR-0052 (degenerate-loop guard); a
+library consumer building `SessionConfig` directly is unaffected (the default
+fill is in the config-resolution layer, not the harness).
+
 ## ADR-0054: A Turn Verifies The Workspace Builds Before It Is Allowed To Finalize (Opt-In)
 
 Status: accepted.

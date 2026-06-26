@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Built-in loop safety rails — default-behaviour change.** A fresh project with
+  no `[harness]` budget/timeout used to run an **unbounded** loop that a weak
+  model could spin to an external SIGKILL with no scorecard. The loop now applies
+  a conservative built-in bound when the config leaves a rail unset (an explicit
+  `[harness]` value always wins): a headless run (`eval`/`print`/`harness` step)
+  self-bounds to **200** tool calls and **600 s**; an interactive session bounds a
+  runaway at **500** tool calls with no default wall-clock (a long interactive
+  turn is legitimate and cancellable). This is a safety default, not a feature
+  lever — an unbounded loop is a defect — so it ships on; tune or lift it with
+  explicit `tool_call_budget`/`turn_timeout_secs`. The verify gate now also stops
+  a turn with `NoProgress` (not a clean `Done`) when its build never goes green
+  within the re-entry cap, tying the no-progress signal to the build result. See
+  [docs/06-harness-spec.md](docs/06-harness-spec.md) §Built-In Safety Rails and
+  ADR-0055 (refining ADR-0029/0052).
+
 - **Verify-before-done gate (`[harness] verify_before_done`, default-off).** A
   solve loop ends when the model stops calling tools, which let a turn "finish"
   code it never built — the largest avoidable cause of compiled-language losses.

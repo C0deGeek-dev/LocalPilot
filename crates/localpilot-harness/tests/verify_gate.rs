@@ -124,15 +124,16 @@ fn gate_off_finalizes_without_running_verification() {
 }
 
 #[test]
-fn gate_gives_up_after_the_attempt_cap_so_it_never_loops_forever() {
+fn gate_gives_up_with_no_progress_after_the_attempt_cap() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let marker = "never_created.txt";
     let command = marker_verify_command(root, marker);
 
     // A model that keeps claiming completion without ever creating the marker:
-    // the verification can never pass. The gate must still terminate the turn
-    // (the fixed re-entry cap), not spin forever.
+    // the verification can never pass. The gate must terminate the turn after the
+    // fixed re-entry cap (never spin forever) and report `NoProgress` — the
+    // verify signal driving the no-progress stop — not a clean `Done`.
     let provider = FakeProvider::new()
         .text("done")
         .text("done")
@@ -149,8 +150,8 @@ fn gate_gives_up_after_the_attempt_cap_so_it_never_loops_forever() {
 
     assert_eq!(
         reason,
-        StopReason::Done,
-        "the gate finalizes after the re-entry cap rather than looping forever"
+        StopReason::NoProgress,
+        "a build that never goes green stops with NoProgress after the re-entry cap"
     );
     assert!(!root.join(marker).is_file());
 }

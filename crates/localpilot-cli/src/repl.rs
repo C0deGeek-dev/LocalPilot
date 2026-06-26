@@ -192,6 +192,12 @@ pub async fn run_chat(
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
+    // Interactive session: apply the built-in safety rails so an unconfigured
+    // project still bounds a runaway tool loop (D003). The interactive profile
+    // uses a higher tool-call ceiling and no default wall-clock — a long
+    // interactive turn is legitimate and the user can cancel it. Explicit
+    // `[harness]` values win inside `resolved_rails`.
+    let rails = config.harness.resolved_rails(true);
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
@@ -214,13 +220,14 @@ pub async fn run_chat(
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
                 &config.compaction,
             ),
-            tool_call_budget: config.harness.tool_call_budget,
-            tool_call_budget_max: config.harness.tool_call_budget_max,
+            tool_call_budget: rails.tool_call_budget,
+            tool_call_budget_max: rails.tool_call_budget_max,
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
             enforce_readable_errors: config.tools.readable_errors,
             repair_mode: config.tools.repair,
+            turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
             ..SessionConfig::default()
         },
         Vec::new(),

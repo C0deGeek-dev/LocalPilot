@@ -58,6 +58,11 @@ pub async fn run(
     );
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
+    // The serve loop is driven by a client (interactive): apply the built-in
+    // safety rails so an unconfigured project still bounds a runaway, with the
+    // interactive profile (higher ceiling, no default wall-clock). Explicit
+    // `[harness]` values win inside `resolved_rails`.
+    let rails = config.harness.resolved_rails(true);
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
@@ -78,13 +83,14 @@ pub async fn run(
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
                 &config.compaction,
             ),
-            tool_call_budget: config.harness.tool_call_budget,
-            tool_call_budget_max: config.harness.tool_call_budget_max,
+            tool_call_budget: rails.tool_call_budget,
+            tool_call_budget_max: rails.tool_call_budget_max,
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
             enforce_readable_errors: config.tools.readable_errors,
             repair_mode: config.tools.repair,
+            turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
             ..SessionConfig::default()
         },
         Vec::new(),

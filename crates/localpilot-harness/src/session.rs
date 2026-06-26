@@ -384,6 +384,17 @@ const UNPRODUCTIVE_CALL_LIMIT: usize = 12;
 /// verifications the turn ends `Done` with the failing state recorded.
 const VERIFY_GATE_MAX_ATTEMPTS: usize = 3;
 
+/// How the verify-before-done gate ends (or extends) a turn that would finalize.
+enum VerifyGate {
+    /// Finalize the turn as `Done` (gate off, no target, passed, or unrunnable).
+    Finalize,
+    /// Verification failed; feed this diagnostics text back and keep going.
+    Retry(String),
+    /// The re-entry cap was reached with the build still failing; stop the turn
+    /// with `NoProgress`.
+    GiveUp,
+}
+
 /// Stable store key under which the broker's graduated tools persist across
 /// sessions (local and disposable, ADR-0012). Keyed by no session id so it is
 /// shared by the project's sessions.
@@ -1409,32 +1420,39 @@ impl SessionRuntime {
     }
 
     /// The verify-before-done gate, consulted when a turn would finalize with no
-    /// tool call. Returns `Some(feedback)` when the gate is on, a verification
-    /// target is detected, the verification *failed*, and a re-entry remains —
-    /// the caller feeds `feedback` back and continues the loop. Returns `None`
-    /// (the turn finalizes) when the gate is off, no target is detected, the
-    /// verification passed, the command could not run, or the re-entry cap is
-    /// reached. Reuses [`Self::run_check`] — the same runner the quality gate
-    /// uses — so it never runs a second compile engine.
+    /// tool call. Reuses [`Self::run_check`] — the same runner the quality gate
+    /// uses — so it never runs a second compile engine. The outcome tells the
+    /// caller how to end (or continue) the turn:
+    /// - [`VerifyGate::Finalize`] — gate off, no target, verification passed, or
+    ///   the command could not run: finalize the turn as `Done`.
+    /// - [`VerifyGate::Retry`] — verification failed and a re-entry remains: feed
+    ///   the diagnostics back and keep going.
+    /// - [`VerifyGate::GiveUp`] — the re-entry cap was reached with the build
+    ///   still failing: stop the turn with `NoProgress` rather than accept a
+    ///   never-green "done". This ties the no-progress stop to the verify signal.
     async fn verify_before_done(
         &self,
         attempts: &mut usize,
         events: &broadcast::Sender<RuntimeEvent>,
-    ) -> Option<String> {
+    ) -> VerifyGate {
         if !self.config.verify_before_done {
-            return None;
-        }
-        if *attempts >= VERIFY_GATE_MAX_ATTEMPTS {
-            let _ = events.send(RuntimeEvent::Warning(format!(
-                "verify-before-done: still failing after {VERIFY_GATE_MAX_ATTEMPTS} attempts; finalizing"
-            )));
-            return None;
+            return VerifyGate::Finalize;
         }
         let root = self.workspace.root().to_path_buf();
-        let check = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())?;
+        let Some(check) = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())
+        else {
+            return VerifyGate::Finalize;
+        };
+        if *attempts >= VERIFY_GATE_MAX_ATTEMPTS {
+            let _ = events.send(RuntimeEvent::Warning(format!(
+                "verify-before-done: still failing after {VERIFY_GATE_MAX_ATTEMPTS} attempts; \
+                 stopping (no forward progress toward a passing build)"
+            )));
+            return VerifyGate::GiveUp;
+        }
         let outcome = self.run_check(&check, &root).await;
         match outcome.status {
-            CheckStatus::Passed => None,
+            CheckStatus::Passed => VerifyGate::Finalize,
             // An environment problem (denied or unstartable command) must not
             // wedge a finished turn: record it and finalize without a signal.
             CheckStatus::Denied | CheckStatus::Errored => {
@@ -1442,7 +1460,7 @@ impl SessionRuntime {
                     "verify-before-done: could not run `{}` ({:?}); finalizing without a verify signal",
                     check.program, outcome.status
                 )));
-                None
+                VerifyGate::Finalize
             }
             CheckStatus::Failed => {
                 *attempts += 1;
@@ -1450,7 +1468,7 @@ impl SessionRuntime {
                     "verify-before-done: `{}` failed (attempt {}/{VERIFY_GATE_MAX_ATTEMPTS}); feeding diagnostics back",
                     check.program, *attempts
                 )));
-                Some(format!(
+                VerifyGate::Retry(format!(
                     "The build/test verification did not pass, so the task is not yet complete. \
                      Fix the problem and continue.\n\n{}",
                     outcome.detail
@@ -2136,15 +2154,20 @@ impl SessionRuntime {
                 // turn as the final answer, confirm the workspace still
                 // builds/tests. On a failure within the re-entry cap, feed the
                 // diagnostics back and keep going instead of "finishing" code
-                // that never compiled. On pass / no target / gate-off / cap
-                // reached, finalize as before. Bounded by the budget/timeout
-                // rails and `VERIFY_GATE_MAX_ATTEMPTS`.
-                if let Some(feedback) = self.verify_before_done(&mut verify_attempts, events).await
-                {
-                    self.append(Message::text(Role::User, feedback).into_synthetic("verify gate"));
-                    continue;
+                // that never compiled. When the cap is reached with the build
+                // still red, stop with `NoProgress` (the verify signal driving the
+                // no-progress guard) rather than accept a never-green "done".
+                // Bounded by the budget/timeout rails and `VERIFY_GATE_MAX_ATTEMPTS`.
+                match self.verify_before_done(&mut verify_attempts, events).await {
+                    VerifyGate::Finalize => return self.stop(events, StopReason::Done),
+                    VerifyGate::Retry(feedback) => {
+                        self.append(
+                            Message::text(Role::User, feedback).into_synthetic("verify gate"),
+                        );
+                        continue;
+                    }
+                    VerifyGate::GiveUp => return self.stop(events, StopReason::NoProgress),
                 }
-                return self.stop(events, StopReason::Done);
             }
 
             if let Some(message) = invalid_tool_calls(&calls) {

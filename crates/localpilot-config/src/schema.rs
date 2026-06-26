@@ -660,6 +660,73 @@ impl Default for HarnessConfig {
     }
 }
 
+/// Out-of-the-box safety bound for a **headless** turn's wall-clock when the
+/// config sets no `turn_timeout_secs`. A headless run (eval / print / harness
+/// step) has no human watching, so it self-bounds rather than running to an
+/// external kill with no scorecard. Generous enough not to cut a legitimate step.
+pub const DEFAULT_HEADLESS_TURN_TIMEOUT_SECS: u64 = 600;
+
+/// Out-of-the-box safety ceiling for a **headless** turn's tool calls when the
+/// config sets no budget. Bounds a runaway loop; an ordinary task stays well under.
+pub const DEFAULT_HEADLESS_TOOL_BUDGET_MAX: usize = 200;
+
+/// Out-of-the-box safety ceiling for an **interactive** turn's tool calls when
+/// the config sets no budget. Higher than the headless ceiling (a human is
+/// present and can cancel), but still bounds an unattended runaway. Interactive
+/// turns get no default wall-clock bound — a long interactive turn is legitimate
+/// and the user can interrupt it.
+pub const DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX: usize = 500;
+
+/// The loop's safety rails after applying the built-in defaults: the configured
+/// values when set, otherwise a conservative built-in bound so a fresh project
+/// with no `[harness]` rails never runs an unbounded, externally-killed loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedRails {
+    /// Soft start for the per-turn tool-call ceiling (passed through unchanged).
+    pub tool_call_budget: Option<usize>,
+    /// Hard per-turn tool-call ceiling — the built-in default fills this when the
+    /// config sets neither budget field.
+    pub tool_call_budget_max: Option<usize>,
+    /// Per-turn wall-clock timeout in seconds; the headless built-in default
+    /// fills this when unset, interactive leaves it `None`.
+    pub turn_timeout_secs: Option<u64>,
+}
+
+impl HarnessConfig {
+    /// Resolve the loop's safety rails, applying the built-in defaults (D003): an
+    /// explicit `[harness]` value always wins; when the config leaves a rail
+    /// unset a conservative built-in bound applies so an empty/minimal
+    /// `.localpilot.toml` still self-bounds. `interactive` selects the live
+    /// (higher tool-call ceiling, no default wall-clock) vs headless (tighter
+    /// ceiling + a default timeout) profile.
+    #[must_use]
+    pub fn resolved_rails(&self, interactive: bool) -> ResolvedRails {
+        // The budget is enabled by setting *either* field; only fall back to the
+        // built-in ceiling when the config set neither.
+        let (tool_call_budget, tool_call_budget_max) =
+            if self.tool_call_budget.is_some() || self.tool_call_budget_max.is_some() {
+                (self.tool_call_budget, self.tool_call_budget_max)
+            } else {
+                let fallback = if interactive {
+                    DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX
+                } else {
+                    DEFAULT_HEADLESS_TOOL_BUDGET_MAX
+                };
+                (None, Some(fallback))
+            };
+        let turn_timeout_secs = match (self.turn_timeout_secs, interactive) {
+            (Some(secs), _) => Some(secs),
+            (None, false) => Some(DEFAULT_HEADLESS_TURN_TIMEOUT_SECS),
+            (None, true) => None,
+        };
+        ResolvedRails {
+            tool_call_budget,
+            tool_call_budget_max,
+            turn_timeout_secs,
+        }
+    }
+}
+
 /// Severity of a harness rule verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1015,6 +1082,64 @@ mod tests {
         // A whole Config with no history key fills the default.
         let config: Config = serde_json::from_value(json!({})).unwrap();
         assert_eq!(config.history, HistoryConfig::default());
+    }
+
+    #[test]
+    fn empty_harness_config_self_bounds_via_built_in_rails() {
+        // The defect (D003): an empty/minimal `.localpilot.toml` leaves budget and
+        // timeout unset, which used to run an unbounded loop. The resolver now
+        // fills a conservative built-in bound so the loop self-bounds.
+        let empty = HarnessConfig::default();
+
+        // Headless: a tool-call ceiling AND a wall-clock bound (no human watching).
+        let headless = empty.resolved_rails(false);
+        assert_eq!(headless.tool_call_budget, None);
+        assert_eq!(
+            headless.tool_call_budget_max,
+            Some(DEFAULT_HEADLESS_TOOL_BUDGET_MAX)
+        );
+        assert_eq!(
+            headless.turn_timeout_secs,
+            Some(DEFAULT_HEADLESS_TURN_TIMEOUT_SECS)
+        );
+
+        // Interactive: a higher ceiling and no default wall-clock (a long turn is
+        // legitimate and the user can cancel).
+        let interactive = empty.resolved_rails(true);
+        assert_eq!(
+            interactive.tool_call_budget_max,
+            Some(DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX)
+        );
+        assert_eq!(interactive.turn_timeout_secs, None);
+    }
+
+    #[test]
+    fn explicit_harness_rails_always_win_over_the_built_in_default() {
+        // An explicit budget (either field) disables the fallback ceiling.
+        let soft_only = HarnessConfig {
+            tool_call_budget: Some(7),
+            ..HarnessConfig::default()
+        };
+        let rails = soft_only.resolved_rails(false);
+        assert_eq!(rails.tool_call_budget, Some(7));
+        assert_eq!(rails.tool_call_budget_max, None);
+
+        // An explicit timeout wins, including on the interactive profile.
+        let timed = HarnessConfig {
+            turn_timeout_secs: Some(45),
+            ..HarnessConfig::default()
+        };
+        assert_eq!(timed.resolved_rails(true).turn_timeout_secs, Some(45));
+        assert_eq!(timed.resolved_rails(false).turn_timeout_secs, Some(45));
+
+        // An explicit hard ceiling is preserved verbatim.
+        let hard = HarnessConfig {
+            tool_call_budget_max: Some(999),
+            ..HarnessConfig::default()
+        };
+        let rails = hard.resolved_rails(true);
+        assert_eq!(rails.tool_call_budget_max, Some(999));
+        assert_eq!(rails.tool_call_budget, None);
     }
 
     #[test]

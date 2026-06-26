@@ -560,13 +560,36 @@ recovers by writing in pieces; a repeated bad turn compacts history; a
 shape-invalid call gets a schema-aware error and the model recovers on the next
 call without a repair engine).
 
+## Built-In Safety Rails
+
+A turn must never run unbounded out of the box. When `[harness]` leaves the
+budget and `turn_timeout_secs` unset, a **conservative built-in bound** still
+applies so a fresh `localpilot init` project self-bounds and finalizes with a
+scorecard instead of running to an external SIGKILL (ADR-0055, refining
+ADR-0029/0052). An explicit `[harness]` value always wins; the built-in default
+only fills an unset rail.
+
+The default is profile-aware, because the safety need is strongest where no human
+is watching:
+
+- **Headless** (`eval`, `print`, a `harness` step): a tool-call ceiling of 200
+  **and** a 600 s wall-clock bound — a non-interactive run self-bounds on both
+  axes.
+- **Interactive** (the REPL, `serve`): a higher tool-call ceiling of 500 and
+  **no** default wall-clock — a long interactive turn is legitimate and the user
+  can cancel it; the ceiling still stops an unattended runaway.
+
+This is a safety default, not a feature lever: unlike the verify gate (opt-in) or
+the broker (opt-in), an unbounded loop is a defect, so the rails ship on with a
+conservative bound. Rollback/tuning is config — raise or set the explicit
+`tool_call_budget`/`turn_timeout_secs`.
+
 ## Per-Turn Tool-Call Budget
 
-The budget is **off by default**: with neither key set in `[harness]`, a turn
-runs with no cost ceiling — bounded only by its other exit paths, including the
-always-on degenerate-loop guard below (ADR-0052). The cost bound is opt-in; set it
-to cap an unattended loop. When
-enabled it is progress-aware (ADR-0029), set by two numbers in `[harness]`:
+With neither budget key set in `[harness]`, a turn carries the built-in headless
+or interactive ceiling above rather than running with no cost bound. Setting
+either key replaces that default with an explicit, progress-aware budget
+(ADR-0029), set by two numbers in `[harness]`:
 
 - `tool_call_budget` — the **soft start**. A turn that keeps making forward
   progress runs past this; a turn detected as making no progress stops here. An
