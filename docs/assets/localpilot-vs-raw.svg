@@ -1,0 +1,52 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='780' height='568' viewBox='0 0 780 568' font-family='Segoe UI, Helvetica, Arial, sans-serif'>
+  <rect width='780' height='568' fill='white'/>
+  <text x='120' y='34' font-size='21' font-weight='800' fill='#111827'>LocalPilot harness vs. raw model — same model, pinned</text>
+  <text x='120' y='58' font-size='14' fill='#6b7280'>Aider polyglot, 225 exercises - container-graded - delta = what the agentic harness adds</text>
+  <rect x='120' y='70' width='13' height='13' rx='2' fill='#16a34a'/><text x='139' y='81' font-size='13' fill='#111827'>LocalPilot (full harness)</text>
+  <rect x='320' y='70' width='13' height='13' rx='2' fill='#9ca3af'/><text x='339' y='81' font-size='13' fill='#111827'>raw model (single-shot)</text>
+  <text x="108" y="111" text-anchor="end" font-size="15" fill="#111827" >go</text>
+  <rect x="120" y="92" width="543" height="17" rx="3" fill="#16a34a"/>
+  <text x="671" y="105" font-size="13" fill="#16a34a" font-weight="700">92%</text>
+  <rect x="120" y="114" width="106" height="17" rx="3" fill="#9ca3af"/>
+  <text x="234" y="127" font-size="13" fill="#6b7280">18%</text>
+  <text x="772" y="111" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+74</text>
+  <text x="108" y="171" text-anchor="end" font-size="15" fill="#111827" >cpp</text>
+  <rect x="120" y="152" width="407" height="17" rx="3" fill="#16a34a"/>
+  <text x="535" y="165" font-size="13" fill="#16a34a" font-weight="700">69%</text>
+  <rect x="120" y="174" width="0" height="17" rx="3" fill="#9ca3af"/>
+  <text x="128" y="187" font-size="13" fill="#6b7280">0%</text>
+  <text x="772" y="171" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+69</text>
+  <text x="108" y="231" text-anchor="end" font-size="15" fill="#111827" >java</text>
+  <rect x="120" y="212" width="401" height="17" rx="3" fill="#16a34a"/>
+  <text x="529" y="225" font-size="13" fill="#16a34a" font-weight="700">68%</text>
+  <rect x="120" y="234" width="0" height="17" rx="3" fill="#9ca3af"/>
+  <text x="128" y="247" font-size="13" fill="#6b7280">0%</text>
+  <text x="772" y="231" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+68</text>
+  <text x="108" y="291" text-anchor="end" font-size="15" fill="#111827" >javascript</text>
+  <rect x="120" y="272" width="507" height="17" rx="3" fill="#16a34a"/>
+  <text x="635" y="285" font-size="13" fill="#16a34a" font-weight="700">86%</text>
+  <rect x="120" y="294" width="130" height="17" rx="3" fill="#9ca3af"/>
+  <text x="258" y="307" font-size="13" fill="#6b7280">22%</text>
+  <text x="772" y="291" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+63</text>
+  <text x="108" y="351" text-anchor="end" font-size="15" fill="#111827" >python</text>
+  <rect x="120" y="332" width="519" height="17" rx="3" fill="#16a34a"/>
+  <text x="647" y="345" font-size="13" fill="#16a34a" font-weight="700">88%</text>
+  <rect x="120" y="354" width="189" height="17" rx="3" fill="#9ca3af"/>
+  <text x="317" y="367" font-size="13" fill="#6b7280">32%</text>
+  <text x="772" y="351" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+56</text>
+  <text x="108" y="411" text-anchor="end" font-size="15" fill="#111827" >rust</text>
+  <rect x="120" y="392" width="295" height="17" rx="3" fill="#16a34a"/>
+  <text x="423" y="405" font-size="13" fill="#16a34a" font-weight="700">50%</text>
+  <rect x="120" y="414" width="136" height="17" rx="3" fill="#9ca3af"/>
+  <text x="264" y="427" font-size="13" fill="#6b7280">23%</text>
+  <text x="772" y="411" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+27</text>
+  <line x1='120' y1='444' x2='750' y2='444' stroke='#e5e7eb' stroke-width='1'/>
+  <text x="108" y="471" text-anchor="end" font-size="15" fill="#111827" font-weight="700">TOTAL</text>
+  <rect x="120" y="452" width="454" height="17" rx="3" fill="#16a34a"/>
+  <text x="582" y="465" font-size="13" fill="#16a34a" font-weight="700">77%</text>
+  <rect x="120" y="474" width="94" height="17" rx="3" fill="#9ca3af"/>
+  <text x="222" y="487" font-size="13" fill="#6b7280">16%</text>
+  <text x="772" y="471" text-anchor="end" font-size="14" fill="#111827" font-weight="700">+61</text>
+  <text x='120' y='526' font-size='15' fill='#111827'><tspan font-weight='800'>~5x the raw solve rate: 16% -> 77% (+61 pts)</tspan> with the model held constant.</text>
+</svg>
+

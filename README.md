@@ -11,7 +11,7 @@
 [![install](https://img.shields.io/badge/install-one--liner-555?style=flat-square)](#getting-started)
 [![stars](https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&label=stars&color=007ec6)](https://github.com/C0deGeek-dev/LocalPilot/stargazers)
 [![issues](https://img.shields.io/github/issues/C0deGeek-dev/LocalPilot?style=flat-square&label=issues&color=4c1)](https://github.com/C0deGeek-dev/LocalPilot/issues)
-[![agent loop](https://img.shields.io/badge/agent%20loop-alpha-orange?style=flat-square)](#commands)
+[![version](https://img.shields.io/badge/version-1.0.0-4c1?style=flat-square)](CHANGELOG.md)
 [![harness](https://img.shields.io/badge/harness-mode-555?style=flat-square)](#commands)
 [![rules](https://img.shields.io/badge/rules-10%20gates-4c1?style=flat-square)](docs/06-harness-spec.md)
 
@@ -48,17 +48,46 @@ is designed from first principles around a small set of public concepts:
 
 ## Project status
 
-Pre-release alpha. The full agent loop, harness, tools, permissions, provider
-adapters, TUI, MCP integration, headless drive (stdio RPC + an Agent Client
-Protocol adapter), durable session event log with resume/fork, and the
-LocalMind learning subsystem are implemented and tested across Windows, Linux,
-and macOS in CI. The runtime's guarantees are written down as a tested
-reliability contract ([`docs/06`](docs/06-harness-spec.md),
-[`docs/07`](docs/07-security-and-privacy.md)). The one gate before a tagged
-public alpha is a live run against a real provider (the suite is offline by
-default).
+**1.0.0 — stable.** As of 1.0.0 the public CLI, configuration, and provider
+contract are under SemVer (schema stability policy in
+[`docs/configuration.md`](docs/configuration.md)). The full agent loop, harness,
+tools, permissions, provider adapters, TUI, MCP integration, headless drive
+(stdio RPC + an Agent Client Protocol adapter), durable session event log with
+resume/fork, and the LocalMind learning subsystem are implemented and tested
+across Windows, Linux, and macOS in CI, and validated on real local models
+(including a cross-model sweep). The runtime's guarantees are written down as a
+tested reliability contract ([`docs/06`](docs/06-harness-spec.md),
+[`docs/07`](docs/07-security-and-privacy.md)). See
+[`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 It contains no implementation copied from any closed-source or leaked codebase.
+
+## Why a harness — benchmark
+
+A coding agent is only as good as the loop around the model. Held the **model
+fixed** (a local GGUF model, served by LocalBox) and compared the full LocalPilot
+harness against the **same model called raw, single-shot** — across **225
+Aider-polyglot exercises in 6 languages**, each graded in a network-isolated
+container.
+
+![LocalPilot harness vs. raw model](docs/assets/localpilot-vs-raw.svg)
+
+**The harness ~5× the raw solve rate: 16% → 77% (+61 points)** with the model
+held constant — tools + an agentic loop + iterating against the tests do the
+work. Read the **delta** (harness − raw), not the absolute: public-corpus
+absolutes are contamination-suspect, it is one model and one quant, and a
+600 s-per-exercise timeout counts as unsolved.
+
+## Learns as you use it
+
+**The more you use it, the smarter it gets.** The embedded
+[LocalMind](https://github.com/C0deGeek-dev/LocalMind) engine distills reviewed
+lessons from each session — decisions, fixes, project conventions, tool-usage
+recipes — and feeds the **accepted** ones back into later sessions. Everything is
+**local-first and review-gated**: you approve what is remembered, and nothing
+leaves your machine. In a controlled uplift eval (tasks chosen to leave headroom),
+injecting accepted lessons lifted the solve rate from **0% to 100%**, and the
+effect held on a second model.
 
 ## Getting started
 
