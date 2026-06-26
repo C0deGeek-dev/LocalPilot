@@ -245,6 +245,19 @@ broker is off and the full tool set is advertised.
 keeps working unchanged. Opt in with `[tools] broker = true`; see
 [05-tool-system.md](05-tool-system.md) §Pull-Discovery Broker.
 
+**Prefill lever.** With the broker off, every builtin tool's full JSON schema is
+re-sent each turn — the dominant per-turn prefill weight. Turning the broker on
+narrows the advertised set to a lean working set and reveals the rest on demand,
+cutting that prefill substantially (measured ~35% of the tool-schema bytes on the
+default builtin set — 21→12 advertised tools), which leaves more of a fixed token
+budget for actual work. This is the recommended lever for a headless/benchmark run
+under a tight budget: enable it per run with `[tools] broker = true`. Defaulting
+the broker **on** is deferred pending a corpus ablation that measures the
+solve-rate effect, not just the token saving. (The per-turn system prompt is
+already small — under ~1k tokens — and compaction trims to the live transcript
+rather than padding to `context_token_limit`, so the tool schemas are the lever
+worth pulling.)
+
 `readable_errors` defaults **on** — a pure message improvement with no behaviour
 change beyond the text the model reads — so a shape-invalid tool call is answered
 with an actionable, schema-aware correction by default.
