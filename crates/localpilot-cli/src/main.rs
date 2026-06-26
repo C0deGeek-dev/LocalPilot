@@ -269,6 +269,16 @@ enum Command {
         /// Path to a gold unified diff, for the vs-gold ratio.
         #[arg(long)]
         gold_diff: Option<PathBuf>,
+        /// Enable the verify-before-done gate for this run: a turn that would
+        /// finalize re-runs a build/test verification first and continues on a
+        /// failure. Overrides `[harness] verify_before_done`. The command is
+        /// detected from the workspace stack unless `--verify-command` is given.
+        #[arg(long)]
+        verify: bool,
+        /// Verification command for `--verify` (a single command line). Implies
+        /// `--verify`. Overrides `[harness] verify_command` and stack detection.
+        #[arg(long)]
+        verify_command: Option<String>,
     },
     /// Inspect, resume, or export durable sessions in this workspace.
     Session {
@@ -1135,6 +1145,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             task,
             test,
             gold_diff,
+            verify,
+            verify_command,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             eval_cmd::run_eval(eval_cmd::EvalOptions {
@@ -1146,6 +1158,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 task: &task,
                 test_command: test.as_deref(),
                 gold_diff: gold_diff.as_deref(),
+                // `--verify-command` implies the gate is on.
+                verify: verify || verify_command.is_some(),
+                verify_command: verify_command.as_deref(),
             })
             .await?;
         }
@@ -1452,5 +1467,48 @@ mod tests {
 
         // The provider argument is required.
         assert!(Cli::try_parse_from(["localpilot", "login"]).is_err());
+    }
+
+    #[test]
+    fn eval_verify_flags_parse() {
+        // Bare `--verify` enables the gate; the command is detected.
+        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m", "--verify"])
+            .unwrap();
+        match cli.command {
+            Some(Command::Eval {
+                verify,
+                verify_command,
+                ..
+            }) => {
+                assert!(verify);
+                assert!(verify_command.is_none());
+            }
+            other => panic!("expected Eval, got {other:?}"),
+        }
+
+        // `--verify-command` carries an explicit command (and implies the gate).
+        let cli = Cli::try_parse_from([
+            "localpilot",
+            "eval",
+            "fix it",
+            "--model",
+            "m",
+            "--verify-command",
+            "ctest",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Eval { verify_command, .. }) => {
+                assert_eq!(verify_command.as_deref(), Some("ctest"));
+            }
+            other => panic!("expected Eval, got {other:?}"),
+        }
+
+        // Default: the gate is off.
+        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval { verify: false, .. })
+        ));
     }
 }

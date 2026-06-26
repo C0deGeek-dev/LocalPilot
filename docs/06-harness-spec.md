@@ -605,6 +605,42 @@ still means no *cost* ceiling. Pinned by the `localpilot-harness` budget tests
 (a spinning loop and a run of failing calls both halt with the budget off; a long
 productive turn is not).
 
+## Verify-Before-Done Gate
+
+A solve loop ends when the model stops calling tools — it "submits" by replying
+without a tool call. That lets a turn finalize code it never built: the largest
+single cause of avoidable losses on compiled languages is a turn that declares
+success on a workspace that does not compile. The verify-before-done gate closes
+that gap (ADR-0054).
+
+When `[harness] verify_before_done` is on, a turn that would finalize with no
+tool call first runs a **verification command** — "does this workspace build /
+do its tests pass?". On a failure the captured diagnostics are fed back as the
+next turn's input and the loop continues, so the model fixes the problem instead
+of stopping; on a pass (or no detectable target, or the gate off) the turn
+finalizes as before.
+
+- **Command resolution.** `[harness] verify_command` (a single command line,
+  split on whitespace — no shell) wins; otherwise the command is detected from
+  the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
+  `go test ./...`, `pom.xml` → `mvn test`, `build.gradle` → `gradle test`,
+  `package.json` → `npm test`, a Python project → `python -m pytest`, a
+  `Makefile` → `make`). A workspace with no detectable target and no override is
+  a clean no-op — the turn finalizes unchanged.
+- **Reuses the quality-gate runner.** The command runs through the same
+  permission-gated [`CheckRunner`](05-tool-system.md) the step-cadence quality
+  gate and `harness resume` use — there is no second command engine and no second
+  retry loop. A denied or unstartable command does not wedge a finished turn: it
+  is recorded and the turn finalizes without a verify signal.
+- **Bounded.** The gate can never loop forever: it is bound by the per-turn
+  tool-call budget and `turn_timeout` rails *and* a fixed re-entry cap. After the
+  cap is reached the turn finalizes with the failing state recorded, rather than
+  spinning.
+- **Default off.** It is an opt-in feature lever (features ship off); defaulting
+  it on awaits corpus evidence. `localpilot eval --verify` (or
+  `--verify-command <cmd>`) enables it for one run so a benchmark arm can measure
+  its lift without a config file.
+
 ## Anti-Sunk-Cost Loop
 
 For each step:

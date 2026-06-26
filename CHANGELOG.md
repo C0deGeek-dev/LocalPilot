@@ -4,6 +4,23 @@ Notable changes per release. As of 1.0.0 the public CLI/config/provider surface
 is SemVer-stable; the configuration schema stability policy is in
 [docs/configuration.md](docs/configuration.md).
 
+## Unreleased
+
+- **Verify-before-done gate (`[harness] verify_before_done`, default-off).** A
+  solve loop ends when the model stops calling tools, which let a turn "finish"
+  code it never built — the largest avoidable cause of compiled-language losses.
+  When enabled, a turn that would finalize with no tool call first runs a
+  build/test verification; on failure the diagnostics are fed back and the loop
+  continues instead of declaring success. The command is detected from the
+  workspace stack (`cargo test`, `go test ./...`, `npm test`, `python -m pytest`,
+  `mvn`/`gradle test`, `make`) or set explicitly with `[harness] verify_command`.
+  It reuses the permission-gated quality-gate runner (no second command engine or
+  retry loop) and is bounded by the budget/timeout rails plus a fixed re-entry
+  cap. `localpilot eval --verify` / `--verify-command <cmd>` enables it for one
+  run so a benchmark arm can measure its lift. Off by default (a feature lever);
+  see [docs/06-harness-spec.md](docs/06-harness-spec.md) §Verify-Before-Done Gate
+  and ADR-0054.
+
 ## v1.0.0 - 2026-06-24
 
 Coordinated LocalX 1.0 release. First stable: the CLI, configuration, and

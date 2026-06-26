@@ -37,7 +37,7 @@ use crate::compaction::{
 use crate::dispatch_gate::{pre_dispatch_decision, PreDispatch};
 use crate::hooks::{HookEvent, HookFabric};
 use crate::launch_targets::{self, LocalTarget};
-use crate::quality::{CheckOutcome, CheckRunner};
+use crate::quality::{CheckOutcome, CheckRunner, CheckStatus};
 use crate::rules::{trigger_for_cadence, RuleContext, RuleEngine, RuleVerdict, Trigger};
 use crate::summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 
@@ -239,6 +239,17 @@ pub struct SessionConfig {
     /// destructive/external/MCP tool or a content/command field, and a repaired
     /// call carries a model-visible note.
     pub repair_mode: localpilot_config::RepairMode,
+    /// When set, a turn that would finalize with no tool call first runs a
+    /// workspace verification command (build/test); on failure the diagnostics
+    /// are fed back and the loop continues instead of declaring success on code
+    /// that never compiled. Off by default (an opt-in feature lever); the
+    /// production config maps `[harness] verify_before_done`. Bounded so it can
+    /// never loop forever: the budget/timeout rails plus a fixed re-entry cap.
+    pub verify_before_done: bool,
+    /// Override command for the verify-before-done gate (a single command line,
+    /// split on whitespace — no shell). `None` resolves the command from the
+    /// workspace stack. Maps `[harness] verify_command`.
+    pub verify_command: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -261,6 +272,8 @@ impl Default for SessionConfig {
             turn_timeout: None,
             enforce_readable_errors: false,
             repair_mode: localpilot_config::RepairMode::Off,
+            verify_before_done: false,
+            verify_command: None,
         }
     }
 }
@@ -363,6 +376,13 @@ const DEFAULT_TOOL_FAILURE_THRESHOLD: u32 = 6;
 /// streak is normal; this many failures in a row with nothing landing is a spin.
 /// See ADR-0052.
 const UNPRODUCTIVE_CALL_LIMIT: usize = 12;
+
+/// Maximum times the verify-before-done gate may fail and re-enter the loop in a
+/// single turn before the turn finalizes anyway. A conservative, fixed safety
+/// cap so the gate can never loop forever on its own — independent of the
+/// budget/timeout rails, which also bound it. After this many failed
+/// verifications the turn ends `Done` with the failing state recorded.
+const VERIFY_GATE_MAX_ATTEMPTS: usize = 3;
 
 /// Stable store key under which the broker's graduated tools persist across
 /// sessions (local and disposable, ADR-0012). Keyed by no session id so it is
@@ -1093,6 +1113,19 @@ impl SessionRuntime {
         self.config.reasoning_effort = effort;
     }
 
+    /// Enable (or disable) the verify-before-done gate at runtime, optionally
+    /// overriding the verification command. Used by `eval --verify` so a
+    /// benchmark arm can turn the gate on without a config file; an explicit
+    /// `command` (when `Some`) overrides any stack detection. Leaves the command
+    /// untouched when `None`, so a config-set command survives a flag that only
+    /// flips the gate on.
+    pub fn set_verify_before_done(&mut self, enabled: bool, command: Option<String>) {
+        self.config.verify_before_done = enabled;
+        if command.is_some() {
+            self.config.verify_command = command;
+        }
+    }
+
     /// The currently requested reasoning effort.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<localpilot_llm::ReasoningEffort> {
@@ -1346,17 +1379,10 @@ impl SessionRuntime {
         trigger: Trigger,
         root: &Path,
     ) -> Vec<CheckOutcome> {
-        let runner = CheckRunner::new(
-            &self.engine,
-            self.approver.as_ref(),
-            self.config.interactivity,
-            self.config.trusted,
-            root,
-        );
         let mut outcomes = Vec::new();
         for check in checks {
             if trigger_for_cadence(check.cadence) == trigger {
-                let outcome = runner.run(check).await;
+                let outcome = self.run_check(check, root).await;
                 self.hooks.notify(&HookEvent::GateCheck {
                     name: outcome.name.clone(),
                     passed: outcome.passed(),
@@ -1365,6 +1391,72 @@ impl SessionRuntime {
             }
         }
         outcomes
+    }
+
+    /// Run one check command through the permission-gated [`CheckRunner`] and
+    /// return its outcome — the single seam shared by the step-cadence quality
+    /// gate (`run_gate_checks`) and the verify-before-done gate, so there is no
+    /// second command-running path.
+    async fn run_check(&self, check: &CheckConfig, root: &Path) -> CheckOutcome {
+        let runner = CheckRunner::new(
+            &self.engine,
+            self.approver.as_ref(),
+            self.config.interactivity,
+            self.config.trusted,
+            root,
+        );
+        runner.run(check).await
+    }
+
+    /// The verify-before-done gate, consulted when a turn would finalize with no
+    /// tool call. Returns `Some(feedback)` when the gate is on, a verification
+    /// target is detected, the verification *failed*, and a re-entry remains —
+    /// the caller feeds `feedback` back and continues the loop. Returns `None`
+    /// (the turn finalizes) when the gate is off, no target is detected, the
+    /// verification passed, the command could not run, or the re-entry cap is
+    /// reached. Reuses [`Self::run_check`] — the same runner the quality gate
+    /// uses — so it never runs a second compile engine.
+    async fn verify_before_done(
+        &self,
+        attempts: &mut usize,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> Option<String> {
+        if !self.config.verify_before_done {
+            return None;
+        }
+        if *attempts >= VERIFY_GATE_MAX_ATTEMPTS {
+            let _ = events.send(RuntimeEvent::Warning(format!(
+                "verify-before-done: still failing after {VERIFY_GATE_MAX_ATTEMPTS} attempts; finalizing"
+            )));
+            return None;
+        }
+        let root = self.workspace.root().to_path_buf();
+        let check = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())?;
+        let outcome = self.run_check(&check, &root).await;
+        match outcome.status {
+            CheckStatus::Passed => None,
+            // An environment problem (denied or unstartable command) must not
+            // wedge a finished turn: record it and finalize without a signal.
+            CheckStatus::Denied | CheckStatus::Errored => {
+                let _ = events.send(RuntimeEvent::Warning(format!(
+                    "verify-before-done: could not run `{}` ({:?}); finalizing without a verify signal",
+                    check.program, outcome.status
+                )));
+                None
+            }
+            CheckStatus::Failed => {
+                *attempts += 1;
+                let _ = events.send(RuntimeEvent::Warning(format!(
+                    "verify-before-done: `{}` failed (attempt {}/{VERIFY_GATE_MAX_ATTEMPTS}); feeding diagnostics back",
+                    check.program, *attempts
+                )));
+                Some(format!(
+                    "The build/test verification did not pass, so the task is not yet complete. \
+                     Fix the problem and continue.\n\n{}",
+                    outcome.detail
+                ))
+            }
+        }
     }
 
     /// Seed a system message into the conversation — for example durable host
@@ -1684,6 +1776,9 @@ impl SessionRuntime {
         // successful call between them. Resets on any successful call. Unlike the
         // opt-in budget, this bounds a spin even when the budget is off.
         let mut unproductive_streak = 0usize;
+        // Verify-before-done re-entries used this turn, capped so the gate can
+        // never loop forever even with the rails off.
+        let mut verify_attempts = 0usize;
 
         loop {
             if cancel.is_cancelled() {
@@ -2035,6 +2130,18 @@ impl SessionRuntime {
                         )
                         .into_synthetic("tool marker reveal"),
                     );
+                    continue;
+                }
+                // Verify-before-done gate (opt-in): before accepting a call-free
+                // turn as the final answer, confirm the workspace still
+                // builds/tests. On a failure within the re-entry cap, feed the
+                // diagnostics back and keep going instead of "finishing" code
+                // that never compiled. On pass / no target / gate-off / cap
+                // reached, finalize as before. Bounded by the budget/timeout
+                // rails and `VERIFY_GATE_MAX_ATTEMPTS`.
+                if let Some(feedback) = self.verify_before_done(&mut verify_attempts, events).await
+                {
+                    self.append(Message::text(Role::User, feedback).into_synthetic("verify gate"));
                     continue;
                 }
                 return self.stop(events, StopReason::Done);

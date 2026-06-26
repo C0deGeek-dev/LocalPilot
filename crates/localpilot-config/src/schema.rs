@@ -621,6 +621,22 @@ pub struct HarnessConfig {
     /// never blocks completion, edits code, or commits. Off by default (features
     /// ship off); the on-demand path is `self-review --cleanup`.
     pub teardown_sweep: bool,
+    /// Verify the workspace builds/tests before a turn is allowed to finalize.
+    /// When on, a turn that would end with no tool call runs a verification
+    /// command first; on failure the diagnostics are fed back and the loop
+    /// continues (bounded by the budget/timeout rails) instead of "finishing"
+    /// code that never compiled. Off by default (a feature lever ships off); the
+    /// command is resolved from the workspace stack unless `verify_command`
+    /// overrides it. A turn whose workspace has no detectable target finalizes
+    /// unchanged.
+    pub verify_before_done: bool,
+    /// Override the verification command run by the verify-before-done gate. A
+    /// single command line (split on whitespace into a program and arguments —
+    /// no shell interpretation, like `test_command`). When unset, the gate
+    /// resolves a command from the workspace stack (e.g. `cargo test`,
+    /// `go test ./...`); set this for a non-standard build/test invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_command: Option<String>,
 }
 
 impl Default for HarnessConfig {
@@ -638,6 +654,8 @@ impl Default for HarnessConfig {
             turn_timeout_secs: None,
             claim_gate: ClaimGate::default(),
             teardown_sweep: false,
+            verify_before_done: false,
+            verify_command: None,
         }
     }
 }

@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0054: A Turn Verifies The Workspace Builds Before It Is Allowed To Finalize (Opt-In)
+
+Status: accepted.
+
+Context: a solve loop finalizes when the model stops calling tools — it "submits"
+by replying with no tool call. That accepts a turn's work without ever confirming
+it builds. A model-pinned corpus sweep showed this is the single largest avoidable
+cause of compiled-language losses: every C++ loss was a workspace that did not
+compile, yet the turn declared success. The harness already has a command runner
+(the quality-gate [`CheckRunner`], ADR-0009) and a feedback-and-retry shape
+(`harness resume`); what was missing was running a build/test signal on the
+*finalize* transition and feeding a failure back instead of stopping.
+
+Decision: add an opt-in **verify-before-done** gate. With
+`[harness] verify_before_done` on, a turn that would finalize with no tool call
+first runs a verification command; on failure the captured diagnostics are fed
+back as the next turn's input and the loop continues; on a pass, no detectable
+target, or the gate off, the turn finalizes as before. The command is resolved
+from `[harness] verify_command` (a whitespace-split command line, no shell) or
+detected from the workspace's marker files; a workspace with neither is a clean
+no-op. It **reuses** `CheckRunner` (one permission-gated command path, no second
+engine) and does **not** add a second retry loop. It is bounded by the per-turn
+tool-call budget and `turn_timeout` rails *and* a fixed re-entry cap, so it can
+never loop forever; a denied or unstartable command finalizes the turn without a
+signal rather than wedging it. `localpilot eval --verify`/`--verify-command`
+enables it for one run so a benchmark arm can quantify its lift.
+
+Consequences: the definition of "done" gains an optional, observable build/test
+postcondition at the finalize seam — distinct from the per-call contract
+verifier (`localpilot-verify`, which checks a single tool call's postconditions,
+not the whole workspace). It ships **default-off** (a feature lever; features ship
+off): defaulting it on is gated on corpus evidence (a fair arm) per the
+validation-evidence policy (D008). Rollback is config — unset the flag. The
+detector covers the common single-command stacks; a stack it does not cover
+(e.g. a CMake-only C++ project) is served by an explicit `verify_command`, which
+the benchmark sets per language.
+
 ## ADR-0053: The Outward Self-Improvement Surface Is Human-Gated By Construction, Draft-Only, And Default-Off
 
 Status: accepted.

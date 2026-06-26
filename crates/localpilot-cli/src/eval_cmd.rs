@@ -31,6 +31,13 @@ pub struct EvalOptions<'a> {
     pub test_command: Option<&'a str>,
     /// Path to a gold unified diff, for the vs-gold ratio.
     pub gold_diff: Option<&'a Path>,
+    /// Enable the verify-before-done gate for this run, overriding config. The
+    /// benchmark's full+verify arm sets this so a turn re-runs a build/test
+    /// verification before finalizing.
+    pub verify: bool,
+    /// Verification command override for the gate (a single command line). When
+    /// `None` the gate detects a command from the workspace stack.
+    pub verify_command: Option<&'a str>,
 }
 
 /// Run one eval and print the capability scorecard JSON to stdout.
@@ -46,6 +53,11 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
     let mut runtime =
         crate::session_cmd::build_runtime(&cwd, opts.model, opts.provider_id, opts.profile, true)
             .await?;
+    // `--verify` opts this run into the verify-before-done gate regardless of
+    // config, so a benchmark arm can enable it without writing a config file.
+    if opts.verify {
+        runtime.set_verify_before_done(true, opts.verify_command.map(str::to_string));
+    }
     let session = runtime.session_id();
 
     // Run the turn; model text is discarded (stdout is reserved for the JSON).

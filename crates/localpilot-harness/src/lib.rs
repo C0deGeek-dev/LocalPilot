@@ -32,6 +32,7 @@ mod scorecard;
 mod session;
 mod summarizer;
 mod system_prompt;
+mod verify_target;
 mod worker;
 
 pub use ablation::{
@@ -81,6 +82,7 @@ pub use session::{
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::agent_system_prompt;
+pub use verify_target::{detect_verify_command, resolve_verify_check, VERIFY_CHECK_NAME};
 // Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
 pub use localpilot_recovery::ModelHealth;
 pub use worker::{
