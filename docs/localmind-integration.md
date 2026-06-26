@@ -152,6 +152,29 @@ commits).
 State is project-local under `.localmind/`. Durable memory is readable Markdown;
 queue, audit, search index, and the code-structure graph live in SQLite.
 
+**Machine-wide global memory (opt-in).** Most memory is project-specific. A
+project may also opt in to a **global** store shared across every project on the
+machine — for cross-project knowledge like tool-use patterns, debugging recipes,
+and durable user preferences ("the more you use it the smarter it gets"). Opt in
+by adding `global_user` to `allowed_scopes` in the project's `.localmind.toml`:
+
+```toml
+[learning]
+enabled = true
+allowed_scopes = ["project", "global_user"]
+# global_memory_root = "/abs/path"   # optional; default is ~/.localmind/memory
+```
+
+The global store lives at the per-user home (`~/.localmind/memory`, resolved
+cross-platform), with its own index, separate from any project. A conservative
+classifier routes only clearly cross-project lessons there (project-specific
+knowledge stays in the project store); promotion is still review-gated, and
+retrieval merges project + global with **project precedence** (a project lesson
+overrides a global one on conflict). Off by default and `local_only` (the global
+store is same-machine, never remote). See
+[LocalMind on-disk-contract](https://github.com/C0deGeek-dev/LocalMind/blob/main/docs/on-disk-contract.md)
+§Global-scope store and D-LM-0017.
+
 ## Store resolution
 
 `localpilot learning` and `localpilot memory` resolve the store like `git`
