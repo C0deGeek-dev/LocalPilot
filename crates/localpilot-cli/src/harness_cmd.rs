@@ -543,6 +543,12 @@ where
             config.docs.lookup_policy,
             &mut runtime,
         );
+        localpilot_harness::register_project_instructions_context(
+            root,
+            config.context.inject_instructions,
+            config.context.instruction_char_budget,
+            &mut runtime,
+        );
         localpilot_localmind::register_context_hook(root, &mut runtime);
         let outcome = resume_one_step_with_events(
             &mut runtime,

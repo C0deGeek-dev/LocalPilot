@@ -24,6 +24,7 @@ mod planning;
 mod precondition;
 mod progress;
 mod project_analysis;
+mod project_instructions;
 mod quality;
 mod resume;
 mod retrospective;
@@ -63,6 +64,7 @@ pub use progress::{Progress, Step};
 pub use project_analysis::{
     analyze_project, register_project_analysis_context, ProjectAnalysis, ProjectAnalysisContext,
 };
+pub use project_instructions::{register_project_instructions_context, ProjectInstructionsContext};
 pub use quality::{
     program_on_path, propose_gate, ratify_gate, render_check, summarize_proposal, CheckOutcome,
     CheckRunner, CheckStatus, GateRatification, ProposedCheck, ToolchainProfile,

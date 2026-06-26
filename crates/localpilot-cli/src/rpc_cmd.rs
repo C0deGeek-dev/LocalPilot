@@ -102,6 +102,12 @@ pub async fn run(
         config.docs.lookup_policy,
         &mut runtime,
     );
+    localpilot_harness::register_project_instructions_context(
+        &cwd,
+        config.context.inject_instructions,
+        config.context.instruction_char_budget,
+        &mut runtime,
+    );
 
     // The Native serve path moves `cwd` into the serve context; keep a copy so
     // the session can be closed out into LocalMind when the client disconnects.

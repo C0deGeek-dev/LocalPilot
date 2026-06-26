@@ -185,6 +185,12 @@ pub async fn build_runtime(
         config.docs.lookup_policy,
         &mut runtime,
     );
+    localpilot_harness::register_project_instructions_context(
+        cwd,
+        config.context.inject_instructions,
+        config.context.instruction_char_budget,
+        &mut runtime,
+    );
     localpilot_localmind::register_context_hook(cwd, &mut runtime);
     Ok(runtime)
 }

@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Project instruction files are injected directly, every turn (default-on).**
+  `CLAUDE.md`/`AGENTS.md` previously reached the model only through the
+  review-gated learning store, so a fresh checkout's instructions might never be
+  seen. LocalPilot now injects the merged instruction document **directly into
+  the turn context every turn** — ungated and independent of learning — bounded by
+  `[context] instruction_char_budget` (8000 chars, truncate-with-marker over
+  budget) and redacted first. Discovery gains two conventions: a first-class
+  **`Navigator.md`** (LocalPilot's own, highest precedence) and
+  **`.github/copilot-instructions.md`** (lowest), alongside `CLAUDE.md`/`AGENTS.md`;
+  within a tier they order by kind (`Navigator` > `CLAUDE` > `AGENTS` >
+  copilot). Opt out with `[context] inject_instructions = false`. The ingest path
+  is unchanged (still review-gated). See ADR-0056.
+
 - **Built-in loop safety rails — default-behaviour change.** A fresh project with
   no `[harness]` budget/timeout used to run an **unbounded** loop that a weak
   model could spin to an external SIGKILL with no scorecard. The loop now applies

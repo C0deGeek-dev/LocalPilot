@@ -23,25 +23,41 @@ are noted in `CHANGELOG.md`.
 
 ## Project context files
 
-Beyond `.localpilot.toml`, a project may carry free-text **instruction files** —
-`CLAUDE.md` and `AGENTS.md` — that orient the agent with project conventions and
-constraints. LocalPilot discovers them, resolves their `@`-imports, and merges
-them into one ordered context document that the learning engine ingests as
-first-class project knowledge (so retrieval can surface a convention on demand).
+Beyond `.localpilot.toml`, a project may carry free-text **instruction files**
+that orient the agent with project conventions and constraints:
+
+- **`Navigator.md`** — LocalPilot's own first-class instruction convention, and
+  the **highest-precedence** instruction file when present;
+- **`CLAUDE.md`** and **`AGENTS.md`** — the widely-shared agent-instruction
+  conventions;
+- **`.github/copilot-instructions.md`** — GitHub Copilot's convention, treated as
+  a repo-root instruction (the lowest-precedence of the four).
+
+LocalPilot discovers them, resolves their `@`-imports, and merges them into one
+ordered context document. That document is used **two** ways: it is **injected
+directly into the turn context every turn** (bounded and redacted — see
+`[context] inject_instructions` below), so a fresh checkout's instructions reach
+the model immediately, *and* the learning engine ingests it as first-class
+project knowledge (so retrieval can surface a convention on demand). The direct
+injection is ungated and independent of learning; the ingest path stays
+review-gated (ADR-0056).
 
 **Discovery.** Three layers are collected:
 
-- **repo-root** — `CLAUDE.md` / `AGENTS.md` at the workspace root;
-- **nested** — the same file names in subdirectories of the workspace (the walk
-  honours ignore files and is depth-bounded);
-- **global** — `CLAUDE.md` / `AGENTS.md` under the per-user `~/.localpilot/`
-  directory (resolved cross-platform from the home directory).
+- **repo-root** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` and
+  `.github/copilot-instructions.md` at the workspace root;
+- **nested** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` in subdirectories of
+  the workspace (the walk honours ignore files and is depth-bounded);
+- **global** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` under the per-user
+  `~/.localpilot/` directory (resolved cross-platform from the home directory).
 
 **Precedence** (most → least specific): **repo-root > nested directory >
-global**. The workspace-root files are the authoritative project instructions
-and lead the merge; nested-directory files refine within their subtree and
-follow (ordered by ascending directory depth, then path, for determinism); the
-per-user global files are the baseline and come last.
+global**, and within one tier by **instruction kind** (`Navigator.md` >
+`CLAUDE.md` > `AGENTS.md` > `copilot-instructions.md`). The workspace-root files
+are the authoritative project instructions and lead the merge; nested-directory
+files refine within their subtree and follow (ordered by ascending directory
+depth, then kind, then path, for determinism); the per-user global files are the
+baseline and come last.
 
 **`@`-imports.** A line whose trimmed text is exactly `@<path>` imports that
 file's body inline at that point (relative paths resolve against the importing
@@ -153,6 +169,8 @@ Notable rule key:
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `project_analysis` | bool | `true` | Inject a compact, read-only project-facts block before each turn. LocalPilot derives it from manifests, lockfiles, package/dependency names, scripts, and common entrypoint markers so the model reuses existing project structure before inventing alternatives. |
+| `inject_instructions` | bool | `true` | Inject the project's instruction files (`Navigator.md`/`CLAUDE.md`/`AGENTS.md`/`.github/copilot-instructions.md`, merged in precedence order) directly into the turn context every turn — ungated and independent of the review-gated learning store, so a fresh project's instructions reach the model even with learning off. Redacted before injection and bounded by `instruction_char_budget`. Set `false` to opt out (the ingest path still surfaces them via retrieval). See [06-harness-spec.md](06-harness-spec.md) and ADR-0056. |
+| `instruction_char_budget` | int | `8000` | Maximum characters of merged instruction text injected per turn. Over the budget the text is truncated with a visible marker rather than dropped silently, so a large instruction set cannot crowd out the per-turn token budget. |
 
 ### `[memory]`
 

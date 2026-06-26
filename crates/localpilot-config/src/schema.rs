@@ -128,12 +128,25 @@ impl Default for HistoryConfig {
 pub struct ContextConfig {
     /// Inject a compact, read-only project analysis block before each turn.
     pub project_analysis: bool,
+    /// Inject the project's instruction files (`Navigator.md` / `CLAUDE.md` /
+    /// `AGENTS.md` / `.github/copilot-instructions.md`, merged in precedence
+    /// order) directly into the turn context every turn — independent of the
+    /// review-gated learning store, so a fresh project's instructions reach the
+    /// model even with learning off. Bounded by `instruction_char_budget` and
+    /// redacted before injection. Default on.
+    pub inject_instructions: bool,
+    /// Maximum characters of merged instruction text injected per turn. Over the
+    /// budget the text is truncated with a marker rather than dropped. Keeps a
+    /// large instruction set from crowding out the per-turn token budget.
+    pub instruction_char_budget: usize,
 }
 
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             project_analysis: true,
+            inject_instructions: true,
+            instruction_char_budget: 8_000,
         }
     }
 }

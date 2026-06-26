@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0056: Project Instruction Files Are Injected Directly Into Context, Ungated, Every Turn
+
+Status: accepted.
+
+Context: a project's instruction files (`CLAUDE.md`, `AGENTS.md`) are the user's
+authoritative orientation for the agent. LocalPilot discovered and merged them
+(`ContextDiscovery`, with precedence + `@`-imports), but the **only** consumer was
+the LocalMind ingest path: the merged document became a derived chunk in the
+review-gated learning store, surfaced via `knowledge_search` only after a human
+accepted it (and only when learning was enabled). So a fresh checkout's
+`CLAUDE.md` could *never* reach the model — the opposite of how a mature harness
+treats a repo's own instructions.
+
+Decision: inject the merged instruction document **directly into the turn
+context every turn**, ungated and independent of learning, behind
+`[context] inject_instructions` (default **on**). The injection reuses
+`ContextDiscovery::discover().render()` (no second discovery walker) through a
+`ProjectInstructionsContext` hook — the same `ContextHook` fabric
+`project_analysis` uses, so the block folds into the leading system message, is
+never persisted, and does not accumulate. It is **bounded**
+(`instruction_char_budget`, truncate-with-marker over budget) and **redacted**
+through the canonical host redactor before it is sent. Discovery is also widened:
+a first-class **`Navigator.md`** convention (LocalPilot's own, highest precedence)
+and **`.github/copilot-instructions.md`** (GitHub Copilot's, lowest), ranked by
+kind within a tier (`Navigator` > `CLAUDE` > `AGENTS` > Copilot).
+
+Consequences: a repo's instructions are respected immediately on a fresh
+checkout, with learning off and an empty store — the parity gap a model-pinned
+sweep exposed. The ingest→retrieval path is unchanged and still review-gated, so
+`knowledge_search` keeps working; the two paths are complementary (direct
+injection for always-on orientation, retrieval for on-demand recall). The
+injection is **default-on** because reading a repo's own committed instructions
+is the expected, safe behaviour — not a speculative feature — but it is bounded,
+redacted, and opt-out (`inject_instructions = false`) to cap context cost and
+contain a secret-bearing file. The `.cursorrules`/`GEMINI.md` conventions are a
+documented future option behind config, deferred (YAGNI) until a project needs
+them. Clean-room: the injection wording is original to this repository.
+
 ## ADR-0055: A Fresh Project Self-Bounds — Built-In Loop Safety Rails When The Config Is Silent
 
 Status: accepted.

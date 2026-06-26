@@ -241,6 +241,12 @@ pub async fn run_chat(
         config.docs.lookup_policy,
         &mut runtime,
     );
+    localpilot_harness::register_project_instructions_context(
+        &cwd,
+        config.context.inject_instructions,
+        config.context.instruction_char_budget,
+        &mut runtime,
+    );
     // Relevant accepted LocalMind memory is contributed per turn through the
     // context-hook fabric; ingested folder knowledge is pulled on demand via the
     // knowledge_search tool rather than seeded here.

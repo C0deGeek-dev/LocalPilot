@@ -41,24 +41,61 @@ pub const DEFAULT_DIR_DEPTH: usize = 24;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextKind {
+    /// A `Navigator.md` file — LocalPilot's own instruction convention. The
+    /// highest-precedence instruction file: when present it leads the merge.
+    Navigator,
     /// A `CLAUDE.md` file.
     Claude,
     /// An `AGENTS.md` file.
     Agents,
+    /// A `.github/copilot-instructions.md` file (GitHub Copilot's convention).
+    Copilot,
 }
 
 impl ContextKind {
-    /// The on-disk file name for this kind.
+    /// The on-disk file name for this kind (the bare file name; see
+    /// [`ContextKind::root_relative_path`] for kinds that live at a fixed subpath).
     #[must_use]
     pub fn file_name(self) -> &'static str {
         match self {
+            ContextKind::Navigator => "Navigator.md",
             ContextKind::Claude => "CLAUDE.md",
             ContextKind::Agents => "AGENTS.md",
+            ContextKind::Copilot => "copilot-instructions.md",
         }
     }
 
-    /// All kinds, in a stable discovery order (`CLAUDE.md` before `AGENTS.md`).
-    const ALL: [ContextKind; 2] = [ContextKind::Claude, ContextKind::Agents];
+    /// The path, relative to a tier root, where this kind is found. Most kinds are
+    /// bare root files; Copilot conventionally lives under `.github/`.
+    #[must_use]
+    pub fn root_relative_path(self) -> PathBuf {
+        match self {
+            ContextKind::Copilot => Path::new(".github").join(self.file_name()),
+            other => PathBuf::from(other.file_name()),
+        }
+    }
+
+    /// Precedence rank among instruction kinds at the same scope/depth (lower
+    /// wins): `Navigator` leads, then `CLAUDE.md`, `AGENTS.md`, and the Copilot
+    /// convention last.
+    #[must_use]
+    fn rank(self) -> u8 {
+        match self {
+            ContextKind::Navigator => 0,
+            ContextKind::Claude => 1,
+            ContextKind::Agents => 2,
+            ContextKind::Copilot => 3,
+        }
+    }
+
+    /// The bare-file-name kinds discovered at the root and walked for in nested
+    /// directories, in stable order. `Copilot` is excluded — it is discovered only
+    /// at its fixed `.github/` subpath, not by bare name anywhere in the tree.
+    const ALL: [ContextKind; 3] = [
+        ContextKind::Navigator,
+        ContextKind::Claude,
+        ContextKind::Agents,
+    ];
 }
 
 /// Where in the precedence hierarchy a context file sits. Ordered by precedence,
@@ -193,10 +230,18 @@ impl ContextDiscovery {
 
         // Repo-root layer: the workspace-root instruction files.
         for kind in ContextKind::ALL {
-            let path = self.workspace_root.join(kind.file_name());
+            let path = self.workspace_root.join(kind.root_relative_path());
             if let Some(file) = self.load(&path, kind, ContextScope::RepoRoot, 0) {
                 files.push(file);
             }
+        }
+        // The Copilot convention lives at a fixed `.github/` subpath, so it is a
+        // repo-root instruction (not a stray nested file) discovered explicitly.
+        let copilot = self
+            .workspace_root
+            .join(ContextKind::Copilot.root_relative_path());
+        if let Some(file) = self.load(&copilot, ContextKind::Copilot, ContextScope::RepoRoot, 0) {
+            files.push(file);
         }
 
         // Nested layer: instruction files in subdirectories of the workspace.
@@ -216,6 +261,10 @@ impl ContextDiscovery {
             a.scope
                 .cmp(&b.scope)
                 .then(a.depth.cmp(&b.depth))
+                // Within the same scope and depth, instruction kind decides
+                // precedence (Navigator leads), so a root `Navigator.md` is
+                // authoritative over a root `CLAUDE.md`/`AGENTS.md`/Copilot file.
+                .then(a.kind.rank().cmp(&b.kind.rank()))
                 .then_with(|| a.path.cmp(&b.path))
         });
 
@@ -539,6 +588,56 @@ mod tests {
         let ctx = discovery(ws.path(), None).discover();
         assert!(ctx.is_empty());
         assert!(ctx.render().is_empty());
+    }
+
+    #[test]
+    fn navigator_leads_the_merge_over_claude_and_agents() {
+        let ws = tempfile::tempdir().unwrap();
+        write(&ws.path().join("Navigator.md"), "navigator rules");
+        write(&ws.path().join("CLAUDE.md"), "claude rules");
+        write(&ws.path().join("AGENTS.md"), "agents rules");
+
+        let ctx = discovery(ws.path(), None).discover();
+        // Navigator is highest-precedence among the root instruction files.
+        assert_eq!(ctx.files.first().unwrap().kind, ContextKind::Navigator);
+        let rendered = ctx.render();
+        let nav = rendered.find("navigator rules").unwrap();
+        let claude = rendered.find("claude rules").unwrap();
+        let agents = rendered.find("agents rules").unwrap();
+        assert!(nav < claude && claude < agents, "{rendered}");
+    }
+
+    #[test]
+    fn discovers_github_copilot_instructions() {
+        let ws = tempfile::tempdir().unwrap();
+        // A repo carrying only `.github/copilot-instructions.md` is discovered.
+        write(
+            &ws.path().join(".github").join("copilot-instructions.md"),
+            "copilot rules",
+        );
+        let ctx = discovery(ws.path(), None).discover();
+        let copilot = ctx
+            .files
+            .iter()
+            .find(|f| f.kind == ContextKind::Copilot)
+            .expect("copilot instructions discovered");
+        assert_eq!(copilot.scope, ContextScope::RepoRoot);
+        assert!(ctx.render().contains("copilot rules"));
+    }
+
+    #[test]
+    fn copilot_is_lowest_precedence_among_root_instruction_files() {
+        let ws = tempfile::tempdir().unwrap();
+        write(&ws.path().join("CLAUDE.md"), "claude rules");
+        write(
+            &ws.path().join(".github").join("copilot-instructions.md"),
+            "copilot rules",
+        );
+        let rendered = discovery(ws.path(), None).discover().render();
+        assert!(
+            rendered.find("claude rules").unwrap() < rendered.find("copilot rules").unwrap(),
+            "{rendered}"
+        );
     }
 
     #[test]
