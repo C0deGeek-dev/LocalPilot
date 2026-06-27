@@ -144,7 +144,7 @@ pub async fn build_runtime(
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     // Headless run (print/eval): apply the built-in safety rails so a project
-    // with no `[harness]` budget/timeout still self-bounds (D003). Explicit
+    // with no `[harness]` budget/timeout still self-bounds (ADR-0055). Explicit
     // config values win inside `resolved_rails`.
     let rails = config.harness.resolved_rails(false);
     let mut runtime = SessionRuntime::new(

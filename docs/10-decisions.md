@@ -73,8 +73,8 @@ green within the re-entry cap the turn stops with `StopReason::NoProgress`, not 
 clean `Done`.
 
 Consequences: this is a **safety default, not a feature lever** — unlike the
-verify gate, broker, and global memory (which ship off pending evidence, D002),
-an unbounded loop is a bug, so the rails ship on (D003). The values are
+verify gate, broker, and global memory (which ship off pending corpus evidence),
+an unbounded loop is a bug, so the rails ship **on** by default. The values are
 conservative enough not to cut a legitimate run (an ordinary task stays well
 under 200/500 calls and a step finishes well under 600 s); the soft/hard budget
 split (ADR-0029) and the clean `TimedOut`/`BudgetExceeded` finalize + handoff

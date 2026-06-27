@@ -508,7 +508,7 @@ where
         }
 
         // Apply the built-in safety rails so a harness step in a project with no
-        // `[harness]` budget/timeout still self-bounds (D003); harness steps run
+        // `[harness]` budget/timeout still self-bounds (ADR-0055); harness steps run
         // headless, so they use the headless profile. Explicit config wins.
         let rails = config
             .harness

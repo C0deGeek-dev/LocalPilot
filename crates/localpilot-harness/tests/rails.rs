@@ -1,4 +1,4 @@
-//! The built-in safety rails (D003): an empty/minimal config self-bounds, so a
+//! The built-in safety rails (ADR-0055): an empty/minimal config self-bounds, so a
 //! fresh project never runs an unbounded, externally-killed loop. This pins the
 //! config→runtime wiring — `HarnessConfig::resolved_rails` fills a conservative
 //! bound, and a runtime built with it stops a runaway with a recorded reason and

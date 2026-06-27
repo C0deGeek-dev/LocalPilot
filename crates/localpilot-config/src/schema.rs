@@ -706,8 +706,8 @@ pub struct ResolvedRails {
 }
 
 impl HarnessConfig {
-    /// Resolve the loop's safety rails, applying the built-in defaults (D003): an
-    /// explicit `[harness]` value always wins; when the config leaves a rail
+    /// Resolve the loop's safety rails, applying the built-in defaults (ADR-0055):
+    /// an explicit `[harness]` value always wins; when the config leaves a rail
     /// unset a conservative built-in bound applies so an empty/minimal
     /// `.localpilot.toml` still self-bounds. `interactive` selects the live
     /// (higher tool-call ceiling, no default wall-clock) vs headless (tighter
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn empty_harness_config_self_bounds_via_built_in_rails() {
-        // The defect (D003): an empty/minimal `.localpilot.toml` leaves budget and
+        // The defect (ADR-0055): an empty/minimal `.localpilot.toml` leaves budget and
         // timeout unset, which used to run an unbounded loop. The resolver now
         // fills a conservative built-in bound so the loop self-bounds.
         let empty = HarnessConfig::default();

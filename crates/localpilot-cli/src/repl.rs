@@ -193,7 +193,7 @@ pub async fn run_chat(
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     // Interactive session: apply the built-in safety rails so an unconfigured
-    // project still bounds a runaway tool loop (D003). The interactive profile
+    // project still bounds a runaway tool loop (ADR-0055). The interactive profile
     // uses a higher tool-call ceiling and no default wall-clock — a long
     // interactive turn is legitimate and the user can cancel it. Explicit
     // `[harness]` values win inside `resolved_rails`.
