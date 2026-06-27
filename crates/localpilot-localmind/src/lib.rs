@@ -201,6 +201,10 @@ pub struct CloseoutSummary {
     pub candidate_count: usize,
     /// Number of candidates enqueued for review.
     pub enqueued_count: usize,
+    /// Number of candidates auto-accepted into memory by the configured review
+    /// mode (automatic/trusted). `0` in manual mode (the default), where
+    /// candidates stay pending for a human `learning review`.
+    pub accepted_count: usize,
 }
 
 /// Close out an LocalPilot session: read its redacted transcript, import it into
@@ -276,10 +280,23 @@ pub fn closeout_session(
         let _ = repair_signal::enqueue_repair_signals(project_root, &events);
     }
 
+    // Apply the project's configured review mode to the freshly-enqueued
+    // candidates. In automatic/trusted mode this promotes clean, novel candidates
+    // to accepted memory — scope-routed (project lessons to the project store,
+    // global ones to the machine-wide store, D-LM-0017) — so they feed forward
+    // into later sessions; in manual mode (the default) it is a no-op. Without
+    // this, automatic mode only ever enqueued candidates that nothing accepted.
+    // Best-effort: a failure leaves them pending for a later `learning review` and
+    // never breaks closeout.
+    let accepted_count = localmind_store::ReviewModeProcessor::apply_project(project_root)
+        .map(|report| report.accepted)
+        .unwrap_or(0);
+
     Ok(CloseoutSummary {
         session_id: report.session_id.to_string(),
         candidate_count: report.candidate_count,
         enqueued_count: report.enqueued_count,
+        accepted_count,
     })
 }
 
@@ -583,6 +600,63 @@ mod tests {
         );
         let items = review_list(root).unwrap();
         assert_eq!(items.len(), summary.enqueued_count);
+    }
+
+    /// Automatic review mode must auto-accept clean candidates AT CLOSEOUT, so a
+    /// lesson feeds forward without a separate human review pass. Before the fix,
+    /// closeout only enqueued — automatic mode was inert (candidates sat pending
+    /// forever, so the warm/learning arm never accumulated anything).
+    #[test]
+    fn automatic_mode_auto_accepts_at_closeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Pre-write the config so review mode is automatic; `initialize` will not
+        // clobber an existing file. Deterministic extraction (no `[inference]`).
+        std::fs::write(
+            root.join(CONFIG_FILE),
+            "[learning]\nenabled = true\nlocal_only = true\n\n[review]\nmode = \"automatic\"\n",
+        )
+        .unwrap();
+        let store = Store::open(root);
+        let session = SessionId::new();
+        for (role, text) in [
+            (Role::User, "the exporter test is failing again"),
+            (
+                Role::Assistant,
+                "error: assertion failed at writer.rs:88, the batch flush ordering is wrong",
+            ),
+            (
+                Role::Assistant,
+                "Fixed: flushing before the clear; the suite is passing now.",
+            ),
+            (
+                Role::User,
+                "Lesson: exporter changes need the integration suite, not just unit tests.",
+            ),
+        ] {
+            store
+                .append_message(session, &Message::text(role, text))
+                .unwrap();
+        }
+
+        let summary = closeout_session(root, &store, session).unwrap();
+
+        assert!(
+            summary.candidate_count >= 1,
+            "extraction should find a lesson, got {summary:?}"
+        );
+        assert!(
+            summary.accepted_count >= 1,
+            "automatic mode must auto-accept at closeout, not leave candidates pending — got {summary:?}"
+        );
+        // The accepted lesson must be retrievable, not merely counted — this is the
+        // gap the promote step closes (a decision marked the item accepted but never
+        // persisted durable memory, so `memory inspect` stayed empty).
+        let hits = crate::ops::search(root, "integration suite").unwrap();
+        assert!(
+            !hits.is_empty(),
+            "an auto-accepted lesson must persist to retrievable memory, got {summary:?}"
+        );
     }
 
     #[test]

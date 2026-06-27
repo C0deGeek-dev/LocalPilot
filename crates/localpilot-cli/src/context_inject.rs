@@ -30,8 +30,8 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
             // instead of echoing it back as project knowledge. Best-effort.
             let _ = localpilot_localmind::record_active_session(cwd, &summary.session_id);
             eprintln!(
-                "learning: closed out session — {} candidate(s), {} enqueued for review",
-                summary.candidate_count, summary.enqueued_count
+                "learning: closed out session — {} candidate(s), {} enqueued, {} auto-accepted",
+                summary.candidate_count, summary.enqueued_count, summary.accepted_count
             );
         }
         Err(error) => eprintln!("learning: closeout skipped ({error})"),
