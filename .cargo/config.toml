@@ -6,3 +6,12 @@ ci-fmt = "fmt --check"
 ci-lint = "clippy --workspace --all-targets -- -D warnings"
 ci-test = "nextest run --workspace"
 ci-check = "check --workspace"
+
+# LocalMind global-scope memory is on by default, rooted at the per-user home.
+# The adapter's tests open the engine store, so root the global store **under each
+# project** (`@project` → `<project>/.localmind-global`) for every in-workspace
+# `cargo test`/`cargo run` — a test's global store is its own and never the
+# developer's real `~/.localmind`. `force` is unset (CI or a user value wins); an
+# installed binary uses the home default unchanged.
+[env]
+LOCALMIND_GLOBAL_ROOT = "@project"

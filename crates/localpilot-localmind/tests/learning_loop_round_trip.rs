@@ -43,6 +43,18 @@ fn learning_loop_closes_and_retrieves_a_promoted_memory() {
     let root = dir.path();
     let store = Store::open(root);
 
+    // This test pins the project-store learning loop, so it scopes memory to the
+    // project — global scope is on by default and would route the explicit lesson
+    // (a `Process` category) to the machine-wide store, which the
+    // `.localmind/memory` path assertions below do not cover. `initialize` keeps
+    // this config (it never overwrites an existing one). The global loop is
+    // covered by the engine's `global_scope` tests.
+    std::fs::write(
+        root.join(".localmind.toml"),
+        "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+    )
+    .expect("write project-scoped learning config");
+
     // 1. Capture the session.
     let session = SessionId::new();
     for (role, text) in GOLDEN_SESSION {

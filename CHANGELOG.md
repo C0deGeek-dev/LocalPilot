@@ -6,17 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- **Machine-wide global memory (opt-in, via LocalMind).** Memory is project-scoped
-  by default, but a project can now opt in to a **global** store shared across
-  every project on the machine — so cross-project knowledge (tool-use patterns,
-  debugging recipes, durable user preferences) accumulates and "the more you use
-  it the smarter it gets" fires across projects. Opt in with `allowed_scopes =
-  ["project", "global_user"]` in `.localmind.toml`; the store lives under
-  `~/.localmind/memory` (overridable). A conservative classifier routes only
-  clearly cross-project lessons there, promotion stays review-gated, and retrieval
-  merges project + global with project precedence. Off by default and `local_only`
-  (same-machine, never remote). See [docs/localmind-integration.md](docs/localmind-integration.md)
-  and LocalMind D-LM-0017.
+- **Machine-wide global memory (on by default, via LocalMind).** A **global**
+  store shared across every project on the machine is now on by default, so
+  cross-project knowledge (tool-use patterns, debugging recipes, durable user
+  preferences) accumulates and "the more you use it the smarter it gets" fires
+  across projects. The store lives under `~/.localmind/memory` (overridable by
+  `global_memory_root` or `LOCALMIND_GLOBAL_ROOT`); a conservative classifier
+  routes only clearly cross-project lessons there, promotion stays review-gated,
+  and retrieval merges project + global with project precedence. `local_only`
+  (same-machine, never remote). A project that wants project-only memory sets
+  `allowed_scopes = ["project"]`. See
+  [docs/localmind-integration.md](docs/localmind-integration.md) and LocalMind
+  D-LM-0017.
 
 - **Project instruction files are injected directly, every turn (default-on).**
   `CLAUDE.md`/`AGENTS.md` previously reached the model only through the
