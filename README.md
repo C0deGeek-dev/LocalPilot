@@ -1,113 +1,59 @@
-```
-╔══════╗ ╔══╗		██╗      ██████╗  ██████╗ █████╗ ██╗     ██████╗ ██╗██╗      ██████╗ ████████╗
-║ >_ █ ║ ║██║║		██║     ██╔═══██╗██╔════╝██╔══██╗██║     ██╔══██╗██║██║     ██╔═══██╗╚══██╔══╝
-╚══╦═══╝ ║██║║		██║     ██║   ██║██║     ███████║██║     ██████╔╝██║██║     ██║   ██║   ██║   
- ══╩══   ╚══╝║		██║     ██║   ██║██║     ██╔══██║██║     ██╔═══╝ ██║██║     ██║   ██║   ██║   
-═════════════╝		███████╗╚██████╔╝╚██████╗██║  ██║███████╗██║     ██║███████╗╚██████╔╝   ██║   
-					╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚══════╝ ╚═════╝    ╚═╝   
-```
-# LocalPilot
+<div align="center">
+  <h1>LocalPilot</h1>
+  <p><strong>A local-first coding agent with a disciplined harness around any compatible model.</strong></p>
+  <p>
+    <a href="docs/install.md">Install</a> ·
+    <a href="docs/providers.md">Providers</a> ·
+    <a href="docs/configuration.md">Configuration</a> ·
+    <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
+  </p>
+  <p>
+    <img alt="version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-7da7ff?style=flat-square">
+    <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-59636e?style=flat-square">
+    <img alt="built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
+    <img alt="GitHub stars" src="https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&amp;label=stars">
+  </p>
+</div>
 
-[![install](https://img.shields.io/badge/install-one--liner-555?style=flat-square)](#getting-started)
-[![stars](https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&label=stars&color=007ec6)](https://github.com/C0deGeek-dev/LocalPilot/stargazers)
-[![issues](https://img.shields.io/github/issues/C0deGeek-dev/LocalPilot?style=flat-square&label=issues&color=4c1)](https://github.com/C0deGeek-dev/LocalPilot/issues)
-[![version](https://img.shields.io/badge/version-1.0.0-4c1?style=flat-square)](CHANGELOG.md)
-[![harness](https://img.shields.io/badge/harness-mode-555?style=flat-square)](#commands)
-[![rules](https://img.shields.io/badge/rules-10%20gates-4c1?style=flat-square)](docs/06-harness-spec.md)
+LocalPilot gives local and hosted models the loop they need to do useful
+software work: inspect files, use tools, edit safely, run checks, recover from
+bad output, and keep going across sessions. The core is provider-neutral and the
+risky parts stay behind explicit permission boundaries.
 
-LocalPilot is a Rust-native, provider-neutral coding-agent harness.
+| At a glance | |
+|---|---|
+| **Use it when** | You want a coding agent you can run against your own model or provider |
+| **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
+| **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, or ACP adapter |
+| **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
+| **Status** | `1.0.0` stable; public CLI, config, and provider contract follow SemVer |
 
-Maintained by C0deGeek.dev (David, Bram).
-Repository: <https://github.com/C0deGeek-dev/LocalPilot>
-Runs on Windows, Linux, and macOS — all first-class, tier-1 platforms.
+## Quick start
 
-## LocalX Ecosystem
-
-- [LocalStack](https://github.com/C0deGeek-dev/LocalStack) is the umbrella
-  ecosystem for the LocalX tools.
-- [LocalBox](https://github.com/C0deGeek-dev/LocalBox) is the model runtime
-  and launcher for local GGUF models.
-- [LocalMind](https://github.com/C0deGeek-dev/LocalMind) is the local-first
-  learning engine for reviewed project memory, graph-connected knowledge,
-  reusable skills, and agent context, embedded by LocalPilot.
-- [LocalBench](https://github.com/C0deGeek-dev/LocalBench) is the benchmarking
-  and evaluation companion for local model/runtime choices.
-- [LocalPilot](https://github.com/C0deGeek-dev/LocalPilot) is this local CLI
-  coding agent.
-
-It is not a fork, clone, port, or redistribution of any vendor CLI. The project
-is designed from first principles around a small set of public concepts:
-
-- a terminal interface for agentic software development
-- two operating modes: a default conversational agent mode and an opt-in,
-  rule-enforced harness mode
-- official model/provider APIs and local OpenAI-compatible servers
-- a rule-enforced harness that turns vague tasks into inspectable plans
-- local state stored in ordinary project files
-- explicit permission boundaries for filesystem, shell, network, and external tools
-
-## Project status
-
-**1.0.0 — stable.** As of 1.0.0 the public CLI, configuration, and provider
-contract are under SemVer (schema stability policy in
-[`docs/configuration.md`](docs/configuration.md)). The full agent loop, harness,
-tools, permissions, provider adapters, TUI, MCP integration, headless drive
-(stdio RPC + an Agent Client Protocol adapter), durable session event log with
-resume/fork, and the LocalMind learning subsystem are implemented and tested
-across Windows, Linux, and macOS in CI, and validated on real local models
-(including a cross-model sweep). The runtime's guarantees are written down as a
-tested reliability contract ([`docs/06`](docs/06-harness-spec.md),
-[`docs/07`](docs/07-security-and-privacy.md)). See
-[`CHANGELOG.md`](CHANGELOG.md) for the release history.
-
-It contains no implementation copied from any closed-source or leaked codebase.
-
-## Why a harness — benchmark
-
-A coding agent is only as good as the loop around the model. Held the **model
-fixed** (a local GGUF model, served by LocalBox) and compared the full LocalPilot
-harness against the **same model called raw, single-shot** — across **225
-Aider-polyglot exercises in 6 languages**, each graded in a network-isolated
-container.
-
-![LocalPilot harness vs. raw model](docs/assets/localpilot-vs-raw.svg)
-
-**The harness ~5× the raw solve rate: 16% → 77% (+61 points)** with the model
-held constant — tools + an agentic loop + iterating against the tests do the
-work. Read the **delta** (harness − raw), not the absolute: public-corpus
-absolutes are contamination-suspect, it is one model and one quant, and a
-600 s-per-exercise timeout counts as unsolved.
-
-## Learns as you use it
-
-**The more you use it, the smarter it gets.** The embedded
-[LocalMind](https://github.com/C0deGeek-dev/LocalMind) engine distills reviewed
-lessons from each session — decisions, fixes, project conventions, tool-usage
-recipes — and feeds the **accepted** ones back into later sessions. Everything is
-**local-first and review-gated**: you approve what is remembered, and nothing
-leaves your machine. In a controlled uplift eval (tasks chosen to leave headroom),
-injecting accepted lessons lifted the solve rate from **0% to 100%**, and the
-effect held on a second model.
-
-## Getting started
-
-Clone with submodules (the LocalMind learning engine is vendored as one):
+You need Rust, Git, and a C compiler. Clone with the LocalMind submodule:
 
 ```sh
 git clone --recurse-submodules https://github.com/C0deGeek-dev/LocalPilot.git
-# or, in an existing clone:
-git submodule update --init --recursive
+cd LocalPilot
 ```
 
-Build and check the environment:
+Install the full terminal build:
 
 ```sh
-cargo build -p localpilot
-cargo run -p localpilot -- doctor
+# Linux / macOS
+./install/install.sh
+
+# Windows PowerShell
+./install/install.ps1
 ```
 
-Point it at a provider in `.localpilot.toml` (official API or a local
-OpenAI-compatible server such as llama.cpp / Ollama / vLLM):
+Check the environment:
+
+```sh
+localpilot doctor
+```
+
+Create `.localpilot.toml` and point it at a local OpenAI-compatible server:
 
 ```toml
 [provider]
@@ -117,114 +63,100 @@ default = "local"
 kind = "openai-compatible"
 base_url = "http://localhost:8080/v1"
 model = "your-local-model"
-# api_key_env = "OPENAI_API_KEY"   # for a hosted API
 ```
 
-Then talk to it:
+Then start a conversation:
+
+```sh
+localpilot chat
+```
+
+Or ask one question without tools:
 
 ```sh
 localpilot ask --model your-local-model "explain this repo's error handling"
-localpilot chat                 # interactive REPL (release builds)
-localpilot                      # no args: launches the REPL, or doctor if unset
 ```
 
-See [`docs/providers.md`](docs/providers.md) for provider setup (including
-per-model context windows, Google Cloud ADC, and reasoning effort),
-[`docs/configuration.md`](docs/configuration.md) for the full config reference
-and stability policy, [`docs/mcp.md`](docs/mcp.md) for MCP tool servers,
-[`docs/extending.md`](docs/extending.md) for adding providers, tools, and
-in-process hooks, and [`docs/embedding.md`](docs/embedding.md) for embedding
-the runtime in-process or driving it headless over RPC/ACP.
+Hosted APIs use the same configuration model; add `api_key_env` and keep the
+credential in the named environment variable. The [provider guide](docs/providers.md)
+covers local servers, hosted providers, context windows, authentication, and
+reasoning settings.
 
-## Commands
+## Why the harness matters
 
-| Command | What it does |
-| --- | --- |
-| `doctor` | Report version, platform, config, providers, tools, trust state (incl. each provider's credential source) |
-| `login \| logout <provider>` | Store/remove a provider API key (bring-your-own-key): deep-link to the key page, paste, validate, save to the OS keychain or a `0600` file. No subscription login |
-| `update [--check]` | Check the repo for a newer release and reinstall from source on confirm |
-| `init` | Initialize project-local state (`.localpilot.toml`, `.gitignore`) |
-| `ask` | Send one prompt and stream the answer (no tools) |
-| `chat` | Interactive terminal REPL with tool approvals, a working indicator, and a task panel |
-| `print` | Run the agent loop once non-interactively (pipelines); `--continue` / `--resume <id>` pick up an existing session |
-| `models` | List what configured OpenAI-compatible servers actually have loaded (`GET /models`), with context windows where reported |
-| `session list \| export \| resume` | Inspect, export, or resume durable sessions rebuilt from the event log |
-| `rpc` | Drive the runtime over stdin/stdout: newline-delimited JSON commands in, streamed session events out |
-| `acp` | Serve the Agent Client Protocol (JSON-RPC over stdio) for editor integrations |
-| `harness intake \| plan \| feature \| resume \| wait-resume` | Rule-enforced mode: idea → `brief.md` → `PROGRESS.md` → worked, committed steps; pause/resume on quota |
-| `memory` | Inspect/search/manage local project memory |
-| `learning` | LocalMind loop: `closeout`, `review`, `promote`, `search`, `skills`, `audit` |
-| `ingest` | Project-local folder ingestion: `preview`, run, `refresh`, `review`, and clean up |
-| `knowledge` | Search and package project-local ingested knowledge |
-| `self-review [--cleanup]` | Read-only repo-health findings (ranked, writes nothing); `--cleanup` adds the whole-repo teardown sweep — dead/abandoned code, duplicate logic, over-engineering, redundant access, doc/test drift |
-| `skills list \| show <name>` | List project skills (advisory prompt modules under `.localpilot/skills` / `.agents/skills`) and read one by name |
-| `handoff [write <objective>] \| resume <id>` | Write a redacted, git-ignored handoff for the latest session, or run the deterministic resume check before a fresh agent continues |
-| `export` | Export a redacted session bundle |
+The model is only one part of a coding agent. In a pinned comparison across 225
+Aider-polyglot exercises, the same local model solved **16%** of tasks raw and
+**77%** through LocalPilot: a **61-point uplift** from tools, iteration, test
+feedback, and recovery.
 
-### Chat controls
+![LocalPilot harness versus the raw model](docs/assets/localpilot-vs-raw.svg)
 
-The REPL runs in your terminal's normal screen buffer and does not capture the
-mouse, so native scrollback, text selection, and copy/paste keep working — scroll
-the transcript the way you scroll any terminal output (mouse wheel or your
-terminal's scroll keys). In the input box, `Enter` sends, and `Alt+Enter`,
-`Ctrl+J`, or a trailing `\` insert a newline; `↑`/`↓` recall input history (and
-move within a multi-line draft) — recall persists across restarts, scoped to the
-current project, and `Ctrl-T` toggles a view of every project's prompts (opt out
-with `[history] persistence = "none"`); `Ctrl-C` cancels an in-flight turn or
-ingest run. Type `/` for slash-command autocomplete and `@` to mention a workspace
-file. `/model` switches the active provider/model mid-conversation without losing
-the transcript (`/model` lists them).
-Bracketed paste is enabled, so large pastes arrive as a single block.
+> [!NOTE]
+> Read the delta, not the absolute score. This is one model and quant; public
+> benchmark data can be contamination-prone, and the 600-second timeout counts
+> an exercise as unsolved.
 
-## Build features
+## The core workflow
 
-The default binary links the LocalMind learning subsystem. The `tui` feature
-adds the interactive `chat` REPL; the `keychain` feature adds the OS-keychain
-credential backend for `localpilot login` (Windows; macOS/Linux use a `0600`
-file); `learning` remains accepted as a compatibility alias for older build
-commands.
+| Command | Use it for |
+|---|---|
+| `localpilot` / `localpilot chat` | Interactive coding sessions with tools and approvals |
+| `localpilot ask` | One prompt, no tools |
+| `localpilot print` | A non-interactive agent run for scripts and pipelines |
+| `localpilot init` | Project-local configuration and ignore rules |
+| `localpilot models` | Models reported by configured OpenAI-compatible servers |
+| `localpilot session list` | Find, export, resume, or fork durable sessions |
+| `localpilot harness …` | Rule-enforced intake, planning, feature work, and resume |
+| `localpilot doctor` | Diagnose providers, credentials, tools, trust, and configuration |
 
-```sh
-cargo build -p localpilot --features tui
-```
+Additional surfaces include MCP tools, `rpc`, `acp`, project knowledge ingestion,
+memory search, skill inspection, handoffs, self-review, and redacted session
+exports. Run `localpilot --help` for the complete command tree.
 
-## Repository layout
+### Terminal controls
+
+- `Enter` sends; `Alt+Enter`, `Ctrl+J`, or a trailing `\` inserts a newline.
+- `↑` / `↓` recalls project-scoped prompt history.
+- `Ctrl-C` cancels the current turn or ingest run.
+- `/` opens slash-command completion; `@` mentions a workspace file.
+- `/model` changes provider or model without losing the conversation.
+
+The REPL uses the terminal's normal screen buffer, so native scrollback,
+selection, and copy/paste continue to work.
+
+## Learns, with your approval
+
+The embedded LocalMind engine can distill decisions, fixes, conventions, and
+tool recipes from opted-in sessions. Candidates enter a review queue; only
+accepted lessons become durable project memory and return as context in future
+sessions.
 
 ```text
-crates/
-  localpilot-cli/        CLI entrypoint and command routing
-  localpilot-core/       Provider-neutral domain types
-  localpilot-config/     Config schema and loading
-  localpilot-llm/        Provider API abstraction (OpenAI-compatible adapter)
-  localpilot-tools/      Tool registry and permission-gated execution
-  localpilot-harness/    Session runtime, intake/planning, rule engine, recovery
-  localpilot-tui/        Terminal UI (ratatui), backend-agnostic core
-  localpilot-store/      Redacted session persistence and export
-  localpilot-sandbox/    Permission engine and execution policy
-  localpilot-mcp/        Model Context Protocol client and stdio transport
-  localpilot-skills/     Skill manifests and drafts (alpha bridge surface)
-  localpilot-recovery/   Bad-output detection and recovery ladder
-  localpilot-verify/     Deterministic verification of tool calls against contracts
-  localpilot-quota/      Quota window tracking and wait/resume policy
-  localpilot-rpc/        Headless drive: stdio RPC protocol and ACP adapter
-  localpilot-localmind/  Adapter to the bundled LocalMind learning engine
-external/
-  localmind/             LocalMind learning engine (git submodule)
-docs/                    Product and technical specifications
+session ──> candidate lessons ──> your review ──> project memory ──> later sessions
 ```
 
-## Design principles
+In a controlled uplift evaluation, accepted lessons moved a deliberately
+headroom-rich task set from **0% to 100%**, and the effect held on a second
+model. Nothing is written to durable memory without review.
 
-1. Original implementation only.
-2. Official APIs (or local servers) only — no private/undocumented endpoints.
-3. Provider-neutral core.
-4. Local-first project state.
-5. Explicit user control for risky actions; `bypass` is never the default.
-6. Reproducible planning and progress.
-7. No hidden consumer-product automation.
-8. No vendor branding as product identity.
+## Pick the right guide
 
-## Local gate (mirrors CI)
+| Topic | Guide |
+|---|---|
+| Installation and updates | [Install](docs/install.md) |
+| Providers and credentials | [Providers](docs/providers.md) |
+| Full configuration schema | [Configuration](docs/configuration.md) |
+| Tools and permissions | [Tool system](docs/05-tool-system.md) and [Security](docs/security.md) |
+| MCP servers | [MCP](docs/mcp.md) |
+| Embedding, RPC, and ACP | [Embedding](docs/embedding.md) |
+| Adding providers or tools | [Extending](docs/extending.md) |
+| Harness guarantees | [Harness specification](docs/06-harness-spec.md) |
+| Release history | [Changelog](CHANGELOG.md) |
+
+<details>
+<summary><strong>Developing LocalPilot</strong></summary>
+
+The local gate mirrors CI:
 
 ```sh
 cargo fmt --check
@@ -237,3 +169,29 @@ cargo machete
 cargo deny check
 cargo audit
 ```
+
+The default binary includes LocalMind-backed learning. The `tui` feature adds
+the interactive terminal, and `keychain` adds the Windows credential backend.
+
+</details>
+
+## Principles
+
+LocalPilot is an original implementation, not a fork or redistribution of a
+vendor CLI. It uses official APIs or local servers, keeps project state local,
+and requires explicit approval for risky actions. Windows, Linux, and macOS are
+first-class platforms.
+
+Maintained by C0deGeek.dev (David and Bram).
+
+## LocalX
+
+LocalPilot is the agent layer in the
+[LocalX toolchain](https://c0degeek-dev.github.io/LocalStack/):
+
+| Project | Role |
+|---|---|
+| [LocalBox](https://github.com/C0deGeek-dev/LocalBox) | Run local models |
+| [LocalBench](https://github.com/C0deGeek-dev/LocalBench) | Find fast, stable settings |
+| **LocalPilot** | Code through the agent harness |
+| [LocalMind](https://github.com/C0deGeek-dev/LocalMind) | Turn reviewed sessions into reusable project memory |
