@@ -38,6 +38,11 @@ pub struct EvalOptions<'a> {
     /// Verification command override for the gate (a single command line). When
     /// `None` the gate detects a command from the workspace stack.
     pub verify_command: Option<&'a str>,
+    /// Learn from this run: after the turn, close the session out into LocalMind
+    /// so it yields review-gated lesson candidates (scope-routed to the
+    /// machine-wide store). Off by default, so a plain `eval` neither reads nor
+    /// writes accumulated memory and stays a clean-room capability measurement.
+    pub learn: bool,
 }
 
 /// Run one eval and print the capability scorecard JSON to stdout.
@@ -116,6 +121,16 @@ pub async fn run_eval(opts: EvalOptions<'_>) -> anyhow::Result<()> {
         schema_validator: Some(&schema_validator),
     });
     println!("{}", card.to_json()?);
+
+    // Learn from this run when asked: close the session out into LocalMind so it
+    // yields review-gated lesson candidates (good and anti-pattern, scope-routed
+    // to the machine-wide store per the classifier). Runs *after* the diff capture
+    // and the scorecard print, so it never pollutes the captured diff or the
+    // JSON-only stdout (close_out reports to stderr); a no-op when learning is
+    // disabled or the session is empty.
+    if opts.learn {
+        crate::context_inject::close_out(&cwd, runtime.session_id());
+    }
     Ok(())
 }
 

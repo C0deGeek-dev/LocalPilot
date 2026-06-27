@@ -279,6 +279,13 @@ enum Command {
         /// `--verify`. Overrides `[harness] verify_command` and stack detection.
         #[arg(long)]
         verify_command: Option<String>,
+        /// Learn from this run: after the turn, close the session out into
+        /// LocalMind so it yields review-gated lesson candidates (good and
+        /// anti-pattern, scope-routed to the machine-wide store). Off by default,
+        /// so a plain `eval` stays a clean-room capability measurement that
+        /// neither reads nor writes accumulated memory.
+        #[arg(long)]
+        learn: bool,
     },
     /// Inspect, resume, or export durable sessions in this workspace.
     Session {
@@ -1171,6 +1178,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             gold_diff,
             verify,
             verify_command,
+            learn,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             eval_cmd::run_eval(eval_cmd::EvalOptions {
@@ -1185,6 +1193,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 // `--verify-command` implies the gate is on.
                 verify: verify || verify_command.is_some(),
                 verify_command: verify_command.as_deref(),
+                learn,
             })
             .await?;
         }
@@ -1533,6 +1542,24 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Eval { verify: false, .. })
+        ));
+    }
+
+    #[test]
+    fn eval_learn_flag_parses_and_defaults_off() {
+        // `--learn` opts the run into closing out into LocalMind (review-gated).
+        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m", "--learn"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval { learn: true, .. })
+        ));
+
+        // Default: a plain `eval` stays a clean-room measurement (no learning).
+        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval { learn: false, .. })
         ));
     }
 }

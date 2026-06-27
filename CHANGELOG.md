@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Learning is on by default (`localpilot eval` stays clean-room).** LocalMind
+  learning now defaults **on** (D-LM-0019), so interactive and agentic runs
+  accumulate reviewed, machine-wide memory out of the box — `local_only`, review-
+  gated (candidates, never auto-active), opt out with `[learning] enabled = false`.
+  Capability measurement is unaffected: **`localpilot eval` neither reads nor
+  writes accumulated memory by default** (clean-room), and a new **`eval --learn`**
+  flag opts a run into closing the session out into LocalMind (review-gated lesson
+  candidates, scope-routed to the global store) — for turning a benchmark or
+  scripted run into a learning corpus without contaminating a measurement arm.
+
 - **Portable signed knowledge bundles (`learning export` / `learning import`).**
   Accepted memory can be exported to a portable, signed bundle and imported on
   another machine or from someone else. `learning export --out pack.json [--scope
