@@ -401,11 +401,38 @@ localpilot learning review list
 localpilot learning review accept <item-id>
 localpilot learning promote <item-id>
 localpilot learning search "<query>"
+localpilot learning export --out pack.json [--scope project|global|both]  # signed memory bundle
+localpilot learning import pack.json [--apply]                            # verify -> review-gated
 localpilot memory inspect
 localpilot memory delete <memory-id>
 localpilot memory graph <symbol>
-localpilot memory export graph.json
+localpilot memory export graph.json   # NOTE: the code-graph snapshot, not the bundle
 ```
+
+### Portable knowledge bundles (`learning export` / `learning import`)
+
+`learning export` writes a **portable, signed** bundle of accepted memory — the
+way to move knowledge across your own machines and share it. The round-trip lives
+under `learning` (not `memory`) because `localpilot memory export` is the
+code-graph snapshot. The bundle is built from the Markdown source of truth,
+re-redacted on the way out, deterministic, and signed (Ed25519 over a SHA-256
+digest) with a local keypair stored `0600` under `~/.localmind/keys/`.
+
+`learning import` verifies the pack **fail-closed** and is **review-gated**:
+
+- A tampered/forged/oversized/unknown-version pack is **rejected** and never
+  reaches the store.
+- A valid signature by an **unknown** key imports as *untrusted* (flagged for
+  heavier review); your own or a trusted key is *trusted*.
+- It is a **dry run by default** (writes nothing, reports counts); `--apply`
+  enqueues the entries as **review candidates** — never straight into active
+  memory. Each carries import provenance (origin author, trust class, digest).
+
+**Trust UX (stated plainly in the CLI output and here):** *a verified author is
+not verified content.* A signature attests integrity and authorship only;
+imported memory is still reviewed before it is used. Trust is local — a keypair
+plus a manual trust list, no PKI or network (D002). See LocalMind
+`docs/decisions.md` D-LM-0018 and `docs/on-disk-contract.md` §Signed bundle.
 
 The agent also has a read-only `knowledge_search` tool (registered on every
 session path) that pulls a ranked cross-source pack on demand — ingested files,

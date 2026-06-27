@@ -471,6 +471,24 @@ enum LearningCommand {
         /// Review item id.
         id: String,
     },
+    /// Export accepted memory to a portable, signed bundle file.
+    Export {
+        /// Destination file for the signed bundle.
+        #[arg(long)]
+        out: PathBuf,
+        /// Which scopes to include: project, global, or both.
+        #[arg(long, default_value = "both")]
+        scope: String,
+    },
+    /// Import a signed bundle: verify, then (with --apply) enqueue for review.
+    Import {
+        /// Signed bundle file to import.
+        input: PathBuf,
+        /// Write imported entries as review candidates. Without it this is a dry
+        /// run that reports what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Search accepted memory.
     Search {
         /// Search query.
@@ -1011,6 +1029,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     learning_cmd::seed(root, &file, dry_run, &mut stdout)?
                 }
                 LearningCommand::Promote { id } => learning_cmd::promote(root, &id, &mut stdout)?,
+                LearningCommand::Export { out, scope } => {
+                    learning_cmd::bundle_export(root, &scope, &out, &mut stdout)?;
+                }
+                LearningCommand::Import { input, apply } => {
+                    learning_cmd::bundle_import(root, &input, apply, &mut stdout)?;
+                }
                 LearningCommand::Search {
                     query,
                     format,

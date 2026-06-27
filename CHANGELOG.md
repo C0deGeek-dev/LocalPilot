@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Portable signed knowledge bundles (`learning export` / `learning import`).**
+  Accepted memory can be exported to a portable, signed bundle and imported on
+  another machine or from someone else. `learning export --out pack.json [--scope
+  project|global|both]` writes a deterministic, re-redacted, Ed25519-signed pack;
+  `learning import pack.json [--apply]` verifies it **fail-closed** (a tampered or
+  unknown-version pack is rejected and never stored), classifies trust
+  (trusted/untrusted by signing key), and is **review-gated** — a dry run by
+  default, `--apply` enqueues entries as review candidates with import provenance,
+  never straight into active memory. The CLI states plainly that *a verified
+  author is not verified content*. Trust is local (a keypair + manual trust list,
+  no PKI). The round-trip lives under `learning` because `memory export` is the
+  code-graph snapshot. See `docs/localmind-integration.md`.
+
 - **Machine-wide global memory (on by default, via LocalMind).** A **global**
   store shared across every project on the machine is now on by default, so
   cross-project knowledge (tool-use patterns, debugging recipes, durable user

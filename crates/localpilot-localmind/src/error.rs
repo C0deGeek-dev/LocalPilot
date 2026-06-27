@@ -39,4 +39,8 @@ pub enum LearningError {
     /// A code-graph operation failed.
     #[error("localmind code graph: {0}")]
     Graph(String),
+
+    /// A portable memory-bundle export/import operation failed.
+    #[error("localmind bundle: {0}")]
+    Bundle(String),
 }

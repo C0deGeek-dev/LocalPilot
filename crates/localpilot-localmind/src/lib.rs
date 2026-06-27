@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod active_skills_tool;
+mod bundle;
 mod chunk_store;
 mod codegraph;
 mod context_hook;
@@ -38,6 +39,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub use active_skills_tool::ActiveSkills;
+pub use bundle::{bundle_export, bundle_import, BundleExportSummary, BundleImportSummary};
 pub use codegraph::{
     codegraph_export, codegraph_impact, codegraph_inspect, codegraph_reindex, CodeGraphSummary,
     ExportFormat, SymbolReport,

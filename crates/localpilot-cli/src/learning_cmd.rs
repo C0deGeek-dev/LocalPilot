@@ -56,6 +56,95 @@ pub fn seed(cwd: &Path, file: &Path, dry_run: bool, out: &mut dyn Write) -> anyh
     Ok(())
 }
 
+/// Export accepted memory to a portable, signed bundle file.
+///
+/// # Errors
+/// Returns an error if the store cannot be read, the signing key cannot be
+/// loaded/created, or the file cannot be written.
+pub fn bundle_export(
+    cwd: &Path,
+    scope: &str,
+    out_path: &Path,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let summary = learning::bundle_export(cwd, scope, out_path)?;
+    writeln!(
+        out,
+        "exported {} accepted memor{} to {}",
+        summary.entries,
+        if summary.entries == 1 { "y" } else { "ies" },
+        summary.output
+    )?;
+    writeln!(
+        out,
+        "signed by author {} (digest {})",
+        summary.author, summary.digest
+    )?;
+    if summary.redactions > 0 {
+        writeln!(
+            out,
+            "redacted {} apparent secret(s) before export",
+            summary.redactions
+        )?;
+    }
+    Ok(())
+}
+
+/// Import a signed bundle: verify, then (with `apply`) enqueue its entries for
+/// review. Without `apply` it is a dry run that writes nothing.
+///
+/// # Errors
+/// Returns an error if the file cannot be read/parsed or the import fails.
+pub fn bundle_import(
+    cwd: &Path,
+    input: &Path,
+    apply: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let summary = learning::bundle_import(cwd, input, apply)?;
+    if summary.trust == "rejected" {
+        writeln!(
+            out,
+            "rejected: {}. nothing was imported.",
+            summary
+                .rejected_reason
+                .as_deref()
+                .unwrap_or("verification failed")
+        )?;
+        return Ok(());
+    }
+    if summary.trust == "untrusted" {
+        writeln!(
+            out,
+            "verified: UNTRUSTED author (valid signature, unknown key) — review carefully"
+        )?;
+    } else {
+        writeln!(out, "verified: trusted author")?;
+    }
+    writeln!(
+        out,
+        "{} {} entr{}: {} new, {} duplicate",
+        if summary.applied {
+            "enqueued for review from"
+        } else {
+            "dry run over"
+        },
+        summary.total,
+        if summary.total == 1 { "y" } else { "ies" },
+        summary.added,
+        summary.duplicate
+    )?;
+    // Honest trust UX: a signature attests the author, not the content.
+    writeln!(
+        out,
+        "a verified author is not verified content — imported memory is reviewed before it is used"
+    )?;
+    if !summary.applied {
+        writeln!(out, "re-run with --apply to enqueue these for review")?;
+    }
+    Ok(())
+}
+
 /// List the review queue, grouped into similarity clusters so a reviewer can
 /// triage near-duplicates together.
 ///
