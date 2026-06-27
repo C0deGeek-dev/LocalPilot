@@ -43,7 +43,13 @@ is SemVer-stable; the configuration schema stability policy is in
   lever — an unbounded loop is a defect — so it ships on; tune or lift it with
   explicit `tool_call_budget`/`turn_timeout_secs`. The verify gate now also stops
   a turn with `NoProgress` (not a clean `Done`) when its build never goes green
-  within the re-entry cap, tying the no-progress signal to the build result. See
+  within the re-entry cap, tying the no-progress signal to the build result. The
+  built-in default fills only the hard ceiling (no soft start), so the cost
+  controller's no-progress branch is inert under it; the always-on degenerate-loop
+  guard (ADR-0052: repeated/cyclic calls or a run of consecutive failures) now
+  stays active for the built-in default and only defers to the controller when an
+  operator sets an **explicit** budget — so a spinning or failing loop stops early
+  on `NoProgress` instead of burning the whole ceiling. See
   [docs/06-harness-spec.md](docs/06-harness-spec.md) §Built-In Safety Rails and
   ADR-0055 (refining ADR-0029/0052).
 

@@ -33,6 +33,38 @@ fn runtime_budgets(
             trusted: true,
             tool_call_budget: Some(soft_start),
             tool_call_budget_max: Some(hard_max),
+            // An operator-set budget: the cost controller owns the no-progress
+            // stop, so the always-on guard defers to it.
+            tool_budget_explicit: true,
+            ..SessionConfig::default()
+        },
+        Vec::new(),
+    )
+}
+
+/// A runtime mirroring the built-in default rail (ADR-0055): the resolver fills
+/// `tool_call_budget_max` with no soft start and marks the budget *not*
+/// operator-explicit. The `soft == hard` collapse disables the controller's
+/// no-progress branch, so the always-on degenerate-loop guard must stay active.
+fn runtime_builtin_default(
+    root: &std::path::Path,
+    provider: FakeProvider,
+    hard_max: usize,
+) -> SessionRuntime {
+    SessionRuntime::new(
+        Arc::new(provider),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Bypass, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig {
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            tool_call_budget: None,
+            tool_call_budget_max: Some(hard_max),
+            tool_budget_explicit: false,
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -257,6 +289,95 @@ fn a_spinning_turn_stops_on_no_progress_before_the_max() {
         reason,
         StopReason::NoProgress,
         "a spinning turn stops on no progress, distinct from the cost ceiling"
+    );
+}
+
+#[test]
+fn the_builtin_default_rail_halts_a_spinning_loop_on_no_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("f.txt"), "x\n").unwrap();
+
+    // The built-in default fills only `..._max` (no soft start), so the budget
+    // collapses to `soft == hard` — the controller's no-progress branch is dead.
+    // Without the always-on guard staying active for the built-in default, these
+    // 20 identical reads would run unchecked to `done` (the regression); the guard
+    // must instead stop the spin early on `NoProgress`, far below the ceiling.
+    let mut provider = FakeProvider::new();
+    for _ in 0..20 {
+        provider = provider.tool_call("c", "read_file", json!({ "path": "f.txt" }));
+    }
+    provider = provider.text("done");
+
+    let mut runtime = runtime_builtin_default(root, provider, 50);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("read it repeatedly", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::NoProgress,
+        "the built-in default keeps the always-on guard; a spin stops early, not at the ceiling"
+    );
+}
+
+#[test]
+fn the_builtin_default_rail_halts_a_run_of_failing_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Consecutive failures (reading a missing file). The no-progress detector is
+    // fed only by successful calls, so the consecutive-failure guard is the one
+    // that must catch this. A ceiling of 50 sits above the 12-failure limit, so a
+    // `NoProgress` stop proves the guard — not the cost cap — fired.
+    let mut provider = FakeProvider::new();
+    for _ in 0..20 {
+        provider = provider.tool_call("c", "read_file", json!({ "path": "missing.txt" }));
+    }
+    provider = provider.text("gave up");
+
+    let mut runtime = runtime_builtin_default(root, provider, 50);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason =
+        rt.block_on(runtime.run_turn("read the missing file repeatedly", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::NoProgress,
+        "a run of consecutive failures halts on the built-in default's always-on guard"
+    );
+}
+
+#[test]
+fn the_builtin_default_ceiling_still_bounds_a_nondegenerate_runaway() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Distinct, progressing reads that defeat the no-progress signal: the guard
+    // never fires, so the cost ceiling is the only bound. Twelve distinct reads
+    // against a ceiling of eight must stop on the cost cap — the built-in `..._max`
+    // still bounds a runaway the early guard cannot catch.
+    let mut provider = FakeProvider::new();
+    for i in 0..12 {
+        let name = format!("f{i}.txt");
+        std::fs::write(root.join(&name), format!("contents {i}\n")).unwrap();
+        provider = provider.tool_call(&format!("c{i}"), "read_file", json!({ "path": name }));
+    }
+    provider = provider.text("read them all");
+
+    let mut runtime = runtime_builtin_default(root, provider, 8);
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("read each file", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::BudgetExceeded,
+        "a non-degenerate runaway is still capped by the built-in ceiling"
     );
 }
 

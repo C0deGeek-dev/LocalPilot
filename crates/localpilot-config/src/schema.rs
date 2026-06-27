@@ -703,6 +703,13 @@ pub struct ResolvedRails {
     /// Per-turn wall-clock timeout in seconds; the headless built-in default
     /// fills this when unset, interactive leaves it `None`.
     pub turn_timeout_secs: Option<u64>,
+    /// Whether the budget came from an explicit `[harness]` value (the operator
+    /// set `tool_call_budget` and/or `tool_call_budget_max`) rather than the
+    /// built-in default fill. Threaded to `SessionConfig::tool_budget_explicit`:
+    /// the always-on degenerate-loop guard (ADR-0052) stays active for the
+    /// built-in default; an explicit budget hands the no-progress stop to the
+    /// cost controller.
+    pub budget_explicit: bool,
 }
 
 impl HarnessConfig {
@@ -715,18 +722,21 @@ impl HarnessConfig {
     #[must_use]
     pub fn resolved_rails(&self, interactive: bool) -> ResolvedRails {
         // The budget is enabled by setting *either* field; only fall back to the
-        // built-in ceiling when the config set neither.
-        let (tool_call_budget, tool_call_budget_max) =
-            if self.tool_call_budget.is_some() || self.tool_call_budget_max.is_some() {
-                (self.tool_call_budget, self.tool_call_budget_max)
+        // built-in ceiling when the config set neither. The same condition records
+        // whether the budget is operator-explicit (the always-on degenerate-loop
+        // guard stays on for the built-in default — see SessionConfig).
+        let budget_explicit =
+            self.tool_call_budget.is_some() || self.tool_call_budget_max.is_some();
+        let (tool_call_budget, tool_call_budget_max) = if budget_explicit {
+            (self.tool_call_budget, self.tool_call_budget_max)
+        } else {
+            let fallback = if interactive {
+                DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX
             } else {
-                let fallback = if interactive {
-                    DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX
-                } else {
-                    DEFAULT_HEADLESS_TOOL_BUDGET_MAX
-                };
-                (None, Some(fallback))
+                DEFAULT_HEADLESS_TOOL_BUDGET_MAX
             };
+            (None, Some(fallback))
+        };
         let turn_timeout_secs = match (self.turn_timeout_secs, interactive) {
             (Some(secs), _) => Some(secs),
             (None, false) => Some(DEFAULT_HEADLESS_TURN_TIMEOUT_SECS),
@@ -736,6 +746,7 @@ impl HarnessConfig {
             tool_call_budget,
             tool_call_budget_max,
             turn_timeout_secs,
+            budget_explicit,
         }
     }
 }
@@ -1115,6 +1126,10 @@ mod tests {
             headless.turn_timeout_secs,
             Some(DEFAULT_HEADLESS_TURN_TIMEOUT_SECS)
         );
+        // The built-in fill is not operator-explicit, so the always-on
+        // degenerate-loop guard stays active (ADR-0052) — a `soft == hard`
+        // ceiling alone would otherwise let a stuck turn burn to the cap.
+        assert!(!headless.budget_explicit);
 
         // Interactive: a higher ceiling and no default wall-clock (a long turn is
         // legitimate and the user can cancel).
@@ -1124,6 +1139,7 @@ mod tests {
             Some(DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX)
         );
         assert_eq!(interactive.turn_timeout_secs, None);
+        assert!(!interactive.budget_explicit);
     }
 
     #[test]
@@ -1136,6 +1152,9 @@ mod tests {
         let rails = soft_only.resolved_rails(false);
         assert_eq!(rails.tool_call_budget, Some(7));
         assert_eq!(rails.tool_call_budget_max, None);
+        // An operator-set budget is explicit, so the cost controller owns the
+        // no-progress stop (the always-on guard defers).
+        assert!(rails.budget_explicit);
 
         // An explicit timeout wins, including on the interactive profile.
         let timed = HarnessConfig {

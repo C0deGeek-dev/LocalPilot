@@ -206,6 +206,18 @@ pub struct SessionConfig {
     /// fixed budget; raising it lets a productive turn extend past the soft start.
     /// `None` disables the ceiling; setting either budget field enables the budget.
     pub tool_call_budget_max: Option<usize>,
+    /// Whether the budget came from an explicit operator `[harness]` value rather
+    /// than the built-in default fill (ADR-0055). It governs *who owns the
+    /// no-progress stop*: with an explicit budget the cost controller owns it
+    /// (defer the always-on guard), but the built-in default must keep the
+    /// always-on degenerate-loop guard (ADR-0052: repeated/cyclic calls or a run
+    /// of consecutive failures) active — otherwise a built-in `..._max` with no
+    /// soft start collapses to `soft == hard`, which disables both the controller's
+    /// no-progress branch and (when keyed on `hard_max`) the always-on guard,
+    /// leaving a stuck turn to burn the full ceiling. `false` (this programmatic
+    /// default) keeps the always-on guard, matching a library `SessionConfig` that
+    /// bypasses `resolved_rails`.
+    pub tool_budget_explicit: bool,
     /// When set, the no-unsupported-claim gate reviews the final reply: an
     /// action-completion claim that no `Verified` call supports is flagged.
     /// Off by default until the benchmark shows a low false-positive rate.
@@ -266,6 +278,7 @@ impl Default for SessionConfig {
             enforce_prior_read: false,
             tool_call_budget: None,
             tool_call_budget_max: None,
+            tool_budget_explicit: false,
             enforce_claim_gate: false,
             rules: IndexMap::new(),
             tool_marker_enabled: false,
@@ -2192,13 +2205,17 @@ impl SessionRuntime {
                 // cleanly with a model-visible, recorded reason before the next
                 // call runs. The hard cost ceiling always wins; a no-progress
                 // stop is distinct so it is diagnosable.
-                // Always-on degenerate-loop guard. The cost budget is opt-in, but
-                // a turn that is provably not progressing must still stop instead
-                // of spinning unbounded: a tripped no-progress detector (a repeated
-                // or cyclic call set) or a long run of consecutive failing calls
-                // ends the turn even with the budget off. When the budget is on,
-                // the controller below owns the no-progress stop. See ADR-0052.
-                if budget.hard_max().is_none()
+                // Always-on degenerate-loop guard. A turn that is provably not
+                // progressing must still stop instead of spinning to the ceiling:
+                // a tripped no-progress detector (a repeated or cyclic call set) or
+                // a long run of consecutive failing calls ends the turn. This stays
+                // active for both no budget and the *built-in* default rail
+                // (ADR-0055) — the built-in `..._max` with no soft start collapses
+                // to `soft == hard`, which kills the controller's no-progress branch
+                // below, so without this guard a stuck turn would burn the whole
+                // ceiling. Only an *explicit* operator budget hands the no-progress
+                // stop to the controller. See ADR-0052.
+                if !self.config.tool_budget_explicit
                     && (no_progress.is_tripped() || unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT)
                 {
                     let notice = "no forward progress this turn (repeated or failing \

@@ -25,8 +25,10 @@ fn an_empty_config_self_bounds_a_runaway_headless_turn() {
     std::fs::write(root.join("f.txt"), "x\n").unwrap();
 
     // The defect this guards: an empty `.localpilot.toml` leaves budget+timeout
-    // unset. The resolver fills the headless ceiling, so a runaway that would
-    // otherwise run unbounded stops at it.
+    // unset. The resolver fills the headless ceiling AND marks the budget
+    // not-operator-explicit, so the always-on degenerate-loop guard stays active —
+    // a spinning runaway stops early on no-progress rather than running unbounded
+    // (or burning the whole ceiling).
     let rails = HarnessConfig::default().resolved_rails(false);
     assert_eq!(
         rails.tool_call_budget_max,
@@ -65,16 +67,15 @@ fn an_empty_config_self_bounds_a_runaway_headless_turn() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let reason = rt.block_on(runtime.run_turn("read forever", &events, &cancel));
 
-    // The turn stops itself with a recorded cost-ceiling reason, and a parseable
-    // handoff is available — never an unbounded loop run to an external kill.
-    assert_eq!(reason, StopReason::BudgetExceeded);
+    // The turn stops itself early on the always-on no-progress guard — the spin is
+    // caught well below the ceiling — with a parseable handoff, never an unbounded
+    // loop run to an external kill.
+    assert_eq!(reason, StopReason::NoProgress);
     let handoff = runtime
         .last_turn_handoff()
         .expect("a handoff at the single exit");
-    assert_eq!(handoff.reason, StopReason::BudgetExceeded);
-    assert!(handoff
-        .to_json_line()
-        .contains("\"stop\":\"BudgetExceeded\""));
+    assert_eq!(handoff.reason, StopReason::NoProgress);
+    assert!(handoff.to_json_line().contains("\"stop\":\"NoProgress\""));
 }
 
 #[test]

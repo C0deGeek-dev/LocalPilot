@@ -85,6 +85,7 @@ pub async fn run(
             ),
             tool_call_budget: rails.tool_call_budget,
             tool_call_budget_max: rails.tool_call_budget_max,
+            tool_budget_explicit: rails.budget_explicit,
             rules: config.harness.rules.clone(),
             enforce_claim_gate: config.harness.claim_gate.is_enabled(),
             tool_marker_enabled: config.tools.marker,
