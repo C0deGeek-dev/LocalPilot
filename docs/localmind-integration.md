@@ -431,7 +431,7 @@ digest) with a local keypair stored `0600` under `~/.localmind/keys/`.
 **Trust UX (stated plainly in the CLI output and here):** *a verified author is
 not verified content.* A signature attests integrity and authorship only;
 imported memory is still reviewed before it is used. Trust is local — a keypair
-plus a manual trust list, no PKI or network (D002). See LocalMind
+plus a manual trust list, no PKI or network. See LocalMind
 `docs/decisions.md` D-LM-0018 and `docs/on-disk-contract.md` §Signed bundle.
 
 The agent also has a read-only `knowledge_search` tool (registered on every
