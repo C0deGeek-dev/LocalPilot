@@ -21,8 +21,8 @@ pub use context::{
 pub use credentials::{CredentialError, CredentialSource, CredentialStore};
 pub use error::ConfigError;
 pub use load::{
-    credential_store_path, load, project_config_path, prompt_history_path, user_config_path,
-    CliOverrides, ConfigPaths,
+    credential_store_path, learning_notice_marker_path, load, project_config_path,
+    prompt_history_path, user_config_path, CliOverrides, ConfigPaths,
 };
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,

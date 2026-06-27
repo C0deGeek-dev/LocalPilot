@@ -181,6 +181,18 @@ pub fn credential_store_path() -> Option<PathBuf> {
     config_base_dir().map(|base| base.join("localpilot").join("credentials.json"))
 }
 
+/// Marker file recording that the one-time "learning is on by default" notice has
+/// been shown. Resolved per-user alongside the config file. Its presence
+/// suppresses the notice on later runs. Returns `None` when no base dir is set
+/// (in which case the notice is simply skipped rather than shown every run).
+#[must_use]
+pub fn learning_notice_marker_path() -> Option<PathBuf> {
+    config_base_dir().map(|base| {
+        base.join("localpilot")
+            .join(".learning-default-notice-shown")
+    })
+}
+
 #[cfg(windows)]
 fn config_base_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(PathBuf::from)

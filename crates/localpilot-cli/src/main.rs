@@ -769,6 +769,40 @@ fn resolve_learning_store(
 /// convention (128 + SIGPIPE 13) that broken-pipe-aware tooling already expects.
 const EXIT_OUTPUT_CONSUMER_GONE: u8 = 141;
 
+/// Print the one-time "learning is on by default" transparency notice the first
+/// time LocalPilot runs after the default flipped. Learning is **local-only**
+/// (never leaves the machine), redacted, and review-gated, so this is disclosure,
+/// not a consent gate. A marker under the per-user config dir suppresses it on
+/// later runs; the notice goes to **stderr** so it never disturbs a piped
+/// `print`/`eval`/`rpc` stdout. Best-effort: if the marker can't be persisted
+/// (no base dir / write failure) the notice is skipped rather than shown every
+/// run.
+fn maybe_show_learning_notice() {
+    let Some(marker) = localpilot_config::learning_notice_marker_path() else {
+        return;
+    };
+    if marker.exists() {
+        return;
+    }
+    // Persist the marker *before* printing, and only print if it persisted, so the
+    // notice shows exactly once — never on every invocation.
+    if let Some(parent) = marker.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if std::fs::write(&marker, b"shown\n").is_err() {
+        return;
+    }
+    eprintln!(
+        "localpilot: LocalMind learning is now ON by default — your sessions become \
+         reviewed, machine-wide memory, so the agent gets better the more you use it. \
+         It is LOCAL-ONLY (never leaves your machine), redacted, and review-gated (you \
+         approve what is remembered; nothing is auto-applied). Opt out with \
+         `[learning] enabled = false`, or manage it with `localpilot learning`."
+    );
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -778,6 +812,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         eprintln!("localpilot: logging to {}", log_path.display());
     }
     let cli = Cli::parse();
+    maybe_show_learning_notice();
 
     let command = match cli.command {
         Some(command) => command,

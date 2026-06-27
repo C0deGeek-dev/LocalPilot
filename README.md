@@ -135,10 +135,12 @@ selection, and copy/paste continue to work.
 
 ## Learns, with your approval
 
-The embedded LocalMind engine can distill decisions, fixes, conventions, and
-tool recipes from opted-in sessions. Candidates enter a review queue; only
-accepted lessons become durable project memory and return as context in future
-sessions.
+The embedded LocalMind engine distills decisions, fixes, conventions, and tool
+recipes from your sessions — **on by default** as of this release, and
+**local-only** (it never leaves your machine). Candidates enter a review queue;
+only accepted lessons become durable, machine-wide memory and return as context
+in future sessions. It is review-gated and redacted, so this is disclosure, not
+a data grab — opt out any time with `[learning] enabled = false`.
 
 ```text
 session ──> candidate lessons ──> your review ──> project memory ──> later sessions
