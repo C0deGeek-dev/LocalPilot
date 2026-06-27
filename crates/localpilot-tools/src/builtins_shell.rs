@@ -426,20 +426,37 @@ impl Tool for RunShell {
             .current_dir(ctx.workspace.root())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+            // We reap the whole process tree explicitly on timeout (below). Do not
+            // let a dropped future kill only the immediate child: on Windows that
+            // kills the shell wrapper first and orphans the grandchild that is the
+            // real workload (a hung test run can hold gigabytes).
+            .kill_on_drop(false);
+        // On Unix, lead a new process group so a timeout can signal the whole tree
+        // with a single negative-pid kill, even after the group leader exits.
+        #[cfg(unix)]
+        command.process_group(0);
 
         let child = command
             .spawn()
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
+        let pid = child.id();
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(ToolError::Failed(e.to_string())),
+            Ok(Err(e)) => {
+                if let Some(pid) = pid {
+                    kill_process_tree(pid).await;
+                }
+                return Err(ToolError::Failed(e.to_string()));
+            }
             Err(_) => {
+                if let Some(pid) = pid {
+                    kill_process_tree(pid).await;
+                }
                 return Err(ToolError::Failed(format!(
                     "command timed out after {}s. If this is a long-running server or \
                      watcher, start it with the `run_background` tool instead.",
                     timeout.as_secs()
-                )))
+                )));
             }
         };
 
@@ -450,6 +467,39 @@ impl Tool for RunShell {
         let mut result = cap(text);
         result.is_error = !output.status.success();
         Ok(result)
+    }
+}
+
+/// Kill a timed-out command's entire process tree. `kill_on_drop` reaps only the
+/// immediate child; a shell-wrapped command (`cmd /c` / `sh -c`) leaves its real
+/// workload as a grandchild that would otherwise orphan and leak — a hung test
+/// run or runaway model solution can hold gigabytes for the rest of the session.
+/// On Windows `taskkill /T` walks and force-kills the child tree; on Unix the
+/// child leads its own process group (set at spawn), so a negative pid signals
+/// the whole group even after the leader exits. Best-effort: an unreapable
+/// process is the OS's to report, never surfaced as a tool error.
+async fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+    #[cfg(unix)]
+    {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
     }
 }
 
@@ -470,6 +520,32 @@ mod tests {
             processes: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_shell_times_out_and_reaps_a_hung_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            retention: None,
+            processes: None,
+        };
+        // A command that sleeps well past the 1s timeout: the timeout path must
+        // return a "timed out" error and exercise the tree-reap (kill_process_tree
+        // runs in this branch). Not a dev-server/watcher, so it is not diverted.
+        #[cfg(windows)]
+        let command = "ping 127.0.0.1 -n 10";
+        #[cfg(unix)]
+        let command = "sleep 10";
+        let input = json!({ "command": command, "timeout_secs": 1 });
+        let err = RunShell.invoke(input, &ctx).await.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("timed out"),
+            "expected a timeout error, got {err:?}"
+        );
     }
 
     fn reads_a_secret(effects: &[Effect]) -> bool {
