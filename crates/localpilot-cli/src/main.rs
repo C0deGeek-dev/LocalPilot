@@ -516,6 +516,47 @@ enum LearningCommand {
     },
     /// Print the memory-change audit log.
     Audit,
+    /// Freshness pass: flag stale / dead-weight / version-sensitive accepted
+    /// memory for review. Dry-run by default (`--apply` writes); never deletes.
+    Freshness {
+        /// Which store(s) to groom: project, global, or both.
+        #[arg(long, default_value = "both")]
+        scope: String,
+        /// Apply the flags (write). Without it, a dry run reports candidates only.
+        #[arg(long)]
+        apply: bool,
+        /// Flag memory older than this many days.
+        #[arg(long)]
+        max_age_days: Option<i64>,
+        /// Flag never-retrieved memory older than this many days.
+        #[arg(long)]
+        unused_grace_days: Option<i64>,
+        /// Flag version-sensitive memory older than this many days.
+        #[arg(long)]
+        version_sensitive_min_age_days: Option<i64>,
+        /// Cap on the flags emitted in one pass.
+        #[arg(long)]
+        max_flags: Option<usize>,
+        /// Output format. Defaults to JSON when stdout is not a terminal.
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Memory lifecycle queues: flagged-for-review (stale), never-retrieved,
+    /// most-used, and contradicted. Read-only.
+    Lifecycle {
+        /// Cap on the most-used section.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// Output format. Defaults to JSON when stdout is not a terminal.
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -803,8 +844,28 @@ fn maybe_show_learning_notice() {
     );
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<std::process::ExitCode> {
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    // The clap command tree and the top-level command future are large; on Windows
+    // the OS main thread's ~1 MiB default stack overflows building them in a debug
+    // build (a `STATUS_STACK_OVERFLOW` before any work runs). Drive everything on a
+    // worker thread with a generous stack so the binary behaves identically across
+    // platforms (tier-1 parity, ADR-0007).
+    const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+    let worker = std::thread::Builder::new()
+        .name("localpilot-main".to_string())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run())
+        })?;
+    worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("localpilot main thread panicked"))?
+}
+
+async fn run() -> anyhow::Result<std::process::ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(log_path) = logging::init(&cwd) {
         // The path goes to stderr (not the TUI's stdout) so the user knows where
@@ -1103,6 +1164,31 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                     }
                 },
                 LearningCommand::Audit => learning_cmd::audit(root, &mut stdout)?,
+                LearningCommand::Freshness {
+                    scope,
+                    apply,
+                    max_age_days,
+                    unused_grace_days,
+                    version_sensitive_min_age_days,
+                    max_flags,
+                    format,
+                    json,
+                } => {
+                    let is_tty = io::stdout().is_terminal();
+                    let resolved = output::resolve_format(format, json, is_tty);
+                    let params = localpilot_localmind::FreshnessParams {
+                        max_age_days,
+                        unused_grace_days,
+                        version_sensitive_min_age_days,
+                        max_flags,
+                    };
+                    learning_cmd::freshness(root, &params, &scope, apply, resolved, &mut stdout)?;
+                }
+                LearningCommand::Lifecycle { top, format, json } => {
+                    let is_tty = io::stdout().is_terminal();
+                    let resolved = output::resolve_format(format, json, is_tty);
+                    learning_cmd::lifecycle(root, top, resolved, &mut stdout)?;
+                }
             }
         }
         Command::Ingest { command } => {

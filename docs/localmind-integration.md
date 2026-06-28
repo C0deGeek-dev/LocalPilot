@@ -109,7 +109,19 @@ commits).
   `skill_drafts` tool. Surfacing a draft never enables it; the disabled flag stays
   authoritative and activation stays a deliberate human step.
 - `localpilot learning` exposes the rich LocalMind loop: `closeout`, `review`,
-  `promote`, `search`, `skills`, and `audit`.
+  `promote`, `search`, `skills`, `audit`, `freshness`, and `lifecycle`.
+- `localpilot learning freshness` runs the proactive freshness pass: it flags
+  stale / never-retrieved / version-sensitive accepted memory **for review** (by
+  age, never-retrieved-after-a-grace, and a version-sensitive heuristic), across
+  the project and global stores (`--scope project|global|both`). It is **dry-run
+  by default** (`--apply` writes), bounded by a per-run cap (threshold/cap flags:
+  `--max-age-days`, `--unused-grace-days`, `--version-sensitive-min-age-days`,
+  `--max-flags`), and **never deletes** — it only routes to the existing review
+  gate, so a flagged lesson is resolved with `learning review` (accept / supersede
+  via edit) or `memory delete`. `localpilot learning lifecycle` lists the queues
+  (flagged-for-review, never-retrieved, most-used, contradicted). Both support
+  `--format human|json`. Usage counts that drive "never retrieved"/"most used" are
+  bumped post-turn, off the retrieval read path.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
 - Agent turns contribute relevant accepted LocalMind memory as best-effort

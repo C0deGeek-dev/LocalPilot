@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Accepted memory now has a proactive lifecycle: usage tracking + a freshness
+  pass + an operator surface.** A memory's hit count is bumped when it is injected
+  into a turn (best-effort, post-turn, off the retrieval path), so dead weight and
+  high-value lessons are both visible. New `localpilot learning freshness` flags
+  stale / never-retrieved / version-sensitive accepted memory **for review** — by
+  age, never-retrieved-after-a-grace, and a version-sensitive heuristic, across the
+  project and global stores (`--scope project|global|both`); it is **dry-run by
+  default** (`--apply` writes), bounded by a per-run cap, and **never deletes** — a
+  flagged lesson is resolved through the existing `learning review` / `memory
+  delete` path. `localpilot learning lifecycle` lists the queues (flagged,
+  never-retrieved, most-used, contradicted). Both honour `--format human|json`.
+
 - **`edit_file`/`multi_edit`/`apply_patch` match across CRLF/LF line endings.**
   The edit tools matched `old_text` against the raw file bytes, so a model that
   emits `old_text` with `\n` could not edit a CRLF-stored file — every attempt

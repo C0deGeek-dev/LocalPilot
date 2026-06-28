@@ -5,8 +5,9 @@
 
 use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
 use localmind_store::{
-    MemoryPersistence, MemoryPersistenceError, MemoryRecord, ReviewQueue, ReviewQueueItem,
-    SkillDraftRecord, SkillDraftStore, StoreConfigError,
+    FreshnessReport, FreshnessScope, FreshnessThresholds, MemoryPersistence,
+    MemoryPersistenceError, MemoryRecord, ReviewQueue, ReviewQueueItem, SkillDraftRecord,
+    SkillDraftStore, StoreConfigError,
 };
 
 use crate::LearningError;
@@ -50,7 +51,7 @@ pub struct SearchHit {
 }
 
 /// An accepted LocalMind memory entry, flattened for display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MemorySummary {
     pub id: String,
     pub scope: String,
@@ -58,6 +59,14 @@ pub struct MemorySummary {
     pub status: String,
     pub path: String,
     pub body: String,
+    /// Times injected into a turn (0 = never retrieved).
+    pub hit_count: i64,
+    /// When last injected, or `None` if never.
+    pub last_used_at: Option<String>,
+    /// Flagged for review (change-aware staleness or the freshness pass).
+    pub stale_candidate: bool,
+    /// In a `contradicts` relationship with another memory.
+    pub contradicted: bool,
 }
 
 fn memory_summary(record: MemoryRecord) -> MemorySummary {
@@ -68,6 +77,10 @@ fn memory_summary(record: MemoryRecord) -> MemorySummary {
         status: record.status,
         path: record.path.display().to_string(),
         body: record.body,
+        hit_count: record.hit_count,
+        last_used_at: record.last_used_at,
+        stale_candidate: record.stale_candidate,
+        contradicted: record.contradicted,
     }
 }
 
@@ -402,6 +415,153 @@ pub fn memory_list(project_root: &Path) -> Result<Vec<MemorySummary>, LearningEr
     let persistence = open_memory(project_root)?;
     let records = persistence.list_memory().map_err(memory_err)?;
     Ok(records.into_iter().map(memory_summary).collect())
+}
+
+/// Host-owned freshness thresholds for the operator CLI (a flat mirror of the
+/// engine's, so the CLI never names a LocalMind type). `None` fields fall back to
+/// the engine defaults.
+#[derive(Debug, Clone, Default)]
+pub struct FreshnessParams {
+    pub max_age_days: Option<i64>,
+    pub unused_grace_days: Option<i64>,
+    pub version_sensitive_min_age_days: Option<i64>,
+    pub max_flags: Option<usize>,
+}
+
+/// One memory the freshness pass selected for review, flattened for display.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FreshnessFlagOut {
+    pub memory_id: String,
+    pub reason: String,
+}
+
+/// The outcome of a freshness pass, flattened + serializable for `--format json`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FreshnessOutcome {
+    pub scanned: usize,
+    pub version_sensitive: usize,
+    pub unused: usize,
+    pub age: usize,
+    pub total_candidates: usize,
+    pub capped: bool,
+    pub dry_run: bool,
+    pub flagged: Vec<FreshnessFlagOut>,
+}
+
+impl From<FreshnessReport> for FreshnessOutcome {
+    fn from(report: FreshnessReport) -> Self {
+        Self {
+            scanned: report.scanned,
+            version_sensitive: report.version_sensitive,
+            unused: report.unused,
+            age: report.age,
+            total_candidates: report.total_candidates(),
+            capped: report.capped,
+            dry_run: report.dry_run,
+            flagged: report
+                .flagged
+                .into_iter()
+                .map(|flag| FreshnessFlagOut {
+                    memory_id: flag.memory_id,
+                    reason: flag.reason.as_str().to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Run the deterministic freshness pass: flag accepted memory for review by age,
+/// never-retrieved-after-grace, and version-sensitivity. `scope` is
+/// `project`/`global`/`both`; with `dry_run` it reports candidates without
+/// writing. Routes to the existing review gate — never deletes (D001).
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read/updated, or the
+/// scope token is invalid.
+pub fn freshness_pass(
+    project_root: &Path,
+    params: &FreshnessParams,
+    scope: &str,
+    dry_run: bool,
+) -> Result<FreshnessOutcome, LearningError> {
+    let scope = FreshnessScope::parse(scope).ok_or_else(|| {
+        LearningError::Memory(format!("invalid scope {scope:?}; use project|global|both"))
+    })?;
+    let defaults = FreshnessThresholds::default();
+    let thresholds = FreshnessThresholds {
+        max_age_days: params.max_age_days.unwrap_or(defaults.max_age_days),
+        unused_grace_days: params
+            .unused_grace_days
+            .unwrap_or(defaults.unused_grace_days),
+        version_sensitive_min_age_days: params
+            .version_sensitive_min_age_days
+            .unwrap_or(defaults.version_sensitive_min_age_days),
+        max_flags: params.max_flags.unwrap_or(defaults.max_flags),
+    };
+    let persistence = open_memory(project_root)?;
+    let report = persistence
+        .freshness_pass(&thresholds, scope, dry_run)
+        .map_err(memory_err)?;
+    Ok(FreshnessOutcome::from(report))
+}
+
+/// The memory-lifecycle review queues, derived from a single store read: stale
+/// candidates (flagged for review), never-retrieved (dead-weight), most-used
+/// (high-value), and contradicted. The act path for any of these stays the
+/// existing review/delete CLI — this only *surfaces* them (D001/D002).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryLifecycle {
+    pub total: usize,
+    pub stale: Vec<MemorySummary>,
+    pub never_retrieved: Vec<MemorySummary>,
+    pub most_used: Vec<MemorySummary>,
+    pub contradicted: Vec<MemorySummary>,
+}
+
+/// Assemble the memory-lifecycle listing. `most_used_limit` caps the most-used
+/// section.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the memory index cannot be read.
+pub fn memory_lifecycle(
+    project_root: &Path,
+    most_used_limit: usize,
+) -> Result<MemoryLifecycle, LearningError> {
+    let persistence = open_memory(project_root)?;
+    let records = persistence.list_memory().map_err(memory_err)?;
+    let total = records.len();
+    let summaries: Vec<MemorySummary> = records.into_iter().map(memory_summary).collect();
+
+    let stale = summaries
+        .iter()
+        .filter(|m| m.stale_candidate)
+        .cloned()
+        .collect();
+    let never_retrieved = summaries
+        .iter()
+        .filter(|m| m.hit_count == 0)
+        .cloned()
+        .collect();
+    let contradicted = summaries
+        .iter()
+        .filter(|m| m.contradicted)
+        .cloned()
+        .collect();
+    let mut most_used: Vec<MemorySummary> = summaries
+        .iter()
+        .filter(|m| m.hit_count > 0)
+        .cloned()
+        .collect();
+    most_used.sort_by(|a, b| b.hit_count.cmp(&a.hit_count).then_with(|| a.id.cmp(&b.id)));
+    most_used.truncate(most_used_limit);
+
+    Ok(MemoryLifecycle {
+        total,
+        stale,
+        never_retrieved,
+        most_used,
+        contradicted,
+    })
 }
 
 /// Delete accepted LocalMind memory by id.

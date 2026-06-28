@@ -462,6 +462,108 @@ pub fn audit(cwd: &std::path::Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the freshness pass: flag stale / dead-weight / version-sensitive accepted
+/// memory for review. Dry-run by default; `--apply` writes. Never deletes — a
+/// flagged lesson is resolved through the existing review/delete CLI.
+///
+/// # Errors
+/// Returns an error if the pass fails (e.g. an invalid scope or unreadable store).
+pub fn freshness(
+    cwd: &Path,
+    params: &learning::FreshnessParams,
+    scope: &str,
+    apply: bool,
+    format: OutputFormat,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let outcome = learning::freshness_pass(cwd, params, scope, !apply)?;
+    if format == OutputFormat::Json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&outcome)?)?;
+        return Ok(());
+    }
+    let mode = if outcome.dry_run {
+        " (dry run — nothing written)"
+    } else {
+        ""
+    };
+    let cap = if outcome.capped {
+        format!(
+            " [capped: {} of {} candidates flagged this run — rerun for the rest]",
+            outcome.flagged.len(),
+            outcome.total_candidates
+        )
+    } else {
+        String::new()
+    };
+    writeln!(
+        out,
+        "freshness pass{mode}: scanned {}, flagged {} (version-sensitive {}, never-retrieved {}, age {}){cap}",
+        outcome.scanned,
+        outcome.flagged.len(),
+        outcome.version_sensitive,
+        outcome.unused,
+        outcome.age,
+    )?;
+    for flag in &outcome.flagged {
+        writeln!(out, "  {}\t{}", flag.reason, flag.memory_id)?;
+    }
+    if outcome.dry_run && !outcome.flagged.is_empty() {
+        writeln!(
+            out,
+            "re-run with --apply to flag these for review. Flagging never deletes; \
+             resolve each via `localpilot learning review` or `localpilot memory delete`."
+        )?;
+    }
+    Ok(())
+}
+
+/// List the memory-lifecycle queues: flagged-for-review (stale), never-retrieved
+/// (dead weight), most-used (high value), and contradicted. Read-only — the act
+/// path stays the existing review/delete CLI.
+///
+/// # Errors
+/// Returns an error if the memory index cannot be read.
+pub fn lifecycle(
+    cwd: &Path,
+    top: usize,
+    format: OutputFormat,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let listing = learning::memory_lifecycle(cwd, top)?;
+    if format == OutputFormat::Json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&listing)?)?;
+        return Ok(());
+    }
+    writeln!(out, "accepted memory: {}", listing.total)?;
+    lifecycle_section(out, "flagged for review (stale)", &listing.stale)?;
+    lifecycle_section(
+        out,
+        "never retrieved (dead weight)",
+        &listing.never_retrieved,
+    )?;
+    lifecycle_section(out, &format!("most used (top {top})"), &listing.most_used)?;
+    lifecycle_section(out, "contradicted", &listing.contradicted)?;
+    Ok(())
+}
+
+/// Print one lifecycle section: a header with the count, then one line per memory.
+fn lifecycle_section(
+    out: &mut dyn Write,
+    title: &str,
+    items: &[learning::MemorySummary],
+) -> anyhow::Result<()> {
+    writeln!(out, "\n# {title}: {}", items.len())?;
+    for memory in items {
+        let snippet: String = memory.body.chars().take(80).collect();
+        writeln!(
+            out,
+            "  {}\t{}\thits={}\t{}",
+            memory.id, memory.category, memory.hit_count, snippet
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -781,5 +883,129 @@ mod tests {
             before,
             "a dry run deletes nothing"
         );
+    }
+
+    /// A project store with one accepted lesson of `body`.
+    fn seed_accepted(dir: &Path, body: &str) {
+        std::fs::write(
+            dir.join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .unwrap();
+        let lesson = learning::SeedLesson {
+            body: body.to_string(),
+            category: None,
+            confidence: None,
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        learning::seed_memory(dir, std::slice::from_ref(&lesson), false).unwrap();
+    }
+
+    #[test]
+    fn freshness_dry_run_reports_then_apply_flags_for_review() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_accepted(dir.path(), "an evergreen lesson nobody has needed");
+        // Aggressive thresholds so a fresh lesson flags immediately.
+        let params = learning::FreshnessParams {
+            max_age_days: Some(0),
+            unused_grace_days: Some(0),
+            version_sensitive_min_age_days: Some(0),
+            max_flags: Some(10),
+        };
+
+        // Dry run reports a candidate but writes nothing.
+        let mut out = Vec::new();
+        freshness(
+            dir.path(),
+            &params,
+            "project",
+            false,
+            OutputFormat::Json,
+            &mut out,
+        )
+        .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["dry_run"], serde_json::json!(true));
+        assert!(
+            !report["flagged"].as_array().unwrap().is_empty(),
+            "got: {report}"
+        );
+        assert!(
+            learning::lessons_flagged_for_review(dir.path())
+                .unwrap()
+                .is_empty(),
+            "a dry run must not flag anything"
+        );
+
+        // Applying flags it for review (never deletes).
+        let mut out2 = Vec::new();
+        freshness(
+            dir.path(),
+            &params,
+            "project",
+            true,
+            OutputFormat::Json,
+            &mut out2,
+        )
+        .unwrap();
+        assert!(
+            !learning::lessons_flagged_for_review(dir.path())
+                .unwrap()
+                .is_empty(),
+            "apply must flag the lesson for review"
+        );
+        assert_eq!(
+            learning::memory_list(dir.path()).unwrap().len(),
+            1,
+            "flagging never deletes the memory"
+        );
+    }
+
+    #[test]
+    fn freshness_rejects_an_invalid_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_accepted(dir.path(), "a lesson");
+        let mut out = Vec::new();
+        let err = freshness(
+            dir.path(),
+            &learning::FreshnessParams::default(),
+            "sideways",
+            false,
+            OutputFormat::Human,
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("scope"), "got: {err}");
+    }
+
+    #[test]
+    fn lifecycle_lists_never_retrieved_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_accepted(dir.path(), "first lesson");
+        // A second lesson via a separate seed call.
+        let second = learning::SeedLesson {
+            body: "second lesson".to_string(),
+            category: None,
+            confidence: None,
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        learning::seed_memory(dir.path(), std::slice::from_ref(&second), false).unwrap();
+
+        let mut out = Vec::new();
+        lifecycle(dir.path(), 5, OutputFormat::Json, &mut out).unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(listing["total"], serde_json::json!(2));
+        assert_eq!(
+            listing["never_retrieved"].as_array().unwrap().len(),
+            2,
+            "both fresh lessons are never-retrieved: {listing}"
+        );
+        assert_eq!(listing["most_used"].as_array().unwrap().len(), 0);
     }
 }
