@@ -73,10 +73,10 @@ pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, lessons_flagged_for_review,
     memory_delete, memory_disable_injection, memory_enable_injection, memory_injection_enabled,
-    memory_list, promote, review_decide, review_list, review_purge, review_show, search,
-    search_readonly, skill_activate, skill_body, skill_show, skills_active, skills_generate,
-    skills_list, ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary, ReviewVerdict,
-    SearchHit, SkillDraftInfo,
+    memory_list, promote, record_memory_usage, review_decide, review_list, review_purge,
+    review_show, search, search_readonly, skill_activate, skill_body, skill_show, skills_active,
+    skills_generate, skills_list, ActiveSkillInfo, AuditEntry, MemorySummary, ReviewSummary,
+    ReviewVerdict, SearchHit, SkillDraftInfo,
 };
 pub use pack::{PackEntry, PackSource};
 pub use primer::{accepted_primer, distill_primer_into_review};

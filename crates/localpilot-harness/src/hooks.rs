@@ -100,6 +100,12 @@ pub trait ContextHook: Send + Sync {
             memories: self.memories_used(prompt),
         }
     }
+    /// Record that `memories` were injected this turn, for usage tracking. Called
+    /// once **post-turn** (from the single turn-exit), never on the retrieval
+    /// read path, so a usage write cannot slow a turn. Default does nothing; a
+    /// hook backed by a store overrides it to bump per-memory hit counts
+    /// best-effort. A failure here must never fail the turn.
+    fn record_usage(&self, _memories: &[localpilot_store::MemoryUsed]) {}
 }
 
 /// The registered hooks for one session runtime.
@@ -150,6 +156,18 @@ impl HookFabric {
         ContextContribution {
             text: (!texts.is_empty()).then(|| texts.join("\n")),
             memories,
+        }
+    }
+
+    /// Deliver this turn's injected-memory set to every context hook for usage
+    /// tracking. Called once at the turn boundary (post-turn), so the bump never
+    /// rides the retrieval read path.
+    pub(crate) fn record_usage(&self, memories: &[localpilot_store::MemoryUsed]) {
+        if memories.is_empty() {
+            return;
+        }
+        for hook in &self.context_hooks {
+            hook.record_usage(memories);
         }
     }
 

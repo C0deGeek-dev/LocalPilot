@@ -294,6 +294,14 @@ impl ContextHook for LocalMindContext {
             memories,
         }
     }
+
+    /// Record this turn's injected memories against the store, bumping each one's
+    /// usage count. Best-effort and post-turn (the harness calls this once at the
+    /// turn-exit, never on the retrieval read path), so a failed bump never fails
+    /// the turn. Synthetic primer/ingest ids match no memory row and fall through.
+    fn record_usage(&self, memories: &[MemoryUsed]) {
+        crate::ops::record_memory_usage(&self.root, memories);
+    }
 }
 
 /// Truncate `text` to at most `cap` characters, adding a marker when it was cut.
@@ -647,6 +655,41 @@ mod tests {
             .unwrap()
             .persist_memory_entry(&entry)
             .unwrap();
+    }
+
+    #[test]
+    fn record_usage_bumps_the_injected_memory_hit_count() {
+        use localmind_store::MemoryPersistence;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        seed_memory(root, "mem-hit", "always redact secrets before persisting");
+
+        let hook = LocalMindContext::new(root);
+        // A turn injects the memory; the harness then delivers the used set
+        // post-turn via record_usage (the seam under test).
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(
+            used.iter().any(|m| m.id == "mem-hit"),
+            "the memory must be injected first: {used:?}"
+        );
+        hook.record_usage(&used);
+
+        let record = MemoryPersistence::open_project(root)
+            .unwrap()
+            .list_memory()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.memory_id.as_str() == "mem-hit")
+            .expect("the memory is present");
+        assert_eq!(
+            record.hit_count, 1,
+            "the injected memory's usage was bumped"
+        );
+        assert!(record.last_used_at.is_some(), "and last_used_at is stamped");
+
+        // Best-effort: an empty set is a harmless no-op (never panics/fails).
+        hook.record_usage(&[]);
     }
 
     #[test]

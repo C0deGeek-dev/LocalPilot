@@ -335,6 +335,32 @@ pub fn context_hits(
 /// the audit record must share so it never lists a memory that was not injected.
 pub const CONTEXT_MEMORY_LIMIT: usize = 5;
 
+/// Record that `memories` were injected into a turn, bumping each one's usage
+/// count. **Best-effort and post-turn** (D003): driven from the turn-exit, never
+/// the retrieval read path, and every failure is swallowed so a usage write can
+/// never fail a turn. Synthetic ids (the repository primer, ingest chunks) and
+/// unknown ids simply match no memory row. A no-op when the set is empty or no
+/// store can be opened.
+pub fn record_memory_usage(project_root: &Path, memories: &[localpilot_store::MemoryUsed]) {
+    if memories.is_empty() {
+        return;
+    }
+    let Ok(persistence) = MemoryPersistence::open_project(project_root) else {
+        return;
+    };
+    let ids: Vec<MemoryEntryId> = memories
+        .iter()
+        .map(|memory| MemoryEntryId::new(memory.id.clone()))
+        .collect();
+    if let Err(error) = persistence.record_memory_usage(&ids) {
+        tracing::warn!(
+            target: "localpilot::localmind",
+            %error,
+            "best-effort memory-usage bump failed; the turn is unaffected"
+        );
+    }
+}
+
 /// Down-weight a lesson by routing it to review — never deleting it. The host's
 /// learning loop calls this when the uplift eval shows a lesson did not improve
 /// (or hurt) outcomes; it reuses the engine's reasoned route-to-review flag, so

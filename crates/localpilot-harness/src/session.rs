@@ -616,6 +616,11 @@ pub struct SessionRuntime {
     /// Whether the current turn persisted learning to memory. Reset at each turn
     /// start; the run-turn path only reads memory, so it stays `false` here.
     turn_memory_written: bool,
+    /// The memories injected into the current turn's context. Reset at each turn
+    /// start, set from the context contribution, and delivered to the context
+    /// hooks once at the turn's exit (`stop`) for best-effort usage tracking —
+    /// post-turn, never on the retrieval read path.
+    turn_memories_used: Vec<localpilot_store::MemoryUsed>,
     /// The handoff summarizing the most recently finished turn, built at the
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
@@ -675,6 +680,7 @@ impl SessionRuntime {
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
             turn_memory_written: false,
+            turn_memories_used: Vec::new(),
             last_handoff: None,
         };
         runtime.record_event(SessionEventKind::SessionOpened {
@@ -1752,6 +1758,7 @@ impl SessionRuntime {
         self.turn_tool_calls = 0;
         self.turn_files_changed.clear();
         self.turn_memory_written = false;
+        self.turn_memories_used.clear();
         // A bounded per-turn deadline, when configured: the turn stops cleanly with
         // a handoff at this instant rather than hanging. `None` leaves it unbounded.
         let deadline = self
@@ -1761,6 +1768,9 @@ impl SessionRuntime {
         let contribution = self.hooks.contribute(user_input);
         let retrieval_text = contribution.text.unwrap_or_default();
         if !contribution.memories.is_empty() {
+            // Stash the injected set for a single best-effort usage bump at the
+            // turn's exit (`stop`) — post-turn, off the retrieval read path.
+            self.turn_memories_used = contribution.memories.clone();
             self.record_event(SessionEventKind::MemoriesUsed {
                 memories: contribution.memories,
             });
@@ -2655,6 +2665,11 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::TurnEnded {
             stop: format!("{reason:?}"),
         });
+        // Best-effort, post-turn usage tracking: bump the hit count of every
+        // memory this turn injected. Delivered once here at the single turn-exit
+        // (so it covers interactive and headless alike) and never on the
+        // retrieval read path, keeping retrieval read-only and fast.
+        self.hooks.record_usage(&self.turn_memories_used);
         self.hooks.notify(&HookEvent::TurnEnded { reason });
         let _ = events.send(RuntimeEvent::Stopped(reason));
         reason
