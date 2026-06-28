@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Ingest keyword retrieval ranks by FTS bm25, and short query terms match whole
+  tokens.** `knowledge_search`'s keyword tier now ranks by the FTS index's own
+  **bm25** score (IDF-weighted, so a common token like `and` ranks far below a
+  rare one), with the file-path column weighted above the body — replacing the old
+  flat term-count + substring path bonus. Query terms of 3+ characters still match
+  as prefixes (`pars` → `parser`); shorter terms match a whole token exactly, so
+  `an` no longer matches `and` (and `do` no longer matches `docker`). This is a
+  deliberate ranking change (ADR-0057, refining ADR-0025) — it reorders some
+  results by design; the hybrid keyword-floor/vector blend shape is unchanged.
+
 - **`knowledge_search` is hybrid keyword+vector retrieval when embeddings are
   configured.** With an embedding model set (and reachable), the query is embedded
   and the cosine-nearest chunk vectors are blended into the keyword results, so a

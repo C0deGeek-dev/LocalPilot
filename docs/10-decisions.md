@@ -2,6 +2,53 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0057: Ingest Keyword Retrieval Ranks By FTS bm25, And Short Query Terms Match Whole Tokens
+
+Status: accepted. Refines ADR-0025 (the indexed chunk store) — specifically its
+"ranking is unchanged" clause, which this record supersedes.
+
+ADR-0025 narrowed candidates through the FTS5 index but then **re-derived** a
+relevance score in Rust: a flat term-count (`text.matches(term)`) plus a `+3`
+substring path bonus, re-sorting by that. Two flaws followed. First, the scorer
+matched **substrings mid-word**, and the candidate expression wildcarded **every**
+term as a prefix (`"term"*`) — so a 2-character query term like `an` matched the
+token `and` (and `do` matched `docker`/`documentation`), floating irrelevant
+chunks into the keyword tier. Second, the flat term-count **discarded bm25's
+IDF weighting**, so a common token counted the same as a rare one.
+
+Ingest keyword retrieval now ranks by the FTS index's **bm25** score directly
+(IDF-weighted; a common token contributes far less than a rare one), with the
+`path` column weighted above the body (`bm25(fts, 0.0, 5.0, 1.0)`) so a term that
+names a file boosts that chunk — the principled replacement for the substring
+path bonus. The Rust term-count rescore is gone; `ChunkStore::search` returns each
+row paired with its (negated, higher-is-better) bm25 relevance, and the keyword
+order is the index's order. Query terms of three or more characters still match as
+FTS **prefixes** (so `pars` matches `parser`); **shorter terms match a whole token
+exactly** (so `an` matches only the token `an`, never `and`).
+
+`KnowledgeHit::score` is therefore a bm25-derived relevance (fixed-point scaled),
+not a term count. The hybrid keyword+vector blend (the chunk-vector layer) is
+unchanged in shape: keyword hits keep an absolute floor above every vector-only
+hit, with cosine sub-ordering; only the keyword tier's internal ordering moved
+from term-count to bm25.
+
+Reason:
+
+- bm25 is the FTS index's own IDF-weighted ranking; re-deriving a cruder flat
+  count on top threw that away and reintroduced the very "common words rank high"
+  problem bm25 exists to solve
+- substring + unconditional-prefix matching is not token-aware; gating the prefix
+  by term length and matching short terms as whole tokens removes a class of false
+  hits (`an`⊂`and`, `do`⊂`docker`), not just one symptom
+- column-weighted bm25 expresses the path-name boost inside the ranker instead of
+  a parallel substring pass, so there is one matching definition, not two
+
+Consequence: the prior `linear_scan` no-regression oracle (which pinned the
+term-count ranking) is retired; new tests pin the bm25 behaviour, the
+whole-token short-term match, and the path-weight boost. This changes observed
+ordering for some queries (by design — it is the fix), so it is a deliberate
+ranking-contract change, not a silent one.
+
 ## ADR-0056: Project Instruction Files Are Injected Directly Into Context, Ungated, Every Turn
 
 Status: accepted.
@@ -1517,7 +1564,9 @@ Derived chunks now live in an embedded SQLite store at
 Search narrows to the matching rows through the FTS index (bounded by a
 relevance-ordered limit), then recomputes the existing term-count +
 path-name-boost score over just those rows, so ranking is unchanged while the
-whole index is never loaded. Refresh updates only the paths that changed:
+whole index is never loaded. *(The term-count rescore was later replaced by the
+index's own bm25 ranking — see ADR-0057, which supersedes this "ranking is
+unchanged" clause.)* Refresh updates only the paths that changed:
 unchanged files are reused by `path:content_hash`, a changed file's prior rows
 are kept as stale tombstones pointing at the new hash, and a vanished file's rows
 are tombstoned with no successor. An existing `chunks.json` migrates into the

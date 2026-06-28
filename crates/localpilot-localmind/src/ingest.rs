@@ -39,6 +39,11 @@ const CHUNK_BYTES: usize = 8 * 1024;
 /// per query — caps the vector pass on a large index (the keyword floor is
 /// unbounded by the FTS candidate limit). Only consulted when embeddings are on.
 const VECTOR_CANDIDATE_LIMIT: usize = 20;
+/// Fixed-point scale turning a chunk's bm25 relevance (a small real) into the
+/// integer `KnowledgeHit::score`. Large enough that distinct bm25 scores stay
+/// distinct integers (so the pack allocator, which re-ranks by the integer score,
+/// preserves bm25 order) while staying far below the hybrid `KEYWORD_BASE` floor.
+const RELEVANCE_SCALE: f64 = 1_000_000.0;
 /// How many manifest entries the session-open staleness check stat-samples, so
 /// change detection stays bounded on the hot path (it never re-walks the tree).
 const REFRESH_SAMPLE_CAP: usize = 256;
@@ -855,16 +860,20 @@ pub fn exclude_path(project_root: &Path, path: &Path) -> Result<String, IngestEr
 /// `localmind_store::detect_workspace_language`, the same detector accepted-memory
 /// retrieval uses), excluding off-language chunks while keeping `NULL`-tagged
 /// (unknown / general) chunks eligible. A workspace with no dominant language
-/// (docs-only or mixed) detects `None` ⇒ no filter ⇒ today's keyword behaviour
-/// byte for byte.
+/// (docs-only or mixed) detects `None` ⇒ no filter.
+///
+/// Keyword relevance is the FTS index's **bm25** score (IDF-weighted, so a common
+/// token like `and` ranks far below a rare one), with the `path` column weighted
+/// above the body — not a re-derived term count. Short query terms match whole
+/// tokens, not prefixes, so `an` never matches `and`.
 ///
 /// **Hybrid retrieval.** When an embedding endpoint is configured *and* reachable,
 /// the query is embedded and the cosine-nearest chunk vectors are blended in:
 /// chunks the keyword pass missed are added (semantic recall) and cosine
-/// sub-orders the results. Keyword (term-match) hits stay the **floor** — every
-/// keyword hit outranks every vector-only hit, so a strong keyword hit always
-/// surfaces. With no embedding model, or when the endpoint is down, the result is
-/// **byte-identical** to the keyword-only ranking above.
+/// sub-orders the results. Keyword hits stay the **floor** — every keyword hit
+/// outranks every vector-only hit, so a strong keyword hit always surfaces. With
+/// no embedding model, or when the endpoint is down, the result is exactly the
+/// keyword-only (bm25) ranking above.
 ///
 /// # Errors
 /// Returns [`IngestError`] when the chunk store cannot be opened or queried.
@@ -882,23 +891,11 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
     let store = ChunkStore::open(&ingest_dir)?;
     let workspace_language = localmind_store::detect_workspace_language(&root);
     let mut hits = Vec::new();
-    for chunk in store.search(&terms, workspace_language)? {
-        let text = chunk.text.to_ascii_lowercase();
-        let path = chunk.path.to_ascii_lowercase();
-        let mut score = 0_u64;
-        for term in &terms {
-            score = score.saturating_add(text.matches(term).count() as u64);
-            if path.contains(term) {
-                score = score.saturating_add(3);
-            }
-        }
-        if score == 0 {
-            continue;
-        }
+    for (chunk, relevance) in store.search(&terms, workspace_language)? {
         hits.push(KnowledgeHit {
             chunk_id: chunk.id,
             path: chunk.path,
-            score,
+            score: relevance_to_score(relevance),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             content_hash: chunk.content_hash,
@@ -913,9 +910,8 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
     // configured + reachable embedding endpoint. `has_vectors` short-circuits the
     // query embed when nothing was embedded (embeddings off via `[ingest]
     // embed_chunks = false`, never built, or the endpoint was down at ingest), so
-    // that path stays byte-identical to keyword-only. A successful query embed
-    // switches on the cosine blend; anything else falls through to the byte-
-    // identical keyword sort.
+    // that path is exactly the keyword-only ranking. A successful query embed
+    // switches on the cosine blend; anything else leaves the keyword-only order.
     if store.has_vectors()? {
         let capability = resolve_embed_capability(&root);
         if let Some(endpoint) = capability.embeddings() {
@@ -925,13 +921,17 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
             }
         }
     }
-    hits.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.path.cmp(&b.path))
-            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-    });
+    // Keyword-only: the chunk store already returned rows in bm25 order
+    // (relevance DESC, then path, id), so no re-sort is needed — re-sorting on the
+    // rounded integer score would only risk collapsing a near-tie.
     Ok(hits)
+}
+
+/// Map a chunk's bm25 relevance (higher = better, from the FTS index) to the
+/// integer `KnowledgeHit::score`. Floored at 1 so every keyword hit stays
+/// distinguishable from a vector-only hit (score 0) in the hybrid blend.
+fn relevance_to_score(relevance: f64) -> u64 {
+    ((relevance.max(0.0) * RELEVANCE_SCALE).round() as u64).max(1)
 }
 
 /// Embed a query string for the vector pass, best-effort: `None` when the
@@ -967,11 +967,12 @@ fn apply_hybrid_ranking(
     terms: &[String],
     language: Option<&str>,
 ) -> Result<(), IngestError> {
-    /// Floor every keyword hit sits above — no vector-only hit can reach it.
+    /// Floor every keyword hit sits above — no vector-only hit can reach it. Far
+    /// larger than any realistic bm25-derived keyword score, so a keyword hit's
+    /// relevance + cosine nudge can never cross it from below.
     const KEYWORD_BASE: u64 = 1_000_000;
-    /// The keyword term-match score dominates the blend among keyword hits.
-    const KW_WEIGHT: u64 = 1_000;
-    /// Cosine only sub-orders keyword hits (0..=100), never overturning term match.
+    /// Cosine only sub-orders keyword hits (0..=100), never overturning the bm25
+    /// relevance that leads the keyword tier.
     const COSINE_SUB: f32 = 100.0;
     /// Vector-only hits rank in 0..=1000 — always below `KEYWORD_BASE`.
     const VECTOR_SCALE: f32 = 1_000.0;
@@ -1011,8 +1012,10 @@ fn apply_hybrid_ranking(
             .unwrap_or(0.0)
             .max(0.0);
         hit.score = if hit.score > 0 {
+            // Keyword hit: the floor + its bm25 relevance (already the score) + a
+            // small cosine nudge.
             KEYWORD_BASE
-                .saturating_add(hit.score.saturating_mul(KW_WEIGHT))
+                .saturating_add(hit.score)
                 .saturating_add((cosine * COSINE_SUB) as u64)
         } else {
             (cosine * VECTOR_SCALE) as u64
@@ -2329,41 +2332,6 @@ mod tests {
             .unwrap();
     }
 
-    /// The pre-store scoring: a full linear scan over every chunk with the exact
-    /// term-count + path-name-boost formula and tie-break. The FTS-backed
-    /// `search` must reproduce this ranking for word queries.
-    fn linear_scan(chunks: &[ChunkRecord], query: &str) -> Vec<(String, u64)> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(|term| term.to_ascii_lowercase())
-            .filter(|term| !term.is_empty())
-            .collect();
-        let mut hits: Vec<(String, u64, String)> = Vec::new();
-        for chunk in chunks {
-            let text = chunk.text.to_ascii_lowercase();
-            let path = chunk.path.to_ascii_lowercase();
-            let mut score = 0_u64;
-            for term in &terms {
-                score = score.saturating_add(text.matches(term.as_str()).count() as u64);
-                if path.contains(term.as_str()) {
-                    score = score.saturating_add(3);
-                }
-            }
-            if score == 0 {
-                continue;
-            }
-            hits.push((chunk.path.clone(), score, chunk.id.clone()));
-        }
-        hits.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-        hits.into_iter()
-            .map(|(path, score, _)| (path, score))
-            .collect()
-    }
-
     #[test]
     fn path_normalization_rejects_escapes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2869,9 +2837,9 @@ mod tests {
             vec!["alpha.md"],
             "without embeddings only the keyword hit returns (beta is not recalled)"
         );
-        // The score is the raw keyword score (1 term match + 3 path-name boost),
-        // not a blended value — proving no hybrid ranking was applied.
-        assert_eq!(hits[0].score, 4);
+        // No hybrid ran: every hit is a keyword hit and the semantic-only chunk
+        // (beta.md) was not recalled — the keyword-only contract.
+        assert!(hits[0].score >= 1);
         assert!(hits
             .iter()
             .all(|hit| hit.inclusion_reason == "query term match"));
@@ -2893,8 +2861,15 @@ mod tests {
         // retrieval falls back to the byte-identical keyword-only result.
         let hits = search(dir.path(), "alpha").unwrap();
         let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
-        assert_eq!(paths, vec!["alpha.md"]);
-        assert_eq!(hits[0].score, 4, "a down endpoint must not blend scores");
+        assert_eq!(
+            paths,
+            vec!["alpha.md"],
+            "endpoint-down falls back to keyword-only — beta is not recalled"
+        );
+        assert_eq!(
+            hits[0].inclusion_reason, "query term match",
+            "no semantic hit may surface on the fallback path"
+        );
     }
 
     #[test]
@@ -3477,30 +3452,38 @@ mod tests {
     }
 
     #[test]
-    fn fts_search_matches_the_linear_scan_ranking() {
+    fn keyword_search_ranks_by_bm25_and_a_short_term_matches_whole_tokens() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("README.md"), "parser parser guide\n").unwrap();
-        fs::write(
-            dir.path().join("notes.txt"),
-            "deployment notes about the parser\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("guide.md"), "the parser parses tokens\n").unwrap();
         fs::write(dir.path().join("parser.md"), "an overview document\n").unwrap();
+        fs::write(dir.path().join("deploy.md"), "ship the image and run it\n").unwrap();
         run(dir.path(), &config(), RunMode::Full).unwrap();
 
-        let all = stored_chunks(dir.path());
-        for query in ["parser", "deployment", "guide parser", "missing"] {
-            let new_hits: Vec<(String, u64)> = search(dir.path(), query)
-                .unwrap()
-                .into_iter()
-                .map(|hit| (hit.path, hit.score))
-                .collect();
-            assert_eq!(
-                new_hits,
-                linear_scan(&all, query),
-                "FTS-backed search must match the linear scan for {query:?}"
-            );
-        }
+        // The 2-char term "an" matches the standalone token in parser.md but must
+        // NOT prefix-match "and" in deploy.md — the substring/short-prefix bug.
+        let an_paths: BTreeSet<String> = search(dir.path(), "an")
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert!(
+            !an_paths.contains("deploy.md"),
+            "'an' must not match the token 'and': {an_paths:?}"
+        );
+
+        // "parser" matches the body of guide.md and the path of parser.md; the
+        // path-named chunk leads (bm25 path weight), and scores are bm25-derived.
+        let hits = search(dir.path(), "parser").unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some("parser.md"),
+            "a path-name match leads under bm25 path weighting: {hits:?}"
+        );
+        assert!(hits.iter().all(|hit| hit.score >= 1));
+        assert!(
+            !hits.iter().any(|hit| hit.path == "deploy.md"),
+            "an unrelated chunk is not a keyword hit"
+        );
     }
 
     #[test]

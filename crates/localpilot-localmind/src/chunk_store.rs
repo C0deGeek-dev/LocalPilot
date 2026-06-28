@@ -31,6 +31,12 @@ const SCHEMA_VERSION: i32 = 4;
 /// relevance. Bounds query memory on a large corpus; far above any realistic
 /// matched-set for a context pack, so it never changes small-fixture results.
 const SEARCH_CANDIDATE_LIMIT: i64 = 512;
+/// bm25 column weight for the `path` column — above the body so a query term that
+/// names the file boosts that chunk (the principled replacement for the old
+/// substring path-name bonus). Columns are (chunk_id UNINDEXED, path, text).
+const BM25_PATH_WEIGHT: f64 = 5.0;
+/// bm25 column weight for the chunk `text` column (the baseline).
+const BM25_TEXT_WEIGHT: f64 = 1.0;
 
 /// The indexed chunk store for one project's ingest directory.
 pub(crate) struct ChunkStore {
@@ -350,19 +356,23 @@ impl ChunkStore {
     }
 
     /// Candidate rows for `terms`, narrowed through the FTS index and bounded by
-    /// [`SEARCH_CANDIDATE_LIMIT`], ordered by relevance. Returns the matching
-    /// rows only — never the whole store — so the caller scores a small set.
+    /// [`SEARCH_CANDIDATE_LIMIT`], each paired with its **bm25 relevance** (higher
+    /// is better — the negated SQLite bm25, which is IDF-weighted so a common token
+    /// like `and` contributes far less than a rare one). The `path` column is
+    /// weighted above `text` ([`BM25_PATH_WEIGHT`]), so a term that names the
+    /// file boosts that chunk without a separate substring pass. Returns the
+    /// matching rows only — never the whole store.
     ///
     /// When `language` is `Some`, a chunk tagged with a *different* language is
     /// excluded while a `NULL`-tagged (unknown / general) chunk always remains
     /// eligible — the exact clause accepted-memory `search_lang` uses. The clause
-    /// is appended **only** when filtering, so the unfiltered path (`None`) is
-    /// byte-for-byte the prior query and ranking is unchanged.
+    /// is appended **only** when filtering, so the unfiltered query shape is
+    /// stable.
     pub(crate) fn search(
         &self,
         terms: &[String],
         language: Option<&str>,
-    ) -> Result<Vec<ChunkRecord>, IngestError> {
+    ) -> Result<Vec<(ChunkRecord, f64)>, IngestError> {
         let Some(match_expression) = fts_match_expression(terms) else {
             return Ok(Vec::new());
         };
@@ -371,16 +381,21 @@ impl ChunkStore {
         } else {
             ""
         };
+        // Column order is (chunk_id UNINDEXED, path, text); bm25 weights are
+        // positional, so the path column is weighted above the text column. bm25
+        // is negative (more negative = better), so it is negated into a positive
+        // "higher is better" relevance.
         let statement_sql = format!(
             r#"
                 SELECT c.id, c.path, c.chunk_index, c.start_line, c.end_line, c.start_byte,
                        c.end_byte, c.content_hash, c.text, c.token_estimate, c.stale,
                        c.context_prefix, c.summary, c.redaction_status, c.original_bytes,
-                       c.preview_bytes, c.superseded_by, c.language
+                       c.preview_bytes, c.superseded_by, c.language,
+                       -bm25(ingest_chunks_fts, 0.0, {BM25_PATH_WEIGHT}, {BM25_TEXT_WEIGHT}) AS relevance
                 FROM ingest_chunks_fts f
                 JOIN ingest_chunks c ON c.id = f.chunk_id
                 WHERE ingest_chunks_fts MATCH ?1{language_clause}
-                ORDER BY bm25(ingest_chunks_fts), c.path, c.id
+                ORDER BY relevance DESC, c.path, c.id
                 LIMIT ?2
                 "#,
         );
@@ -388,23 +403,21 @@ impl ChunkStore {
             .connection
             .prepare(&statement_sql)
             .map_err(|source| self.sqlite_err(source))?;
+        let map_row = |row: &rusqlite::Row<'_>| Ok((row_to_chunk(row)?, row.get::<_, f64>(18)?));
         let rows = if let Some(language) = language {
             statement.query_map(
                 params![match_expression, SEARCH_CANDIDATE_LIMIT, language],
-                row_to_chunk,
+                map_row,
             )
         } else {
-            statement.query_map(
-                params![match_expression, SEARCH_CANDIDATE_LIMIT],
-                row_to_chunk,
-            )
+            statement.query_map(params![match_expression, SEARCH_CANDIDATE_LIMIT], map_row)
         }
         .map_err(|source| self.sqlite_err(source))?;
-        let mut chunks = Vec::new();
+        let mut scored = Vec::new();
         for row in rows {
-            chunks.push(row.map_err(|source| self.sqlite_err(source))?);
+            scored.push(row.map_err(|source| self.sqlite_err(source))?);
         }
-        Ok(chunks)
+        Ok(scored)
     }
 
     /// Delete every chunk for a path or a single chunk id, keeping FTS in sync.
@@ -715,20 +728,37 @@ fn prefixed_text(chunk: &ChunkRecord) -> String {
     }
 }
 
-/// Turns the (already lowercased, non-empty) query terms into an FTS5 MATCH
-/// expression: each term becomes a quoted prefix phrase (`"term"*`), OR-ed
-/// together. Quoting neutralizes FTS5 query operators in user input; embedded
-/// double quotes are doubled per FTS5 string rules. Returns `None` for no terms.
+/// A query term must be at least this many characters to match as an FTS5
+/// **prefix** (`"term"*`); shorter terms match a whole token **exactly**. A
+/// 2-char term like `an` otherwise prefix-matches the token `and` (and `do`
+/// matches `docker`, `documentation`, …), floating irrelevant chunks. Short terms
+/// are not discriminating enough to wildcard.
+const MIN_PREFIX_LEN: usize = 3;
+
+/// Turns the (already lowercased) query terms into an FTS5 MATCH expression,
+/// OR-ed together. A term of [`MIN_PREFIX_LEN`] or more characters becomes a
+/// quoted prefix phrase (`"term"*`, so `pars` matches `parser`); a shorter term
+/// becomes a quoted **exact** token (`"term"`, so `an` matches only the token
+/// `an`, never `and`). Quoting neutralizes FTS5 query operators in user input;
+/// embedded double quotes are doubled per FTS5 string rules. Returns `None` when
+/// no non-empty terms remain.
 fn fts_match_expression(terms: &[String]) -> Option<String> {
-    if terms.is_empty() {
+    let clauses: Vec<String> = terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .map(|term| {
+            let quoted = term.replace('"', "\"\"");
+            if term.chars().count() >= MIN_PREFIX_LEN {
+                format!("\"{quoted}\"*")
+            } else {
+                format!("\"{quoted}\"")
+            }
+        })
+        .collect();
+    if clauses.is_empty() {
         return None;
     }
-    let expression = terms
-        .iter()
-        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    Some(expression)
+    Some(clauses.join(" OR "))
 }
 
 /// Encode an embedding as a little-endian f32 BLOB — the same on-disk layout the
@@ -821,7 +851,8 @@ mod tests {
         assert_eq!(store.count().unwrap(), 1);
         let hits = store.search(&["parser".to_string()], None).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id, "c1");
+        assert_eq!(hits[0].0.id, "c1");
+        assert!(hits[0].1 > 0.0, "a match carries a positive bm25 relevance");
 
         // Re-open: rows persist and migration is idempotent.
         drop(store);
@@ -845,11 +876,11 @@ mod tests {
         // The body never says "authentication"; only the indexed prefix does.
         let by_prefix = store.search(&["authentication".to_string()], None).unwrap();
         assert_eq!(by_prefix.len(), 1, "prefix terms must be searchable");
-        assert_eq!(by_prefix[0].id, "c1");
+        assert_eq!(by_prefix[0].0.id, "c1");
         // The stored body is still the raw chunk, prefix kept in its own column.
-        assert_eq!(by_prefix[0].text, "the token is refreshed on expiry");
+        assert_eq!(by_prefix[0].0.text, "the token is refreshed on expiry");
         assert_eq!(
-            by_prefix[0].context_prefix,
+            by_prefix[0].0.context_prefix,
             "File docs/auth.md: Authentication Flow."
         );
         // The body itself still matches its own terms.
@@ -875,7 +906,7 @@ mod tests {
         // Filtered to rust: the python chunk is excluded; the rust chunk and the
         // NULL-tagged general chunk both remain.
         let rust_only = store.search(&["parser".to_string()], Some("rust")).unwrap();
-        let ids: BTreeSet<String> = rust_only.into_iter().map(|c| c.id).collect();
+        let ids: BTreeSet<String> = rust_only.into_iter().map(|(c, _)| c.id).collect();
         assert!(ids.contains("rs"), "the rust chunk must be kept");
         assert!(
             ids.contains("gen"),
@@ -884,6 +915,55 @@ mod tests {
         assert!(
             !ids.contains("py"),
             "an off-language chunk must be excluded"
+        );
+    }
+
+    #[test]
+    fn a_short_term_matches_a_whole_token_not_a_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        // A's only candidate token for "an" would be the prefix of "and"; B has the
+        // standalone token "an".
+        store
+            .upsert_chunks(&[
+                chunk("a", "a.md", "h1", "the pipeline builds and ships"),
+                chunk("b", "b.md", "h2", "an apple keeps bugs away"),
+            ])
+            .unwrap();
+
+        let ids: BTreeSet<String> = store
+            .search(&["an".to_string()], None)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| c.id)
+            .collect();
+        assert!(ids.contains("b"), "the standalone token 'an' matches");
+        assert!(
+            !ids.contains("a"),
+            "the 2-char term 'an' must not prefix-match the token 'and'"
+        );
+    }
+
+    #[test]
+    fn a_path_match_outranks_a_body_only_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        // body-only match for "parser"…
+        let body = chunk(
+            "body",
+            "notes.md",
+            "h1",
+            "the parser handles the input stream",
+        );
+        // …versus a path-only match (the term names the file, not the body).
+        let named = chunk("named", "parser.md", "h2", "an overview document goes here");
+        store.upsert_chunks(&[body, named]).unwrap();
+
+        let hits = store.search(&["parser".to_string()], None).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].0.id, "named",
+            "a chunk whose path names the term outranks a body-only match (bm25 path weight)"
         );
     }
 
@@ -940,7 +1020,7 @@ mod tests {
         );
         // The added column is usable and the NULL row stays eligible under a filter.
         let hits = store.search(&["legacy".to_string()], Some("rust")).unwrap();
-        assert!(hits.iter().any(|hit| hit.id == "old"));
+        assert!(hits.iter().any(|(c, _)| c.id == "old"));
     }
 
     #[test]
@@ -999,7 +1079,7 @@ mod tests {
         fresh.context_prefix = "File b.md: New.".to_string();
         store.upsert_chunks(&[fresh]).unwrap();
         let hits = store.search(&["new".to_string()], None).unwrap();
-        assert!(hits.iter().any(|hit| hit.id == "new"));
+        assert!(hits.iter().any(|(c, _)| c.id == "new"));
     }
 
     #[test]
