@@ -9,7 +9,6 @@
 //! This lives in the engine crate (not the host binary) so the pull/push gate is
 //! unit-testable; the host just registers it.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -52,10 +51,12 @@ impl LocalMindContext {
     }
 
     /// The workspace's dominant programming language, computed once and cached.
+    /// Detection lives in `localmind-store` so the workspace signal and the stored
+    /// lesson tag share one source of truth.
     fn workspace_language(&self) -> Option<&'static str> {
         *self
             .language
-            .get_or_init(|| detect_workspace_language(&self.root))
+            .get_or_init(|| localmind_store::detect_workspace_language(&self.root))
     }
 
     fn ingest_config(&self) -> Option<IngestConfig> {
@@ -304,68 +305,6 @@ fn bound(text: &str, cap: usize) -> String {
     format!("{truncated}\n… (memory truncated)")
 }
 
-/// The workspace's dominant programming language by source-file extension, or
-/// `None` when there is no clear signal (empty/mixed — then no filtering). A
-/// bounded, shallow scan that skips dependency and build directories; run once
-/// per session and cached on the hook. The extension→language map is owned by
-/// `localmind-store` (the same table that tags a lesson's language), so the
-/// workspace signal and the stored tag can never drift apart.
-fn detect_workspace_language(root: &Path) -> Option<&'static str> {
-    /// Directories that never carry the project's own source signal.
-    const SKIP_DIRS: &[&str] = &[
-        "target",
-        "node_modules",
-        "build",
-        "dist",
-        "venv",
-        "__pycache__",
-        "vendor",
-    ];
-    /// Cap on files inspected, so a large repo does not stall session start.
-    const MAX_FILES: usize = 2_000;
-
-    let mut counts: HashMap<&'static str, usize> = HashMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
-        if seen >= MAX_FILES {
-            break;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if seen >= MAX_FILES {
-                break;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
-                    continue;
-                }
-                stack.push(entry.path());
-            } else {
-                seen += 1;
-                let path = entry.path();
-                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-                    continue;
-                };
-                if let Some(canon) = localmind_store::language_for_extension(ext) {
-                    *counts.entry(canon).or_default() += 1;
-                }
-            }
-        }
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(canon, _)| canon)
-}
-
 /// Register the LocalMind context hook on a session runtime.
 pub fn register_context_hook(cwd: &Path, runtime: &mut SessionRuntime) {
     runtime
@@ -389,20 +328,6 @@ mod tests {
         )
         .unwrap();
         ingest_run(root, &IngestConfig::default(), RunMode::Full).unwrap();
-    }
-
-    #[test]
-    fn detects_the_workspace_dominant_language() {
-        // A workspace of .rs files is rust; build/dep dirs are ignored so a
-        // generated file there cannot swing the signal. (Lesson-text tagging is
-        // tested in localmind-store, which owns the language table.)
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "fn a() {}").unwrap();
-        std::fs::write(dir.path().join("util.rs"), "fn b() {}").unwrap();
-        std::fs::write(dir.path().join("notes.md"), "# notes").unwrap();
-        std::fs::create_dir_all(dir.path().join("target")).unwrap();
-        std::fs::write(dir.path().join("target/gen.py"), "x=1").unwrap();
-        assert_eq!(detect_workspace_language(dir.path()), Some("rust"));
     }
 
     #[test]

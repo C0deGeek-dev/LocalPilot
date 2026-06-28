@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`edit_file`/`multi_edit`/`apply_patch` match across CRLF/LF line endings.**
+  The edit tools matched `old_text` against the raw file bytes, so a model that
+  emits `old_text` with `\n` could not edit a CRLF-stored file — every attempt
+  failed "old_text was not found", pushing the model to give up and rewrite the
+  whole file (and to keep re-learning that workaround as a lesson). Matching now
+  runs on a line-ending-normalized form; the file's original CRLF/LF style is
+  preserved on write.
+
+- **Injected memory's language filter now also catches idiom-named lessons.** A
+  lesson learned in a language but named only by idiom (a Go `sort.Strings`
+  pattern) is tagged with the session's language at promotion (LocalMind), so the
+  workspace-language injection filter excludes it from other languages instead of
+  leaking it as noise.
+
 - **Injected memory is filtered by the workspace language.** The session's
   dominant language (a bounded, cached scan at session start) is pushed into
   accepted-memory retrieval, so a lesson clearly about another language is
