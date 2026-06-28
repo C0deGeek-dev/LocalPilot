@@ -460,6 +460,12 @@ pub struct MemoryConfig {
     /// enforces equivalent guidance (dedup-vs-enforced). Empty by default. Values
     /// match `LessonCategory` debug names, e.g. `SecurityWarning`.
     pub injection_skip_categories: Vec<String>,
+    /// Skip an accepted memory whose text is clearly about a *different*
+    /// programming language than the workspace's (a Python idiom injected into a
+    /// Rust task is noise that degrades the solution). On by default; only filters
+    /// when both the workspace language and the lesson's language are confidently
+    /// detected and differ — a language-agnostic lesson is always eligible.
+    pub injection_language_filter: bool,
 }
 
 impl Default for MemoryConfig {
@@ -469,6 +475,7 @@ impl Default for MemoryConfig {
             injection_char_budget: 1_200,
             injection_context_aware: false,
             injection_skip_categories: Vec::new(),
+            injection_language_filter: true,
         }
     }
 }

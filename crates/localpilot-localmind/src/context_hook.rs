@@ -9,8 +9,9 @@
 //! This lives in the engine crate (not the host binary) so the pull/push gate is
 //! unit-testable; the host just registers it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use localpilot_config::{CliOverrides, ConfigPaths, IngestConfig, IngestMode};
 use localpilot_harness::{ContextContribution, ContextHook, SessionRuntime};
@@ -35,13 +36,26 @@ const PRIMER_ID: &str = "<repository-primer>";
 /// contributes nothing and never fails the turn.
 pub struct LocalMindContext {
     root: PathBuf,
+    /// The workspace's dominant language, detected once per session (a bounded
+    /// scan) and cached, so language-relevance filtering costs nothing per turn.
+    language: OnceLock<Option<&'static str>>,
 }
 
 impl LocalMindContext {
     /// A hook rooted at `root`.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            language: OnceLock::new(),
+        }
+    }
+
+    /// The workspace's dominant programming language, computed once and cached.
+    fn workspace_language(&self) -> Option<&'static str> {
+        *self
+            .language
+            .get_or_init(|| detect_workspace_language(&self.root))
     }
 
     fn ingest_config(&self) -> Option<IngestConfig> {
@@ -75,6 +89,7 @@ impl LocalMindContext {
             min_score: memory.injection_min_score,
             char_budget,
             skip_categories: memory.injection_skip_categories.clone(),
+            language_filter: memory.injection_language_filter,
         }
     }
 }
@@ -87,6 +102,8 @@ struct InjectionPolicy {
     char_budget: usize,
     /// Lesson categories skipped because a rule already enforces equivalent guidance.
     skip_categories: Vec<String>,
+    /// Skip a lesson clearly about a different language than the workspace's.
+    language_filter: bool,
 }
 
 impl InjectionPolicy {
@@ -96,6 +113,7 @@ impl InjectionPolicy {
             min_score: 0,
             char_budget: ACCEPTED_MEMORY_CHAR_CAP,
             skip_categories: Vec::new(),
+            language_filter: true,
         }
     }
 
@@ -204,6 +222,11 @@ impl ContextHook for LocalMindContext {
         match crate::ops::context_hits(&self.root, prompt) {
             Ok(hits) => {
                 let policy = self.injection_policy();
+                // The workspace language (cached), used only when the filter is on.
+                let task_language = policy
+                    .language_filter
+                    .then(|| self.workspace_language())
+                    .flatten();
                 let mut block = String::from("Relevant accepted project memory:\n");
                 let mut wrote = false;
                 for hit in hits {
@@ -216,6 +239,16 @@ impl ContextHook for LocalMindContext {
                     // injected again here.
                     if cue_ids.contains(&hit.memory_id) {
                         continue;
+                    }
+                    // Language relevance: a lesson clearly about a different
+                    // language than this workspace's is noise here — a Python idiom
+                    // injected into a Rust task degrades the solution. A lesson that
+                    // names no language is general and stays eligible.
+                    if let Some(task) = task_language {
+                        let langs = languages_in_text(&hit.snippet);
+                        if !langs.is_empty() && !langs.contains(&task) {
+                            continue;
+                        }
                     }
                     let line = format!("- {}\n", hit.snippet.trim());
                     if block.chars().count() + line.chars().count() > policy.char_budget {
@@ -276,6 +309,106 @@ fn bound(text: &str, cap: usize) -> String {
     format!("{truncated}\n… (memory truncated)")
 }
 
+/// Languages used for memory language-relevance filtering: the canonical name,
+/// the source extensions that signal it in a workspace, and the lowercase prose
+/// keywords that name it in a lesson. Deliberately small and unambiguous — bare
+/// "go"/"c" are not matched (too many false positives in prose), and "java" is
+/// disambiguated from "javascript" at match time.
+const LANGS: &[(&str, &[&str], &[&str])] = &[
+    ("python", &["py"], &["python"]),
+    ("rust", &["rs"], &["rust"]),
+    (
+        "javascript",
+        &["js", "mjs", "cjs", "jsx"],
+        &["javascript", "node.js", "nodejs"],
+    ),
+    ("typescript", &["ts", "tsx"], &["typescript"]),
+    ("go", &["go"], &["golang"]),
+    ("cpp", &["cpp", "cc", "cxx", "hpp", "hh"], &["c++", "cpp"]),
+    ("java", &["java"], &["java"]),
+    ("ruby", &["rb"], &["ruby"]),
+];
+
+/// The languages a lesson's text clearly names — for keeping an off-language
+/// lesson out of this task's context. "java" counts only when the text is not
+/// actually naming "javascript".
+fn languages_in_text(text: &str) -> Vec<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (canon, _exts, keywords) in LANGS {
+        let named = keywords.iter().any(|kw| lower.contains(kw));
+        let confused_java = *canon == "java" && lower.contains("javascript");
+        if named && !confused_java {
+            found.push(*canon);
+        }
+    }
+    found
+}
+
+/// The workspace's dominant programming language by source-file extension, or
+/// `None` when there is no clear signal (empty/mixed — then no filtering). A
+/// bounded, shallow scan that skips dependency and build directories; run once
+/// per session and cached on the hook.
+fn detect_workspace_language(root: &Path) -> Option<&'static str> {
+    /// Directories that never carry the project's own source signal.
+    const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "build",
+        "dist",
+        "venv",
+        "__pycache__",
+        "vendor",
+    ];
+    /// Cap on files inspected, so a large repo does not stall session start.
+    const MAX_FILES: usize = 2_000;
+
+    let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        if seen >= MAX_FILES {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if seen >= MAX_FILES {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(entry.path());
+            } else {
+                seen += 1;
+                let path = entry.path();
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                let ext = ext.to_ascii_lowercase();
+                for (canon, exts, _) in LANGS {
+                    if exts.contains(&ext.as_str()) {
+                        *counts.entry(*canon).or_default() += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(canon, _)| canon)
+}
+
 /// Register the LocalMind context hook on a session runtime.
 pub fn register_context_hook(cwd: &Path, runtime: &mut SessionRuntime) {
     runtime
@@ -299,6 +432,39 @@ mod tests {
         )
         .unwrap();
         ingest_run(root, &IngestConfig::default(), RunMode::Full).unwrap();
+    }
+
+    #[test]
+    fn language_helpers_isolate_off_language_lessons() {
+        // Lesson side: detect the language a lesson clearly names.
+        assert_eq!(
+            languages_in_text("Always use None for mutable default arguments in Python"),
+            vec!["python"]
+        );
+        assert_eq!(
+            languages_in_text("Prefer iterators over index loops in Rust"),
+            vec!["rust"]
+        );
+        // "javascript" must not be misread as "java".
+        assert_eq!(
+            languages_in_text("Avoid == in JavaScript; use ==="),
+            vec!["javascript"]
+        );
+        assert_eq!(
+            languages_in_text("Close a Java Stream in try-with-resources"),
+            vec!["java"]
+        );
+        // A language-agnostic lesson names none and stays eligible everywhere.
+        assert!(languages_in_text("Run the tests before declaring done").is_empty());
+
+        // Task side: a workspace of .rs files is rust (build/dep dirs ignored).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("util.rs"), "fn b() {}").unwrap();
+        std::fs::write(dir.path().join("notes.md"), "# notes").unwrap();
+        std::fs::create_dir_all(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/gen.py"), "x=1").unwrap();
+        assert_eq!(detect_workspace_language(dir.path()), Some("rust"));
     }
 
     #[test]
