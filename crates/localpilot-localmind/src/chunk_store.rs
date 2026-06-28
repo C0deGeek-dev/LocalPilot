@@ -490,6 +490,63 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Cosine-nearest fresh chunks to `query`, as `(chunk_id, score)` ordered by
+    /// descending cosine and bounded by `limit`. Only **fresh** (non-stale) chunks
+    /// with a stored vector of matching dimension are scored; tombstones never
+    /// resurface as semantic hits. When `language` is `Some`, the same
+    /// `(language = ? OR language IS NULL)` filter the keyword path uses applies,
+    /// so the keyword and vector views agree on language eligibility.
+    pub(crate) fn vector_search(
+        &self,
+        query: &[f32],
+        limit: usize,
+        language: Option<&str>,
+    ) -> Result<Vec<(String, f32)>, IngestError> {
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let language_clause = if language.is_some() {
+            " AND (c.language = ?1 OR c.language IS NULL)"
+        } else {
+            ""
+        };
+        let statement_sql = format!(
+            "SELECT v.chunk_id, v.vector_blob \
+             FROM ingest_chunk_vectors v \
+             JOIN ingest_chunks c ON c.id = v.chunk_id \
+             WHERE c.stale = 0{language_clause}"
+        );
+        let mut statement = self
+            .connection
+            .prepare(&statement_sql)
+            .map_err(|source| self.sqlite_err(source))?;
+        let map_row =
+            |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?));
+        let rows = if let Some(language) = language {
+            statement.query_map(params![language], map_row)
+        } else {
+            statement.query_map([], map_row)
+        }
+        .map_err(|source| self.sqlite_err(source))?;
+        let mut scored: Vec<(String, f32)> = Vec::new();
+        for row in rows {
+            let (chunk_id, blob) = row.map_err(|source| self.sqlite_err(source))?;
+            let vector = decode_vector(&blob);
+            if vector.len() != query.len() {
+                continue;
+            }
+            scored.push((chunk_id, cosine_similarity(query, &vector)));
+        }
+        // Descending cosine, with chunk id as a stable tiebreak.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
     /// Count of stored chunk vectors — for verification and tests, not a runtime
     /// search path.
     #[cfg(test)]
@@ -668,6 +725,37 @@ fn encode_vector(vector: &[f32]) -> Vec<u8> {
         blob.extend_from_slice(&value.to_le_bytes());
     }
     blob
+}
+
+/// Decode a little-endian f32 BLOB back into an embedding. A blob whose length is
+/// not a multiple of 4 is treated as empty (it can never match a query's
+/// dimension, so it is simply skipped at search time) rather than erroring — the
+/// vector index is best-effort and rebuildable.
+fn decode_vector(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+/// Exact cosine similarity, identical to the accepted-memory implementation, so
+/// the keyword and vector views score the same way. Zero for a length mismatch or
+/// a zero-norm vector.
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return 0.0;
+    }
+    dot / (left_norm.sqrt() * right_norm.sqrt())
 }
 
 /// `u64` span/count → `i64` for SQLite. Values this large never occur for line

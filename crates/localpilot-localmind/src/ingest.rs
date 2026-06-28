@@ -35,6 +35,10 @@ const JOB_FILE: &str = "job.json";
 const REVIEW_FILE: &str = "review.json";
 const PACK_FILE: &str = "last-pack.json";
 const CHUNK_BYTES: usize = 8 * 1024;
+/// Bounded window of cosine-nearest chunk vectors pulled into the hybrid blend
+/// per query — caps the vector pass on a large index (the keyword floor is
+/// unbounded by the FTS candidate limit). Only consulted when embeddings are on.
+const VECTOR_CANDIDATE_LIMIT: usize = 20;
 /// How many manifest entries the session-open staleness check stat-samples, so
 /// change detection stays bounded on the hot path (it never re-walks the tree).
 const REFRESH_SAMPLE_CAP: usize = 256;
@@ -840,6 +844,14 @@ pub fn exclude_path(project_root: &Path, path: &Path) -> Result<String, IngestEr
 /// (docs-only or mixed) detects `None` ⇒ no filter ⇒ today's keyword behaviour
 /// byte for byte.
 ///
+/// **Hybrid retrieval.** When an embedding endpoint is configured *and* reachable,
+/// the query is embedded and the cosine-nearest chunk vectors are blended in:
+/// chunks the keyword pass missed are added (semantic recall) and cosine
+/// sub-orders the results. Keyword (term-match) hits stay the **floor** — every
+/// keyword hit outranks every vector-only hit, so a strong keyword hit always
+/// surfaces. With no embedding model, or when the endpoint is down, the result is
+/// **byte-identical** to the keyword-only ranking above.
+///
 /// # Errors
 /// Returns [`IngestError`] when the chunk store cannot be opened or queried.
 pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, IngestError> {
@@ -883,6 +895,16 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
             skip_reason: None,
         });
     }
+    // Hybrid augmentation, gated on a configured + reachable embedding endpoint.
+    // A successful query embed switches on the cosine blend; anything else
+    // (no model, endpoint down) falls through to the byte-identical keyword sort.
+    let capability = resolve_embed_capability(&root);
+    if let Some(endpoint) = capability.embeddings() {
+        if let Some(query_vector) = embed_query(endpoint, query) {
+            apply_hybrid_ranking(&store, &mut hits, &query_vector, &terms, workspace_language)?;
+            return Ok(hits);
+        }
+    }
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -890,6 +912,99 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
             .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
     Ok(hits)
+}
+
+/// Embed a query string for the vector pass, best-effort: `None` when the
+/// endpoint errors (e.g. unreachable), so the caller falls back to the
+/// keyword-only ranking. The single embedding-path query embed reuses the same
+/// `EmbeddingEndpoint` the chunk index was built with.
+fn embed_query(endpoint: &localmind_inference::EmbeddingEndpoint, query: &str) -> Option<Vec<f32>> {
+    let input = [query.to_string()];
+    match endpoint.embed(&input) {
+        Ok(vectors) => vectors
+            .into_iter()
+            .next()
+            .filter(|vector| !vector.is_empty()),
+        Err(error) => {
+            tracing::warn!(
+                target: "localpilot::ingest",
+                %error,
+                "query embedding failed; falling back to keyword-only retrieval"
+            );
+            None
+        }
+    }
+}
+
+/// Blend cosine-nearest chunk vectors into the keyword `hits` in place, then
+/// re-sort. Vector-nearest chunks the keyword pass missed are appended (semantic
+/// recall); the blended score keeps keyword (term-match) hits strictly above
+/// vector-only hits (the floor) while cosine sub-orders within each tier.
+fn apply_hybrid_ranking(
+    store: &ChunkStore,
+    hits: &mut Vec<KnowledgeHit>,
+    query_vector: &[f32],
+    terms: &[String],
+    language: Option<&str>,
+) -> Result<(), IngestError> {
+    /// Floor every keyword hit sits above — no vector-only hit can reach it.
+    const KEYWORD_BASE: u64 = 1_000_000;
+    /// The keyword term-match score dominates the blend among keyword hits.
+    const KW_WEIGHT: u64 = 1_000;
+    /// Cosine only sub-orders keyword hits (0..=100), never overturning term match.
+    const COSINE_SUB: f32 = 100.0;
+    /// Vector-only hits rank in 0..=1000 — always below `KEYWORD_BASE`.
+    const VECTOR_SCALE: f32 = 1_000.0;
+
+    let cosine_by_id: BTreeMap<String, f32> = store
+        .vector_search(query_vector, VECTOR_CANDIDATE_LIMIT, language)?
+        .into_iter()
+        .collect();
+
+    // Add the cosine-nearest chunks the keyword pass missed (recall boost).
+    let known: BTreeSet<String> = hits.iter().map(|hit| hit.chunk_id.clone()).collect();
+    let missing: Vec<String> = cosine_by_id
+        .keys()
+        .filter(|id| !known.contains(*id))
+        .cloned()
+        .collect();
+    for chunk in store.fetch_by_ids(&missing)? {
+        hits.push(KnowledgeHit {
+            chunk_id: chunk.id,
+            path: chunk.path,
+            score: 0, // vector-only marker; blended below
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content_hash: chunk.content_hash,
+            stale: chunk.stale,
+            snippet: summarize_snippet(&chunk.text, terms),
+            token_estimate: chunk.token_estimate,
+            inclusion_reason: "semantic match".to_string(),
+            skip_reason: None,
+        });
+    }
+
+    for hit in hits.iter_mut() {
+        let cosine = cosine_by_id
+            .get(&hit.chunk_id)
+            .copied()
+            .unwrap_or(0.0)
+            .max(0.0);
+        hit.score = if hit.score > 0 {
+            KEYWORD_BASE
+                .saturating_add(hit.score.saturating_mul(KW_WEIGHT))
+                .saturating_add((cosine * COSINE_SUB) as u64)
+        } else {
+            (cosine * VECTOR_SCALE) as u64
+        };
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
+    Ok(())
 }
 
 /// Compute a task-specific context pack from every reachable source under one
@@ -2470,8 +2585,23 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let mut buffer = [0_u8; 2048];
-                let _ = stream.read(&mut buffer);
+                // Drain the full request (headers + declared body) before
+                // responding, so the client never sees a reset mid-send — the
+                // flakiness guard the accepted-memory/chat fixtures use.
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            request.extend_from_slice(&buffer[..read]);
+                            if request_is_complete(&request) {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
                 server_counter.fetch_add(1, Ordering::SeqCst);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2482,6 +2612,25 @@ mod tests {
             }
         });
         (format!("http://{address}"), counter)
+    }
+
+    /// Whether `request` holds a complete HTTP request (headers plus a body of the
+    /// declared Content-Length) — so the fixture drains the client's POST before
+    /// replying.
+    fn request_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let mut content_length = 0_usize;
+        for line in headers.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        request.len() >= header_end + 4 + content_length
     }
 
     /// Write a `.localmind.toml` wiring the embedding endpoint at `base_url`, so
@@ -2625,6 +2774,76 @@ mod tests {
         store.clear().unwrap();
         assert_eq!(store.count().unwrap(), 0);
         assert_eq!(store.vector_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn hybrid_retrieval_recalls_a_keyword_missed_chunk_and_keeps_the_keyword_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        // alpha.md carries the query term; beta.md does not (keyword misses it).
+        fs::write(dir.path().join("alpha.md"), "alpha unique marker\n").unwrap();
+        fs::write(dir.path().join("beta.md"), "beta unrelated prose\n").unwrap();
+        let (base_url, _count) = counting_embed_server(4);
+        write_inference_config(dir.path(), &base_url);
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        let hits = search(dir.path(), "alpha").unwrap();
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        // The keyword hit stays the floor — it surfaces first…
+        assert_eq!(
+            paths.first(),
+            Some(&"alpha.md"),
+            "a keyword hit must rank above a vector-only hit"
+        );
+        // …and the keyword-missed chunk is recalled via the vector path.
+        assert!(
+            paths.contains(&"beta.md"),
+            "a semantically-near chunk the keyword query missed must be recalled: {paths:?}"
+        );
+        let beta = hits.iter().find(|hit| hit.path == "beta.md").unwrap();
+        assert_eq!(beta.inclusion_reason, "semantic match");
+    }
+
+    #[test]
+    fn no_embeddings_retrieval_is_byte_identical_to_keyword_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("alpha.md"), "alpha unique marker\n").unwrap();
+        fs::write(dir.path().join("beta.md"), "beta unrelated prose\n").unwrap();
+        // No `.localmind.toml` ⇒ no embedding model ⇒ keyword-only.
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        let hits = search(dir.path(), "alpha").unwrap();
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["alpha.md"],
+            "without embeddings only the keyword hit returns (beta is not recalled)"
+        );
+        // The score is the raw keyword score (1 term match + 3 path-name boost),
+        // not a blended value — proving no hybrid ranking was applied.
+        assert_eq!(hits[0].score, 4);
+        assert!(hits
+            .iter()
+            .all(|hit| hit.inclusion_reason == "query term match"));
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_keyword_when_embed_endpoint_is_down() {
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("alpha.md"), "alpha unique marker\n").unwrap();
+        fs::write(dir.path().join("beta.md"), "beta unrelated prose\n").unwrap();
+        write_inference_config(dir.path(), &format!("http://{dead_addr}"));
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // The endpoint is configured but unreachable: the query embed fails and
+        // retrieval falls back to the byte-identical keyword-only result.
+        let hits = search(dir.path(), "alpha").unwrap();
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(paths, vec!["alpha.md"]);
+        assert_eq!(hits[0].score, 4, "a down endpoint must not blend scores");
     }
 
     #[test]

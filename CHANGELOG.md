@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`knowledge_search` is hybrid keyword+vector retrieval when embeddings are
+  configured.** With an embedding model set (and reachable), the query is embedded
+  and the cosine-nearest chunk vectors are blended into the keyword results, so a
+  semantically-relevant chunk the keyword query missed is recalled. Keyword
+  (term-match) hits stay the **floor** — a keyword hit always ranks above a
+  vector-only hit, so a strong keyword hit always surfaces; cosine only
+  sub-orders. With no embedding model, or when the endpoint is unreachable, the
+  result is **byte-identical** to the prior keyword-only ranking (a bounded vector
+  window keeps the pass cheap).
+
 - **Ingested chunks are embedded on ingest (best-effort, opt-in) into a chunk
   vector index.** When an embedding model is configured (the same
   `[inference]` embedding gate accepted-memory embedding uses — the local CPU

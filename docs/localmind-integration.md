@@ -169,6 +169,15 @@ commits).
   excluding off-language chunks while keeping language-neutral (`NULL`-tagged,
   e.g. docs) chunks eligible. A workspace with no dominant language detects no
   signal and applies no filter, so keyword retrieval is unchanged.
+- When an embedding model is configured (the local CPU embed server) and
+  reachable, `knowledge_search` is **hybrid**: the query is embedded and the
+  cosine-nearest chunk vectors are blended into the keyword results, so a
+  semantically-relevant chunk the keyword query missed is still recalled. Keyword
+  (term-match) hits stay the **floor** — every keyword hit ranks above every
+  vector-only hit, so a strong keyword hit always surfaces; cosine only
+  sub-orders. With no embedding model, or when the endpoint is unreachable, the
+  query embed is skipped and retrieval is byte-identical to the keyword-only
+  ranking.
 - Context compaction manages the active model projection only. It can emit a
   structured, source-grounded runtime digest and safe audit metadata, but it
   does not write accepted memory, create skill drafts, or enqueue LocalMind
