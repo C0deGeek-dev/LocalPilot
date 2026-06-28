@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Injected memory is filtered by the workspace language.** The session's
+  dominant language (a bounded, cached scan at session start) is pushed into
+  accepted-memory retrieval, so a lesson clearly about another language is
+  excluded inside LocalMind's query (schema v7) rather than retrieved and
+  dropped afterward — a Python idiom no longer lands in a Rust task and wastes
+  the injection budget. A lesson that names no single language stays eligible
+  everywhere. Opt out with `[memory] injection_language_filter = false`. The
+  extension→language table now lives in LocalMind, shared with the stored lesson
+  tag, so the workspace signal and the tag cannot drift.
+
 - **Learning is on by default (`localpilot eval` stays clean-room).** LocalMind
   learning now defaults **on** (D-LM-0019), so interactive and agentic runs
   accumulate reviewed, machine-wide memory out of the box — `local_only`, review-

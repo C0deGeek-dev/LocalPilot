@@ -295,7 +295,11 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
 /// malformed config, a failed migration, or database corruption — so a broken
 /// store surfaces as an actionable error instead of masquerading as "no memory".
 /// A missing config or disabled learning is an empty result, not an error.
-pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, LearningError> {
+pub fn context_hits(
+    project_root: &Path,
+    query: &str,
+    language: Option<&str>,
+) -> Result<Vec<SearchHit>, LearningError> {
     if !memory_injection_enabled(project_root) {
         return Ok(Vec::new());
     }
@@ -312,7 +316,7 @@ pub fn context_hits(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, 
         Err(e) => return Err(LearningError::Context(e.to_string())),
     };
     let hits = persistence
-        .search(query)
+        .search_lang(query, language)
         .map_err(|e| LearningError::Context(e.to_string()))?;
     Ok(hits
         .into_iter()
@@ -428,7 +432,7 @@ pub fn memory_enable_injection(project_root: &Path) -> Result<(), LearningError>
 /// Returns [`LearningError::Context`] if memory cannot be searched.
 pub fn context_for(project_root: &Path, query: &str) -> Result<Option<String>, LearningError> {
     use std::fmt::Write as _;
-    let hits = context_hits(project_root, query)?;
+    let hits = context_hits(project_root, query, None)?;
     if hits.is_empty() {
         return Ok(None);
     }
@@ -744,7 +748,7 @@ mod tests {
         // A project that has never closed out has no config and no store. That is
         // "nothing to inject", an empty result — never an error.
         let dir = tempfile::tempdir().unwrap();
-        let hits = context_hits(dir.path(), "anything").unwrap();
+        let hits = context_hits(dir.path(), "anything", None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -753,7 +757,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::initialize(dir.path()).unwrap();
         memory_disable_injection(dir.path()).unwrap();
-        let hits = context_hits(dir.path(), "anything").unwrap();
+        let hits = context_hits(dir.path(), "anything", None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -765,7 +769,7 @@ mod tests {
             "[learning]\nenabled = false\n",
         )
         .unwrap();
-        let hits = context_hits(dir.path(), "anything").unwrap();
+        let hits = context_hits(dir.path(), "anything", None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -784,7 +788,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = context_hits(dir.path(), "anything");
+        let result = context_hits(dir.path(), "anything", None);
         assert!(
             matches!(result, Err(LearningError::Context(_))),
             "expected a propagated Context error, got {result:?}"

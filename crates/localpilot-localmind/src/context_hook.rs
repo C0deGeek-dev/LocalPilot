@@ -219,14 +219,19 @@ impl ContextHook for LocalMindContext {
         // best-effort for the turn, but a broken store (corrupt/misconfigured) no
         // longer vanishes silently: it is logged so the failure is diagnosable
         // instead of looking identical to "no memory".
-        match crate::ops::context_hits(&self.root, prompt) {
+        let policy = self.injection_policy();
+        // The workspace language (cached), used only when the filter is on. It is
+        // pushed into the query so retrieval excludes off-language lessons inside
+        // the FTS search — a Python idiom injected into a Rust task degrades the
+        // solution — and returns rows that are already language-relevant rather
+        // than spending the budget on rows that would be dropped here. A lesson
+        // that names no single language stays eligible for every task.
+        let task_language = policy
+            .language_filter
+            .then(|| self.workspace_language())
+            .flatten();
+        match crate::ops::context_hits(&self.root, prompt, task_language) {
             Ok(hits) => {
-                let policy = self.injection_policy();
-                // The workspace language (cached), used only when the filter is on.
-                let task_language = policy
-                    .language_filter
-                    .then(|| self.workspace_language())
-                    .flatten();
                 let mut block = String::from("Relevant accepted project memory:\n");
                 let mut wrote = false;
                 for hit in hits {
@@ -239,16 +244,6 @@ impl ContextHook for LocalMindContext {
                     // injected again here.
                     if cue_ids.contains(&hit.memory_id) {
                         continue;
-                    }
-                    // Language relevance: a lesson clearly about a different
-                    // language than this workspace's is noise here — a Python idiom
-                    // injected into a Rust task degrades the solution. A lesson that
-                    // names no language is general and stays eligible.
-                    if let Some(task) = task_language {
-                        let langs = languages_in_text(&hit.snippet);
-                        if !langs.is_empty() && !langs.contains(&task) {
-                            continue;
-                        }
                     }
                     let line = format!("- {}\n", hit.snippet.trim());
                     if block.chars().count() + line.chars().count() > policy.char_budget {
@@ -309,46 +304,12 @@ fn bound(text: &str, cap: usize) -> String {
     format!("{truncated}\n… (memory truncated)")
 }
 
-/// Languages used for memory language-relevance filtering: the canonical name,
-/// the source extensions that signal it in a workspace, and the lowercase prose
-/// keywords that name it in a lesson. Deliberately small and unambiguous — bare
-/// "go"/"c" are not matched (too many false positives in prose), and "java" is
-/// disambiguated from "javascript" at match time.
-const LANGS: &[(&str, &[&str], &[&str])] = &[
-    ("python", &["py"], &["python"]),
-    ("rust", &["rs"], &["rust"]),
-    (
-        "javascript",
-        &["js", "mjs", "cjs", "jsx"],
-        &["javascript", "node.js", "nodejs"],
-    ),
-    ("typescript", &["ts", "tsx"], &["typescript"]),
-    ("go", &["go"], &["golang"]),
-    ("cpp", &["cpp", "cc", "cxx", "hpp", "hh"], &["c++", "cpp"]),
-    ("java", &["java"], &["java"]),
-    ("ruby", &["rb"], &["ruby"]),
-];
-
-/// The languages a lesson's text clearly names — for keeping an off-language
-/// lesson out of this task's context. "java" counts only when the text is not
-/// actually naming "javascript".
-fn languages_in_text(text: &str) -> Vec<&'static str> {
-    let lower = text.to_ascii_lowercase();
-    let mut found = Vec::new();
-    for (canon, _exts, keywords) in LANGS {
-        let named = keywords.iter().any(|kw| lower.contains(kw));
-        let confused_java = *canon == "java" && lower.contains("javascript");
-        if named && !confused_java {
-            found.push(*canon);
-        }
-    }
-    found
-}
-
 /// The workspace's dominant programming language by source-file extension, or
 /// `None` when there is no clear signal (empty/mixed — then no filtering). A
 /// bounded, shallow scan that skips dependency and build directories; run once
-/// per session and cached on the hook.
+/// per session and cached on the hook. The extension→language map is owned by
+/// `localmind-store` (the same table that tags a lesson's language), so the
+/// workspace signal and the stored tag can never drift apart.
 fn detect_workspace_language(root: &Path) -> Option<&'static str> {
     /// Directories that never carry the project's own source signal.
     const SKIP_DIRS: &[&str] = &[
@@ -393,12 +354,8 @@ fn detect_workspace_language(root: &Path) -> Option<&'static str> {
                 let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                     continue;
                 };
-                let ext = ext.to_ascii_lowercase();
-                for (canon, exts, _) in LANGS {
-                    if exts.contains(&ext.as_str()) {
-                        *counts.entry(*canon).or_default() += 1;
-                        break;
-                    }
+                if let Some(canon) = localmind_store::language_for_extension(ext) {
+                    *counts.entry(canon).or_default() += 1;
                 }
             }
         }
@@ -435,29 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn language_helpers_isolate_off_language_lessons() {
-        // Lesson side: detect the language a lesson clearly names.
-        assert_eq!(
-            languages_in_text("Always use None for mutable default arguments in Python"),
-            vec!["python"]
-        );
-        assert_eq!(
-            languages_in_text("Prefer iterators over index loops in Rust"),
-            vec!["rust"]
-        );
-        // "javascript" must not be misread as "java".
-        assert_eq!(
-            languages_in_text("Avoid == in JavaScript; use ==="),
-            vec!["javascript"]
-        );
-        assert_eq!(
-            languages_in_text("Close a Java Stream in try-with-resources"),
-            vec!["java"]
-        );
-        // A language-agnostic lesson names none and stays eligible everywhere.
-        assert!(languages_in_text("Run the tests before declaring done").is_empty());
-
-        // Task side: a workspace of .rs files is rust (build/dep dirs ignored).
+    fn detects_the_workspace_dominant_language() {
+        // A workspace of .rs files is rust; build/dep dirs are ignored so a
+        // generated file there cannot swing the signal. (Lesson-text tagging is
+        // tested in localmind-store, which owns the language table.)
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "fn a() {}").unwrap();
         std::fs::write(dir.path().join("util.rs"), "fn b() {}").unwrap();
