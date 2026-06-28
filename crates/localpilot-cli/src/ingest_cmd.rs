@@ -61,6 +61,15 @@ pub fn run(project_root: &Path, mode: RunMode, out: &mut dyn Write) -> anyhow::R
     writeln!(out, "files: {}", summary.job.completed_files)?;
     writeln!(out, "skipped: {}", summary.job.skipped_files)?;
     writeln!(out, "chunks: {}", summary.chunks_written)?;
+    // Only reported when chunk embeddings are active, so a keyword-only run's
+    // output is unchanged.
+    if summary.embedded_chunks > 0 {
+        writeln!(
+            out,
+            "embedded: {} of {} chunks (hybrid retrieval)",
+            summary.embedded_chunks, summary.chunks_written
+        )?;
+    }
     Ok(())
 }
 

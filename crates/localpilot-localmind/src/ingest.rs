@@ -221,6 +221,11 @@ pub struct RunSummary {
     pub job: IngestJob,
     pub manifest: PreviewManifest,
     pub chunks_written: usize,
+    /// How many of the indexed chunks carry an embedding vector (the
+    /// keyword+vector hybrid corpus). `0` when no embedding model is configured or
+    /// `[ingest] embed_chunks = false` — i.e. the keyword-only path.
+    #[serde(default)]
+    pub embedded_chunks: usize,
 }
 
 /// A generated review candidate backed by ingestion artifacts.
@@ -434,7 +439,14 @@ pub fn run_with_progress(
     // configured (the local CPU embed server), so by default ingest is exactly the
     // keyword path. An embedding failure never fails ingest.
     let embed_capability = resolve_embed_capability(&root);
-    let embed_endpoint = embed_capability.embeddings();
+    // Chunk embedding is on by default but suppressible per project via
+    // `[ingest] embed_chunks = false` (keep accepted-memory embeddings, skip the
+    // per-chunk ingest cost). With the flag off, ingest is the keyword-only path.
+    let embed_endpoint = if config.embed_chunks {
+        embed_capability.embeddings()
+    } else {
+        None
+    };
     // Contextual chunk prefixing. The model-enrichment tier is gated on the
     // opt-in flag; no enricher is wired on this local path, so prefixes stay
     // synthetic (the flag alone never causes egress).
@@ -559,6 +571,7 @@ pub fn run_with_progress(
     progress(IngestProgress::Writing);
     let chunk_count = store.count()?;
     let review = build_review_items(&manifest, chunk_count);
+    let embedded_chunks = store.vector_count().unwrap_or(0);
     write_json(&ingest_dir.join(MANIFEST_FILE), &manifest)?;
     write_json(&ingest_dir.join(REVIEW_FILE), &review)?;
     write_json(&ingest_dir.join(JOB_FILE), &job)?;
@@ -571,6 +584,7 @@ pub fn run_with_progress(
         job,
         manifest,
         chunks_written: chunk_count,
+        embedded_chunks,
     })
 }
 
@@ -895,14 +909,20 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
             skip_reason: None,
         });
     }
-    // Hybrid augmentation, gated on a configured + reachable embedding endpoint.
-    // A successful query embed switches on the cosine blend; anything else
-    // (no model, endpoint down) falls through to the byte-identical keyword sort.
-    let capability = resolve_embed_capability(&root);
-    if let Some(endpoint) = capability.embeddings() {
-        if let Some(query_vector) = embed_query(endpoint, query) {
-            apply_hybrid_ranking(&store, &mut hits, &query_vector, &terms, workspace_language)?;
-            return Ok(hits);
+    // Hybrid augmentation, gated on chunks actually having been embedded *and* a
+    // configured + reachable embedding endpoint. `has_vectors` short-circuits the
+    // query embed when nothing was embedded (embeddings off via `[ingest]
+    // embed_chunks = false`, never built, or the endpoint was down at ingest), so
+    // that path stays byte-identical to keyword-only. A successful query embed
+    // switches on the cosine blend; anything else falls through to the byte-
+    // identical keyword sort.
+    if store.has_vectors()? {
+        let capability = resolve_embed_capability(&root);
+        if let Some(endpoint) = capability.embeddings() {
+            if let Some(query_vector) = embed_query(endpoint, query) {
+                apply_hybrid_ranking(&store, &mut hits, &query_vector, &terms, workspace_language)?;
+                return Ok(hits);
+            }
         }
     }
     hits.sort_by(|a, b| {
@@ -2685,6 +2705,37 @@ mod tests {
             "without an embedding model, ingest must write no vectors"
         );
         assert!(!search(dir.path(), "parser").unwrap().is_empty());
+    }
+
+    #[test]
+    fn embed_chunks_false_skips_embedding_even_with_a_configured_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser guide\n").unwrap();
+        let (base_url, count) = counting_embed_server(4);
+        write_inference_config(dir.path(), &base_url);
+        // Endpoint is configured, but the project opts out of ingest embedding.
+        let cfg = IngestConfig {
+            embed_chunks: false,
+            ..config()
+        };
+
+        run(dir.path(), &cfg, RunMode::Full).unwrap();
+
+        assert_eq!(
+            stored_vector_count(dir.path()),
+            0,
+            "embed_chunks = false must skip embedding"
+        );
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no embed request may be made when embed_chunks is off"
+        );
+        // Retrieval is the keyword-only path (raw score, no blend).
+        let hits = search(dir.path(), "parser").unwrap();
+        assert!(hits
+            .iter()
+            .all(|hit| hit.inclusion_reason == "query term match"));
     }
 
     #[test]

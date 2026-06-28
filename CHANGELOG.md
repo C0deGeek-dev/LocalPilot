@@ -25,7 +25,9 @@ is SemVer-stable; the configuration schema stability policy is in
   re-embedded (content-fingerprinted), a down/unconfigured endpoint writes no
   vectors and never fails ingest, and chunk vectors are dropped with their chunks.
   With no embedding model configured this is a no-op, so ingest stays exactly the
-  keyword path. (Hybrid keyword+vector retrieval over this index ships next.)
+  keyword path. `ingest run`/`refresh` report `embedded: N of M chunks` when
+  embeddings are active. New `[ingest] embed_chunks` (default `true`) opts out of
+  the per-chunk ingest embedding cost while keeping accepted-memory embeddings.
 
 - **Ingested folder knowledge is language-tagged and `knowledge_search` filters
   to the workspace language.** Each ingested chunk now records its file's

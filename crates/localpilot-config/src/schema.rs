@@ -397,6 +397,14 @@ pub struct IngestConfig {
     /// prefixes, and each use is audited. Without an enricher this stays
     /// synthetic even when set.
     pub contextual_prefix_enrichment: bool,
+    /// Embed each ingested chunk into the chunk vector index when an embedding
+    /// model is configured (the `[inference]` embedding endpoint accepted memory
+    /// uses), enabling hybrid keyword+vector `knowledge_search`. On by default, but
+    /// only ever active when an embedding model is configured — with no model this
+    /// is a no-op and ingest is keyword-only. Set to `false` to keep accepted-memory
+    /// embeddings while skipping the per-chunk embedding cost on ingest; retrieval
+    /// then stays keyword-only (byte-identical to the no-embeddings path).
+    pub embed_chunks: bool,
     /// Minimum seconds between session-open auto-refreshes of a completed index.
     /// Once the index is built, a later session re-runs a refresh only when
     /// source files have changed and at least this long has passed since the last
@@ -434,6 +442,7 @@ impl Default for IngestConfig {
             max_elapsed_secs: 600,
             max_model_calls: 0,
             contextual_prefix_enrichment: false,
+            embed_chunks: true,
             refresh_min_interval_secs: 600,
         }
     }

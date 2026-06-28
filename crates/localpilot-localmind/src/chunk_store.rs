@@ -547,9 +547,8 @@ impl ChunkStore {
         Ok(scored)
     }
 
-    /// Count of stored chunk vectors — for verification and tests, not a runtime
-    /// search path.
-    #[cfg(test)]
+    /// Count of stored chunk vectors — reported after a run (embedded-vs-keyword)
+    /// and used in tests.
     pub(crate) fn vector_count(&self) -> Result<usize, IngestError> {
         let count: i64 = self
             .connection
@@ -558,6 +557,21 @@ impl ChunkStore {
             })
             .map_err(|source| self.sqlite_err(source))?;
         Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Whether any chunk vectors exist — the cheap gate the search path uses to
+    /// skip the query embed + vector pass entirely when nothing was embedded
+    /// (embeddings off, never built, or the endpoint was down at ingest), keeping
+    /// retrieval byte-identical to the keyword-only contract.
+    pub(crate) fn has_vectors(&self) -> Result<bool, IngestError> {
+        let found: Option<i64> = self
+            .connection
+            .query_row("SELECT 1 FROM ingest_chunk_vectors LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|source| self.sqlite_err(source))?;
+        Ok(found.is_some())
     }
 
     /// Fetch full chunk rows for an explicit set of ids — the layer-3 "fetch"

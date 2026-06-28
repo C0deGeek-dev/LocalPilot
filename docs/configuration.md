@@ -76,6 +76,21 @@ large or scattered. The merged context is derived, disposable state under
 `.localmind/ingest/` like any other ingested knowledge (ADR-0013); it is never
 written to accepted memory without review.
 
+**Semantic ingest.** When an embedding model is configured for the project (the
+`[inference]` embedding endpoint accepted memory uses — i.e. `embedding_base_url`
++ `embedding_model` in `.localmind.toml`, the local CPU embed server), ingested
+chunks are also embedded into a chunk vector index and `knowledge_search` becomes
+hybrid keyword+vector retrieval: a semantically-relevant chunk the keyword query
+missed is recalled, while keyword hits stay the floor (a strong keyword hit always
+surfaces). Embedding is best-effort — a down or unconfigured endpoint writes no
+vectors, never fails ingest, and leaves retrieval byte-identical to the
+keyword-only path. With no embedding model configured this is entirely inert.
+`ingest run`/`refresh` report `embedded: N of M chunks` when embeddings are
+active. To keep accepted-memory embeddings but skip the per-chunk ingest embedding
+cost, set `[ingest] embed_chunks = false` (default `true`); retrieval then stays
+keyword-only. See [10-decisions.md](10-decisions.md) (ADR-0025) and LocalMind
+D-LM-0022.
+
 **Store location.** `localpilot learning` and `localpilot memory` find the
 LocalMind store by walking up from the current directory to the nearest ancestor
 holding `.localmind` (git-style), so a subdirectory answers from the project's
