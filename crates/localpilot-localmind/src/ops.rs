@@ -349,8 +349,8 @@ pub fn context_hits(
 pub const CONTEXT_MEMORY_LIMIT: usize = 5;
 
 /// Record that `memories` were injected into a turn, bumping each one's usage
-/// count. **Best-effort and post-turn** (D003): driven from the turn-exit, never
-/// the retrieval read path, and every failure is swallowed so a usage write can
+/// count. **Best-effort and post-turn**: driven from the turn-exit, never the
+/// retrieval read path, and every failure is swallowed so a usage write can
 /// never fail a turn. Synthetic ids (the repository primer, ingest chunks) and
 /// unknown ids simply match no memory row. A no-op when the set is empty or no
 /// store can be opened.
@@ -473,7 +473,7 @@ impl From<FreshnessReport> for FreshnessOutcome {
 /// Run the deterministic freshness pass: flag accepted memory for review by age,
 /// never-retrieved-after-grace, and version-sensitivity. `scope` is
 /// `project`/`global`/`both`; with `dry_run` it reports candidates without
-/// writing. Routes to the existing review gate — never deletes (D001).
+/// writing. Routes to the existing review gate — never deletes.
 ///
 /// # Errors
 /// Returns [`LearningError::Memory`] if the store cannot be read/updated, or the
@@ -505,10 +505,11 @@ pub fn freshness_pass(
     Ok(FreshnessOutcome::from(report))
 }
 
-/// The memory-lifecycle review queues, derived from a single store read: stale
+/// The memory lifecycle review queues, derived from a single store read: stale
 /// candidates (flagged for review), never-retrieved (dead-weight), most-used
 /// (high-value), and contradicted. The act path for any of these stays the
-/// existing review/delete CLI — this only *surfaces* them (D001/D002).
+/// existing review/delete CLI — this only *surfaces* them (operator-invoked,
+/// never auto-deleting).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryLifecycle {
     pub total: usize,
@@ -518,7 +519,7 @@ pub struct MemoryLifecycle {
     pub contradicted: Vec<MemorySummary>,
 }
 
-/// Assemble the memory-lifecycle listing. `most_used_limit` caps the most-used
+/// Assemble the memory lifecycle listing. `most_used_limit` caps the most-used
 /// section.
 ///
 /// # Errors
@@ -585,10 +586,11 @@ pub struct RevalidationOutcome {
 }
 
 /// Optional, opt-in source re-validation. **Default-off and network-touching**
-/// (policy D007): a preview (`apply = false`) counts version-sensitive candidates
-/// **offline** and contacts nothing; only `apply = true` contacts the configured
-/// model and routes "no longer true" verdicts to review (never deletes, D001).
-/// The live model run is opportunistic (D008) — the logic is offline-tested with a
+/// (egress is the caller's disclosed choice): a preview (`apply = false`) counts
+/// version-sensitive candidates **offline** and contacts nothing; only
+/// `apply = true` contacts the configured model and routes "no longer true"
+/// verdicts to review (never deletes). The live model run is opportunistic — the
+/// logic is offline-tested with a
 /// fixture verdict source in the engine.
 ///
 /// # Errors

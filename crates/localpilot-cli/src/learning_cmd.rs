@@ -517,7 +517,7 @@ pub fn freshness(
     Ok(())
 }
 
-/// List the memory-lifecycle queues: flagged-for-review (stale), never-retrieved
+/// List the memory lifecycle queues: flagged-for-review (stale), never-retrieved
 /// (dead weight), most-used (high value), and contradicted. Read-only — the act
 /// path stays the existing review/delete CLI.
 ///
@@ -581,7 +581,7 @@ pub fn revalidate(
     err: &mut dyn Write,
 ) -> anyhow::Result<()> {
     if apply {
-        // Disclose egress on stderr so a JSON stdout stays clean (D007).
+        // Disclose egress on stderr so a JSON stdout stays clean.
         writeln!(
             err,
             "localmind: source re-validation contacts the configured local model to judge \
