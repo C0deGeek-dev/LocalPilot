@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 ignore = { workspace = true }
 localmind-codegraph = { path = "../../external/localmind/crates/localmind-codegraph" }
 localmind-core = { path = "../../external/localmind/crates/localmind-core" }
+localmind-inference = { path = "../../external/localmind/crates/localmind-inference" }
 localmind-mcp = { path = "../../external/localmind/crates/localmind-mcp" }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 schemars = { workspace = true }

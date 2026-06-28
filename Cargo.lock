@@ -1629,6 +1629,7 @@ dependencies = [
  "ignore",
  "localmind-codegraph",
  "localmind-core",
+ "localmind-inference",
  "localmind-mcp",
  "localmind-store",
  "localpilot-config",

@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Ingested chunks are embedded on ingest (best-effort, opt-in) into a chunk
+  vector index.** When an embedding model is configured (the same
+  `[inference]` embedding gate accepted-memory embedding uses — the local CPU
+  embed server), each ingested chunk is embedded into a new rebuildable
+  `ingest_chunk_vectors` table (schema v4, mirroring the accepted-memory
+  `vector_index` shape). It is **best-effort**: an unchanged chunk is not
+  re-embedded (content-fingerprinted), a down/unconfigured endpoint writes no
+  vectors and never fails ingest, and chunk vectors are dropped with their chunks.
+  With no embedding model configured this is a no-op, so ingest stays exactly the
+  keyword path. (Hybrid keyword+vector retrieval over this index ships next.)
+
 - **Ingested folder knowledge is language-tagged and `knowledge_search` filters
   to the workspace language.** Each ingested chunk now records its file's
   programming language (reusing LocalMind's `language_for_extension` map — the

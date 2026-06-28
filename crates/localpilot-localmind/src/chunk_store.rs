@@ -24,7 +24,9 @@ const LEGACY_CHUNKS_FILE: &str = "chunks.json";
 /// v2 adds the additive `context_prefix` column (contextual chunk prefixing).
 /// v3 adds the additive nullable `language` column (language-tagged chunks +
 /// language-filtered search). `NULL` = unknown/general = always eligible.
-const SCHEMA_VERSION: i32 = 3;
+/// v4 adds the additive `ingest_chunk_vectors` table (best-effort chunk
+/// embeddings), mirroring the accepted-memory `vector_index` shape.
+const SCHEMA_VERSION: i32 = 4;
 /// Cap on candidate rows pulled from the FTS index for one query, ordered by
 /// relevance. Bounds query memory on a large corpus; far above any realistic
 /// matched-set for a context pack, so it never changes small-fixture results.
@@ -130,6 +132,28 @@ impl ChunkStore {
                 .map_err(|source| self.sqlite_err(source))?;
             current = 3;
         }
+        if current < 4 {
+            // Additive: a rebuildable chunk vector index, mirroring the
+            // accepted-memory `vector_index` shape (LE-f32 BLOB, exact cosine in
+            // Rust). Keyed by chunk id; `source_fingerprint` dedups re-embedding
+            // of an unchanged chunk. Best-effort and disposable — absent rows just
+            // mean those chunks were never embedded (keyword retrieval is intact).
+            self.connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS ingest_chunk_vectors (
+                        chunk_id TEXT PRIMARY KEY,
+                        source_fingerprint TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        dimensions INTEGER NOT NULL,
+                        vector_blob BLOB NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    "#,
+                )
+                .map_err(|source| self.sqlite_err(source))?;
+            current = 4;
+        }
         let _ = current;
         self.connection
             .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -165,10 +189,14 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Drop every row — a full rebuild's clean slate.
+    /// Drop every row — a full rebuild's clean slate. Chunk vectors are dropped
+    /// with their chunks so no orphan vectors survive a rebuild.
     pub(crate) fn clear(&self) -> Result<(), IngestError> {
         self.connection
-            .execute_batch("DELETE FROM ingest_chunks; DELETE FROM ingest_chunks_fts;")
+            .execute_batch(
+                "DELETE FROM ingest_chunks; DELETE FROM ingest_chunks_fts; \
+                 DELETE FROM ingest_chunk_vectors;",
+            )
             .map_err(|source| self.sqlite_err(source))?;
         Ok(())
     }
@@ -398,8 +426,81 @@ impl ChunkStore {
                 params![target],
             )
             .map_err(|source| self.sqlite_err(source))?;
+        // Drop the vectors of the just-removed chunks so none are orphaned (the
+        // chunk-vector table has no DB-level foreign key).
+        tx.execute(
+            "DELETE FROM ingest_chunk_vectors \
+             WHERE chunk_id NOT IN (SELECT id FROM ingest_chunks)",
+            [],
+        )
+        .map_err(|source| self.sqlite_err(source))?;
         tx.commit().map_err(|source| self.sqlite_err(source))?;
         Ok(removed)
+    }
+
+    /// The stored embedding fingerprint for a chunk, or `None` when the chunk has
+    /// no vector yet — the re-embed signal. A chunk whose `source_fingerprint`
+    /// already matches the text about to be embedded is skipped (no re-embed of
+    /// unchanged content).
+    pub(crate) fn vector_fingerprint(&self, chunk_id: &str) -> Result<Option<String>, IngestError> {
+        self.connection
+            .query_row(
+                "SELECT source_fingerprint FROM ingest_chunk_vectors WHERE chunk_id = ?1",
+                params![chunk_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|source| self.sqlite_err(source))
+    }
+
+    /// Insert or replace one chunk's embedding vector (LE-f32 BLOB, exact-cosine
+    /// at search time), keyed by chunk id and stamped with the content fingerprint
+    /// it was embedded from, the model, and the dimension count.
+    pub(crate) fn upsert_chunk_vector(
+        &self,
+        chunk_id: &str,
+        source_fingerprint: &str,
+        model: &str,
+        vector: &[f32],
+        updated_at: &str,
+    ) -> Result<(), IngestError> {
+        let blob = encode_vector(vector);
+        let dimensions = i64::try_from(vector.len()).unwrap_or(i64::MAX);
+        self.connection
+            .execute(
+                "INSERT INTO ingest_chunk_vectors \
+                    (chunk_id, source_fingerprint, model, dimensions, vector_blob, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(chunk_id) DO UPDATE SET \
+                    source_fingerprint = excluded.source_fingerprint, \
+                    model = excluded.model, \
+                    dimensions = excluded.dimensions, \
+                    vector_blob = excluded.vector_blob, \
+                    updated_at = excluded.updated_at",
+                params![
+                    chunk_id,
+                    source_fingerprint,
+                    model,
+                    dimensions,
+                    blob,
+                    updated_at
+                ],
+            )
+            .map_err(|source| self.sqlite_err(source))?;
+        Ok(())
+    }
+
+    /// Count of stored chunk vectors — for verification and tests, not a runtime
+    /// search path.
+    #[cfg(test)]
+    pub(crate) fn vector_count(&self) -> Result<usize, IngestError> {
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM ingest_chunk_vectors", [], |row| {
+                row.get(0)
+            })
+            .map_err(|source| self.sqlite_err(source))?;
+        Ok(usize::try_from(count).unwrap_or(0))
     }
 
     /// Fetch full chunk rows for an explicit set of ids — the layer-3 "fetch"
@@ -557,6 +658,16 @@ fn fts_match_expression(terms: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" OR ");
     Some(expression)
+}
+
+/// Encode an embedding as a little-endian f32 BLOB — the same on-disk layout the
+/// accepted-memory `vector_index` uses, so cosine is computed identically in Rust.
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
 }
 
 /// `u64` span/count → `i64` for SQLite. Values this large never occur for line

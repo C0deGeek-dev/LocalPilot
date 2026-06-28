@@ -424,6 +424,13 @@ pub fn run_with_progress(
         skipped: manifest.estimates.skipped_files,
     });
     let store = ChunkStore::open(&ingest_dir)?;
+    // Best-effort chunk embeddings. The endpoint is resolved from the project's
+    // `.localmind.toml` `[inference]` via the **same** capability gate
+    // accepted-memory embedding uses — it is `None` unless an embedding model is
+    // configured (the local CPU embed server), so by default ingest is exactly the
+    // keyword path. An embedding failure never fails ingest.
+    let embed_capability = resolve_embed_capability(&root);
+    let embed_endpoint = embed_capability.embeddings();
     // Contextual chunk prefixing. The model-enrichment tier is gated on the
     // opt-in flag; no enricher is wired on this local path, so prefixes stay
     // synthetic (the flag alone never causes egress).
@@ -502,6 +509,7 @@ pub fn run_with_progress(
                     store.mark_path_changed(&entry.path, hash)?;
                 }
                 store.upsert_chunks(&file_chunks)?;
+                embed_chunks_best_effort(&store, embed_endpoint, &file_chunks);
                 job.completed_files = job.completed_files.saturating_add(1);
             }
             Err(_) => {
@@ -526,6 +534,7 @@ pub fn run_with_progress(
             store.mark_path_changed(PROJECT_CONTEXT_PATH, &hash)?;
         }
         store.upsert_chunks(&context_chunks)?;
+        embed_chunks_best_effort(&store, embed_endpoint, &context_chunks);
         candidate_paths.insert(PROJECT_CONTEXT_PATH.to_string());
     }
 
@@ -1996,6 +2005,95 @@ fn path_matches(path: &str, pattern: &str) -> bool {
     path == pattern || path.starts_with(&format!("{pattern}/")) || path.contains(pattern)
 }
 
+/// Resolve the project's embedding capability from its `.localmind.toml`
+/// `[inference]` settings, reusing the **same** gate accepted-memory embedding
+/// uses (`InferenceCapability::from_settings`). Best-effort and default-safe: a
+/// project with no config, no embedding model, or a parse error yields a disabled
+/// capability, so ingest stays on the keyword-only path with zero embedding calls.
+fn resolve_embed_capability(root: &Path) -> localmind_inference::InferenceCapability {
+    let settings = localmind_store::ProjectConfig::discover(root)
+        .ok()
+        .and_then(|config| config.config.inference);
+    localmind_inference::InferenceCapability::from_settings(settings.as_ref())
+        .unwrap_or_else(|_| localmind_inference::InferenceCapability::disabled())
+}
+
+/// The text embedded for a chunk: its context prefix (when present) followed by
+/// the redacted chunk body — the same prefixed text the FTS index sees, so the
+/// keyword and vector views describe the same content. Redaction already ran at
+/// chunk creation, so no raw secret is embedded.
+fn chunk_embed_text(chunk: &ChunkRecord) -> String {
+    if chunk.context_prefix.is_empty() {
+        chunk.text.clone()
+    } else {
+        format!("{}\n{}", chunk.context_prefix, chunk.text)
+    }
+}
+
+/// Embed `chunks` into the chunk vector index, **best-effort**. A no-op when no
+/// embedding endpoint is configured (the default — keyword-only ingest). Each
+/// chunk is content-fingerprinted (`localmind_core::content_fingerprint` over the
+/// embed text) so an unchanged chunk that already has a current vector is not
+/// re-embedded. A failed embed call never fails ingest: it logs and stops the
+/// pass for this run (a down endpoint should not be hammered per chunk), leaving
+/// the chunks keyword-searchable.
+fn embed_chunks_best_effort(
+    store: &ChunkStore,
+    endpoint: Option<&localmind_inference::EmbeddingEndpoint>,
+    chunks: &[ChunkRecord],
+) {
+    let Some(endpoint) = endpoint else {
+        return;
+    };
+    for chunk in chunks {
+        let embed_text = chunk_embed_text(chunk);
+        let fingerprint = localmind_core::content_fingerprint(&embed_text);
+        // Skip an unchanged chunk that already carries a current vector.
+        match store.vector_fingerprint(&chunk.id) {
+            Ok(Some(existing)) if existing == fingerprint => continue,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "localpilot::ingest",
+                    %error,
+                    "could not read chunk vector fingerprint; skipping embed"
+                );
+                continue;
+            }
+        }
+        match endpoint.embed(std::slice::from_ref(&embed_text)) {
+            Ok(vectors) => {
+                let Some(vector) = vectors.into_iter().next().filter(|v| !v.is_empty()) else {
+                    continue;
+                };
+                if let Err(error) = store.upsert_chunk_vector(
+                    &chunk.id,
+                    &fingerprint,
+                    endpoint.model(),
+                    &vector,
+                    &unix_now().to_string(),
+                ) {
+                    tracing::warn!(
+                        target: "localpilot::ingest",
+                        %error,
+                        "could not persist chunk vector; chunk stays keyword-searchable"
+                    );
+                }
+            }
+            Err(error) => {
+                // Best-effort: a down/erroring endpoint never fails ingest. Stop
+                // the pass for this run rather than retry every chunk.
+                tracing::warn!(
+                    target: "localpilot::ingest",
+                    %error,
+                    "chunk embedding endpoint unavailable; chunks stay keyword-searchable"
+                );
+                return;
+            }
+        }
+    }
+}
+
 /// The programming language tagged on a chunk, derived from its display path's
 /// extension via the **same** map accepted-memory tagging and workspace detection
 /// use (`localmind_store::language_for_extension`), so a chunk tag and the
@@ -2347,6 +2445,186 @@ mod tests {
             !paths.contains("script.py"),
             "an off-language (python) chunk must be excluded in a rust workspace"
         );
+    }
+
+    /// A fixture OpenAI-compatible embeddings server returning a fixed
+    /// `dims`-length vector for every request, counting requests so a test can
+    /// prove fingerprint dedup (no re-embed of unchanged content). Serves many
+    /// requests (one per chunk). Mirrors the accepted-memory embeddings fixture.
+    fn counting_embed_server(
+        dims: usize,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let server_counter = Arc::clone(&counter);
+        let values = std::iter::repeat_n("0.1", dims)
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!("{{\"data\":[{{\"embedding\":[{values}]}}]}}");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer);
+                server_counter.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{address}"), counter)
+    }
+
+    /// Write a `.localmind.toml` wiring the embedding endpoint at `base_url`, so
+    /// `resolve_embed_capability` returns a configured endpoint.
+    fn write_inference_config(root: &Path, base_url: &str) {
+        fs::write(
+            root.join(".localmind.toml"),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"test-embed\"\ntimeout_secs = 2\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn stored_vector_count(root: &Path) -> usize {
+        let ingest_dir = canonical_root(root).unwrap().join(INGEST_DIR);
+        crate::chunk_store::ChunkStore::open(&ingest_dir)
+            .unwrap()
+            .vector_count()
+            .unwrap()
+    }
+
+    #[test]
+    fn ingest_embeds_chunks_when_configured_and_keyword_search_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser deployment guide\n").unwrap();
+        let (base_url, _count) = counting_embed_server(4);
+        write_inference_config(dir.path(), &base_url);
+
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // Vectors were written for the ingested chunk(s)…
+        assert!(
+            stored_vector_count(dir.path()) >= 1,
+            "a configured endpoint must embed chunks on ingest"
+        );
+        // …and keyword retrieval is unaffected.
+        let hits = search(dir.path(), "parser").unwrap();
+        assert!(hits.iter().any(|hit| hit.path == "README.md"));
+    }
+
+    #[test]
+    fn ingest_writes_no_vectors_without_embedding_config() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser guide\n").unwrap();
+        // No `.localmind.toml` / no embedding model ⇒ exactly today's keyword path.
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        assert_eq!(
+            stored_vector_count(dir.path()),
+            0,
+            "without an embedding model, ingest must write no vectors"
+        );
+        assert!(!search(dir.path(), "parser").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ingest_keeps_keyword_rows_when_embed_endpoint_is_down() {
+        // A bound-then-dropped port is guaranteed closed → connection refused.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "parser guide\n").unwrap();
+        write_inference_config(dir.path(), &format!("http://{dead_addr}"));
+
+        // Ingest must not fail just because embedding is unreachable.
+        let summary = run(dir.path(), &config(), RunMode::Full).unwrap();
+        assert_eq!(summary.job.status, JobStatus::Completed);
+        assert_eq!(
+            stored_vector_count(dir.path()),
+            0,
+            "a down endpoint writes no vectors"
+        );
+        assert!(
+            !search(dir.path(), "parser").unwrap().is_empty(),
+            "chunks stay keyword-searchable when embedding is down"
+        );
+    }
+
+    #[test]
+    fn unchanged_chunks_are_not_re_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ingest_dir = ensure_ingest_dir(&canonical_root(dir.path()).unwrap()).unwrap();
+        let store = ChunkStore::open(&ingest_dir).unwrap();
+        let policy = crate::context_prefix::PrefixEnrichmentPolicy { enabled: false };
+        let chunks = chunk_text("parser mapping body", "a.rs", "h1", &policy);
+        store.upsert_chunks(&chunks).unwrap();
+
+        let (base_url, count) = counting_embed_server(4);
+        let endpoint =
+            localmind_inference::EmbeddingEndpoint::new(&base_url, "test-embed", None, 5).unwrap();
+
+        embed_chunks_best_effort(&store, Some(&endpoint), &chunks);
+        let after_first = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_first >= 1, "the first pass embeds the chunk(s)");
+        assert_eq!(store.vector_count().unwrap(), chunks.len());
+
+        // A second pass over the identical chunks must re-embed nothing.
+        embed_chunks_best_effort(&store, Some(&endpoint), &chunks);
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            after_first,
+            "an unchanged chunk (same fingerprint) must not be re-embedded"
+        );
+    }
+
+    #[test]
+    fn forget_and_rebuild_drop_chunk_vectors_leaving_no_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("keep.md"), "keep parser\n").unwrap();
+        fs::write(dir.path().join("drop.md"), "drop parser\n").unwrap();
+        let (base_url, _count) = counting_embed_server(4);
+        write_inference_config(dir.path(), &base_url);
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+        assert!(stored_vector_count(dir.path()) >= 2);
+
+        // Forgetting a path drops that chunk and its vector (no orphan vector).
+        forget(dir.path(), "drop.md").unwrap();
+        let ingest_dir = canonical_root(dir.path()).unwrap().join(INGEST_DIR);
+        let store = ChunkStore::open(&ingest_dir).unwrap();
+        let chunk_ids: BTreeSet<String> = store
+            .all_chunks()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        // Every stored vector still belongs to a live chunk.
+        assert!(
+            store.vector_count().unwrap() <= chunk_ids.len(),
+            "no vector may outlive its chunk"
+        );
+        assert!(
+            chunk_ids.iter().all(|id| !id.contains("drop")),
+            "the forgotten chunk is gone"
+        );
+
+        // A clear (the Full-run clean slate) drops the vector table with the
+        // chunks, so no orphan vectors survive a rebuild.
+        store.clear().unwrap();
+        assert_eq!(store.count().unwrap(), 0);
+        assert_eq!(store.vector_count().unwrap(), 0);
     }
 
     #[test]

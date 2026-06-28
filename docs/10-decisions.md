@@ -1525,6 +1525,18 @@ database on first open and is then removed; `ingest rebuild` recreates the store
 from source. Only the large chunk index moved — the small manifest/job/review/
 last-pack files stay JSON.
 
+The stepper has since taken two additive steps, each nullable/defaulted so a
+pre-existing store upgrades clean: **v2** adds a `context_prefix` column
+(contextual chunk prefixing); **v3** adds a nullable `language` column
+(language-tagged chunks + workspace-language-filtered search, reusing
+`localmind_store::language_for_extension`); **v4** adds a rebuildable
+`ingest_chunk_vectors` table (chunk id → LE-f32 BLOB + content fingerprint +
+model + dimensions), mirroring the accepted-memory `vector_index` shape, for
+best-effort chunk embeddings. Embeddings are gated on a configured embedding model
+(the same `InferenceCapability` gate accepted memory uses) and never fail ingest;
+chunk vectors are dropped with their chunks, so the keyword path and the
+disposable/rebuildable contract are unchanged.
+
 Reason:
 
 - the persisted index exists to keep retrieval lean on modest machines; a
