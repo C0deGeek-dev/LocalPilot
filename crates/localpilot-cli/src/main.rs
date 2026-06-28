@@ -557,6 +557,25 @@ enum LearningCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Opt-in source re-validation: ask the configured model whether version-
+    /// sensitive accepted lessons are still current and flag "no longer true"
+    /// ones for review. Network-touching and default-off — a preview contacts
+    /// nothing; `--apply` contacts the configured model. Never deletes.
+    Revalidate {
+        /// Contact the configured model and flag for review. Without it, this is
+        /// an offline preview that counts candidates and contacts nothing.
+        #[arg(long)]
+        apply: bool,
+        /// Most version-sensitive lessons to sample in one pass.
+        #[arg(long, default_value_t = 10)]
+        sample: usize,
+        /// Output format. Defaults to JSON when stdout is not a terminal.
+        #[arg(long, value_enum)]
+        format: Option<output::OutputFormat>,
+        /// Alias for `--format json`.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1188,6 +1207,23 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     let is_tty = io::stdout().is_terminal();
                     let resolved = output::resolve_format(format, json, is_tty);
                     learning_cmd::lifecycle(root, top, resolved, &mut stdout)?;
+                }
+                LearningCommand::Revalidate {
+                    apply,
+                    sample,
+                    format,
+                    json,
+                } => {
+                    let is_tty = io::stdout().is_terminal();
+                    let resolved = output::resolve_format(format, json, is_tty);
+                    learning_cmd::revalidate(
+                        root,
+                        sample,
+                        apply,
+                        resolved,
+                        &mut stdout,
+                        &mut io::stderr(),
+                    )?;
                 }
             }
         }

@@ -5,9 +5,9 @@
 
 use localmind_core::{MemoryEntryId, ReviewAction, ReviewDecision, ReviewItemId, SkillDraftId};
 use localmind_store::{
-    FreshnessReport, FreshnessScope, FreshnessThresholds, MemoryPersistence,
-    MemoryPersistenceError, MemoryRecord, ReviewQueue, ReviewQueueItem, SkillDraftRecord,
-    SkillDraftStore, StoreConfigError,
+    is_revalidation_candidate, FreshnessReport, FreshnessScope, FreshnessThresholds,
+    MemoryPersistence, MemoryPersistenceError, MemoryRecord, RevalidationConfig, ReviewQueue,
+    ReviewQueueItem, SkillDraftRecord, SkillDraftStore, StoreConfigError,
 };
 
 use crate::LearningError;
@@ -562,6 +562,90 @@ pub fn memory_lifecycle(
         most_used,
         contradicted,
     })
+}
+
+/// The outcome of a source re-validation invocation, flattened + serializable.
+/// On a preview (no `--apply`) only `candidates` is set and no model is contacted;
+/// on apply the remaining fields report the model's verdicts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RevalidationOutcome {
+    /// Version-sensitive accepted lessons eligible for re-validation (computed
+    /// offline, always).
+    pub candidates: usize,
+    /// Whether the configured model was actually contacted (only on apply).
+    pub contacted_model: bool,
+    /// Whether a chat model is configured (false → the live pass is unavailable).
+    pub model_available: bool,
+    pub sampled: usize,
+    pub no_longer_true: usize,
+    pub still_current: usize,
+    pub unknown: usize,
+    /// Ids routed to review (the "no longer true" verdicts).
+    pub flagged: Vec<String>,
+}
+
+/// Optional, opt-in source re-validation. **Default-off and network-touching**
+/// (policy D007): a preview (`apply = false`) counts version-sensitive candidates
+/// **offline** and contacts nothing; only `apply = true` contacts the configured
+/// model and routes "no longer true" verdicts to review (never deletes, D001).
+/// The live model run is opportunistic (D008) — the logic is offline-tested with a
+/// fixture verdict source in the engine.
+///
+/// # Errors
+/// Returns [`LearningError::Memory`] if the store cannot be read or updated.
+pub fn revalidate(
+    project_root: &Path,
+    sample_size: usize,
+    apply: bool,
+) -> Result<RevalidationOutcome, LearningError> {
+    let persistence = open_memory(project_root)?;
+    // Offline candidate count — never contacts the network.
+    let candidates = persistence
+        .list_memory()
+        .map_err(memory_err)?
+        .into_iter()
+        .filter(|record| is_revalidation_candidate(&record.body))
+        .count();
+
+    if !apply {
+        return Ok(RevalidationOutcome {
+            candidates,
+            contacted_model: false,
+            model_available: false,
+            sampled: 0,
+            no_longer_true: 0,
+            still_current: 0,
+            unknown: 0,
+            flagged: Vec::new(),
+        });
+    }
+
+    let config = RevalidationConfig { sample_size };
+    match persistence
+        .revalidate_with_model(&config, false)
+        .map_err(memory_err)?
+    {
+        None => Ok(RevalidationOutcome {
+            candidates,
+            contacted_model: false,
+            model_available: false,
+            sampled: 0,
+            no_longer_true: 0,
+            still_current: 0,
+            unknown: 0,
+            flagged: Vec::new(),
+        }),
+        Some(report) => Ok(RevalidationOutcome {
+            candidates,
+            contacted_model: true,
+            model_available: true,
+            sampled: report.sampled,
+            no_longer_true: report.no_longer_true,
+            still_current: report.still_current,
+            unknown: report.unknown,
+            flagged: report.flagged,
+        }),
+    }
 }
 
 /// Delete accepted LocalMind memory by id.

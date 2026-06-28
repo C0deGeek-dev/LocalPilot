@@ -122,6 +122,13 @@ commits).
   (flagged-for-review, never-retrieved, most-used, contradicted). Both support
   `--format human|json`. Usage counts that drive "never retrieved"/"most used" are
   bumped post-turn, off the retrieval read path.
+- `localpilot learning revalidate` is the **opt-in, default-off** deeper check: it
+  asks the configured local model whether version-sensitive lessons are still
+  current and flags "no longer true" ones **for review** (never deletes). It is
+  **network-touching and disclosed** (policy D007): a preview (no `--apply`) counts
+  candidates **offline and contacts nothing**; only `--apply` contacts the model
+  (egress disclosed on stderr). The offline `learning freshness` pass needs no
+  model and is the default; the live re-validation run is opportunistic.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
 - Agent turns contribute relevant accepted LocalMind memory as best-effort

@@ -18,6 +18,15 @@ is SemVer-stable; the configuration schema stability policy is in
   delete` path. `localpilot learning lifecycle` lists the queues (flagged,
   never-retrieved, most-used, contradicted). Both honour `--format human|json`.
 
+- **Optional source re-validation (`localpilot learning revalidate`, opt-in,
+  default-off).** Asks the configured local model whether version-sensitive
+  accepted lessons are still current and flags "no longer true" ones **for
+  review** — never deletes. It is **network-touching and disclosed**: a preview
+  (no `--apply`) counts candidates **offline and contacts nothing**; only
+  `--apply` contacts the model (egress is disclosed on stderr). The offline
+  `learning freshness` pass needs no model and stays the default; this deeper
+  check is opportunistic.
+
 - **`edit_file`/`multi_edit`/`apply_patch` match across CRLF/LF line endings.**
   The edit tools matched `old_text` against the raw file bytes, so a model that
   emits `old_text` with `\n` could not edit a CRLF-stored file — every attempt

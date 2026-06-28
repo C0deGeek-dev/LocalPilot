@@ -564,6 +564,79 @@ fn lifecycle_section(
     Ok(())
 }
 
+/// Opt-in source re-validation: ask the configured model whether version-
+/// sensitive accepted lessons are still current, flagging "no longer true" ones
+/// for review. **Network-touching and default-off**: a preview (no `--apply`)
+/// contacts nothing and only counts candidates; `--apply` contacts the configured
+/// local model (egress is disclosed on stderr). Never deletes.
+///
+/// # Errors
+/// Returns an error if the store cannot be read or updated.
+pub fn revalidate(
+    cwd: &Path,
+    sample: usize,
+    apply: bool,
+    format: OutputFormat,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> anyhow::Result<()> {
+    if apply {
+        // Disclose egress on stderr so a JSON stdout stays clean (D007).
+        writeln!(
+            err,
+            "localmind: source re-validation contacts the configured local model to judge \
+             version-sensitive lessons (opt-in egress). It only flags for review — never deletes."
+        )?;
+    }
+    let outcome = learning::revalidate(cwd, sample, apply)?;
+    if format == OutputFormat::Json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&outcome)?)?;
+        return Ok(());
+    }
+    if !apply {
+        writeln!(
+            out,
+            "source re-validation (preview): {} version-sensitive lesson(s) eligible. \
+             Nothing was contacted or written.",
+            outcome.candidates
+        )?;
+        writeln!(
+            out,
+            "re-run with --apply to ask the configured model and flag 'no longer true' lessons \
+             for review (opt-in egress; never deletes)."
+        )?;
+        return Ok(());
+    }
+    if !outcome.model_available {
+        writeln!(
+            out,
+            "no chat model configured ([inference] chat_base_url/chat_model); source \
+             re-validation is unavailable. The offline `learning freshness` pass needs no model."
+        )?;
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "source re-validation: sampled {} of {} candidate(s) — {} no-longer-true, {} still-current, {} unknown",
+        outcome.sampled,
+        outcome.candidates,
+        outcome.no_longer_true,
+        outcome.still_current,
+        outcome.unknown,
+    )?;
+    for id in &outcome.flagged {
+        writeln!(out, "  flagged-for-review\t{id}")?;
+    }
+    if !outcome.flagged.is_empty() {
+        writeln!(
+            out,
+            "resolve each via `localpilot learning review` or `localpilot memory delete` — \
+             re-validation never deletes."
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1007,5 +1080,63 @@ mod tests {
             "both fresh lessons are never-retrieved: {listing}"
         );
         assert_eq!(listing["most_used"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn revalidate_preview_counts_offline_and_contacts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_accepted(dir.path(), "the --foo flag was deprecated in v1.2");
+        // An evergreen lesson is not a re-validation candidate.
+        let evergreen = learning::SeedLesson {
+            body: "prefer guard clauses over deep nesting".to_string(),
+            category: None,
+            confidence: None,
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        learning::seed_memory(dir.path(), std::slice::from_ref(&evergreen), false).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        revalidate(
+            dir.path(),
+            10,
+            false,
+            OutputFormat::Json,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let outcome: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            outcome["candidates"],
+            serde_json::json!(1),
+            "only the version-sensitive lesson is eligible: {outcome}"
+        );
+        assert_eq!(outcome["contacted_model"], serde_json::json!(false));
+        assert!(
+            err.is_empty(),
+            "a preview discloses nothing and contacts nothing"
+        );
+    }
+
+    #[test]
+    fn revalidate_apply_without_a_model_is_unavailable_and_discloses_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_accepted(dir.path(), "the deprecated flag in v1.2");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        // No [inference] config -> no chat model -> unavailable, never an error.
+        revalidate(dir.path(), 10, true, OutputFormat::Json, &mut out, &mut err).unwrap();
+        let outcome: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(outcome["model_available"], serde_json::json!(false));
+        assert_eq!(outcome["contacted_model"], serde_json::json!(false));
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains("opt-in egress"),
+            "apply must disclose egress: {err}"
+        );
     }
 }
