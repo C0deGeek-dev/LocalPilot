@@ -163,6 +163,12 @@ commits).
   `mode = "push"` restores always-on injection of high-ranking chunks. Ingested
   context is never accepted memory. Promotion from ingestion enqueues LocalMind
   review items first (ADR-0016).
+- Each ingested chunk is tagged with its file's programming language (via the
+  same `language_for_extension` map accepted-memory tagging uses), and
+  `knowledge_search` filters results to the workspace's dominant language —
+  excluding off-language chunks while keeping language-neutral (`NULL`-tagged,
+  e.g. docs) chunks eligible. A workspace with no dominant language detects no
+  signal and applies no filter, so keyword retrieval is unchanged.
 - Context compaction manages the active model projection only. It can emit a
   structured, source-grounded runtime digest and safe audit metadata, but it
   does not write accepted memory, create skill drafts, or enqueue LocalMind

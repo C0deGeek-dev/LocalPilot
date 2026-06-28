@@ -178,6 +178,13 @@ pub struct ChunkRecord {
     pub context_prefix: String,
     #[serde(default)]
     pub summary: String,
+    /// The chunk's programming language, derived from its file extension via
+    /// `localmind_store::language_for_extension` (the same map accepted-memory
+    /// tagging uses). `None` for an unknown extension or the synthetic
+    /// project-context document — a `NULL` tag stays eligible for every search.
+    /// Empty for chunks ingested before language tagging existed.
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub redaction_status: String,
     #[serde(default)]
@@ -817,6 +824,13 @@ pub fn exclude_path(project_root: &Path, path: &Path) -> Result<String, IngestEr
 /// term-count + path-name-boost score is then recomputed over just those rows,
 /// so the ranking is unchanged while the whole index is never loaded into RAM.
 ///
+/// Results are filtered to the workspace's dominant programming language (via
+/// `localmind_store::detect_workspace_language`, the same detector accepted-memory
+/// retrieval uses), excluding off-language chunks while keeping `NULL`-tagged
+/// (unknown / general) chunks eligible. A workspace with no dominant language
+/// (docs-only or mixed) detects `None` ⇒ no filter ⇒ today's keyword behaviour
+/// byte for byte.
+///
 /// # Errors
 /// Returns [`IngestError`] when the chunk store cannot be opened or queried.
 pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, IngestError> {
@@ -831,8 +845,9 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
         return Ok(Vec::new());
     }
     let store = ChunkStore::open(&ingest_dir)?;
+    let workspace_language = localmind_store::detect_workspace_language(&root);
     let mut hits = Vec::new();
-    for chunk in store.search(&terms)? {
+    for chunk in store.search(&terms, workspace_language)? {
         let text = chunk.text.to_ascii_lowercase();
         let path = chunk.path.to_ascii_lowercase();
         let mut score = 0_u64;
@@ -1645,6 +1660,7 @@ fn push_chunk(
         content_hash: content_hash.to_string(),
         token_estimate: estimate_tokens(redacted.len() as u64),
         context_prefix: context_prefix.to_string(),
+        language: chunk_language(path),
         summary: summarize_chunk(path, &redacted),
         redaction_status: "redacted".to_string(),
         original_bytes: text.len() as u64,
@@ -1980,6 +1996,17 @@ fn path_matches(path: &str, pattern: &str) -> bool {
     path == pattern || path.starts_with(&format!("{pattern}/")) || path.contains(pattern)
 }
 
+/// The programming language tagged on a chunk, derived from its display path's
+/// extension via the **same** map accepted-memory tagging and workspace detection
+/// use (`localmind_store::language_for_extension`), so a chunk tag and the
+/// workspace-language filter speak one vocabulary. `None` (⇒ `NULL`, always
+/// eligible) for an unknown extension or the synthetic `<project-context>`
+/// document, which carries no extension.
+fn chunk_language(display_path: &str) -> Option<String> {
+    let ext = Path::new(display_path).extension()?.to_str()?;
+    localmind_store::language_for_extension(ext).map(str::to_string)
+}
+
 fn language_for(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
     if matches!(name.as_str(), "makefile" | "dockerfile") {
@@ -2282,6 +2309,47 @@ mod tests {
     }
 
     #[test]
+    fn chunks_are_language_tagged_and_search_filters_to_the_workspace_language() {
+        let dir = tempfile::tempdir().unwrap();
+        // Make rust the dominant workspace language (2 rust files vs 1 python).
+        fs::write(dir.path().join("lib.rs"), "fn parser_mapping() {}\n").unwrap();
+        fs::write(dir.path().join("main.rs"), "fn run_mapping() {}\n").unwrap();
+        fs::write(dir.path().join("script.py"), "def mapping(): pass\n").unwrap();
+        // A docs file: its language is NULL (unknown), so it is always eligible.
+        fs::write(dir.path().join("NOTES.md"), "mapping notes\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // Tagging: each chunk inherits its file's language via the shared map.
+        let stored = stored_chunks(dir.path());
+        let lang_of = |path: &str| {
+            stored
+                .iter()
+                .find(|c| c.path == path)
+                .and_then(|c| c.language.clone())
+        };
+        assert_eq!(lang_of("lib.rs").as_deref(), Some("rust"));
+        assert_eq!(lang_of("script.py").as_deref(), Some("python"));
+        assert_eq!(lang_of("NOTES.md"), None, "a docs file is NULL-tagged");
+
+        // Search in the rust workspace: rust + NULL chunks surface, the python
+        // chunk is filtered out.
+        let paths: BTreeSet<String> = search(dir.path(), "mapping")
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert!(paths.contains("lib.rs"), "a rust chunk must surface");
+        assert!(
+            paths.contains("NOTES.md"),
+            "a NULL-tagged chunk stays eligible"
+        );
+        assert!(
+            !paths.contains("script.py"),
+            "an off-language (python) chunk must be excluded in a rust workspace"
+        );
+    }
+
+    #[test]
     fn search_and_pack_are_budgeted() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("README.md"), "parser parser guide\n").unwrap();
@@ -2461,6 +2529,7 @@ mod tests {
                 token_estimate: 1,
                 stale: false,
                 context_prefix: String::new(),
+                language: None,
                 summary: String::new(),
                 redaction_status: "redacted".to_string(),
                 original_bytes: 6,

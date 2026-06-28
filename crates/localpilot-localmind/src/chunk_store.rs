@@ -22,7 +22,9 @@ const CHUNKS_DB: &str = "chunks.sqlite";
 const LEGACY_CHUNKS_FILE: &str = "chunks.json";
 /// Highest schema version this build understands.
 /// v2 adds the additive `context_prefix` column (contextual chunk prefixing).
-const SCHEMA_VERSION: i32 = 2;
+/// v3 adds the additive nullable `language` column (language-tagged chunks +
+/// language-filtered search). `NULL` = unknown/general = always eligible.
+const SCHEMA_VERSION: i32 = 3;
 /// Cap on candidate rows pulled from the FTS index for one query, ordered by
 /// relevance. Bounds query memory on a large corpus; far above any realistic
 /// matched-set for a context pack, so it never changes small-fixture results.
@@ -119,6 +121,15 @@ impl ChunkStore {
                 .map_err(|source| self.sqlite_err(source))?;
             current = 2;
         }
+        if current < 3 {
+            // Additive: the chunk's programming language. Existing rows default to
+            // NULL (unknown ⇒ always eligible in the language filter); they are
+            // re-tagged when re-ingested.
+            self.connection
+                .execute_batch("ALTER TABLE ingest_chunks ADD COLUMN language TEXT;")
+                .map_err(|source| self.sqlite_err(source))?;
+            current = 3;
+        }
         let _ = current;
         self.connection
             .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -181,8 +192,8 @@ impl ChunkStore {
                 INSERT INTO ingest_chunks
                     (id, path, chunk_index, start_line, end_line, start_byte, end_byte,
                      content_hash, text, token_estimate, stale, context_prefix, summary,
-                     redaction_status, original_bytes, preview_bytes, superseded_by)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                     redaction_status, original_bytes, preview_bytes, superseded_by, language)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 ON CONFLICT(id) DO UPDATE SET
                     path = excluded.path,
                     chunk_index = excluded.chunk_index,
@@ -199,7 +210,8 @@ impl ChunkStore {
                     redaction_status = excluded.redaction_status,
                     original_bytes = excluded.original_bytes,
                     preview_bytes = excluded.preview_bytes,
-                    superseded_by = excluded.superseded_by
+                    superseded_by = excluded.superseded_by,
+                    language = excluded.language
                 "#,
                 params![
                     chunk.id,
@@ -219,6 +231,7 @@ impl ChunkStore {
                     to_i64(chunk.original_bytes),
                     to_i64(chunk.preview_bytes),
                     chunk.superseded_by,
+                    chunk.language,
                 ],
             )
             .map_err(|source| self.sqlite_err(source))?;
@@ -311,31 +324,54 @@ impl ChunkStore {
     /// Candidate rows for `terms`, narrowed through the FTS index and bounded by
     /// [`SEARCH_CANDIDATE_LIMIT`], ordered by relevance. Returns the matching
     /// rows only — never the whole store — so the caller scores a small set.
-    pub(crate) fn search(&self, terms: &[String]) -> Result<Vec<ChunkRecord>, IngestError> {
+    ///
+    /// When `language` is `Some`, a chunk tagged with a *different* language is
+    /// excluded while a `NULL`-tagged (unknown / general) chunk always remains
+    /// eligible — the exact clause accepted-memory `search_lang` uses. The clause
+    /// is appended **only** when filtering, so the unfiltered path (`None`) is
+    /// byte-for-byte the prior query and ranking is unchanged.
+    pub(crate) fn search(
+        &self,
+        terms: &[String],
+        language: Option<&str>,
+    ) -> Result<Vec<ChunkRecord>, IngestError> {
         let Some(match_expression) = fts_match_expression(terms) else {
             return Ok(Vec::new());
         };
-        let mut statement = self
-            .connection
-            .prepare(
-                r#"
+        let language_clause = if language.is_some() {
+            " AND (c.language = ?3 OR c.language IS NULL)"
+        } else {
+            ""
+        };
+        let statement_sql = format!(
+            r#"
                 SELECT c.id, c.path, c.chunk_index, c.start_line, c.end_line, c.start_byte,
                        c.end_byte, c.content_hash, c.text, c.token_estimate, c.stale,
                        c.context_prefix, c.summary, c.redaction_status, c.original_bytes,
-                       c.preview_bytes, c.superseded_by
+                       c.preview_bytes, c.superseded_by, c.language
                 FROM ingest_chunks_fts f
                 JOIN ingest_chunks c ON c.id = f.chunk_id
-                WHERE ingest_chunks_fts MATCH ?1
+                WHERE ingest_chunks_fts MATCH ?1{language_clause}
                 ORDER BY bm25(ingest_chunks_fts), c.path, c.id
                 LIMIT ?2
                 "#,
+        );
+        let mut statement = self
+            .connection
+            .prepare(&statement_sql)
+            .map_err(|source| self.sqlite_err(source))?;
+        let rows = if let Some(language) = language {
+            statement.query_map(
+                params![match_expression, SEARCH_CANDIDATE_LIMIT, language],
+                row_to_chunk,
             )
-            .map_err(|source| self.sqlite_err(source))?;
-        let rows = statement
-            .query_map(params![match_expression, SEARCH_CANDIDATE_LIMIT], |row| {
-                row_to_chunk(row)
-            })
-            .map_err(|source| self.sqlite_err(source))?;
+        } else {
+            statement.query_map(
+                params![match_expression, SEARCH_CANDIDATE_LIMIT],
+                row_to_chunk,
+            )
+        }
+        .map_err(|source| self.sqlite_err(source))?;
         let mut chunks = Vec::new();
         for row in rows {
             chunks.push(row.map_err(|source| self.sqlite_err(source))?);
@@ -381,7 +417,7 @@ impl ChunkStore {
             r#"
             SELECT id, path, chunk_index, start_line, end_line, start_byte, end_byte,
                    content_hash, text, token_estimate, stale, context_prefix, summary,
-                   redaction_status, original_bytes, preview_bytes, superseded_by
+                   redaction_status, original_bytes, preview_bytes, superseded_by, language
             FROM ingest_chunks WHERE id IN ({placeholders})
             ORDER BY path, chunk_index
             "#
@@ -452,7 +488,7 @@ impl ChunkStore {
                 r#"
                 SELECT id, path, chunk_index, start_line, end_line, start_byte, end_byte,
                        content_hash, text, token_estimate, stale, context_prefix, summary,
-                       redaction_status, original_bytes, preview_bytes, superseded_by
+                       redaction_status, original_bytes, preview_bytes, superseded_by, language
                 FROM ingest_chunks ORDER BY path, chunk_index
                 "#,
             )
@@ -492,6 +528,7 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRecord> {
         original_bytes: from_i64(row.get(14)?),
         preview_bytes: from_i64(row.get(15)?),
         superseded_by: row.get(16)?,
+        language: row.get(17)?,
     })
 }
 
@@ -552,6 +589,7 @@ mod tests {
             token_estimate: 1,
             stale: false,
             context_prefix: String::new(),
+            language: None,
             summary: String::new(),
             redaction_status: "redacted".to_string(),
             original_bytes: text.len() as u64,
@@ -568,7 +606,7 @@ mod tests {
             .upsert_chunks(&[chunk("c1", "a.md", "h1", "alpha parser guide")])
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
-        let hits = store.search(&["parser".to_string()]).unwrap();
+        let hits = store.search(&["parser".to_string()], None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "c1");
 
@@ -592,7 +630,7 @@ mod tests {
         store.upsert_chunks(&[prefixed]).unwrap();
 
         // The body never says "authentication"; only the indexed prefix does.
-        let by_prefix = store.search(&["authentication".to_string()]).unwrap();
+        let by_prefix = store.search(&["authentication".to_string()], None).unwrap();
         assert_eq!(by_prefix.len(), 1, "prefix terms must be searchable");
         assert_eq!(by_prefix[0].id, "c1");
         // The stored body is still the raw chunk, prefix kept in its own column.
@@ -602,7 +640,94 @@ mod tests {
             "File docs/auth.md: Authentication Flow."
         );
         // The body itself still matches its own terms.
-        assert_eq!(store.search(&["token".to_string()]).unwrap().len(), 1);
+        assert_eq!(store.search(&["token".to_string()], None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn language_filter_excludes_off_language_but_keeps_null_tagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        let mut rust = chunk("rs", "a.rs", "h1", "parser mapping");
+        rust.language = Some("rust".to_string());
+        let mut python = chunk("py", "b.py", "h2", "parser mapping");
+        python.language = Some("python".to_string());
+        // A general (e.g. docs) chunk with no language tag stays eligible always.
+        let general = chunk("gen", "c.md", "h3", "parser mapping");
+        store.upsert_chunks(&[rust, python, general]).unwrap();
+
+        // No filter: every matching chunk is returned (byte-identical to before).
+        let unfiltered = store.search(&["parser".to_string()], None).unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        // Filtered to rust: the python chunk is excluded; the rust chunk and the
+        // NULL-tagged general chunk both remain.
+        let rust_only = store.search(&["parser".to_string()], Some("rust")).unwrap();
+        let ids: BTreeSet<String> = rust_only.into_iter().map(|c| c.id).collect();
+        assert!(ids.contains("rs"), "the rust chunk must be kept");
+        assert!(
+            ids.contains("gen"),
+            "a NULL-tagged chunk is always eligible"
+        );
+        assert!(
+            !ids.contains("py"),
+            "an off-language chunk must be excluded"
+        );
+    }
+
+    #[test]
+    fn migrates_a_v2_database_by_adding_the_language_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join(CHUNKS_DB);
+        // Hand-build a v2 database: prefix column present, no language column.
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE ingest_chunks (
+                        id TEXT PRIMARY KEY,
+                        path TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        start_line INTEGER NOT NULL,
+                        end_line INTEGER NOT NULL,
+                        start_byte INTEGER NOT NULL,
+                        end_byte INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        token_estimate INTEGER NOT NULL,
+                        stale INTEGER NOT NULL DEFAULT 0,
+                        summary TEXT NOT NULL DEFAULT '',
+                        redaction_status TEXT NOT NULL DEFAULT '',
+                        original_bytes INTEGER NOT NULL DEFAULT 0,
+                        preview_bytes INTEGER NOT NULL DEFAULT 0,
+                        superseded_by TEXT,
+                        context_prefix TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE VIRTUAL TABLE ingest_chunks_fts
+                        USING fts5(chunk_id UNINDEXED, path, text);
+                    INSERT INTO ingest_chunks
+                        (id, path, chunk_index, start_line, end_line, start_byte, end_byte,
+                         content_hash, text, token_estimate)
+                    VALUES ('old', 'a.md', 0, 1, 1, 0, 5, 'h1', 'legacy body', 1);
+                    INSERT INTO ingest_chunks_fts(chunk_id, path, text)
+                        VALUES ('old', 'a.md', 'legacy body');
+                    PRAGMA user_version = 2;
+                    "#,
+                )
+                .unwrap();
+        }
+
+        // Opening with the current build migrates v2 → v3.
+        let store = ChunkStore::open(dir.path()).unwrap();
+        let all = store.all_chunks().unwrap();
+        assert_eq!(all.len(), 1, "the legacy row survives migration");
+        assert_eq!(
+            all[0].language, None,
+            "migrated rows default to NULL language"
+        );
+        // The added column is usable and the NULL row stays eligible under a filter.
+        let hits = store.search(&["legacy".to_string()], Some("rust")).unwrap();
+        assert!(hits.iter().any(|hit| hit.id == "old"));
     }
 
     #[test]
@@ -660,7 +785,7 @@ mod tests {
         let mut fresh = chunk("new", "b.md", "h2", "fresh body");
         fresh.context_prefix = "File b.md: New.".to_string();
         store.upsert_chunks(&[fresh]).unwrap();
-        let hits = store.search(&["new".to_string()]).unwrap();
+        let hits = store.search(&["new".to_string()], None).unwrap();
         assert!(hits.iter().any(|hit| hit.id == "new"));
     }
 

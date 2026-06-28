@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Ingested folder knowledge is language-tagged and `knowledge_search` filters
+  to the workspace language.** Each ingested chunk now records its file's
+  programming language (reusing LocalMind's `language_for_extension` map — the
+  same one accepted-memory tagging uses), and `knowledge_search` filters hits to
+  the workspace's dominant language (via `detect_workspace_language`), excluding
+  off-language chunks while keeping language-neutral (`NULL`-tagged, e.g. docs)
+  chunks eligible. A docs-only or mixed workspace detects no dominant language and
+  applies no filter, so keyword retrieval stays byte-identical to before. The
+  chunk store migrates additively (schema v3, nullable `language` column;
+  pre-existing chunks read as untagged until re-ingested).
+
 - **Accepted memory now has a proactive lifecycle: usage tracking + a freshness
   pass + an operator surface.** A memory's hit count is bumped when it is injected
   into a turn (best-effort, post-turn, off the retrieval path), so dead weight and
