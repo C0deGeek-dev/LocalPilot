@@ -149,6 +149,16 @@ fn apply_newline(content: &str, newline: &str) -> String {
     }
 }
 
+/// Line-ending-insensitive matching base: CRLF→LF. The model emits an edit's
+/// `old_text` with `\n`, but a file may be stored with `\r\n`; matching on the
+/// normalized form lets an edit land on a CRLF file instead of failing "old_text
+/// was not found" (which is what pushed the model to give up and rewrite whole
+/// files). The file's original newline style is restored on write via
+/// [`apply_newline`].
+fn lf(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(e.to_string()))?;
@@ -450,12 +460,17 @@ impl Tool for EditFile {
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let content = std::fs::read_to_string(&path)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
-        let matches = content.matches(&input.old_text).count();
+        // Match line-ending-insensitively: the model emits `old_text` with `\n`,
+        // but the file may be CRLF. Match on the LF-normalized form so the edit
+        // lands instead of failing "not found"; restore the file's style on write.
+        let newline = detect_newline(&content);
+        let haystack = lf(&content);
+        let needle = lf(&input.old_text);
+        let matches = haystack.matches(&needle).count();
         match matches {
             0 => Err(ToolError::Failed("old_text was not found".to_string())),
             1 => {
-                let updated = content.replacen(&input.old_text, &input.new_text, 1);
-                let newline = detect_newline(&content);
+                let updated = haystack.replacen(&needle, &lf(&input.new_text), 1);
                 atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
                 Ok(ToolOutput::ok(format!("edited {}", path.display())))
             }
@@ -530,9 +545,13 @@ impl Tool for MultiEdit {
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let original = std::fs::read_to_string(&path)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
-        let mut updated = original.clone();
+        let newline = detect_newline(&original);
+        // Match each edit line-ending-insensitively (see EditFile): work on the
+        // LF-normalized content, restore the file's newline style on write.
+        let mut updated = lf(&original);
         for (index, edit) in input.edits.iter().enumerate() {
-            let matches = updated.matches(&edit.old_text).count();
+            let needle = lf(&edit.old_text);
+            let matches = updated.matches(&needle).count();
             match matches {
                 0 => {
                     return Err(ToolError::Failed(format!(
@@ -540,7 +559,7 @@ impl Tool for MultiEdit {
                         index + 1
                     )))
                 }
-                1 => updated = updated.replacen(&edit.old_text, &edit.new_text, 1),
+                1 => updated = updated.replacen(&needle, &lf(&edit.new_text), 1),
                 n => {
                     return Err(ToolError::Failed(format!(
                         "edit {} failed: old_text matches {n} times",
@@ -549,7 +568,6 @@ impl Tool for MultiEdit {
                 }
             }
         }
-        let newline = detect_newline(&original);
         atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
         Ok(ToolOutput::ok(format!(
             "applied {} edits to {}",
@@ -965,9 +983,13 @@ impl Tool for ApplyPatch {
                     }
                     let original = std::fs::read_to_string(&path)
                         .map_err(|e| ToolError::Failed(format!("{label}: {e}")))?;
-                    let mut updated = original.clone();
+                    let newline = detect_newline(&original);
+                    // Match each hunk line-ending-insensitively (see EditFile): a
+                    // CRLF file must not reject a hunk whose `old_text` uses `\n`.
+                    let mut updated = lf(&original);
                     for (hunk_index, hunk) in hunks.iter().enumerate() {
-                        match updated.matches(&hunk.old_text).count() {
+                        let needle = lf(&hunk.old_text);
+                        match updated.matches(&needle).count() {
                             0 => {
                                 return Err(ToolError::Failed(format!(
                                     "{label}: hunk {} old_text was not found; \
@@ -976,7 +998,7 @@ impl Tool for ApplyPatch {
                                 )))
                             }
                             1 => {
-                                updated = updated.replacen(&hunk.old_text, &hunk.new_text, 1);
+                                updated = updated.replacen(&needle, &lf(&hunk.new_text), 1);
                             }
                             n => {
                                 return Err(ToolError::Failed(format!(
@@ -987,7 +1009,6 @@ impl Tool for ApplyPatch {
                             }
                         }
                     }
-                    let newline = detect_newline(&original);
                     writes.push((path, Some(apply_newline(&updated, newline))));
                 }
                 PatchOperation::Delete { .. } => {

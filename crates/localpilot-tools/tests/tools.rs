@@ -259,6 +259,35 @@ async fn edit_file_exact_match_and_rejects_ambiguous() {
 }
 
 #[tokio::test]
+async fn edit_file_matches_lf_old_text_against_a_crlf_file() {
+    // The model emits multi-line `old_text` with `\n`, but the file on disk is
+    // CRLF. The edit must still land (not fail "old_text was not found" and push
+    // the model to rewrite the whole file), and the CRLF style must be preserved.
+    let (dir, ws) = workspace_with(&[("win.txt", "line one\r\nline two\r\nline three\r\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let res = dispatch(
+        &registry,
+        "edit_file",
+        json!({
+            "path": "win.txt",
+            "old_text": "line one\nline two\n",
+            "new_text": "line one\nLINE TWO\n"
+        }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!res.is_error, "{}", res.output);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("win.txt")).unwrap(),
+        "line one\r\nLINE TWO\r\nline three\r\n"
+    );
+}
+
+#[tokio::test]
 async fn append_file_creates_then_concatenates() {
     let (dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
