@@ -240,6 +240,16 @@ Rules:
   information: bypass auto-allows every command class, and a command's own
   file access is not contained (its working directory is the workspace root,
   nothing more). Treat bypass as full shell access for the model.
+- **The containment root and the spawn working directory are distinct
+  spellings of the same directory.** The sandbox canonicalizes the workspace
+  root to a verbatim extended-length path (`\\?\…` on Windows); that verbatim
+  form is the security boundary — every contained-path check (`starts_with`)
+  uses it, and it is never weakened. A child process cannot use a verbatim path
+  as its working directory, so spawns use a de-verbatim equivalent of the *same*
+  directory (`dunce::simplified`, which keeps the verbatim form whenever it
+  cannot be safely shortened). De-verbatim never widens containment: it changes
+  only the cwd spelling handed to a child, not the boundary the path checks
+  enforce.
 - Harness rule verdicts still apply on top of the permission profile. A profile
   controls prompting, not the harness correctness gates.
 

@@ -1457,7 +1457,12 @@ impl SessionRuntime {
         if !self.config.verify_before_done {
             return VerifyGate::Finalize;
         }
-        let root = self.workspace.root().to_path_buf();
+        // The gate runs its build/test command as a child process, so it needs the
+        // de-verbatim spawn cwd (see `Workspace::process_dir`): handed a verbatim
+        // `\\?\` working directory the gate would compile in `C:\Windows`, not the
+        // workspace. Detection reads marker files, which resolve the same on either
+        // spelling.
+        let root = self.workspace.process_dir();
         let Some(check) = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())
         else {
             return VerifyGate::Finalize;

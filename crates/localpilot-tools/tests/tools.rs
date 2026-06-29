@@ -591,11 +591,55 @@ async fn run_shell_allows_read_only_and_denies_destructive_non_interactive() {
 }
 
 #[tokio::test]
+async fn run_shell_runs_relative_paths_against_the_workspace_not_a_fallback_dir() {
+    // The de-verbatim cwd fix (01): a relative path in a model-issued shell
+    // command must resolve against the workspace, never a fallback like
+    // `C:\Windows` (the Windows verbatim-`\\?\`-cwd bug that ran every build/test
+    // command outside the workspace). Prove it by reading a workspace marker file
+    // by its *relative* name through the platform shell — which only succeeds when
+    // the child's cwd is the workspace.
+    let marker = "cwd-marker-7be3a1.txt";
+    let body = "marker-body-in-workspace";
+    let (_dir, ws) = workspace_with(&[(marker, body)]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    #[cfg(windows)]
+    let command = format!("Get-Content {marker}");
+    #[cfg(not(windows))]
+    let command = format!("cat {marker}");
+
+    // Bypass the classifier (an unknown shell verb is otherwise gated), as the
+    // sibling `$PWD` test does; the cwd is what is under test, not the gate.
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": command }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "a relative read failed — the shell did not run in the workspace: {}",
+        result.output
+    );
+    assert!(
+        result.output.contains(body),
+        "a relative path resolved outside the workspace cwd: {}",
+        result.output
+    );
+}
+
+#[tokio::test]
 async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();
     let c = ctx(&ws, Interactivity::NonInteractive, true);
-    let cwd = ws.root().display().to_string();
+    // The shell runs in the de-verbatim spawn cwd (`process_dir`), so `$PWD`/`pwd`
+    // report that form — not the verbatim containment `root()`.
+    let cwd = ws.process_dir().display().to_string();
 
     let pwd = dispatch(
         &registry,

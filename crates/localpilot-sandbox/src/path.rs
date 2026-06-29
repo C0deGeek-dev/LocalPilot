@@ -38,6 +38,25 @@ impl Workspace {
         &self.root
     }
 
+    /// The workspace root in a form a child process can use as its working
+    /// directory. On Windows [`Workspace::new`] canonicalizes the root to a
+    /// verbatim (`\\?\C:\…`) extended-length path; a launched shell cannot `cd`
+    /// into that form (cmd falls back to `C:\Windows`, PowerShell resolves
+    /// relative paths against a broken `$PWD`), so every model-issued build/test
+    /// command would run outside the workspace. This returns the de-verbatim
+    /// form for `Command::current_dir`, leaving the verbatim [`Workspace::root`]
+    /// — the security containment boundary — untouched.
+    ///
+    /// This is a **spawn-only** accessor: it is never used for containment.
+    /// `dunce::simplified` strips the `\\?\` / `\\?\UNC\` prefix only when the
+    /// resulting path is still valid; a path that genuinely needs the verbatim
+    /// form (over `MAX_PATH`, reserved names, a real UNC share) is returned
+    /// unchanged, so the cwd is never corrupted. On non-Windows it is a no-op.
+    #[must_use]
+    pub fn process_dir(&self) -> PathBuf {
+        dunce::simplified(&self.root).to_path_buf()
+    }
+
     /// Resolve a candidate path (absolute or relative to the root) to an absolute,
     /// symlink/case/8.3-normalized path **without** enforcing containment. The
     /// workspace boundary is enforced by the permission engine, which can approve
@@ -190,5 +209,36 @@ mod tests {
         let (_dir, ws) = workspace();
         // An absolute path on a system root is outside any temp workspace.
         assert!(!ws.contains(Path::new("C:\\Windows\\System32")));
+    }
+
+    #[test]
+    fn process_dir_points_at_the_same_workspace_directory() {
+        let (_dir, ws) = workspace();
+        let spawn = ws.process_dir();
+        // The spawn cwd must resolve to the very same directory as the canonical
+        // root — de-verbatim only changes the spelling, never the location.
+        assert_eq!(
+            std::fs::canonicalize(&spawn).unwrap(),
+            std::fs::canonicalize(ws.root()).unwrap(),
+        );
+        // It is a real, usable directory (the property the launched shell needs).
+        assert!(spawn.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_dir_strips_the_verbatim_prefix_on_a_normal_drive_path() {
+        let (_dir, ws) = workspace();
+        // A temp dir is an ordinary short drive path, so the verbatim root is
+        // de-verbatim-able: the spawn form must drop the `\\?\` prefix that a
+        // launched shell cannot `cd` into, while the containment root keeps it.
+        assert!(
+            ws.root().to_string_lossy().starts_with(r"\\?\"),
+            "the canonical containment root stays verbatim",
+        );
+        assert!(
+            !ws.process_dir().to_string_lossy().starts_with(r"\\?\"),
+            "the spawn cwd must not be a verbatim path",
+        );
     }
 }

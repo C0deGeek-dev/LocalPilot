@@ -46,6 +46,12 @@ async-trait = "=0.1.83"
 base64 = "=0.22.1"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 crossterm = "=0.28.1"
+# De-verbatim a Windows `\\?\` extended-length path back to its ordinary form for
+# a child process's working directory: the launched shell cannot `cd` into a
+# verbatim path, so the workspace cwd must be simplified before spawn. Zero
+# dependencies; `simplified()` correctly leaves a path verbatim when it cannot be
+# safely shortened (>MAX_PATH, reserved names). Used only by `localpilot-sandbox`.
+dunce = "=1.0.5"
 # `unstable-rendered-line-info` exposes `Paragraph::line_count`, used by the
 # transcript renderer to match ratatui's own word-wrapping when computing the
 # scroll bounds (a plain cargo feature; no nightly required).

@@ -423,7 +423,9 @@ impl Tool for RunShell {
         let mut command = tokio::process::Command::new(&program);
         command
             .args(&args)
-            .current_dir(ctx.workspace.root())
+            // The de-verbatim spawn cwd: a launched shell cannot `cd` into the
+            // verbatim `\\?\…` containment root, so it must run in `process_dir()`.
+            .current_dir(ctx.workspace.process_dir())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // We reap the whole process tree explicitly on timeout (below). Do not

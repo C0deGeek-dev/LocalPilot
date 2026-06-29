@@ -375,7 +375,10 @@ impl Tool for RunBackground {
                 };
                 let grace = Duration::from_secs(input.grace_secs.unwrap_or(DEFAULT_GRACE_SECS));
                 let execution = Self::execution(&input)?;
-                match procs.start(execution, ctx.workspace.root(), grace).await? {
+                // De-verbatim spawn cwd (see `Workspace::process_dir`): a background
+                // dev server/watcher must start in the workspace, not `C:\Windows`.
+                let cwd = ctx.workspace.process_dir();
+                match procs.start(execution, &cwd, grace).await? {
                     StartOutcome::Running { id, log } => Ok(cap(format!(
                         "started background process `{id}` (`{detail}`). \
                          Use run_background with action `logs` and this id to read more \

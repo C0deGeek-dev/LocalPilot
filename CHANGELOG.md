@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Child processes run in the workspace on Windows, not a fallback directory.**
+  The sandbox canonicalizes the workspace root to a verbatim extended-length path
+  (`\\?\…`); handed to a child process as its working directory, a launched shell
+  could not use it (cmd fell back to `C:\Windows`, PowerShell resolved relative
+  paths against a broken `$PWD`), so every model-issued build/test command ran
+  *outside* the workspace and failed. The shell, git, background, and
+  verify-before-done child processes now spawn in a de-verbatim equivalent of the
+  same directory (`Workspace::process_dir`, via `dunce`), while the verbatim
+  containment root and its `starts_with` boundary are unchanged. Windows/Linux/
+  macOS parity; no behaviour change off Windows.
 - **Ingest keyword retrieval ranks by FTS bm25, and short query terms match whole
   tokens.** `knowledge_search`'s keyword tier now ranks by the FTS index's own
   **bm25** score (IDF-weighted, so a common token like `and` ranks far below a

@@ -659,6 +659,16 @@ finalizes as before.
   tool-call budget and `turn_timeout` rails *and* a fixed re-entry cap. After the
   cap is reached the turn finalizes with the failing state recorded, rather than
   spinning.
+- **In-workspace, de-verbatim working directory.** This gate's build/test
+  command — like every child process the harness spawns (the shell and git
+  tools, background processes) — runs with the workspace as its working
+  directory in a form a launched shell can actually use. The sandbox
+  canonicalizes the workspace root to a verbatim extended-length path
+  (`\\?\…` on Windows) for containment, but that form is unusable as a process
+  cwd: a shell handed a verbatim cwd falls back to a system directory, so a
+  relative build/test command would run *outside* the workspace and fail. Spawns
+  therefore use the de-verbatim equivalent, while the containment boundary keeps
+  the verbatim root unchanged. See [security & privacy](07-security-and-privacy.md).
 - **Default off.** It is an opt-in feature lever (features ship off); defaulting
   it on awaits corpus evidence. `localpilot eval --verify` (or
   `--verify-command <cmd>`) enables it for one run so a benchmark arm can measure

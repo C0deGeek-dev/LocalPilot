@@ -1696,7 +1696,9 @@ impl Tool for GitCommit {
 async fn run_git(ctx: &ToolContext<'_>, args: &[&str]) -> Result<String, ToolError> {
     let output = tokio::process::Command::new("git")
         .args(args)
-        .current_dir(ctx.workspace.root())
+        // De-verbatim spawn cwd (see `Workspace::process_dir`): git on Windows
+        // misbehaves with a verbatim `\\?\` working directory.
+        .current_dir(ctx.workspace.process_dir())
         .output()
         .await
         .map_err(|e| ToolError::Failed(format!("git: {e}")))?;
