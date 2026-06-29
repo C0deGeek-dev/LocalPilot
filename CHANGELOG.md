@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The Windows shell prefers PowerShell 7 (`pwsh`), so `&&` chains work.** A
+  `run_shell` `command` string runs through `pwsh` when it is on PATH, falling
+  back to `powershell.exe` (Windows PowerShell 5.1) otherwise. `pwsh` supports
+  the `&&`/`||` chain operators that 5.1 lacks, so a chained command
+  (`cargo build && cargo test`) runs as written instead of erroring — which is
+  what taught the learning corpus junk "PowerShell doesn't support `&&`" lessons.
+  Detection is cached; it is *prefer*, not *require* (a host without `pwsh` still
+  works with `;`). A timed-out command's whole process tree is killed
+  (`taskkill /T /F`; a process-group `kill` on Unix), confirmed by test, so a
+  hung build's grandchildren (`make`→`cc1`, `gradle`→daemon) never orphan.
 - **Child processes run in the workspace on Windows, not a fallback directory.**
   The sandbox canonicalizes the workspace root to a verbatim extended-length path
   (`\\?\…`); handed to a child process as its working directory, a launched shell

@@ -225,8 +225,16 @@ pub(crate) fn render_stream(bytes: &[u8]) -> String {
 pub(crate) fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
+        // Prefer PowerShell 7+ (`pwsh`) when it is on PATH: it supports the
+        // `&&`/`||` pipeline-chain operators that Windows PowerShell 5.1
+        // (`powershell.exe`) does not, so a chained command the model emits
+        // (`cargo build && cargo test`) actually runs instead of erroring — which
+        // is what taught the model junk "PowerShell doesn't support `&&`" lessons.
+        // Fall back to the always-present `powershell.exe` when `pwsh` is absent;
+        // this is "prefer", not "require". Both take the same flags.
+        let program = windows_shell_program();
         (
-            "powershell.exe".to_string(),
+            program.to_string(),
             vec![
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
@@ -240,6 +248,33 @@ pub(crate) fn shell_program_and_args(command: &str) -> (String, Vec<String>) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         (shell, vec!["-lc".to_string(), command.to_string()])
     }
+}
+
+/// The Windows shell program to wrap a command with: `pwsh.exe` (PowerShell 7+)
+/// when it is on PATH, else `powershell.exe` (Windows PowerShell 5.1, always
+/// present). The detection is run once and cached for the process — PATH does not
+/// change mid-session and a per-command PATH scan would be wasteful.
+#[cfg(windows)]
+fn windows_shell_program() -> &'static str {
+    use std::sync::OnceLock;
+    static SHELL: OnceLock<&'static str> = OnceLock::new();
+    SHELL.get_or_init(|| {
+        if executable_on_path("pwsh.exe") {
+            "pwsh.exe"
+        } else {
+            "powershell.exe"
+        }
+    })
+}
+
+/// Whether `exe` is found in one of the `PATH` directories. A plain filesystem
+/// lookup — no process is spawned to probe for it.
+#[cfg(windows)]
+fn executable_on_path(exe: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(exe).is_file())
 }
 
 /// Program basenames that are long-running servers/watchers whenever they lead a

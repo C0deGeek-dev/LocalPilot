@@ -703,6 +703,59 @@ async fn run_shell_command_field_uses_the_platform_shell() {
 }
 
 #[tokio::test]
+async fn run_shell_runs_and_chained_commands_on_an_and_capable_shell() {
+    // The `&&` chain (02): on a `&&`-capable shell both commands run. Unix
+    // `sh -lc` always supports `&&`; on Windows it works only when PowerShell 7+
+    // (`pwsh`) is the selected shell — Windows PowerShell 5.1 lacks the operator,
+    // so the fallback path is exercised and the chain is reported as a failure
+    // rather than silently dropping the second command.
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    // `&&` is a shell metachar, so the command classifies Unknown and is gated;
+    // bypass clears the gate so the shell behaviour itself is what is tested.
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": "echo chain-a && echo chain-b" }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+
+    #[cfg(windows)]
+    let and_capable = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join("pwsh.exe").is_file()))
+        .unwrap_or(false);
+    #[cfg(not(windows))]
+    let and_capable = true;
+
+    if and_capable {
+        assert!(
+            !result.is_error,
+            "an &&-capable shell must run a chained command: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("chain-a") && result.output.contains("chain-b"),
+            "both halves of the `&&` chain must run: {}",
+            result.output
+        );
+    } else {
+        // No PS7 on this host: the 5.1 fallback rejects `&&`. The contract we pin
+        // is that it does not *pretend* the chain succeeded — it surfaces an error
+        // rather than running only the first half and reporting success.
+        assert!(
+            result.is_error,
+            "the PS5.1 fallback must report a `&&` chain as failed, not silently succeed: {}",
+            result.output
+        );
+    }
+}
+
+#[tokio::test]
 async fn run_shell_classifies_normalized_command_strings_before_running() {
     let (_dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();

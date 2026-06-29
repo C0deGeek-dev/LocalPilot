@@ -170,6 +170,24 @@ Rules:
   the timeout. The tool returns a hint to use `run_background` instead, and the
   timeout message carries the same hint for the ambiguous cases.
 
+Shell and process behaviour:
+
+- **`&&`-capable shell.** A `command` string runs through the platform shell:
+  `$SHELL -lc` on Unix, and on Windows **PowerShell 7+ (`pwsh`) when it is on
+  PATH**, falling back to `powershell.exe` (Windows PowerShell 5.1) otherwise.
+  `pwsh` supports the `&&`/`||` pipeline-chain operators that 5.1 lacks, so a
+  chained command (`cargo build && cargo test`) runs as written instead of
+  erroring. The selection is detected once and cached. It is *prefer*, not
+  *require*: a host without `pwsh` still works, with `;` as the separator.
+- **Working directory.** The command runs in the workspace, in the de-verbatim
+  form a launched shell can use (see [harness spec](06-harness-spec.md) and
+  [security & privacy](07-security-and-privacy.md)) — never a fallback like
+  `C:\Windows`.
+- **Whole-tree termination on timeout.** When a command exceeds its timeout its
+  *entire* process tree is killed (`taskkill /T /F` on Windows; a process-group
+  `kill` on Unix), so a shell-wrapped build's grandchildren (`make`→`cc1`,
+  `gradle`→its daemon) never orphan and leak memory for the rest of the session.
+
 ### `run_background`
 
 Starts a long-running command (a dev server like `npm run dev` or `bun run
