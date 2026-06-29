@@ -73,13 +73,48 @@ pub fn detect_verify_command(root: &Path) -> Option<CheckConfig> {
         return Some(verify_check(python(), vec_of(&["-m", "pytest", "-q"])));
     }
     // C/C++ without a language test runner: a top-level Makefile is the most
-    // portable single-command build. A CMake-only project needs a configure +
-    // build pair that does not fit one program+args call, so it is left to an
-    // explicit `verify_command` override (documented).
+    // portable single-command build, so it wins when present.
     if has_file(root, "Makefile") || has_file(root, "makefile") {
         return Some(verify_check(make(), Vec::new()));
     }
+    // Otherwise, when the workspace carries C++ sources (a CMake project or a
+    // bare exercism layout), compile-check them with a single artifact-free
+    // `g++ -fsyntax-only` over the enumerated translation units. This catches the
+    // parse/type/include errors that are the dominant "submitted code that never
+    // compiled" failure — the biggest convergence lever — without writing an
+    // `a.out`/`*.o` that would pollute the captured diff, and without the
+    // three-command CMake configure→build→ctest pipeline that does not fit one
+    // program+args call. A full CMake build/test is available via an explicit
+    // `verify_command` override.
+    if let Some(sources) = cpp_sources(root) {
+        let mut args = vec_of(&["-std=c++17", "-I.", "-fsyntax-only"]);
+        args.extend(sources);
+        return Some(verify_check(gpp(), args));
+    }
     None
+}
+
+/// Root-level C++ translation units (`.cpp`/`.cc`/`.cxx`), sorted for a stable
+/// command, or `None` when the workspace has none. Marker-free detection: the
+/// presence of C++ sources at the workspace root is itself the signal (a CMake
+/// project keeps them there, as does the exercism layout).
+fn cpp_sources(root: &Path) -> Option<Vec<String>> {
+    let mut sources: Vec<String> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let lower = name.to_ascii_lowercase();
+            (lower.ends_with(".cpp") || lower.ends_with(".cc") || lower.ends_with(".cxx"))
+                .then(|| name.to_string())
+        })
+        .collect();
+    if sources.is_empty() {
+        return None;
+    }
+    sources.sort();
+    Some(sources)
 }
 
 /// A verify [`CheckConfig`]: a single phase check, never auto-fixed (the model
@@ -141,6 +176,9 @@ fn go() -> String {
 }
 fn make() -> String {
     "make".to_string()
+}
+fn gpp() -> String {
+    "g++".to_string()
 }
 #[cfg(windows)]
 fn npm() -> String {
@@ -219,6 +257,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "Makefile");
         assert_eq!(detect_verify_command(dir.path()).unwrap().program, "make");
+    }
+
+    #[test]
+    fn detects_cpp_sources_as_a_gpp_compile_check() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "anagram.cpp");
+        touch(dir.path(), "anagram_test.cpp");
+        let check = detect_verify_command(dir.path()).expect("a C++ target");
+        assert_eq!(check.program, "g++");
+        // Artifact-free syntax check over the sorted translation units.
+        assert_eq!(
+            check.args,
+            vec_of(&[
+                "-std=c++17",
+                "-I.",
+                "-fsyntax-only",
+                "anagram.cpp",
+                "anagram_test.cpp",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_makefile_beats_the_cpp_compile_check() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "main.cpp");
+        touch(dir.path(), "Makefile");
+        // The author's real build (Makefile) wins over the g++ syntax fallback.
+        assert_eq!(detect_verify_command(dir.path()).unwrap().program, "make");
+    }
+
+    #[test]
+    fn a_language_test_runner_beats_the_cpp_compile_check() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "binding.cpp");
+        touch(dir.path(), "Cargo.toml");
+        // A native test runner outranks the C++ compile fallback.
+        assert_eq!(detect_verify_command(dir.path()).unwrap().program, "cargo");
     }
 
     #[test]

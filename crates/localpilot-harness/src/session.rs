@@ -1465,6 +1465,14 @@ impl SessionRuntime {
         let root = self.workspace.process_dir();
         let Some(check) = crate::resolve_verify_check(&root, self.config.verify_command.as_deref())
         else {
+            // The gate is on but no build/test target was detected (and no
+            // override): finalize unchanged, but surface it so a silently
+            // un-verified solve is visible rather than mistaken for a pass.
+            let _ = events.send(RuntimeEvent::Warning(
+                "verify-before-done: no build/test target detected for this workspace; \
+                 finalizing without a verify signal (set `verify_command` to force one)"
+                    .to_string(),
+            ));
             return VerifyGate::Finalize;
         };
         if *attempts >= VERIFY_GATE_MAX_ATTEMPTS {

@@ -31,9 +31,10 @@ pub struct EvalOptions<'a> {
     pub test_command: Option<&'a str>,
     /// Path to a gold unified diff, for the vs-gold ratio.
     pub gold_diff: Option<&'a Path>,
-    /// Enable the verify-before-done gate for this run, overriding config. The
-    /// benchmark's full+verify arm sets this so a turn re-runs a build/test
-    /// verification before finalizing.
+    /// Enable the verify-before-done gate for this run, overriding config. On by
+    /// default for `eval` (the caller passes `!--no-verify`) so a turn re-runs a
+    /// build/test verification before finalizing and the benchmark measures
+    /// compiled+tested solves.
     pub verify: bool,
     /// Verification command override for the gate (a single command line). When
     /// `None` the gate detects a command from the workspace stack.

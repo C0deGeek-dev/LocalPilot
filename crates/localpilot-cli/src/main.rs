@@ -269,14 +269,19 @@ enum Command {
         /// Path to a gold unified diff, for the vs-gold ratio.
         #[arg(long)]
         gold_diff: Option<PathBuf>,
-        /// Enable the verify-before-done gate for this run: a turn that would
+        /// Verify-before-done is **on by default** for `eval`: a turn that would
         /// finalize re-runs a build/test verification first and continues on a
-        /// failure. Overrides `[harness] verify_before_done`. The command is
-        /// detected from the workspace stack unless `--verify-command` is given.
+        /// failure, so the benchmark measures compiled+tested solves. This flag is
+        /// accepted for back-compat but is now redundant (the gate is already on).
         #[arg(long)]
         verify: bool,
-        /// Verification command for `--verify` (a single command line). Implies
-        /// `--verify`. Overrides `[harness] verify_command` and stack detection.
+        /// Opt out of the default-on verify-before-done gate for this run, so the
+        /// turn finalizes without a build/test check (the pre-default behaviour).
+        #[arg(long, conflicts_with = "verify")]
+        no_verify: bool,
+        /// Verification command for the gate (a single command line). Overrides
+        /// `[harness] verify_command` and stack detection. Ignored under
+        /// `--no-verify`.
         #[arg(long)]
         verify_command: Option<String>,
         /// Learn from this run: after the turn, close the session out into
@@ -1333,7 +1338,8 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             task,
             test,
             gold_diff,
-            verify,
+            verify: _verify,
+            no_verify,
             verify_command,
             learn,
         } => {
@@ -1347,8 +1353,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 task: &task,
                 test_command: test.as_deref(),
                 gold_diff: gold_diff.as_deref(),
-                // `--verify-command` implies the gate is on.
-                verify: verify || verify_command.is_some(),
+                // Verify-before-done is on by default for `eval`: the benchmark
+                // measures compiled+tested solves. `--no-verify` opts out,
+                // reproducing the pre-default behaviour byte-for-byte. The legacy
+                // `--verify` flag is redundant (the gate is already on).
+                verify: !no_verify,
                 verify_command: verify_command.as_deref(),
                 learn,
             })
@@ -1661,22 +1670,56 @@ mod tests {
 
     #[test]
     fn eval_verify_flags_parse() {
-        // Bare `--verify` enables the gate; the command is detected.
+        // Default: the verify gate is **on** for eval, so `no_verify` is false.
+        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval {
+                no_verify: false,
+                verify: false,
+                ..
+            })
+        ));
+
+        // `--no-verify` opts out of the default-on gate.
+        let cli = Cli::try_parse_from([
+            "localpilot",
+            "eval",
+            "fix it",
+            "--model",
+            "m",
+            "--no-verify",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval {
+                no_verify: true,
+                ..
+            })
+        ));
+
+        // The legacy `--verify` flag still parses (now redundant — gate is on).
         let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m", "--verify"])
             .unwrap();
-        match cli.command {
-            Some(Command::Eval {
-                verify,
-                verify_command,
-                ..
-            }) => {
-                assert!(verify);
-                assert!(verify_command.is_none());
-            }
-            other => panic!("expected Eval, got {other:?}"),
-        }
+        assert!(matches!(
+            cli.command,
+            Some(Command::Eval { verify: true, .. })
+        ));
 
-        // `--verify-command` carries an explicit command (and implies the gate).
+        // `--verify` and `--no-verify` are mutually exclusive.
+        assert!(Cli::try_parse_from([
+            "localpilot",
+            "eval",
+            "fix it",
+            "--model",
+            "m",
+            "--verify",
+            "--no-verify",
+        ])
+        .is_err());
+
+        // `--verify-command` carries an explicit command.
         let cli = Cli::try_parse_from([
             "localpilot",
             "eval",
@@ -1693,13 +1736,6 @@ mod tests {
             }
             other => panic!("expected Eval, got {other:?}"),
         }
-
-        // Default: the gate is off.
-        let cli = Cli::try_parse_from(["localpilot", "eval", "fix it", "--model", "m"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Eval { verify: false, .. })
-        ));
     }
 
     #[test]

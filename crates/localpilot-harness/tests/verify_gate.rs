@@ -42,6 +42,32 @@ fn marker_verify_command(root: &Path, marker: &str) -> String {
     }
 }
 
+/// A verification command that checks for `marker` by its **relative** name, so
+/// it passes only when run in the workspace (the gate's de-verbatim cwd). Used to
+/// prove the gate runs in-workspace, not a fallback directory.
+fn relative_marker_verify_command(marker: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("cmd /C type {marker}")
+    }
+    #[cfg(not(windows))]
+    {
+        format!("test -f {marker}")
+    }
+}
+
+/// A verification command that always passes (exit 0) on each tier-1 platform.
+fn always_pass_command() -> String {
+    #[cfg(windows)]
+    {
+        "cmd /C exit 0".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "true".to_string()
+    }
+}
+
 fn runtime_with_verify(
     root: &Path,
     provider: FakeProvider,
@@ -154,6 +180,56 @@ fn gate_gives_up_with_no_progress_after_the_attempt_cap() {
         "a build that never goes green stops with NoProgress after the re-entry cap"
     );
     assert!(!root.join(marker).is_file());
+}
+
+#[test]
+fn gate_runs_the_verification_in_the_workspace_not_a_fallback_dir() {
+    // 04.3 (end-to-end of the 01 cwd fix): the gate's verify command runs in the
+    // workspace's de-verbatim cwd, so a *relative* marker check resolves against
+    // the workspace. Before the fix the gate ran in a verbatim `\\?\` cwd that
+    // `cmd` mishandled (falling back to `C:\Windows`), so a relative check could
+    // never pass. The model writes the marker by its relative name; the gate sees
+    // it only because it is running in the workspace.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let marker = "verified_in_workspace.txt";
+    let command = relative_marker_verify_command(marker);
+
+    let mut runtime = runtime_with_verify(root, fixes_on_second_chance(marker), Some(command));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("solve it", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::Done,
+        "a relative-path verification passed — the gate ran in the workspace"
+    );
+    assert!(root.join(marker).is_file());
+}
+
+#[test]
+fn gate_on_a_green_workspace_finalizes_done_without_re_entry() {
+    // 04.4 no-regression: with the gate on, a workspace whose verification already
+    // passes finalizes `Done` on the first call-free reply. The gate only *adds* a
+    // build/test step on finalize — it can never unpass a passing solve. The model
+    // carries no fix tool, so a spurious re-entry would change the outcome.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let provider = FakeProvider::new().text("done");
+
+    let mut runtime = runtime_with_verify(root, provider, Some(always_pass_command()));
+    let (events, _rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let reason = rt.block_on(runtime.run_turn("solve it", &events, &cancel));
+
+    assert_eq!(
+        reason,
+        StopReason::Done,
+        "a green verification finalizes Done unchanged — the gate adds a step, it does not unpass"
+    );
 }
 
 #[test]

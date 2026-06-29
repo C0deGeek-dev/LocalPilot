@@ -648,8 +648,11 @@ finalizes as before.
   the workspace's marker files (`Cargo.toml` → `cargo test`, `go.mod` →
   `go test ./...`, `pom.xml` → `mvn test`, `build.gradle` → `gradle test`,
   `package.json` → `npm test`, a Python project → `python -m pytest`, a
-  `Makefile` → `make`). A workspace with no detectable target and no override is
-  a clean no-op — the turn finalizes unchanged.
+  `Makefile` → `make`, otherwise C++ sources at the root → an artifact-free
+  `g++ -std=c++17 -I. -fsyntax-only <sources>` compile check). A workspace with
+  no detectable target and no override is a clean no-op — the turn finalizes
+  unchanged, and a warning is emitted so the un-verified finalize is visible
+  rather than mistaken for a pass.
 - **Reuses the quality-gate runner.** The command runs through the same
   permission-gated [`CheckRunner`](05-tool-system.md) the step-cadence quality
   gate and `harness resume` use — there is no second command engine and no second
@@ -669,10 +672,14 @@ finalizes as before.
   relative build/test command would run *outside* the workspace and fail. Spawns
   therefore use the de-verbatim equivalent, while the containment boundary keeps
   the verbatim root unchanged. See [security & privacy](07-security-and-privacy.md).
-- **Default off.** It is an opt-in feature lever (features ship off); defaulting
-  it on awaits corpus evidence. `localpilot eval --verify` (or
-  `--verify-command <cmd>`) enables it for one run so a benchmark arm can measure
-  its lift without a config file.
+- **Default: off interactively, on for `eval`.** As a config lever
+  (`[harness] verify_before_done`) it ships **off**, so an interactive or `print`
+  turn is unchanged. For `localpilot eval` it is **on by default**: a benchmark
+  must measure compiled+tested solves, not code that was never built. Opt out
+  with `localpilot eval --no-verify` (byte-identical to the pre-default
+  behaviour); `--verify-command <cmd>` overrides the detected command. The legacy
+  `--verify` flag is accepted but redundant. The per-call `localpilot-verify`
+  contract verifier is a separate mechanism.
 
 ## Anti-Sunk-Cost Loop
 

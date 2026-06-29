@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot eval` verifies the build before finishing, by default.** The
+  verify-before-done gate is now **on by default for `eval`** (opt out with
+  `eval --no-verify`, which reproduces the prior behaviour byte-for-byte), so a
+  benchmark measures compiled+tested solves instead of code the model never
+  built. Interactive and `print` turns are unchanged (the `[harness]
+  verify_before_done` config default stays `false`). Stack detection gains a
+  C++ branch: a workspace with C++ sources at the root (a CMake project or a
+  bare exercism layout) is compile-checked with an artifact-free
+  `g++ -std=c++17 -I. -fsyntax-only <sources>` — catching "it never compiled"
+  without writing build artifacts into the captured diff. When the gate is on
+  but no target is detected, a warning makes the un-verified finalize visible.
+  The gate runs in the workspace's de-verbatim cwd (see above), so its build
+  command no longer ran in a fallback directory on Windows. The legacy
+  `--verify` flag is accepted but redundant.
 - **Edit tools tolerate indentation drift and guide a failed edit.** `edit_file`,
   `multi_edit`, and `apply_patch` now share one anchored matcher: an exact unique
   match first, then a single leading-indentation-tolerant rung that applies only
