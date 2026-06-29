@@ -2,6 +2,86 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0058: The Solve Loop Can Build, Test, And Edit In The Workspace — De-Verbatim cwd, `&&` Shell, Anchored Edits, Verify-On-Eval
+
+Status: accepted. Refines ADR-0054 (the verify-before-done gate — flips its
+deferred default on *for eval*) and ADR-0007 (tier-1 parity — this is largely a
+Windows-parity fix). Builds on the read-only behaviour reference under
+clean-room rules (ADR-0005): the behaviours below were replicated originally, no
+code/prompt/identifier copied.
+
+A model-pinned benchmark exposed that the solve loop was **blind on Windows**.
+The sandbox canonicalizes the workspace root to a verbatim extended-length path
+(`\\?\C:\…`) for path containment; handed verbatim to a child process as its
+working directory, a launched shell cannot use it (cmd falls back to
+`C:\Windows`, PowerShell resolves relative paths against a broken `$PWD`), so
+every model-issued build/test command ran **outside** the workspace and failed.
+The grader ran in a separate raw cwd and still scored the final file, which
+**masked** the bug and depressed solve quality — and poisoned the learning
+corpus (≈25% of warm-store lessons were artifacts of the broken tooling, e.g.
+"PowerShell doesn't support `&&`"). Four changes make the loop robust, each
+guarded so containment and no-regression hold:
+
+1. **De-verbatim child-process cwd.** `Workspace::process_dir()` returns the root
+   in a form a child can use (`dunce::simplified`, which leaves a path verbatim
+   when it cannot be safely shortened). Every spawn — the shell and git tools,
+   background processes, and the verify gate's runner — uses it. The verbatim
+   `Workspace::root()` and its `starts_with` containment boundary are **never**
+   touched; `process_dir()` is a spawn-only accessor, never used for a contained
+   path. The sandbox boundary tests (verbatim/case/UNC/ADS) stay green.
+
+2. **`&&`-capable shell.** The Windows shell wrapper prefers PowerShell 7
+   (`pwsh`) when it is on PATH (cached detection), falling back to
+   `powershell.exe`. `pwsh` supports the `&&`/`||` chain operators that Windows
+   PowerShell 5.1 lacks, so a chained command runs as written instead of teaching
+   the corpus junk shell lessons. *Prefer*, not *require*. A timed-out command's
+   whole process tree is killed (`taskkill /T /F`; a process-group `kill` on
+   Unix) so a hung build's grandchildren never orphan.
+
+3. **Anchored, indentation-tolerant edits with guiding errors.** `edit_file`,
+   `multi_edit`, and `apply_patch` share one matcher: an exact unique match
+   first, then a single leading-indentation-tolerant rung that applies only on a
+   *unique* block whose indentation differs by one consistent whitespace prefix
+   (re-indenting the replacement to the file), else a guiding error (the match
+   count, or the nearest line + a re-read hint). Matching stays **anchored, never
+   fuzzy** — no Levenshtein/best-guess location, because a wrong-location edit is
+   worse than a failed one. CRLF handling and `multi_edit`/`apply_patch`
+   atomicity are unchanged.
+
+4. **Verify-before-done default-on for `eval`.** ADR-0054 left the gate off
+   "pending a fair arm"; `eval` is that arm. `localpilot eval` defaults the gate
+   on (opt out `--no-verify`, byte-identical to the prior behaviour), so the
+   benchmark measures compiled+tested solves. Interactive and `print` are
+   unchanged (the `[harness] verify_before_done` config default stays `false`).
+   Stack detection gains a C++ branch: C++ sources at the root are compile-checked
+   with an artifact-free `g++ -std=c++17 -I. -fsyntax-only <sources>` — a single
+   `CheckRunner` program+args that writes no build artifacts (so it never pollutes
+   the captured diff) and catches the dominant "never compiled" failure, rather
+   than the three-command CMake configure/build/`ctest` pipeline that does not fit
+   one call (a full `ctest` stays available via `verify_command`).
+
+Reason:
+
+- a verbatim `\\?\` path is a *containment* form, not a *spawn* form; the fix is
+  to distinguish the two, not to weaken containment — so the security boundary is
+  unchanged and the launched tools finally run where the work is
+- the harness defect did not just lower scores, it **poisoned the learning
+  corpus**; fixing the build/test/edit surface is a prerequisite to any learning
+  re-run, and removes the source of the `&&` bug-lessons at the root
+- anchored-and-unique edit matching turns the common "model rewrites the whole
+  file because its `old_text` indentation was slightly off" failure into a
+  landed edit, without ever risking a best-guess wrong-location write
+- a benchmark that scores code the model never built measures the grader's cwd,
+  not the solver's; defaulting verification on *for eval* closes that gap while
+  leaving interactive behaviour untouched
+
+Consequence: the eval baseline now reflects verified solves (the in-flight
+comparison ledger is reset before the next run, dropping the blind-cwd failures
+and keeping the valid results). The warm-store cleanup — pruning the
+bug-artifact lessons and investigating the semantic-dedup miss — is a separate
+operational/LocalMind follow-up before any learning re-run. The C++-as-`g++`
+choice is recorded as a deliberate, single-command refinement of "CMake → ctest".
+
 ## ADR-0057: Ingest Keyword Retrieval Ranks By FTS bm25, And Short Query Terms Match Whole Tokens
 
 Status: accepted. Refines ADR-0025 (the indexed chunk store) — specifically its
