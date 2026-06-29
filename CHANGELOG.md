@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v1.1.0 - 2026-06-29
+
+Coordinated LocalX release.
+
 - **`localpilot eval` verifies the build before finishing, by default.** The
   verify-before-done gate is now **on by default for `eval`** (opt out with
   `eval --no-verify`, which reproduces the prior behaviour byte-for-byte), so a
