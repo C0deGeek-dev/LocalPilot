@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Edit tools tolerate indentation drift and guide a failed edit.** `edit_file`,
+  `multi_edit`, and `apply_patch` now share one anchored matcher: an exact unique
+  match first, then a single leading-indentation-tolerant rung that applies only
+  on a *unique* block whose indentation differs by one consistent whitespace
+  prefix (re-indenting the replacement to the file), then a guiding error — the
+  match count for an ambiguous edit, or the nearest existing line plus a re-read
+  hint for a not-found one — instead of a bare "old_text was not found". An empty
+  or identical-to-`new_text` `old_text` is rejected. Matching stays anchored,
+  never fuzzy (no best-guess location); CRLF handling and `multi_edit`/
+  `apply_patch` atomicity are unchanged. This cuts the "model gives up and
+  rewrites the whole file" failure when its `old_text` indentation is slightly off.
 - **The Windows shell prefers PowerShell 7 (`pwsh`), so `&&` chains work.** A
   `run_shell` `command` string runs through `pwsh` when it is on PATH, falling
   back to `powershell.exe` (Windows PowerShell 5.1) otherwise. `pwsh` supports

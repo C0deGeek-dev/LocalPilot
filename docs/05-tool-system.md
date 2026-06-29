@@ -56,6 +56,32 @@ Rules:
 - require exact old text or AST-aware operation
 - show diff before approval when interactive
 
+**Edit matching contract** (shared by `edit_file`, `multi_edit`, and
+`apply_patch` — one matcher, not three copies). Matching is **anchored, never
+fuzzy** — a wrong-location edit is far worse than a failed one:
+
+1. **Line-ending-insensitive.** Matching runs on the LF-normalized file; the
+   file's original CRLF/LF style is restored on write. An `old_text` written
+   with `\n` lands on a CRLF file.
+2. **Exact, unique match first.** A single exact substring match is replaced. A
+   match that occurs more than once is rejected as ambiguous (with the count) —
+   never a best-guess pick.
+3. **One leading-indentation-tolerant rung.** If the exact match misses, the
+   `old_text` lines are matched against the file ignoring leading indentation,
+   but only when they form a *unique* contiguous block whose indentation differs
+   by **one consistent whitespace prefix** across the whole block. The
+   replacement is re-indented to the file's own indentation. A non-unique or
+   inconsistent-indent candidate applies nothing.
+4. **Guiding errors.** A failed edit returns the match count (ambiguous) or the
+   nearest existing line + a re-read/stale hint (not found), instead of a bare
+   "old_text was not found", so the model can correct rather than give up and
+   rewrite the whole file.
+5. **No-op guard.** An empty `old_text`, or an `old_text` identical to
+   `new_text`, is rejected up front.
+6. **Atomicity preserved.** `multi_edit` applies every edit in memory then does
+   one atomic write; `apply_patch` validates every hunk before any write — a
+   miss on any one aborts the batch with nothing changed.
+
 ### `append_file`
 
 Appends content to the end of a file, creating it if absent. Lets a large file

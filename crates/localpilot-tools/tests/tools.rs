@@ -288,6 +288,127 @@ async fn edit_file_matches_lf_old_text_against_a_crlf_file() {
 }
 
 #[tokio::test]
+async fn edit_file_applies_an_indentation_drifted_unique_block() {
+    // The model's `old_text` is the right block but uniformly under-indented (it
+    // "eyeballed" the code). The exact substring fails, but the anchored
+    // indent-tolerant rung finds the unique block and re-indents the replacement
+    // to the file's own indentation — so the edit lands instead of the model
+    // giving up and rewriting the whole file.
+    let file = "fn f() {\n        if x {\n            go();\n        }\n}\n";
+    let (dir, ws) = workspace_with(&[("lib.rs", file)]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let res = dispatch(
+        &registry,
+        "edit_file",
+        json!({
+            "path": "lib.rs",
+            // No indentation, and a `}` on its own line — not an exact substring.
+            "old_text": "if x {\n    go();\n}",
+            "new_text": "if y {\n    stop();\n}"
+        }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!res.is_error, "{}", res.output);
+    // The file's 8-space block indentation is preserved on the replacement.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
+        "fn f() {\n        if y {\n            stop();\n        }\n}\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_guiding_error_quotes_the_nearest_line_and_a_reread_hint() {
+    // A near miss (the block's first line exists, a later line does not) must
+    // guide the model: name the closest matching line and prompt a re-read,
+    // rather than the old bare "old_text was not found".
+    let (_dir, ws) = workspace_with(&[("a.rs", "fn a() {\n    compute();\n    finish();\n}\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let res = dispatch(
+        &registry,
+        "edit_file",
+        json!({
+            "path": "a.rs",
+            "old_text": "compute();\n    cleanup();",
+            "new_text": "compute();\n    teardown();"
+        }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(res.is_error);
+    assert!(
+        res.output.contains("was not found"),
+        "error: {}",
+        res.output
+    );
+    assert!(
+        res.output.contains("line 2"),
+        "the error should point at the nearest line: {}",
+        res.output
+    );
+    assert!(
+        res.output.to_lowercase().contains("re-read"),
+        "the error should carry a re-read/stale hint: {}",
+        res.output
+    );
+}
+
+#[tokio::test]
+async fn edit_file_ambiguous_error_reports_the_match_count() {
+    let (_dir, ws) = workspace_with(&[("d.rs", "x = 1;\nx = 1;\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let res = dispatch(
+        &registry,
+        "edit_file",
+        json!({ "path": "d.rs", "old_text": "x = 1;", "new_text": "x = 2;" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(res.is_error);
+    assert!(
+        res.output.contains("ambiguous") && res.output.contains("2 times"),
+        "the error should report the match count: {}",
+        res.output
+    );
+}
+
+#[tokio::test]
+async fn edit_file_rejects_a_no_op_edit() {
+    let (dir, ws) = workspace_with(&[("f.txt", "same\n")]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let res = dispatch(
+        &registry,
+        "edit_file",
+        json!({ "path": "f.txt", "old_text": "same", "new_text": "same" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(res.is_error);
+    assert!(res.output.contains("identical"), "{}", res.output);
+    // The file is untouched.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+        "same\n"
+    );
+}
+
+#[tokio::test]
 async fn append_file_creates_then_concatenates() {
     let (dir, ws) = workspace_with(&[]);
     let registry = ToolRegistry::with_builtins();

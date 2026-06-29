@@ -173,6 +173,266 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ToolError> {
     })
 }
 
+// --- edit matching (shared by edit_file / multi_edit / apply_patch) ----------
+//
+// All three edit tools locate an exact, unique `old_text` and replace it once.
+// They share one anchored matcher so a near-miss yields the same guiding error
+// everywhere instead of three copy-pasted count-and-replace loops. The matcher
+// is **anchored, never fuzzy**: an exact unique match first, then a single
+// leading-indentation-tolerant rung that must *also* be unique, else it changes
+// nothing and guides the model. There is no Levenshtein/best-guess rung — a
+// wrong-location edit is far worse than a failed one.
+
+/// A located, anchored replacement: the byte span of the LF-normalized haystack
+/// to replace and the text to write there (re-indented to the file when the
+/// match needed indentation tolerance).
+#[derive(Debug)]
+struct EditPlan {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+/// Why an `old_text` could not be applied — carries what a guiding error needs.
+#[derive(Debug)]
+enum EditMiss {
+    /// No exact match and no unique leading-indent-tolerant match.
+    NotFound,
+    /// The match (exact or tolerant) was not unique.
+    Ambiguous { count: usize },
+}
+
+/// Locate `needle` in `haystack` (both already LF-normalized) for an anchored
+/// replacement with `replacement`. Exact unique substring match first; on a
+/// zero-count miss, one leading-indentation-tolerant rung that must be unique;
+/// otherwise an [`EditMiss`]. Anchored, never a best-guess edit.
+fn locate_edit(haystack: &str, needle: &str, replacement: &str) -> Result<EditPlan, EditMiss> {
+    let exact: Vec<usize> = haystack.match_indices(needle).map(|(i, _)| i).collect();
+    match exact.len() {
+        1 => Ok(EditPlan {
+            start: exact[0],
+            end: exact[0] + needle.len(),
+            replacement: replacement.to_string(),
+        }),
+        0 => tolerant_locate(haystack, needle, replacement),
+        n => Err(EditMiss::Ambiguous { count: n }),
+    }
+}
+
+/// Byte spans of each line in `text` (content only, excluding the `\n`); the span
+/// end is the newline index, or the text length for the final line.
+fn line_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            spans.push((start, i));
+            start = i + 1;
+        }
+    }
+    spans.push((start, text.len()));
+    spans
+}
+
+/// The content lines of `text`: split on `\n`, dropping the empty element a
+/// trailing newline produces so `"a\nb\n"` is two lines, not three.
+fn content_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
+/// A leading-indentation-tolerant, anchored block match. The needle's content
+/// lines, left-trimmed, must equal a *unique* contiguous run of the haystack's
+/// content lines, and the indentation must differ by **one consistent whitespace
+/// prefix across the whole block** (the file is the block uniformly re-indented,
+/// or the needle is) — never a per-line guess. `replacement` is re-indented by
+/// that prefix so the file's own indentation is preserved. Only the matched
+/// content lines are replaced; the surrounding newlines are left intact.
+fn tolerant_locate(haystack: &str, needle: &str, replacement: &str) -> Result<EditPlan, EditMiss> {
+    let h_spans = line_spans(haystack);
+    let n_lines = content_lines(needle);
+    let k = n_lines.len();
+    if k == 0 || k > h_spans.len() {
+        return Err(EditMiss::NotFound);
+    }
+    let mut hit: Option<(usize, String)> = None;
+    let mut count = 0usize;
+    for i in 0..=(h_spans.len() - k) {
+        let h_block: Vec<&str> = (0..k)
+            .map(|j| &haystack[h_spans[i + j].0..h_spans[i + j].1])
+            .collect();
+        if let Some(reindented) = block_matches(&h_block, &n_lines, replacement) {
+            count += 1;
+            if hit.is_none() {
+                hit = Some((i, reindented));
+            }
+        }
+    }
+    match (count, hit) {
+        (1, Some((i, replacement))) => Ok(EditPlan {
+            start: h_spans[i].0,
+            end: h_spans[i + k - 1].1,
+            replacement,
+        }),
+        (0, _) => Err(EditMiss::NotFound),
+        (n, _) => Err(EditMiss::Ambiguous { count: n }),
+    }
+}
+
+/// Whether a haystack block matches the needle lines under the uniform-indent
+/// rule; on a match, the re-indented replacement. Blank lines match any blank
+/// line. Returns `None` (no match) when content differs or the indentation
+/// difference is not one consistent whitespace prefix across the block.
+fn block_matches(h_block: &[&str], n_lines: &[&str], replacement: &str) -> Option<String> {
+    let mut delta: Option<(String, bool)> = None;
+    for (h, n) in h_block.iter().zip(n_lines.iter()) {
+        let hb = h.trim_start();
+        let nb = n.trim_start();
+        if hb.is_empty() && nb.is_empty() {
+            continue; // both blank — matches, contributes no indentation constraint
+        }
+        if hb.is_empty() != nb.is_empty() || hb != nb {
+            return None; // content differs beyond leading indentation
+        }
+        let h_indent = &h[..h.len() - hb.len()];
+        let n_indent = &n[..n.len() - nb.len()];
+        let rel = indent_delta(h_indent, n_indent)?;
+        match &delta {
+            None => delta = Some(rel),
+            Some(prev) if *prev != rel => return None, // not a uniform shift
+            Some(_) => {}
+        }
+    }
+    let (pad, add) = delta.unwrap_or_else(|| (String::new(), true));
+    Some(reindent(replacement, &pad, add))
+}
+
+/// The uniform whitespace shift between a file line's indent and a needle line's
+/// indent: `(pad, add)` where `add` means "prepend `pad` to the replacement"
+/// (the file is more indented) and `!add` means "strip `pad`" (the needle is more
+/// indented). `None` when neither indent is a prefix of the other (e.g. tabs vs
+/// spaces) — an incompatible difference the tolerant rung must not guess through.
+fn indent_delta(h_indent: &str, n_indent: &str) -> Option<(String, bool)> {
+    if let Some(extra) = h_indent.strip_prefix(n_indent) {
+        return Some((extra.to_string(), true));
+    }
+    n_indent
+        .strip_prefix(h_indent)
+        .map(|extra| (extra.to_string(), false))
+}
+
+/// Re-indent each content line of `replacement` by `pad`: prepend it when `add`,
+/// strip it otherwise. Blank lines are left untouched (never padded into trailing
+/// whitespace). An empty `pad` returns the text unchanged.
+fn reindent(replacement: &str, pad: &str, add: bool) -> String {
+    if pad.is_empty() {
+        return replacement.to_string();
+    }
+    let mut out = String::new();
+    for (idx, line) in content_lines(replacement).iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if line.trim().is_empty() {
+            out.push_str(line);
+        } else if add {
+            out.push_str(pad);
+            out.push_str(line);
+        } else {
+            out.push_str(line.strip_prefix(pad).unwrap_or(line));
+        }
+    }
+    out
+}
+
+/// Build a guiding error for an edit that did not apply: the match count plus
+/// "add surrounding context" for an ambiguous match, or the nearest existing
+/// block + a re-read/stale hint for a not-found one. `location` names the failing
+/// edit (a path, or `edit N (path)`, or `operation N … hunk M`).
+fn edit_miss_error(location: &str, haystack: &str, needle: &str, miss: &EditMiss) -> ToolError {
+    match miss {
+        EditMiss::Ambiguous { count } => ToolError::Failed(format!(
+            "{location}: ambiguous edit — old_text matches {count} times; include more \
+             surrounding context so it matches exactly once (or use replace_in_file to \
+             change every occurrence)."
+        )),
+        EditMiss::NotFound => ToolError::Failed(format!(
+            "{location}: old_text was not found. {} Re-read the file before editing — its \
+             contents may have changed since your last read; the text must match the file \
+             (whitespace/indentation aside).",
+            nearest_block_hint(haystack, needle)
+        )),
+    }
+}
+
+/// A pointer to the closest existing line for a not-found edit: the line number
+/// of the first haystack line whose trimmed content equals the needle's first
+/// non-blank trimmed line, or a note that none was close.
+fn nearest_block_hint(haystack: &str, needle: &str) -> String {
+    let Some(first) = content_lines(needle)
+        .into_iter()
+        .find(|l| !l.trim().is_empty())
+    else {
+        return "The old_text has no content.".to_string();
+    };
+    let target = first.trim();
+    for (idx, line) in haystack.split('\n').enumerate() {
+        if line.trim() == target {
+            return format!(
+                "The closest matching line is line {} (`{}`).",
+                idx + 1,
+                cap_line(line.trim())
+            );
+        }
+    }
+    "No closely matching line was found.".to_string()
+}
+
+/// Truncate a single line to a readable length on a char boundary for an error.
+fn cap_line(line: &str) -> String {
+    const MAX: usize = 80;
+    if line.len() <= MAX {
+        return line.to_string();
+    }
+    let mut end = MAX;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
+}
+
+/// Reject a degenerate edit before matching: an empty `old_text` (which would
+/// match everywhere) or an `old_text` identical to `new_text` (a no-op write).
+/// `location` names the failing edit for a multi-edit/patch batch.
+fn validate_edit(location: &str, needle: &str, replacement: &str) -> Result<(), ToolError> {
+    if needle.is_empty() {
+        return Err(ToolError::InvalidInput(format!(
+            "{location}: old_text must not be empty"
+        )));
+    }
+    if needle == replacement {
+        return Err(ToolError::InvalidInput(format!(
+            "{location}: old_text and new_text are identical; the edit would change nothing"
+        )));
+    }
+    Ok(())
+}
+
+/// Apply an [`EditPlan`] to `haystack`, returning the new (still LF-normalized)
+/// content. Splices the replacement into the matched span without disturbing the
+/// rest of the file.
+fn apply_plan(haystack: &str, plan: &EditPlan) -> String {
+    format!(
+        "{}{}{}",
+        &haystack[..plan.start],
+        plan.replacement,
+        &haystack[plan.end..]
+    )
+}
+
 // --- read_file --------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -460,23 +720,22 @@ impl Tool for EditFile {
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         let content = std::fs::read_to_string(&path)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
-        // Match line-ending-insensitively: the model emits `old_text` with `\n`,
-        // but the file may be CRLF. Match on the LF-normalized form so the edit
-        // lands instead of failing "not found"; restore the file's style on write.
+        // Match line-ending-insensitively (the model emits `old_text` with `\n`,
+        // the file may be CRLF) through the shared anchored matcher, then restore
+        // the file's newline style on write.
         let newline = detect_newline(&content);
         let haystack = lf(&content);
         let needle = lf(&input.old_text);
-        let matches = haystack.matches(&needle).count();
-        match matches {
-            0 => Err(ToolError::Failed("old_text was not found".to_string())),
-            1 => {
-                let updated = haystack.replacen(&needle, &lf(&input.new_text), 1);
+        let replacement = lf(&input.new_text);
+        let location = path.display().to_string();
+        validate_edit(&location, &needle, &replacement)?;
+        match locate_edit(&haystack, &needle, &replacement) {
+            Ok(plan) => {
+                let updated = apply_plan(&haystack, &plan);
                 atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
                 Ok(ToolOutput::ok(format!("edited {}", path.display())))
             }
-            n => Err(ToolError::Failed(format!(
-                "ambiguous edit: old_text matches {n} times; provide a unique snippet"
-            ))),
+            Err(miss) => Err(edit_miss_error(&location, &haystack, &needle, &miss)),
         }
     }
 }
@@ -546,26 +805,18 @@ impl Tool for MultiEdit {
         let original = std::fs::read_to_string(&path)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
         let newline = detect_newline(&original);
-        // Match each edit line-ending-insensitively (see EditFile): work on the
-        // LF-normalized content, restore the file's newline style on write.
+        // Apply each edit through the shared anchored matcher on the LF-normalized
+        // content, atomically: all edits land in memory, then one write restores
+        // the file's newline style. A miss on any edit aborts with nothing written.
         let mut updated = lf(&original);
         for (index, edit) in input.edits.iter().enumerate() {
             let needle = lf(&edit.old_text);
-            let matches = updated.matches(&needle).count();
-            match matches {
-                0 => {
-                    return Err(ToolError::Failed(format!(
-                        "edit {} failed: old_text was not found",
-                        index + 1
-                    )))
-                }
-                1 => updated = updated.replacen(&needle, &lf(&edit.new_text), 1),
-                n => {
-                    return Err(ToolError::Failed(format!(
-                        "edit {} failed: old_text matches {n} times",
-                        index + 1
-                    )))
-                }
+            let replacement = lf(&edit.new_text);
+            let location = format!("edit {} ({})", index + 1, path.display());
+            validate_edit(&location, &needle, &replacement)?;
+            match locate_edit(&updated, &needle, &replacement) {
+                Ok(plan) => updated = apply_plan(&updated, &plan),
+                Err(miss) => return Err(edit_miss_error(&location, &updated, &needle, &miss)),
             }
         }
         atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
@@ -984,28 +1235,20 @@ impl Tool for ApplyPatch {
                     let original = std::fs::read_to_string(&path)
                         .map_err(|e| ToolError::Failed(format!("{label}: {e}")))?;
                     let newline = detect_newline(&original);
-                    // Match each hunk line-ending-insensitively (see EditFile): a
-                    // CRLF file must not reject a hunk whose `old_text` uses `\n`.
+                    // Apply each hunk through the shared anchored matcher on the
+                    // LF-normalized content (a CRLF file must not reject a hunk
+                    // whose `old_text` uses `\n`); validate-then-apply keeps the
+                    // whole patch all-or-nothing.
                     let mut updated = lf(&original);
                     for (hunk_index, hunk) in hunks.iter().enumerate() {
                         let needle = lf(&hunk.old_text);
-                        match updated.matches(&needle).count() {
-                            0 => {
-                                return Err(ToolError::Failed(format!(
-                                    "{label}: hunk {} old_text was not found; \
-                                     re-read the file and resend the patch",
-                                    hunk_index + 1
-                                )))
-                            }
-                            1 => {
-                                updated = updated.replacen(&needle, &lf(&hunk.new_text), 1);
-                            }
-                            n => {
-                                return Err(ToolError::Failed(format!(
-                                    "{label}: hunk {} old_text matches {n} times; \
-                                     provide a unique snippet",
-                                    hunk_index + 1
-                                )))
+                        let replacement = lf(&hunk.new_text);
+                        let location = format!("{label}: hunk {}", hunk_index + 1);
+                        validate_edit(&location, &needle, &replacement)?;
+                        match locate_edit(&updated, &needle, &replacement) {
+                            Ok(plan) => updated = apply_plan(&updated, &plan),
+                            Err(miss) => {
+                                return Err(edit_miss_error(&location, &updated, &needle, &miss))
                             }
                         }
                     }
@@ -1761,7 +2004,46 @@ impl Tool for UpdatePlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{binary_placeholder, looks_binary};
+    use super::{binary_placeholder, locate_edit, looks_binary, EditMiss};
+
+    #[test]
+    fn locate_edit_prefers_an_exact_unique_match() {
+        let plan = locate_edit("a\nfoo\nb\n", "foo", "bar").unwrap();
+        assert_eq!(&"a\nfoo\nb\n"[plan.start..plan.end], "foo");
+        assert_eq!(plan.replacement, "bar");
+    }
+
+    #[test]
+    fn locate_edit_reports_an_exact_ambiguous_match_without_guessing() {
+        let miss = locate_edit("x\nx\n", "x", "y").unwrap_err();
+        assert!(matches!(miss, EditMiss::Ambiguous { count: 2 }));
+    }
+
+    #[test]
+    fn locate_edit_applies_a_unique_indent_drifted_block_and_reindents() {
+        // The needle is the block uniformly under-indented; the unique tolerant
+        // match re-indents the replacement to the file's indentation.
+        let haystack = "{\n        a();\n        b();\n}\n";
+        let plan = locate_edit(haystack, "a();\nb();", "a();\nc();").unwrap();
+        let updated = format!(
+            "{}{}{}",
+            &haystack[..plan.start],
+            plan.replacement,
+            &haystack[plan.end..]
+        );
+        assert_eq!(updated, "{\n        a();\n        c();\n}\n");
+    }
+
+    #[test]
+    fn locate_edit_refuses_a_non_unique_tolerant_match() {
+        // The same indent-drifted block appears twice: anchored matching must
+        // refuse it (Ambiguous) rather than edit a best-guess location.
+        let haystack = "if a {\n        go();\n}\nif b {\n        go();\n}\n";
+        let miss = locate_edit(haystack, "go();", "stop();").unwrap_err();
+        // `go();` is an exact substring twice over, so it is reported ambiguous —
+        // either way the contract holds: a non-unique match never applies.
+        assert!(matches!(miss, EditMiss::Ambiguous { count } if count >= 2));
+    }
 
     #[test]
     fn looks_binary_flags_nul_and_control_heavy_bytes() {
