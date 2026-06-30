@@ -8,12 +8,14 @@
 //! keeps this crate dependency-light and unit-testable with fakes.
 
 mod engine;
+mod output;
 mod report;
 mod source;
 mod synth;
 mod web;
 
 pub use engine::{run_research, Bounds, RunOutcome};
+pub use output::{candidates_from, render_markdown, CandidateSpec};
 pub use report::{ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
 pub use source::{Source, SourceSet};
 pub use synth::{HeuristicSynthesizer, Synthesizer};
