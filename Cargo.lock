@@ -1700,6 +1700,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-research"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "localpilot-rpc"
 version = "1.1.0"
 dependencies = [
