@@ -40,6 +40,7 @@ mod update;
 #[derive(Debug, Parser)]
 #[command(name = "localpilot")]
 #[command(about = "Provider-neutral coding-agent harness")]
+#[command(version = env!("LOCALPILOT_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
