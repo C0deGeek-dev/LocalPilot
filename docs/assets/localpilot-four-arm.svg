@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="556" viewBox="0 0 780 556" role="img" aria-labelledby="t d">
+  <title id="t">Four arms, one local model</title>
+  <desc id="d">Solve rate per language for four arms on the same pinned local model: raw 25 percent, LocalPilot harness 92 percent, Claude Code on the same model 88 percent, and LocalPilot with learning 93 percent.</desc>
+  <rect x="0.5" y="0.5" width="779" height="555" rx="12" fill="#0b1218" stroke="#20303a"/>
+  <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="28" y="37" font-size="21" font-weight="800" fill="#eef8f5">Four arms, one local model.</text>
+    <text x="28" y="59" font-size="13" fill="#93a5a0">225 Aider-polyglot exercises · six languages · container graded · model held constant</text>
+    <rect x="28" y="71" width="11" height="11" rx="3" fill="#38d6be"/>
+    <text x="45" y="80" font-size="11.5" font-weight="700" fill="#cdddd8">LocalPilot + learning  (warm)</text>
+    <rect x="232" y="71" width="11" height="11" rx="3" fill="#7da7ff"/>
+    <text x="249" y="80" font-size="11.5" font-weight="700" fill="#cdddd8">LocalPilot harness  (full)</text>
+    <rect x="436" y="71" width="11" height="11" rx="3" fill="#f0a868"/>
+    <text x="453" y="80" font-size="11.5" font-weight="700" fill="#cdddd8">Claude Code · same model</text>
+    <rect x="28" y="89" width="11" height="11" rx="3" fill="#52636d"/>
+    <text x="45" y="98" font-size="11.5" font-weight="700" fill="#cdddd8">Raw, single-shot</text>
+    <g font-family="Cascadia Mono, Consolas, monospace" font-size="10" fill="#6f837e">
+      <text x="130" y="124" text-anchor="middle">0</text><text x="260" y="124" text-anchor="middle">25</text>
+      <text x="390" y="124" text-anchor="middle">50</text><text x="520" y="124" text-anchor="middle">75</text>
+      <text x="650" y="124" text-anchor="middle">100%</text>
+    </g>
+    <g stroke="#20303a" stroke-width="1">
+      <line x1="130" y1="130" x2="130" y2="486"/><line x1="260" y1="130" x2="260" y2="486"/>
+      <line x1="390" y1="130" x2="390" y2="486"/><line x1="520" y1="130" x2="520" y2="486"/><line x1="650" y1="130" x2="650" y2="486"/>
+    </g>
+    <g font-family="Cascadia Mono, Consolas, monospace">
+      <g transform="translate(0 138)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">python</text>
+        <rect x="130" y="0" width="520" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="656" y="8" font-size="9.5" font-weight="700" fill="#38d6be">100%</text>
+        <rect x="130" y="9" width="504" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="640" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">97%</text>
+        <rect x="130" y="18" width="442" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="578" y="26" font-size="9.5" font-weight="700" fill="#f0a868">85%</text>
+        <rect x="130" y="27" width="198" height="8" rx="2.5" fill="#52636d"/>
+        <text x="334" y="35" font-size="9.5" font-weight="700" fill="#52636d">38%</text>
+      </g>
+      <g transform="translate(0 188)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">go</text>
+        <rect x="130" y="0" width="504" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="640" y="8" font-size="9.5" font-weight="700" fill="#38d6be">97%</text>
+        <rect x="130" y="9" width="504" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="640" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">97%</text>
+        <rect x="130" y="18" width="468" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="604" y="26" font-size="9.5" font-weight="700" fill="#f0a868">90%</text>
+        <rect x="130" y="27" width="146" height="8" rx="2.5" fill="#52636d"/>
+        <text x="282" y="35" font-size="9.5" font-weight="700" fill="#52636d">28%</text>
+      </g>
+      <g transform="translate(0 238)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">rust</text>
+        <rect x="130" y="0" width="416" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="552" y="8" font-size="9.5" font-weight="700" fill="#38d6be">80%</text>
+        <rect x="130" y="9" width="348" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="484" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">67%</text>
+        <rect x="130" y="18" width="348" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="484" y="26" font-size="9.5" font-weight="700" fill="#f0a868">67%</text>
+        <rect x="130" y="27" width="172" height="8" rx="2.5" fill="#52636d"/>
+        <text x="308" y="35" font-size="9.5" font-weight="700" fill="#52636d">33%</text>
+      </g>
+      <g transform="translate(0 288)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">cpp</text>
+        <rect x="130" y="0" width="478" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="614" y="8" font-size="9.5" font-weight="700" fill="#38d6be">92%</text>
+        <rect x="130" y="9" width="458" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="594" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">88%</text>
+        <rect x="130" y="18" width="442" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="578" y="26" font-size="9.5" font-weight="700" fill="#f0a868">85%</text>
+        <rect x="130" y="27" width="42" height="8" rx="2.5" fill="#52636d"/>
+        <text x="178" y="35" font-size="9.5" font-weight="700" fill="#52636d">8%</text>
+      </g>
+      <g transform="translate(0 338)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">javascript</text>
+        <rect x="130" y="0" width="520" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="656" y="8" font-size="9.5" font-weight="700" fill="#38d6be">100%</text>
+        <rect x="130" y="9" width="520" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="656" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">100%</text>
+        <rect x="130" y="18" width="510" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="646" y="26" font-size="9.5" font-weight="700" fill="#f0a868">98%</text>
+        <rect x="130" y="27" width="151" height="8" rx="2.5" fill="#52636d"/>
+        <text x="287" y="35" font-size="9.5" font-weight="700" fill="#52636d">29%</text>
+      </g>
+      <g transform="translate(0 388)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">java</text>
+        <rect x="130" y="0" width="452" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="588" y="8" font-size="9.5" font-weight="700" fill="#38d6be">87%</text>
+        <rect x="130" y="9" width="489" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="625" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">94%</text>
+        <rect x="130" y="18" width="489" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="625" y="26" font-size="9.5" font-weight="700" fill="#f0a868">94%</text>
+        <rect x="130" y="27" width="78" height="8" rx="2.5" fill="#52636d"/>
+        <text x="214" y="35" font-size="9.5" font-weight="700" fill="#52636d">15%</text>
+      </g>
+      <rect x="108" y="432" width="644" height="46" rx="7" fill="#111c24" stroke="#2a3d49"/>
+      <g transform="translate(0 438)">
+        <text x="108" y="22" text-anchor="end" font-size="13" font-weight="800" fill="#eef8f5">TOTAL</text>
+        <rect x="130" y="0" width="484" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="620" y="8" font-size="9.5" font-weight="700" fill="#38d6be">93%</text>
+        <rect x="130" y="9" width="478" height="8" rx="2.5" fill="#7da7ff"/>
+        <text x="614" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">92%</text>
+        <rect x="130" y="18" width="458" height="8" rx="2.5" fill="#f0a868"/>
+        <text x="594" y="26" font-size="9.5" font-weight="700" fill="#f0a868">88%</text>
+        <rect x="130" y="27" width="130" height="8" rx="2.5" fill="#52636d"/>
+        <text x="266" y="35" font-size="9.5" font-weight="700" fill="#52636d">25%</text>
+      </g>
+    </g>
+    <rect x="28" y="504" width="724" height="36" rx="7" fill="#0e211f" stroke="#24554d"/>
+    <text x="44" y="527" font-size="13" font-weight="800" fill="#eef8f5">Same model: harness +67 over raw,</text>
+    <text x="300" y="527" font-size="13" fill="#93a5a0">and learning out-solves the Claude Code harness</text>
+    <text x="736" y="527" text-anchor="end" font-size="14" font-weight="900" fill="#38d6be">93% vs 88%</text>
+  </g>
+</svg>

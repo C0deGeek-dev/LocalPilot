@@ -102,6 +102,8 @@ comparison on one model, not a model claim.
 
 ![LocalPilot harness versus the raw model](docs/assets/localpilot-vs-raw.svg)
 
+![All four arms on the same local model — raw 25%, LocalPilot harness 92%, Claude Code 88%, LocalPilot with learning 93%](docs/assets/localpilot-four-arm.svg)
+
 > [!NOTE]
 > Read the delta, not the absolute score. This is one model and quant; public
 > benchmark data can be contamination-prone, and the 600-second timeout counts
