@@ -2,6 +2,105 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0060: Research Is A Two-Surface, Provenance-Preserving Loop In Its Own Crate, With Web Egress Off By Default
+
+Status: accepted. Honours the ecosystem remote-egress policy (the five rules:
+default-off, explicit opt-in, disclosed, auditable, disableable) and reuses the
+loop-safety rails (ADR-0055), the review-gated candidate path (ADR-0037), and the
+single workspace redactor (ADR-0011). Keeps the LocalMind adapter thin (ADR-0036)
+by landing the loop in a new crate, not the adapter. The bundled `deep-research`
+harness concept is a behavioural reference only — code, prompts, identifiers, and
+UI copy are original (ADR-0005, clean-room).
+
+LocalPilot can already retrieve across local code, accepted memory, and ingested
+knowledge, but only one source at a time and without a loop that decomposes a
+question, cross-checks support, or produces a reviewable artefact. A *research*
+capability wants to fan out across those sources — and, for some questions, the
+web — then synthesise with provenance. The web reach is the hazard: LocalPilot's
+posture is local-first with no telemetry, so any outbound path must be inert
+unless the operator explicitly turns it on for that run.
+
+1. **One engine, two surfaces.** A single bounded loop is exposed as both an
+   interactive `/research` (one-shot `/research <topic>` runs and returns to the
+   prior mode; a bare `/research` enters a persistent research mode where a typed
+   prompt is researched) and a headless `localpilot research <topic>` subcommand
+   (`--no-report`, `--no-memory`). The interactive surface is a thin shell over
+   the loop; no research logic lives in the TUI/CLI layer.
+
+2. **Host-neutral loop in a new crate (`localpilot-research`).** The crate defines
+   the `Source`/`Synthesizer` traits, the bounded `run_research` loop, the value
+   types (`Provenance`/`Evidence`/`Finding`/`ResearchReport`), the Markdown
+   renderer, the review-candidate spec, and the pure web-egress policy gate. It
+   carries no filesystem, network, or model dependency. The concrete sources
+   (knowledge/memory/web), the model-backed synthesizer, the report writer, and
+   the candidate enqueue live in the binding layer (`localpilot-cli`), where those
+   capabilities already exist — so the loop stays dependency-light and
+   unit-testable with fakes, and the LocalMind adapter gains no research logic
+   (ADR-0036).
+
+3. **Dual output, always review-gated.** A run emits both a redacted, human-
+   readable Markdown report and review-gated memory candidates. Candidates derive
+   only from supported, provenance-backed findings, are redacted, and are enqueued
+   through the existing review path (the `write_retrospective_lesson` queue,
+   ADR-0037) — never written to accepted memory. Knowledge production stays
+   human-gated.
+
+4. **The model assists decomposition only; synthesis stays provenance-preserving.**
+   When a provider and model are configured, the model decomposes the topic into
+   sub-questions (one per line, bounded by `[research].max_questions`). Synthesis
+   is **not** delegated: each finding is a gathered evidence snippet carrying that
+   snippet's provenance, and the loop's adversarial cross-check downgrades any
+   finding with no supporting evidence to `unsupported`. So the model can never
+   inject an unbacked or hallucinated finding into a report or a memory candidate.
+   With no model, decomposition degrades to the single-topic heuristic and a run
+   still completes.
+
+5. **Web egress is off by default and opt-in by construction.** The whole web path
+   is governed by `[research.web]` (`enabled` default `false`, an `allowlist`, and
+   an `audit_log` path) layered with per-session, runtime consent:
+   - **Default-off / disableable.** `enabled = false` (the unset default) removes
+     the entire outbound path; the loop runs local-only. The switch is the kill
+     switch — runtime consent can never override it.
+   - **Explicit, loud opt-in.** Web research is reachable only via the headless
+     `research --web` flag, which prints an egress disclosure (what is sent — only
+     the redacted sub-question — which allowlisted domains, and the audit-log path)
+     and then records a per-session opt-in that is never persisted. The interactive
+     surface stays local-only. A freshly built run is inactive until both config
+     and the per-session opt-in agree (fail-closed).
+   - **Allowlist-only per host.** Each candidate URL's host is parsed with a real
+     URL parser; an allowlisted host is fetched (bounded bytes + timeouts), every
+     other host is **skipped and logged** — there is no interactive per-fetch
+     prompt in v1. (The policy gate already models a `NeedsConfirmation` decision
+     for a future UI; v1 treats it as skip.)
+   - **Auditable.** Every outbound request and every skip appends one line to the
+     audit log (decision, host, URL, redacted sub-question) — metadata and the
+     redacted question only, never gathered evidence or file contents.
+
+Reason:
+
+- a research loop that fans out across sources is a genuinely new operating mode,
+  but its *logic* is host-neutral; isolating it in its own crate keeps the LocalMind
+  adapter thin (ADR-0036) and lets the security-sensitive gate be tested in
+  isolation with fakes
+- the trust hazard is egress, so the egress path is made inert by construction:
+  default-off, a loud per-run opt-in with disclosure, an allowlist with skip-on-
+  miss, and an audit trail — the five remote-egress rules, satisfied structurally
+  rather than by convention
+- delegating *decomposition* to the model is low-risk (it only shapes which
+  questions are asked); delegating *synthesis* is not, because an ungrounded
+  finding could become a report claim or a memory candidate — so synthesis keeps
+  real provenance and the cross-check stays authoritative
+- candidates route to the existing review queue, so research can never silently
+  enlarge durable memory
+
+Consequence: the default build makes no network request and is byte-identical to
+the no-web path; `research --web` against an empty allowlist fetches nothing (every
+host confirms→skips) and says so up front. Live evaluation of model decomposition
+and URL-proposal quality on a local model is opportunistic, not blocking (the
+offline `wiremock` egress tests are the accepted bar). A future interactive
+per-fetch confirm flow can light up the gate's existing `NeedsConfirmation`
+decision without changing the crate boundary.
+
 ## ADR-0059: Accepted-Memory Injection Is Gated By Semantic Relevance, And A Lesson That Hurt The Uplift Eval Is Routed To Review
 
 Status: accepted. Implements the two halves ADR-0045/ADR-0046 left as mechanism:

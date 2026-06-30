@@ -21,6 +21,7 @@ Security-sensitive areas:
 - provider authentication
 - transcript persistence
 - MCP server integration
+- web research egress
 
 ## Security Defaults
 
@@ -33,4 +34,12 @@ Security-sensitive areas:
   Bring-your-own-key only: no "sign in with Claude/ChatGPT" and no use of
   subscription credentials (ADR-0042).
 - Logs must redact secrets; a stored key is never logged or echoed in full.
+- Web research is off by default. The research loop is local-only unless the
+  operator opts in for that run with the headless `localpilot research --web`
+  flag, which discloses what egresses, fetches only allowlisted domains (others
+  are skipped and logged), sends only the redacted sub-question, and audits every
+  request. `[research.web] enabled = false` is the kill switch a runtime opt-in
+  cannot override. See
+  [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) §Web Research
+  Egress.
 

@@ -17,3 +17,14 @@ which maps every area to its owning doc.
 - **Store resolution** — `learning`/`memory` walk up to the nearest ancestor
   `.localmind` store; `--workspace <path>` pins it. See
   [`docs/localmind-integration.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/localmind-integration.md#store-resolution).
+
+## Research
+
+- **Research surface** — `/research` (interactive) and `localpilot research`
+  (headless) drive one local-first loop that writes a report and review-gated
+  memory candidates (ADR-0060). Configure it under `[research]`; see
+  [`docs/configuration.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md).
+- **Web egress** — off by default; reachable only via the headless
+  `localpilot research --web` opt-in (disclosed, allowlist-only, audited,
+  disableable). See
+  [`docs/07-security-and-privacy.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md).

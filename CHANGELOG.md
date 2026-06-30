@@ -6,6 +6,23 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **New `/research` mode and `localpilot research` subcommand (ADR-0060).** A
+  bounded research loop decomposes a topic into sub-questions, gathers evidence
+  across local sources (ingested knowledge + accepted memory), cross-checks each
+  finding against its evidence, and produces both a redacted Markdown report and
+  **review-gated** memory candidates (never written to accepted memory). It is
+  reachable interactively (`/research <topic>` one-shot; bare `/research` enters a
+  persistent research mode) and headlessly (`localpilot research <topic>`, with
+  `--no-report`/`--no-memory`). When a provider and model are configured the model
+  decomposes the topic; synthesis stays grounded in gathered evidence so a finding
+  is always backed. The loop lives in a new host-neutral `localpilot-research`
+  crate. **Web research is off by default** and reachable only via the headless
+  `localpilot research --web` opt-in, which prints an egress disclosure, fetches
+  only allowlisted domains (others are skipped and logged), sends only the redacted
+  sub-question, and audits every request; `[research.web] enabled = false` is the
+  kill switch. Configure under `[research]`; see `docs/configuration.md` and
+  `docs/07-security-and-privacy.md`.
+
 - **Outcome-aware down-weight wired to the uplift eval (ADR-0046/ADR-0059).** The
   engine's reasoned route-to-review flag was built but never wired to an outcome
   signal. It is now wired to the uplift A/B eval (not a live turn — one turn is too

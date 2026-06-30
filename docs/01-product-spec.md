@@ -217,6 +217,29 @@ loop cannot mint: a human `promote`s a patch onto the branch, or `emit-draft
 **off by default** (`[self_improvement]`) and the agent can propose but never
 publish.
 
+### Research (local-first; web opt-in)
+
+Independent of the operating mode, LocalPilot can **research** a topic
+(ADR-0060). One bounded loop decomposes the topic into sub-questions, gathers
+evidence across local sources — the repo's ingested knowledge and accepted
+memory — cross-checks each finding against its evidence, and produces two
+outputs: a redacted Markdown report and **review-gated** memory candidates
+(supported, provenance-backed findings offered to the review queue, never written
+to accepted memory).
+
+It is reachable two ways: an interactive `/research <topic>` (runs once and
+returns to the prior mode) or a bare `/research` that enters a persistent
+research mode; and a headless `localpilot research <topic>` subcommand
+(`--no-report`, `--no-memory`). When a provider and model are configured the
+model decomposes the topic; synthesis stays grounded in gathered evidence, so a
+finding is always backed.
+
+**Web research is off by default.** The loop is local-only unless the operator
+opts in for that run with the headless `localpilot research --web` flag, which
+prints an egress disclosure and fetches only allowlisted domains (others are
+skipped and logged), auditing every outbound request. The interactive surface is
+always local-only. See the security and privacy doc for the egress controls.
+
 ## Interfaces
 
 ### Interactive REPL
@@ -253,6 +276,9 @@ session. The rest:
   the job so a later `/ingest resume` continues from the chunks already written.
 - `/knowledge <query>` searches ingested knowledge; `/context <task>` builds a
   task-specific context bundle from it.
+- `/research <topic>` researches a topic across local sources once;
+  bare `/research` enters a persistent research mode. The interactive surface is
+  local-only — web research is the headless `localpilot research --web` opt-in.
 - `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
   all`).
 

@@ -105,6 +105,12 @@ commits).
   enqueues a review candidate (permission-gated, project-local write) and never
   writes accepted memory directly — promotion stays a human, review-gated step
   (ADR-0011).
+- `localpilot research` (and the `/research` mode, ADR-0060) produces memory
+  candidates from its **supported, provenance-backed** findings. Each is redacted
+  and enqueued through the same review path as a retrospective lesson (the
+  `write_retrospective_lesson` queue, ADR-0037) at a low prior confidence — never
+  written to accepted memory. Unsupported or unbacked findings never become
+  candidates. `--no-memory` skips the enqueue entirely.
 - The agent can list or inspect generated skill drafts read-only with the
   `skill_drafts` tool. Surfacing a draft never enables it; the disabled flag stays
   authoritative and activation stays a deliberate human step.

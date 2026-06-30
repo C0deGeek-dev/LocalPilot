@@ -336,6 +336,37 @@ unless `--approve` is passed), and requires an explicit human approval — the
 autonomous loop can author a draft but can never publish one. See
 [07-security-and-privacy.md](07-security-and-privacy.md) §Outward Draft Emission.
 
+### `[research]`
+
+The `/research` mode and `localpilot research` subcommand (ADR-0060). Local
+research (repo knowledge + accepted memory) is read-only and never leaves the
+machine; the **web** half is off by default and gated separately.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Whether the research surface is usable at all. Local-only research is read-only and harmless; set `false` to disable the surface entirely. |
+| `max_questions` | integer | `6` | The loop bound — the maximum sub-questions a single run may pursue. |
+| `output_dir` | string | _(unset)_ | Directory for written report artefacts, relative to the project root. Unset → `.localpilot/research/`. |
+
+#### `[research.web]`
+
+The outbound web-egress gate (`policies/remote-egress.md`). Every key defaults to
+the most restrictive value, and `enabled = false` removes the entire outbound
+path regardless of the others. Per-session consent is enforced at runtime on top
+of this static config (the headless `research --web` opt-in) — config permits, the
+operator still opts in for that run.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for outbound web research. While `false`, no web request is ever made and the loop runs local-only — this is the kill switch a runtime opt-in cannot override. |
+| `allowlist` | array of string | `[]` | Domains that may be fetched (exact host or a subdomain). Empty → every host is skipped, so nothing is fetched. There is no implicit trust. |
+| `audit_log` | string | _(unset)_ | Path (relative to the project root) of the egress audit log recording every outbound request and skip. Unset → `.localpilot/research/egress-audit.log`. |
+
+Web research is reachable only via the headless `localpilot research --web` flag,
+which prints an egress disclosure and records the per-session opt-in. The
+interactive `/research` surface is always local-only. See
+[07-security-and-privacy.md](07-security-and-privacy.md) §Web Research Egress.
+
 ## Example
 
 ```toml
@@ -377,4 +408,12 @@ args = ["--root", "."]
 
 [history]
 persistence = "save-all"
+
+[research]
+enabled = true
+max_questions = 6
+# Web research stays off until you enable it and opt in per run with `--web`.
+[research.web]
+enabled = false
+allowlist = []
 ```

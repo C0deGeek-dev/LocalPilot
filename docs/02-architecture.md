@@ -201,6 +201,27 @@ Must not own:
 
 Memory and learning must remain local-only by design.
 
+### `localpilot-research`
+
+Owns the **host-neutral** research loop (ADR-0060):
+
+- the `Source`/`Synthesizer` traits and the bounded `run_research` loop
+  (decompose → gather → adversarial cross-check → synthesise)
+- the value types (`Provenance`/`Evidence`/`Finding`/`ResearchReport`), the
+  Markdown report renderer, and the review-candidate spec
+- the **pure** web-egress policy gate (`WebAccess`/`FetchDecision`/`host_allowed`/
+  `AuditEntry`) — it decides whether a fetch is permitted and how it is recorded,
+  but parses no URLs and performs no I/O
+
+Must not own:
+
+- any filesystem, network, or model dependency — the concrete sources
+  (knowledge/memory/web), the model-backed synthesizer, URL parsing, the report
+  writer, and the candidate enqueue live in `localpilot-cli`
+
+Keeping the loop here (not in `localpilot-localmind`) holds the adapter boundary
+(ADR-0036) and lets the security-sensitive gate be unit-tested with fakes.
+
 ### `localpilot-skills`
 
 Owns:

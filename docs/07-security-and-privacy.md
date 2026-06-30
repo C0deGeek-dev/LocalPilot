@@ -386,6 +386,45 @@ as patch promotion:
 - **No shell.** The `gh` arguments are passed as an argv array, never a shell
   string, so a redacted title or body can never become another command.
 
+## Web Research Egress
+
+Research (ADR-0060) is local-first. The loop gathers from the repo's ingested
+knowledge and accepted memory — read-only, on-machine — and reaches the **web**
+only behind an explicit per-run opt-in. The egress path satisfies the ecosystem
+remote-egress policy (`policies/remote-egress.md`) by construction:
+
+- **Default-off, disableable.** `[research.web] enabled` defaults `false`; the
+  unset block leaves the loop local-only. `enabled = false` removes the entire
+  outbound path and is the kill switch — a runtime opt-in can never override it
+  (the consent grant is a no-op against config-off, enforced and tested).
+- **Explicit, loud opt-in.** Web research is reachable only via the headless
+  `localpilot research --web` flag, which first prints an egress disclosure — what
+  is sent (only the redacted sub-question), the allowlisted domains, and the
+  audit-log path — then records a per-session opt-in that is **never persisted**,
+  so every new run starts denied. The interactive `/research` surface is always
+  local-only.
+- **Allowlist-only.** Each candidate URL's host is parsed with a real URL parser
+  and checked against `[research.web] allowlist` (exact host or subdomain). An
+  allowlisted host is fetched (bounded bytes and timeouts); every other host is
+  **skipped and logged**, never fetched. An empty allowlist fetches nothing.
+- **Only the sub-question leaves the machine.** The outbound text is the
+  sub-question passed through the shared workspace redactor — never gathered
+  evidence, file contents, or memory. The redactor is a second guard over the
+  topic the user typed.
+- **Auditable.** When active, every outbound request and every skip appends one
+  line to the audit log (`[research.web] audit_log`, default
+  `.localpilot/research/egress-audit.log`): the decision, host, URL, and the
+  redacted sub-question — metadata and the redacted question only, never content.
+- **Findings stay review-gated.** Web-derived findings flow through the same
+  provenance cross-check and review queue as local ones; nothing a fetch produced
+  is written to accepted memory without human promotion.
+
+A sample audit line:
+
+```
+decision=allowed host=docs.rs url=https://docs.rs/tokio question=how does tokio schedule tasks
+```
+
 ## Quota Wait/Resume Safety
 
 Automatic quota wait/resume is allowed only when it honors the provider's
