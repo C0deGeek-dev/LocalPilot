@@ -9,6 +9,7 @@
 use std::io::Write as _;
 
 use localpilot_config::{CliOverrides, Config, ConfigPaths, ProviderConfig};
+use localpilot_llm::resolve_vision_with_source;
 use localpilot_sandbox::{Decision, Effect, Interactivity, PermissionEngine, PermissionRequest};
 use serde::Serialize;
 
@@ -61,6 +62,14 @@ struct ProviderModels {
     /// config. The authoritative half of the resolution (config > probe > false).
     #[serde(skip_serializing_if = "Option::is_none")]
     supports_vision: Option<bool>,
+    /// The resolved vision capability (config > probe > false) for a reachable
+    /// server. `None` when the server was not reached or not probed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision: Option<bool>,
+    /// Which signal decided `vision`: `config`, `probe`, or `default`. `None`
+    /// alongside a `None` `vision` when nothing was resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -97,6 +106,8 @@ pub async fn run(
                 status: Status::NoListingEndpoint,
                 models: Vec::new(),
                 supports_vision: entry.supports_vision,
+                vision: None,
+                vision_source: None,
                 error: None,
             });
             continue;
@@ -161,6 +172,14 @@ pub async fn run(
                         context_window: model.context_window,
                     })
                     .collect();
+                // The server is reachable, so resolve its vision capability:
+                // config wins, else a best-effort read-only probe, else default off.
+                let probe = if config.discovery.vision_probe {
+                    probe_vision_for_provider(&config, id, &base_url).await
+                } else {
+                    None
+                };
+                let (vision, source) = resolve_vision_with_source(entry.supports_vision, probe);
                 results.push(ProviderModels {
                     provider: id.clone(),
                     kind: entry.kind.clone(),
@@ -168,6 +187,8 @@ pub async fn run(
                     status: Status::Ok,
                     models: listed,
                     supports_vision: entry.supports_vision,
+                    vision: Some(vision),
+                    vision_source: Some(source.as_str()),
                     error: None,
                 });
             }
@@ -213,8 +234,29 @@ fn provider_blocked(
         status,
         models: Vec::new(),
         supports_vision: entry.supports_vision,
+        vision: None,
+        vision_source: None,
         error: None,
     }
+}
+
+/// Best-effort, read-only vision probe for a provider's server (llama.cpp
+/// `/props`). A dynamic-auth provider (e.g. Google Vertex) has no such endpoint,
+/// so it is skipped; otherwise the configured static credential is used.
+pub(crate) async fn probe_vision_for_provider(
+    config: &Config,
+    provider_id: &str,
+    base_url: &str,
+) -> Option<bool> {
+    if localpilot_llm::discovery_auth_provider_from_config(config, provider_id)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
+    let credential = config.resolve_credential(provider_id);
+    localpilot_llm::probe_vision(base_url, credential.as_ref()).await
 }
 
 /// Emit the results as a JSON array (the agent-consumable surface). Stdout stays
@@ -237,10 +279,16 @@ fn render_human(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> any
             Status::Ok => {
                 listed_any = true;
                 let base = r.base_url.as_deref().unwrap_or("");
-                let vision = match r.supports_vision {
-                    Some(true) => " [vision declared]",
-                    Some(false) => " [vision off]",
-                    None => "",
+                // Prefer the resolved capability (config or probe) for a reachable
+                // server; fall back to the config declaration otherwise.
+                let vision = match (r.vision, r.vision_source) {
+                    (Some(true), Some(source)) => format!(" [vision: yes ({source})]"),
+                    (Some(false), Some(source)) => format!(" [vision: no ({source})]"),
+                    _ => match r.supports_vision {
+                        Some(true) => " [vision declared]".to_string(),
+                        Some(false) => " [vision off]".to_string(),
+                        None => String::new(),
+                    },
                 };
                 writeln!(out, "{} ({base}):{vision}", r.provider)?;
                 for model in &r.models {
@@ -381,6 +429,8 @@ mod tests {
                 configured: true,
             }],
             supports_vision: None,
+            vision: None,
+            vision_source: None,
             error: None,
         }
     }
@@ -422,6 +472,21 @@ mod tests {
     }
 
     #[test]
+    fn json_carries_the_resolved_vision_and_its_source() {
+        // A reachable server probed as vision-capable surfaces the resolved value
+        // and the signal that decided it, so a caller can see *why*.
+        let mut entry = ok_entry("local", "m");
+        entry.vision = Some(true);
+        entry.vision_source = Some("probe");
+        let mut out: Vec<u8> = Vec::new();
+        render_json(&mut out, &[entry]).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(parsed[0]["vision"], true);
+        assert_eq!(parsed[0]["vision_source"], "probe");
+    }
+
+    #[test]
     fn an_unreachable_or_approval_required_endpoint_serializes_its_status() {
         let unreachable = ProviderModels {
             provider: "local".to_string(),
@@ -430,6 +495,8 @@ mod tests {
             status: Status::Unreachable,
             models: Vec::new(),
             supports_vision: None,
+            vision: None,
+            vision_source: None,
             error: Some("connection refused".to_string()),
         };
         let mut out: Vec<u8> = Vec::new();
@@ -452,6 +519,8 @@ mod tests {
             status,
             models: Vec::new(),
             supports_vision: None,
+            vision: None,
+            vision_source: None,
             error: None,
         };
         assert!(listing_incomplete(&[mk(Status::Unreachable)]));
@@ -470,6 +539,8 @@ mod tests {
             status: Status::ApprovalRequired,
             models: Vec::new(),
             supports_vision: None,
+            vision: None,
+            vision_source: None,
             error: None,
         };
         let mut out: Vec<u8> = Vec::new();

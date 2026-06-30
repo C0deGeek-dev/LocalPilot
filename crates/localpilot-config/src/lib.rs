@@ -26,8 +26,8 @@ pub use load::{
 };
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
-    DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig, IngestMode,
-    LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
+    DiscoveryConfig, DocsConfig, HarnessConfig, HistoryConfig, HistoryPersistence, IngestConfig,
+    IngestMode, LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode, PermissionProfile,
     PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection, QuotaAutoResume,
     QuotaConfig, RepairMode, ResearchConfig, ResearchWebConfig, ResolvedRails, RuleSeverity,
     SelfImprovementConfig, SkillsConfig, StorageConfig, ToolsConfig,

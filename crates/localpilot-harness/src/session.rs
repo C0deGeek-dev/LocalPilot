@@ -604,6 +604,15 @@ pub struct SessionRuntime {
     /// mid-conversation (the switch is a lookup here, never a rebuild). `None`
     /// leaves the session single-provider — a switch is then refused as unknown.
     registry: Option<Arc<ProviderRegistry>>,
+    /// A best-effort, probe-resolved image-input capability for the active
+    /// provider, set by an interactive host after a discovery-time vision probe
+    /// (config > probe > false). `Some(true)` lifts the image-attach preflight for
+    /// a provider that did not declare vision in config but was probed as
+    /// vision-capable; it never *removes* capability the declaration already
+    /// advertises (official API or a config-declared local server). `None` (the
+    /// default for every non-interactive host) keeps the declaration as the sole
+    /// source, so behaviour is unchanged unless a host opts in.
+    image_support_override: Option<bool>,
     /// Whether a turn is currently running. A switch is refused while this is set,
     /// so the provider/model are only ever re-pointed at a turn boundary.
     turn_in_flight: bool,
@@ -676,6 +685,7 @@ impl SessionRuntime {
             broker: None,
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
+            image_support_override: None,
             turn_in_flight: false,
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
@@ -1177,14 +1187,28 @@ impl SessionRuntime {
         &self.provider.declaration().id
     }
 
-    /// Whether the active provider declares it accepts image input blocks, so the
-    /// UI can offer (or refuse) pasting an image for this model.
+    /// Whether the active provider accepts image input, so the UI can offer (or
+    /// refuse) pasting an image. True when the provider *declares* image input
+    /// (the official API, or a config-declared local server) **or** an interactive
+    /// host recorded a positive probe override. The override only ever adds
+    /// capability, so it cannot turn off images for a provider that already
+    /// declares them.
     #[must_use]
     pub fn active_accepts_images(&self) -> bool {
         self.provider
             .declaration()
             .supported_input_blocks
             .contains(&InputBlockKind::Image)
+            || self.image_support_override == Some(true)
+    }
+
+    /// Record the probe-resolved image-input capability for the active provider
+    /// (config > probe > false), set by an interactive host after a discovery-time
+    /// vision probe. Only `Some(true)` changes behaviour (it lifts the image-attach
+    /// preflight for an undeclared-but-probed-vision provider); `Some(false)`/`None`
+    /// leaves the provider's own declaration as the sole gate.
+    pub fn set_image_support_override(&mut self, resolved: Option<bool>) {
+        self.image_support_override = resolved;
     }
 
     /// The active model.
@@ -2955,6 +2979,22 @@ mod tests {
         assert!(vision.active_accepts_images());
         let (text_only, _d2) = runtime_with_provider(fake_with_vision(false));
         assert!(!text_only.active_accepts_images());
+    }
+
+    #[test]
+    fn a_positive_probe_override_lifts_an_undeclared_provider_only_upward() {
+        // A probe override adds capability to an undeclared provider...
+        let (mut text_only, _d1) = runtime_with_provider(fake_with_vision(false));
+        assert!(!text_only.active_accepts_images());
+        text_only.set_image_support_override(Some(true));
+        assert!(text_only.active_accepts_images());
+
+        // ...but a negative/empty override never removes a declared capability.
+        let (mut declared, _d2) = runtime_with_provider(fake_with_vision(true));
+        declared.set_image_support_override(Some(false));
+        assert!(declared.active_accepts_images());
+        declared.set_image_support_override(None);
+        assert!(declared.active_accepts_images());
     }
 
     #[test]

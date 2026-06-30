@@ -21,6 +21,12 @@ pub struct DiscoveredModel {
     pub id: String,
     /// The model's context window in tokens, when the server reports one.
     pub context_window: Option<u64>,
+    /// Whether the loaded model accepts image (vision) input, from a best-effort
+    /// read-only server probe ([`probe_vision`]). `None` when the server was not
+    /// probed or exposes no vision signal — never a guessed value. The listing
+    /// itself does not report this, so [`discover_models`] leaves it `None`; a
+    /// caller that probes stamps it on.
+    pub vision: Option<bool>,
 }
 
 /// Default timeout for a discovery request: listing models is interactive
@@ -109,7 +115,54 @@ fn parse_model(entry: &Value) -> Option<DiscoveredModel> {
     Some(DiscoveredModel {
         id,
         context_window: context_window_of(entry),
+        // The model listing carries no vision signal; a caller probes for it.
+        vision: None,
     })
+}
+
+/// Best-effort, read-only vision probe of a llama.cpp `llama-server`.
+///
+/// `llama-server` exposes a documented `GET /props` endpoint that reports the
+/// loaded model's `modalities` (set when a multimodal projector is loaded via
+/// `--mmproj`). This reads `modalities.vision` and runs **no model inference**.
+/// `/props` is served at the server root, while the OpenAI-compatible endpoints
+/// live under `/v1`, so a trailing `/v1` is stripped from `base_url` first.
+///
+/// Returns `Some(true|false)` only when the server reports the field; `None` when
+/// the server is unreachable, returns a non-success status, or exposes no such
+/// field (an older server, or a different OpenAI-compatible backend). It never
+/// returns an error — an unknown capability is `None`, never a guess.
+///
+/// Provenance: implemented from the public llama.cpp server documentation
+/// (`tools/server/README.md`, the `GET /props` `modalities` field). No private or
+/// undocumented endpoint behaviour is used.
+pub async fn probe_vision(base_url: &str, api_key: Option<&Secret>) -> Option<bool> {
+    let url = format!("{}/props", server_root(base_url));
+    let client = reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .ok()?;
+    let mut request = client.get(&url);
+    if let Some(key) = api_key {
+        // The credential rides as a header and is never logged.
+        request = request.bearer_auth(key.expose());
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    body.get("modalities")
+        .and_then(|modalities| modalities.get("vision"))
+        .and_then(Value::as_bool)
+}
+
+/// The server root for a `/props` probe. `llama-server` serves `/props` at the
+/// root, while the OpenAI-compatible endpoints live under `/v1`; strip a trailing
+/// `/v1` (with or without a trailing slash) so the probe targets the right path.
+fn server_root(base_url: &str) -> &str {
+    let trimmed = base_url.trim_end_matches('/');
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed)
 }
 
 /// Best-effort context length from the non-standard fields common servers
@@ -186,5 +239,67 @@ mod tests {
             discover_models(&format!("{}/v1", server.uri()), None).await,
             Err(ProviderError::Auth { .. })
         ));
+    }
+
+    async fn props_server(body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        // `/props` is served at the root, not under `/v1`.
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn props_reporting_a_loaded_projector_probes_vision_true() {
+        let server = props_server(serde_json::json!({
+            "modalities": { "vision": true },
+            "total_slots": 1
+        }))
+        .await;
+        // A `/v1` base is stripped to the server root before probing `/props`.
+        assert_eq!(
+            probe_vision(&format!("{}/v1", server.uri()), None).await,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn props_reporting_no_projector_probes_vision_false() {
+        let server = props_server(serde_json::json!({
+            "modalities": { "vision": false }
+        }))
+        .await;
+        assert_eq!(probe_vision(&server.uri(), None).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn props_without_a_modalities_field_is_unknown() {
+        let server = props_server(serde_json::json!({ "total_slots": 1 })).await;
+        assert_eq!(probe_vision(&server.uri(), None).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_props_endpoint_is_unknown() {
+        // A server with no `/props` (a 404) — an older build or a different
+        // OpenAI-compatible backend — yields `None`, never a guessed capability.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/props"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            probe_vision(&format!("{}/v1", server.uri()), None).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_server_is_unknown() {
+        // A closed port resolves to `None` (best-effort), not an error.
+        assert_eq!(probe_vision("http://127.0.0.1:1/v1", None).await, None);
     }
 }

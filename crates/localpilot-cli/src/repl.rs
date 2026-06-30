@@ -236,6 +236,11 @@ pub async fn run_chat(
     runtime.set_broker(broker);
     // Hand the runtime the built provider map so `/model` switches are a lookup.
     runtime.set_registry(provider_registry);
+    // Best-effort: resolve the active provider's image-input capability (config
+    // wins, else a read-only `/props` probe) so the image-attach preflight honours
+    // an undeclared-but-vision-capable local server. Default-off probe (a declared
+    // provider is not probed); failure leaves the provider's declaration as the gate.
+    runtime.set_image_support_override(resolved_image_support(&config, provider_id).await);
     localpilot_harness::register_project_analysis_context(
         &cwd,
         config.context.project_analysis,
@@ -837,6 +842,9 @@ async fn switch_model(
     }
     state.header.provider = runtime.active_provider_id().to_string();
     state.header.model = runtime.active_model().to_string();
+    // The active provider changed, so re-resolve its image-input capability for the
+    // attach preflight (config wins, else a best-effort probe of the new server).
+    runtime.set_image_support_override(resolved_image_support(config, Some(provider_id)).await);
     state.apply(UiEvent::Notice(format!(
         "switched to provider '{}' · model '{}'",
         runtime.active_provider_id(),
@@ -1948,6 +1956,33 @@ fn sandbox_profile(profile: UiProfile) -> Profile {
 /// Best-effort context window for `model` from the provider's own model
 /// listing, when the provider speaks the OpenAI-compatible protocol and a base
 /// URL is known. Silent on failure: discovery is metadata, not a gate.
+/// The probe-resolved image-input capability for the active provider — config
+/// `supports_vision` wins, else a best-effort read-only `/props` probe, else
+/// false — recorded on the runtime so the image-attach preflight honours an
+/// undeclared-but-vision-capable local server. Returns `None` (leave the
+/// declaration as the sole gate) when no such provider is configured. The probe
+/// runs only when `[discovery] vision_probe` is on **and** config did not already
+/// declare the capability (a declaration wins, so no probe is needed).
+async fn resolved_image_support(
+    config: &localpilot_config::Config,
+    provider_id: Option<&str>,
+) -> Option<bool> {
+    let id = provider_id.unwrap_or(&config.provider.default);
+    let entry = config.providers.get(id)?;
+    let declared = entry.supports_vision;
+    let probed = if declared.is_none() && config.discovery.vision_probe {
+        match crate::models_cmd::listing_base_url(entry) {
+            Some(base_url) => {
+                crate::models_cmd::probe_vision_for_provider(config, id, &base_url).await
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    Some(localpilot_llm::resolve_vision(declared, probed))
+}
+
 async fn discovered_window(
     config: &localpilot_config::Config,
     provider_id: Option<&str>,

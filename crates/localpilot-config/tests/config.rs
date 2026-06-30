@@ -371,6 +371,30 @@ fn provider_supports_vision_parses() -> TestResult {
 }
 
 #[test]
+fn vision_probe_defaults_on_and_is_toggleable() -> TestResult {
+    isolated(|jail| {
+        // Absent `[discovery]` keeps the probe on (best-effort, read-only).
+        let default_cfg = load(
+            &ConfigPaths {
+                user: None,
+                project: None,
+            },
+            &CliOverrides::default(),
+        )?;
+        assert!(default_cfg.discovery.vision_probe);
+
+        let project = write(jail, "project.toml", "[discovery]\nvision_probe = false\n")?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(!cfg.discovery.vision_probe);
+        Ok(())
+    })
+}
+
+#[test]
 fn google_adc_provider_config_parses_without_static_secret() -> TestResult {
     isolated(|jail| {
         let project = write(

@@ -20,10 +20,13 @@ mod provider;
 mod registry;
 mod request;
 mod retry;
+mod vision;
 
 pub use anthropic::AnthropicProvider;
 pub use auth::{AccessToken, AuthProvider, GoogleAdcAuthProvider};
-pub use discovery::{discover_models, discover_models_with_auth_provider, DiscoveredModel};
+pub use discovery::{
+    discover_models, discover_models_with_auth_provider, probe_vision, DiscoveredModel,
+};
 pub use error::{ProviderError, QuotaInfo};
 pub use event::{ModelEvent, ModelEventStream};
 pub use fake::FakeProvider;
@@ -35,6 +38,7 @@ pub use provider::{
 pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
 pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
 pub use retry::{retry, RetryPolicy};
+pub use vision::{resolve_vision, resolve_vision_with_source, VisionSource};
 
 /// Fuzzing entry points (enabled by the `fuzzing` feature; not public API).
 #[cfg(feature = "fuzzing")]

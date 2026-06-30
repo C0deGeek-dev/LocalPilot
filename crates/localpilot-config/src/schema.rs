@@ -32,6 +32,7 @@ pub struct Config {
     pub history: HistoryConfig,
     pub self_improvement: SelfImprovementConfig,
     pub research: ResearchConfig,
+    pub discovery: DiscoveryConfig,
 }
 
 impl Default for Config {
@@ -54,7 +55,30 @@ impl Default for Config {
             history: HistoryConfig::default(),
             self_improvement: SelfImprovementConfig::default(),
             research: ResearchConfig::default(),
+            discovery: DiscoveryConfig::default(),
         }
+    }
+}
+
+/// Model-discovery behaviour.
+///
+/// Controls best-effort, read-only metadata LocalPilot reads from a configured
+/// server at discovery time (it never runs model inference).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    /// Whether to probe a local server's read-only `/props` endpoint for vision
+    /// (multimodal projector) support, so an undeclared but vision-capable server
+    /// resolves its capability without a hand edit. Default `true`: the probe is
+    /// read-only and best-effort — an unreachable or signal-less server is treated
+    /// as "unknown" (no vision), never a false claim, and an explicit
+    /// `supports_vision` config always wins. Set `false` to never probe.
+    pub vision_probe: bool,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self { vision_probe: true }
     }
 }
 
