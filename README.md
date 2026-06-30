@@ -37,6 +37,22 @@ risky parts stay behind explicit permission boundaries.
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
 | **Status** | `1.0.0` stable; public CLI, config, and provider contract follow SemVer |
 
+## Privacy by design
+
+LocalPilot is built so the complete coding-agent loop can run on your machine,
+against a model endpoint you control.
+
+- **No usage telemetry is sent.** LocalPilot does not report your prompts, code,
+  tool calls, transcripts, or usage to us.
+- **Local is the default.** The default provider targets a local endpoint, and
+  files, logs, transcripts, and memory remain under your control.
+- **Remote providers are explicit.** If you configure a hosted provider, the
+  relevant requests go to that provider—not to LocalX—and you can return to the
+  local-only path at any time.
+- **You control access.** Workspace boundaries, permission gates, secret
+  redaction, and review-gated memory keep sensitive actions visible and
+  reversible.
+
 ## Quick start
 
 You need Rust, Git, and a C compiler. Clone with the LocalMind submodule:
