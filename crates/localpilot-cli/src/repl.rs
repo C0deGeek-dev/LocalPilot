@@ -464,20 +464,29 @@ async fn submit_current_input(
                 attachments.len()
             )));
         }
-        state.busy = true;
-        let outcome = run_turn(
-            terminal,
-            state,
-            runtime,
-            approval_rx,
-            &model_prompt,
-            &attachments,
-        )
-        .await;
-        state.busy = false;
-        // The turn may have created or removed files; refresh the @-mention list.
-        state.set_workspace_files(workspace_files(host.cwd));
-        outcome
+        if state.mode == Mode::Research {
+            // In research mode a bare prompt is a topic to research locally, not
+            // a model turn.
+            state.busy = true;
+            let outcome = run_research_prompt(state, host, &model_prompt).await;
+            state.busy = false;
+            outcome
+        } else {
+            state.busy = true;
+            let outcome = run_turn(
+                terminal,
+                state,
+                runtime,
+                approval_rx,
+                &model_prompt,
+                &attachments,
+            )
+            .await;
+            state.busy = false;
+            // The turn may have created or removed files; refresh the @-mention list.
+            state.set_workspace_files(workspace_files(host.cwd));
+            outcome
+        }
     };
     // A turn may have started a background process and a `/bg`/`/new` may have
     // changed the set; keep the status-line indicator current either way.
@@ -679,6 +688,22 @@ async fn run_slash(
             let result = crate::ingest_cmd::knowledge_pack(host.cwd, &task, &mut output);
             apply_command_result(state, output, result);
         }
+        SlashAction::Research(topic) => match topic {
+            // A one-shot `/research <topic>` runs immediately and leaves the
+            // current mode unchanged.
+            Some(topic) => {
+                state.apply(UiEvent::UserMessage(format!("/research {topic}")));
+                run_research_prompt(state, host, &topic).await?;
+            }
+            // A bare `/research` enters persistent research mode.
+            None => {
+                state.mode = Mode::Research;
+                state.apply(UiEvent::Notice(
+                    "research mode: type a topic to research locally (web off). /agent to exit."
+                        .to_string(),
+                ));
+            }
+        },
         SlashAction::Background(command) => {
             apply_background_command(state, runtime.background_registry(), command)
         }
@@ -1244,6 +1269,29 @@ fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::R
     if let Err(error) = result {
         state.apply(UiEvent::Notice(format!("command failed: {error}")));
     }
+}
+
+/// Run a local research pass for `topic` and post its output to the transcript.
+/// Local-only: web research is reached through the headless `research --web`
+/// path, not the interactive surface.
+async fn run_research_prompt(
+    state: &mut AppState,
+    host: &CommandHost<'_>,
+    topic: &str,
+) -> anyhow::Result<()> {
+    let options = match crate::research::options_from_config(host.cwd, true, true)? {
+        Some(options) => options,
+        None => {
+            state.apply(UiEvent::Notice(
+                "research is disabled ([research].enabled = false)".to_string(),
+            ));
+            return Ok(());
+        }
+    };
+    let mut output = Vec::new();
+    let result = crate::research::run_local_research(host.cwd, topic, &options, &mut output).await;
+    apply_command_result(state, output, result);
+    Ok(())
 }
 
 fn apply_command_output(state: &mut AppState, output: Vec<u8>) {

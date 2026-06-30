@@ -11,6 +11,9 @@ const MAX_INPUT_HISTORY: usize = 100;
 pub enum Mode {
     Agent,
     Harness,
+    /// Research mode: a bare prompt is treated as a topic to research locally
+    /// rather than a model turn.
+    Research,
 }
 
 impl Mode {
@@ -19,6 +22,7 @@ impl Mode {
         match self {
             Mode::Agent => "agent",
             Mode::Harness => "harness",
+            Mode::Research => "research",
         }
     }
 }

@@ -79,6 +79,9 @@ pub enum SlashAction {
     },
     Ingest(IngestAction),
     Knowledge(String),
+    /// Research a topic. `Some(topic)` runs a one-shot research pass; `None`
+    /// enters persistent research mode.
+    Research(Option<String>),
     ContextBuild(String),
     /// Manage background processes started this session.
     Background(BackgroundCommand),
@@ -188,6 +191,10 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
             command: "knowledge".to_string(),
             reason: "usage: /knowledge <query>".to_string(),
         },
+        _ if name == "research" && !args.is_empty() => {
+            SlashAction::Research(Some(args.to_string()))
+        }
+        _ if name == "research" => SlashAction::Research(None),
         _ if name == "context" => parse_context(args),
         _ if name == "bg" => parse_bg(args),
         _ if matches!(name, "quit" | "q") && args.is_empty() => SlashAction::Quit,
@@ -465,6 +472,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         )),
         SlashAction::ContextBuild(_) => state.apply(UiEvent::Notice(
             "/context is handled by the interactive host".to_string(),
+        )),
+        SlashAction::Research(_) => state.apply(UiEvent::Notice(
+            "/research is handled by the interactive host".to_string(),
         )),
         SlashAction::Background(_) => state.apply(UiEvent::Notice(
             "/bg is handled by the interactive host".to_string(),

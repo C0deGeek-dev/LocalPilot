@@ -28,6 +28,7 @@ mod outward_cmd;
 mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;
+mod research;
 mod rpc_cmd;
 mod self_review_cmd;
 mod session_cmd;
@@ -135,6 +136,18 @@ enum Command {
     Knowledge {
         #[command(subcommand)]
         command: KnowledgeCommand,
+    },
+    /// Research a topic across local sources, writing a report and review-gated
+    /// memory candidates. Web research is off unless explicitly enabled.
+    Research {
+        /// The topic or question to research.
+        topic: String,
+        /// Do not enqueue review-gated memory candidates from the findings.
+        #[arg(long)]
+        no_memory: bool,
+        /// Do not write a report artefact to the research output directory.
+        #[arg(long)]
+        no_report: bool,
     },
     /// Export a session transcript as a redacted, inspectable bundle.
     Export {
@@ -1274,6 +1287,20 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 KnowledgeCommand::Pack { task } => {
                     ingest_cmd::knowledge_pack(&cwd, &task, &mut stdout)?;
                 }
+            }
+        }
+        Command::Research {
+            topic,
+            no_memory,
+            no_report,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            match research::options_from_config(&cwd, !no_report, !no_memory)? {
+                Some(options) => {
+                    research::run_local_research(&cwd, &topic, &options, &mut stdout).await?;
+                }
+                None => writeln!(stdout, "research is disabled ([research].enabled = false)")?,
             }
         }
         Command::Export { session, out } => {
