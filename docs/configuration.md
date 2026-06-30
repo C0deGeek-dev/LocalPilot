@@ -202,6 +202,7 @@ endpoint is configured.
 | `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
 | `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
 | `injection_language_filter` | bool | `true` | Skip an accepted memory clearly about a different programming language than the workspace's; a language-agnostic lesson stays eligible. |
+| `outcome_downweight` | bool | `false` | **Outcome-aware down-weight.** When the uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). Off by default: a single eval is a weak signal, so the host acts on the A/B verdict (joined by the per-turn `memories_used` audit), not a live turn, and the action is reversible. |
 
 ### `[docs]`
 

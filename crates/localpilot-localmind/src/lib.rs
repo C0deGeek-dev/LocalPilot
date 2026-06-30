@@ -33,6 +33,7 @@ mod rule_cue;
 mod seed;
 mod skill_drafts_tool;
 mod tool_use;
+mod uplift_downweight;
 mod workspace;
 
 use std::fmt::Write as _;
@@ -92,6 +93,7 @@ pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};
 pub use seed::{seed_memory, SeedLesson, SeedPack, SeedReport};
 pub use skill_drafts_tool::SkillDrafts;
 pub use tool_use::{tool_use_candidate, ToolUseSignal};
+pub use uplift_downweight::{downweight_unhelpful_lessons, UpliftArmOutcome};
 pub use workspace::{is_store_root, resolve_store_root, StoreRoot};
 
 use localmind_core::{SessionId as LearningSessionId, SessionSource};

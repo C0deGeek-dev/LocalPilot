@@ -493,6 +493,13 @@ pub struct MemoryConfig {
     /// byte-identical. The gate only re-filters keyword candidates by semantic
     /// relevance; it never selects.
     pub injection_min_cosine: f32,
+    /// Outcome-aware down-weight: when the uplift A/B eval shows an injected
+    /// lesson coincided with an arm under-performing its control, route that
+    /// lesson to review (never delete it). **Off by default** — a single eval is a
+    /// weak signal, so the host only acts on the A/B verdict, not a live turn, and
+    /// the action is reversible (a human re-judges). Implements ADR-0046's unwired
+    /// half; reuses the engine's route-to-review flag (D-LM-0016).
+    pub outcome_downweight: bool,
 }
 
 impl Default for MemoryConfig {
@@ -504,6 +511,7 @@ impl Default for MemoryConfig {
             injection_skip_categories: Vec::new(),
             injection_language_filter: true,
             injection_min_cosine: 0.6,
+            outcome_downweight: false,
         }
     }
 }

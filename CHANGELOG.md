@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Outcome-aware down-weight wired to the uplift eval (ADR-0046/ADR-0059).** The
+  engine's reasoned route-to-review flag was built but never wired to an outcome
+  signal. It is now wired to the uplift A/B eval (not a live turn — one turn is too
+  weak a signal): when an arm that injected a set of lessons under-performs its
+  control, those lessons are routed to review (never deleted) for a human to
+  re-judge, joined by the per-turn `memories_used` audit. Off by default
+  (`[memory] outcome_downweight`); only `memory`-layer ids are eligible; reversible.
+
 - **Semantic relevance gate at memory injection (ADR-0059).** Accepted-memory
   injection was gated only by keyword bm25 score (unnormalized, not portably
   tightenable), so a same-language but off-topic lesson could inject into an
