@@ -94,9 +94,11 @@ reasoning settings.
 ## Why the harness matters
 
 The model is only one part of a coding agent. In a pinned comparison across 225
-Aider-polyglot exercises, the same local model solved **16%** of tasks raw and
-**77%** through LocalPilot: a **61-point uplift** from tools, iteration, test
-feedback, and recovery.
+Aider-polyglot exercises, the same local model solved **25%** of tasks raw and
+**92%** through LocalPilot: a **67-point uplift** from tools, iteration, test
+feedback, and recovery. With learning on it reached **93%** — out-solving the
+Claude Code harness driving the *same* pinned local model (**88%**); a harness
+comparison on one model, not a model claim.
 
 ![LocalPilot harness versus the raw model](docs/assets/localpilot-vs-raw.svg)
 
