@@ -1627,9 +1627,14 @@ const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
 /// fallback path, where a normal text paste simply had nothing to insert.
 fn attach_clipboard_image(state: &mut AppState, runtime: &SessionRuntime, quiet_when_absent: bool) {
     if !runtime.active_accepts_images() {
-        state.apply(UiEvent::Notice(
-            "the current model does not accept images".to_string(),
-        ));
+        // Refuse with guidance rather than sending an image blind to a model not
+        // known to accept one: tell the user how to declare the capability.
+        state.apply(UiEvent::Notice(format!(
+            "the current model is not known to accept images — if provider '{}' \
+             supports vision, declare `supports_vision = true` for it in \
+             .localpilot.toml",
+            runtime.active_provider_id()
+        )));
         return;
     }
     let mut clipboard = match arboard::Clipboard::new() {

@@ -31,6 +31,7 @@ fn doctor_does_not_print_secret_values() {
         credential_source: CredentialSource::Env,
         model: None,
         context_window: None,
+        supports_vision: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -51,6 +52,7 @@ fn doctor_renders_google_adc_source_without_file_contents() {
         credential_source: CredentialSource::GoogleAdcFile,
         model: Some("google/gemini-3.5-flash".to_string()),
         context_window: None,
+        supports_vision: None,
     }];
 
     let rendered = doctor::render(&report);
@@ -87,6 +89,7 @@ fn report() -> DoctorReport {
                 credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
+                supports_vision: None,
             },
             ProviderStatus {
                 name: "openai".to_string(),
@@ -96,6 +99,7 @@ fn report() -> DoctorReport {
                 credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
+                supports_vision: None,
             },
             ProviderStatus {
                 name: "anthropic".to_string(),
@@ -105,6 +109,7 @@ fn report() -> DoctorReport {
                 credential_source: CredentialSource::None,
                 model: None,
                 context_window: None,
+                supports_vision: None,
             },
         ],
         tools: vec![

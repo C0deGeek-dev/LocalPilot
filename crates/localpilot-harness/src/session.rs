@@ -2910,6 +2910,53 @@ mod tests {
         (runtime, dir)
     }
 
+    /// A single-provider runtime over `provider`, for capability checks.
+    fn runtime_with_provider(
+        provider: Arc<dyn ModelProvider>,
+    ) -> (SessionRuntime, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = SessionRuntime::new(
+            provider,
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                model: "m".to_string(),
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        (runtime, dir)
+    }
+
+    /// A fake provider whose declaration advertises image input only when asked.
+    fn fake_with_vision(vision: bool) -> Arc<dyn ModelProvider> {
+        let mut declaration: ProviderDeclaration = FakeProvider::new().declaration().clone();
+        if vision
+            && !declaration
+                .supported_input_blocks
+                .contains(&InputBlockKind::Image)
+        {
+            declaration
+                .supported_input_blocks
+                .push(InputBlockKind::Image);
+        }
+        Arc::new(FakeProvider::new().with_declaration(declaration))
+    }
+
+    #[test]
+    fn active_accepts_images_follows_the_declared_capability() {
+        // The image-attach preflight reads exactly this: a declared-vision model
+        // passes, a model with no image-input block is refused with guidance.
+        let (vision, _d1) = runtime_with_provider(fake_with_vision(true));
+        assert!(vision.active_accepts_images());
+        let (text_only, _d2) = runtime_with_provider(fake_with_vision(false));
+        assert!(!text_only.active_accepts_images());
+    }
+
     #[test]
     fn switching_provider_retargets_and_resolves_the_new_default_model() {
         let (mut runtime, _dir) = switchable_runtime();

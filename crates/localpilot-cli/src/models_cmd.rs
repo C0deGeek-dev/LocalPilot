@@ -57,6 +57,10 @@ struct ProviderModels {
     base_url: Option<String>,
     status: Status,
     models: Vec<ModelEntry>,
+    /// The provider's declared vision (image-input) capability, when set in
+    /// config. The authoritative half of the resolution (config > probe > false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supports_vision: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -92,6 +96,7 @@ pub async fn run(
                 base_url: entry.base_url.clone(),
                 status: Status::NoListingEndpoint,
                 models: Vec::new(),
+                supports_vision: entry.supports_vision,
                 error: None,
             });
             continue;
@@ -162,6 +167,7 @@ pub async fn run(
                     base_url: Some(base_url.clone()),
                     status: Status::Ok,
                     models: listed,
+                    supports_vision: entry.supports_vision,
                     error: None,
                 });
             }
@@ -206,6 +212,7 @@ fn provider_blocked(
         base_url: Some(base_url.to_string()),
         status,
         models: Vec::new(),
+        supports_vision: entry.supports_vision,
         error: None,
     }
 }
@@ -230,7 +237,12 @@ fn render_human(out: &mut dyn std::io::Write, results: &[ProviderModels]) -> any
             Status::Ok => {
                 listed_any = true;
                 let base = r.base_url.as_deref().unwrap_or("");
-                writeln!(out, "{} ({base}):", r.provider)?;
+                let vision = match r.supports_vision {
+                    Some(true) => " [vision declared]",
+                    Some(false) => " [vision off]",
+                    None => "",
+                };
+                writeln!(out, "{} ({base}):{vision}", r.provider)?;
                 for model in &r.models {
                     let marker = if model.configured { "  * " } else { "    " };
                     match model.context_window {
@@ -368,6 +380,7 @@ mod tests {
                 context_window: Some(131_072),
                 configured: true,
             }],
+            supports_vision: None,
             error: None,
         }
     }
@@ -392,6 +405,23 @@ mod tests {
     }
 
     #[test]
+    fn json_carries_a_declared_vision_capability() {
+        let mut entry = ok_entry("local", "q3635ba3bapex");
+        entry.supports_vision = Some(true);
+        let mut out: Vec<u8> = Vec::new();
+        render_json(&mut out, &[entry]).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(parsed[0]["supports_vision"], true);
+        // An undeclared provider omits the field entirely (no guessed value).
+        let mut out2: Vec<u8> = Vec::new();
+        render_json(&mut out2, &[ok_entry("local", "m")]).unwrap();
+        let parsed2: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out2).unwrap()).unwrap();
+        assert!(parsed2[0].get("supports_vision").is_none());
+    }
+
+    #[test]
     fn an_unreachable_or_approval_required_endpoint_serializes_its_status() {
         let unreachable = ProviderModels {
             provider: "local".to_string(),
@@ -399,6 +429,7 @@ mod tests {
             base_url: Some("http://localhost:9/v1".to_string()),
             status: Status::Unreachable,
             models: Vec::new(),
+            supports_vision: None,
             error: Some("connection refused".to_string()),
         };
         let mut out: Vec<u8> = Vec::new();
@@ -420,6 +451,7 @@ mod tests {
             base_url: Some("http://localhost:1/v1".to_string()),
             status,
             models: Vec::new(),
+            supports_vision: None,
             error: None,
         };
         assert!(listing_incomplete(&[mk(Status::Unreachable)]));
@@ -437,6 +469,7 @@ mod tests {
             base_url: Some("http://localhost:11435/v1".to_string()),
             status: Status::ApprovalRequired,
             models: Vec::new(),
+            supports_vision: None,
             error: None,
         };
         let mut out: Vec<u8> = Vec::new();

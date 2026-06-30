@@ -642,6 +642,15 @@ pub struct ProviderConfig {
     /// provider exposes a documented request shape for that behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suppress_thinking: Option<bool>,
+    /// Whether this provider's model accepts image (vision) input. A user
+    /// assertion that resolves the model's vision capability: the consumer lifts
+    /// the image-input gate when this is `true` (or the provider is an official
+    /// API). `None`/`false` keeps today's behaviour — a local OpenAI-compatible
+    /// server is not assumed to accept images. Set automatically by LocalBox when
+    /// it loads a multimodal projector, or by hand for a BYO vision server. Takes
+    /// precedence over the best-effort discovery probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,

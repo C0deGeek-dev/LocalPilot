@@ -185,6 +185,26 @@ impl OpenAiProvider {
         self
     }
 
+    /// Resolve image (vision) input from a user/launcher declaration. `Some(true)`
+    /// lifts the image-input gate even for a local server (which is otherwise not
+    /// assumed to accept images); `Some(false)`/`None` leaves the gate as the
+    /// source-type set it, so an undeclared provider is byte-identical to today.
+    /// The official-API path already declares `Image`, so this only ever adds it.
+    #[must_use]
+    pub fn with_declared_vision(mut self, supports_vision: Option<bool>) -> Self {
+        if supports_vision == Some(true)
+            && !self
+                .declaration
+                .supported_input_blocks
+                .contains(&InputBlockKind::Image)
+        {
+            self.declaration
+                .supported_input_blocks
+                .push(InputBlockKind::Image);
+        }
+        self
+    }
+
     /// Build the JSON request body sent to `/chat/completions`.
     #[must_use]
     pub fn build_body(&self, request: &ModelRequest) -> Value {
@@ -1218,6 +1238,66 @@ mod tests {
             .declaration()
             .supported_input_blocks
             .contains(&InputBlockKind::Image));
+    }
+
+    #[test]
+    fn a_declared_vision_local_server_advertises_image_input() {
+        // A local server keeps text-only until vision is declared; declaring it
+        // lifts the gate the official-API path gets for free.
+        let provider = OpenAiProvider::new(
+            "local",
+            "Local",
+            SourceType::LocalServer,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .with_declared_vision(Some(true));
+        assert!(provider
+            .declaration()
+            .supported_input_blocks
+            .contains(&InputBlockKind::Image));
+    }
+
+    #[test]
+    fn an_undeclared_or_off_vision_local_server_stays_text_only() {
+        for declared in [None, Some(false)] {
+            let provider = OpenAiProvider::new(
+                "local",
+                "Local",
+                SourceType::LocalServer,
+                "http://localhost:1234/v1",
+                None,
+            )
+            .with_declared_vision(declared);
+            assert!(
+                !provider
+                    .declaration()
+                    .supported_input_blocks
+                    .contains(&InputBlockKind::Image),
+                "supports_vision = {declared:?} must not advertise image input"
+            );
+        }
+    }
+
+    #[test]
+    fn declaring_vision_on_the_official_api_does_not_duplicate_image_input() {
+        // The official API already advertises Image; a redundant declaration must
+        // not push a second entry.
+        let provider = OpenAiProvider::new(
+            "openai",
+            "OpenAI",
+            SourceType::OfficialApi,
+            "https://api.openai.com/v1",
+            None,
+        )
+        .with_declared_vision(Some(true));
+        let images = provider
+            .declaration()
+            .supported_input_blocks
+            .iter()
+            .filter(|kind| **kind == InputBlockKind::Image)
+            .count();
+        assert_eq!(images, 1);
     }
 
     #[test]

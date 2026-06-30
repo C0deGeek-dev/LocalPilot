@@ -177,7 +177,8 @@ fn build_provider(
     }
     .with_timeout(timeout)
     .with_default_options(options)
-    .with_max_context_tokens(entry.context_window);
+    .with_max_context_tokens(entry.context_window)
+    .with_declared_vision(entry.supports_vision);
     Ok(Arc::new(provider))
 }
 

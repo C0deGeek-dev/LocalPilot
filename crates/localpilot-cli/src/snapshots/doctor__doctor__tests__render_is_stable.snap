@@ -14,7 +14,7 @@ config search paths:
   project: /work/.localpilot.toml (present)
 
 providers:
-  local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown
+  local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown; vision declared
   openai (openai): credential OPENAI_API_KEY [keychain]; base https://api.openai.com/v1; model (none); context window unknown
 
 tools:

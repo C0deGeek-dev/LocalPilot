@@ -59,6 +59,11 @@ pub struct ProviderStatus {
     pub model: Option<String>,
     /// The model's context window in tokens, when configured.
     pub context_window: Option<u64>,
+    /// The provider's declared vision (image-input) capability, when set in
+    /// config. `doctor` reads config offline, so this is the *declared* value;
+    /// the discovery probe (and the full config-or-probe resolution) surfaces in
+    /// `localpilot models`, which queries the server.
+    pub supports_vision: Option<bool>,
 }
 
 /// Map a credential source to its machine token (never the value).
@@ -234,9 +239,16 @@ pub fn render(report: &DoctorReport) -> String {
             .as_deref()
             .map(|u| format!("; base {u}"))
             .unwrap_or_default();
+        // Vision is only shown when declared in config, so an undeclared provider
+        // reads exactly as before.
+        let vision = match p.supports_vision {
+            Some(true) => "; vision declared",
+            Some(false) => "; vision off (declared)",
+            None => "",
+        };
         let _ = writeln!(
             s,
-            "  {} ({}): credential {} [{source}]{base}; model {model}; context window {window}",
+            "  {} ({}): credential {} [{source}]{base}; model {model}; context window {window}{vision}",
             p.name, p.kind, p.credential_env
         );
     }
@@ -333,6 +345,7 @@ fn providers() -> Vec<ProviderStatus> {
         },
         model: None,
         context_window: None,
+        supports_vision: None,
     })
     .collect()
 }
@@ -381,6 +394,7 @@ fn configured_providers() -> Option<Vec<ProviderStatus>> {
                     credential_source: source,
                     model: entry.model.clone(),
                     context_window: entry.context_window,
+                    supports_vision: entry.supports_vision,
                 }
             })
             .collect(),
@@ -496,6 +510,7 @@ mod tests {
                     credential_source: CredentialSource::None,
                     model: None,
                     context_window: None,
+                    supports_vision: Some(true),
                 },
                 ProviderStatus {
                     name: "openai".to_string(),
@@ -505,6 +520,7 @@ mod tests {
                     credential_source: CredentialSource::Keychain,
                     model: None,
                     context_window: None,
+                    supports_vision: None,
                 },
             ],
             memory_root: Some("/work/.localmind".to_string()),
@@ -571,6 +587,10 @@ mod tests {
             parsed["providers"][1]["base_url"],
             "https://api.openai.com/v1"
         );
+        // The declared vision capability rides in the JSON for an agent to read;
+        // an undeclared provider carries a null, never a guessed value.
+        assert_eq!(parsed["providers"][0]["supports_vision"], true);
+        assert!(parsed["providers"][1]["supports_vision"].is_null());
     }
 
     #[test]

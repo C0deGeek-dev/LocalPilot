@@ -27,7 +27,8 @@ expression: render_json(&fixture())
       "credential_env": "LOCALPILOT_LOCAL_API_KEY",
       "credential_source": "none",
       "model": null,
-      "context_window": null
+      "context_window": null,
+      "supports_vision": true
     },
     {
       "name": "openai",
@@ -36,7 +37,8 @@ expression: render_json(&fixture())
       "credential_env": "OPENAI_API_KEY",
       "credential_source": "keychain",
       "model": null,
-      "context_window": null
+      "context_window": null,
+      "supports_vision": null
     }
   ],
   "tools": [

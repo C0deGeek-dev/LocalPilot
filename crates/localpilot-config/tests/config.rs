@@ -344,6 +344,28 @@ fn provider_timeout_and_thinking_config_parse() -> TestResult {
         let local = cfg.providers.get("local").expect("provider present");
         assert_eq!(local.request_timeout_secs, Some(600));
         assert_eq!(local.suppress_thinking, Some(true));
+        // Vision is unset by default: an undeclared local provider keeps today's
+        // text-only behaviour.
+        assert_eq!(local.supports_vision, None);
+        Ok(())
+    })
+}
+
+#[test]
+fn provider_supports_vision_parses() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[providers.local]\nkind = \"openai-compatible\"\nbase_url = \"http://localhost:8080/v1\"\nsupports_vision = true\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        let local = cfg.providers.get("local").expect("provider present");
+        assert_eq!(local.supports_vision, Some(true));
         Ok(())
     })
 }
