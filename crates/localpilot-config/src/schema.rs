@@ -8,7 +8,11 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// The full resolved configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally not derived: `MemoryConfig` carries an `f32` cosine
+// threshold (`injection_min_cosine`), and `f32: !Eq`. `PartialEq` is all the
+// config comparisons (and `assert_eq!` in tests) need; the type is never a hash
+// key or under an `Eq` bound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub provider: ProviderSelection,
@@ -449,9 +453,12 @@ impl Default for IngestConfig {
 }
 
 /// Accepted-memory injection tuning. Every default preserves the prior fixed
-/// behaviour (no relevance gate, a fixed 1200-char budget, no category dedup), so
-/// the section is purely additive and opt-in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// behaviour for the keyword path (a fixed 1200-char budget, no category dedup);
+/// the only default-on lever is the **semantic relevance gate**
+/// (`injection_min_cosine`), which is best-effort — inert unless an embedding
+/// endpoint is configured, in which case it gates off-topic same-language
+/// lessons. `Eq` is not derived because `injection_min_cosine` is an `f32`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Minimum retrieval score an accepted memory must clear to be injected. The
@@ -475,6 +482,17 @@ pub struct MemoryConfig {
     /// when both the workspace language and the lesson's language are confidently
     /// detected and differ — a language-agnostic lesson is always eligible.
     pub injection_language_filter: bool,
+    /// Minimum normalized cosine similarity (prompt ↔ lesson, over the stored
+    /// embedding vectors) an accepted memory must clear to be injected — the
+    /// **semantic relevance gate**. Default `0.6`; `0.0` disables. Unlike the
+    /// unnormalized bm25 `injection_min_score`, cosine is normalized and portable,
+    /// so this ships **default-on**. It is **best-effort**: when no embedding
+    /// endpoint is configured (or it is unreachable, or a candidate has no stored
+    /// vector) the hit carries no cosine and is injected exactly as today — the
+    /// keyword bm25 path stays the candidate floor and the no-embed behaviour is
+    /// byte-identical. The gate only re-filters keyword candidates by semantic
+    /// relevance; it never selects.
+    pub injection_min_cosine: f32,
 }
 
 impl Default for MemoryConfig {
@@ -485,6 +503,7 @@ impl Default for MemoryConfig {
             injection_context_aware: false,
             injection_skip_categories: Vec::new(),
             injection_language_filter: true,
+            injection_min_cosine: 0.6,
         }
     }
 }

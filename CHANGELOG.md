@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Semantic relevance gate at memory injection (ADR-0059).** Accepted-memory
+  injection was gated only by keyword bm25 score (unnormalized, not portably
+  tightenable), so a same-language but off-topic lesson could inject into an
+  unrelated task and mislead the model (the negative transfer seen in the v1.1.0
+  sweep). The injection layer now embeds the prompt once per turn and scores each
+  keyword candidate by normalized cosine over the stored vectors, gating any hit
+  below `[memory] injection_min_cosine` (default `0.6`; `0.0` disables). Because
+  cosine is normalized it ships **default-on**, but it is **best-effort**: with no
+  embedding endpoint (or an unembedded lesson) the hit carries no cosine and is
+  injected exactly as on the keyword path — a no-embed run is byte-identical. The
+  keyword search stays the candidate floor; cosine only re-filters. Reuses the
+  engine's `embed_query` + global-aware `vector_search`. See
+  `docs/configuration.md`.
+
 ## v1.1.0 - 2026-06-29
 
 Coordinated LocalX release.

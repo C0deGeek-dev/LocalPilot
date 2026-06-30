@@ -189,15 +189,19 @@ Notable rule key:
 
 ### `[memory]`
 
-Tunes always-on accepted-memory injection. Every default preserves the prior
-fixed behaviour, so the section is additive and opt-in.
+Tunes always-on accepted-memory injection. Every keyword-path default preserves
+the prior fixed behaviour; the one default-on lever is the semantic relevance
+gate (`injection_min_cosine`), which is best-effort — inert unless an embedding
+endpoint is configured.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `injection_min_score` | int | `0` | Minimum retrieval score a memory must clear to be injected. `0` injects every match (prior behaviour); raise it so weak matches do not fill the per-turn budget. |
+| `injection_min_cosine` | float | `0.6` | **Semantic relevance gate.** Minimum normalized cosine (prompt ↔ lesson, over the stored embedding vectors) a memory must clear to be injected, so a same-language but off-topic lesson cannot inject into an unrelated task. Unlike the unnormalized `injection_min_score`, cosine is normalized and portable, so this ships **default-on**. **Best-effort:** with no embedding endpoint (or an unembedded lesson) the memory carries no cosine and is injected exactly as on the keyword path — a no-embed run is byte-identical. `0.0` disables. The keyword bm25 search stays the candidate floor; cosine only re-filters it. |
 | `injection_char_budget` | int | `1200` | Char budget for the injected accepted-memory block, and the ceiling when `injection_context_aware` scales it down. |
 | `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
 | `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
+| `injection_language_filter` | bool | `true` | Skip an accepted memory clearly about a different programming language than the workspace's; a language-agnostic lesson stays eligible. |
 
 ### `[docs]`
 

@@ -48,6 +48,13 @@ pub struct SearchHit {
     /// The memory's lesson category, so a caller can gate or dedup injection by
     /// category without a second store lookup.
     pub category: String,
+    /// Normalized cosine similarity of the prompt to this lesson's stored
+    /// embedding vector, when an embedding endpoint is configured and the lesson
+    /// has a vector. `None` when embeddings are unavailable or the lesson is
+    /// unembedded — the injection relevance gate then lets the hit pass (the
+    /// best-effort keyword path), so a no-embed run is byte-identical to today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cosine: Option<f32>,
 }
 
 /// An accepted LocalMind memory entry, flattened for display.
@@ -266,6 +273,7 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<SearchHit>, Learni
             path: result.path.display().to_string(),
             snippet: result.snippet,
             category: result.category,
+            cosine: None,
         })
         .collect())
 }
@@ -291,6 +299,7 @@ pub fn search_readonly(project_root: &Path, query: &str) -> Result<Vec<SearchHit
             path: result.path.display().to_string(),
             snippet: result.snippet,
             category: result.category,
+            cosine: None,
         })
         .collect())
 }
@@ -331,18 +340,64 @@ pub fn context_hits(
     let hits = persistence
         .search_lang(query, language)
         .map_err(|e| LearningError::Context(e.to_string()))?;
+    // Best-effort semantic relevance: embed the prompt once and score the
+    // candidate memories by cosine over the stored vectors, so the injection gate
+    // can drop a same-language but off-topic lesson. The keyword bm25 search above
+    // stays the candidate floor — cosine only re-filters it, never selects. When
+    // no embedding endpoint is configured (or it is unreachable, or a candidate
+    // has no stored vector) the cosine is `None` and the hit is injected exactly
+    // as today, so a no-embed run is byte-identical.
+    let cosines = relevance_cosines(&persistence, query);
     Ok(hits
         .into_iter()
         .take(CONTEXT_MEMORY_LIMIT)
-        .map(|hit| SearchHit {
-            memory_id: hit.memory_id.to_string(),
-            score: hit.score,
-            path: hit.path.display().to_string(),
-            snippet: hit.snippet,
-            category: hit.category,
+        .map(|hit| {
+            let memory_id = hit.memory_id.to_string();
+            let cosine = cosines
+                .as_ref()
+                .and_then(|by_id| by_id.get(&memory_id).copied());
+            SearchHit {
+                memory_id,
+                score: hit.score,
+                path: hit.path.display().to_string(),
+                snippet: hit.snippet,
+                category: hit.category,
+                cosine,
+            }
         })
         .collect())
 }
+
+/// Cosine similarity of `query` to each accepted memory that has a stored vector,
+/// keyed by `memory_id`. Best-effort and offline-safe: `None` when no embedding
+/// endpoint is configured, it is unreachable, or no vectors are stored — the
+/// caller then attaches no cosine and the keyword path is unchanged. Reuses the
+/// engine's `embed_query` + global-aware `vector_search` (the same primitives the
+/// review-mode semantic dedup uses); no new retrieval engine.
+fn relevance_cosines(
+    persistence: &MemoryPersistence,
+    query: &str,
+) -> Option<std::collections::HashMap<String, f32>> {
+    let vector = persistence.embed_query(query).ok().flatten()?;
+    let scored = persistence
+        .vector_search(&vector, RELEVANCE_VECTOR_WINDOW)
+        .ok()?;
+    Some(
+        scored
+            .into_iter()
+            .filter(|result| result.subject_kind == "memory")
+            .map(|result| (result.subject_id, result.score))
+            .collect(),
+    )
+}
+
+/// How many nearest vectors to score for the injection relevance gate. Generous
+/// headroom over the `CONTEXT_MEMORY_LIMIT` keyword candidates because the
+/// `vector_index` also holds non-memory subjects (ingested code chunks); a memory
+/// candidate ranked below this window simply carries no cosine and passes the gate
+/// (the conservative direction — under-gate rather than over-exclude). Mirrors the
+/// dedup path's `max(20)` candidate window.
+const RELEVANCE_VECTOR_WINDOW: usize = 64;
 
 /// The number of accepted-memory hits injected into a turn's context — the cap
 /// the audit record must share so it never lists a memory that was not injected.

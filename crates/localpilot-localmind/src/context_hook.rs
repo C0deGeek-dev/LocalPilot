@@ -65,9 +65,11 @@ impl LocalMindContext {
             .map(|config| config.ingest)
     }
 
-    /// Resolve the accepted-memory injection policy for this project. Defaults
-    /// preserve the prior fixed behaviour (no relevance gate, a 1200-char budget,
-    /// no category dedup); a `[memory]` section opts into tuning. When
+    /// Resolve the accepted-memory injection policy for this project. The
+    /// keyword-path defaults preserve the prior fixed behaviour (a 1200-char
+    /// budget, no category dedup); the semantic relevance gate
+    /// (`injection_min_cosine`) ships default-on but is best-effort (inert without
+    /// an embedding endpoint). A `[memory]` section opts into further tuning. When
     /// context-aware budgeting is on, the budget is scaled toward the default
     /// provider's declared context window so a small model injects less.
     fn injection_policy(&self) -> InjectionPolicy {
@@ -91,6 +93,7 @@ impl LocalMindContext {
             char_budget,
             skip_categories: memory.injection_skip_categories.clone(),
             language_filter: memory.injection_language_filter,
+            min_cosine: memory.injection_min_cosine,
         }
     }
 }
@@ -105,26 +108,36 @@ struct InjectionPolicy {
     skip_categories: Vec<String>,
     /// Skip a lesson clearly about a different language than the workspace's.
     language_filter: bool,
+    /// Minimum normalized cosine a hit with an embedding must clear to be injected
+    /// (the semantic relevance gate). `0.0` disables. A hit without a cosine
+    /// (no embedding endpoint / unembedded lesson) always passes — best-effort.
+    min_cosine: f32,
 }
 
 impl InjectionPolicy {
-    /// The prior fixed behaviour, used when config cannot be read.
+    /// The prior fixed behaviour, used when config cannot be read. The cosine gate
+    /// is off here so a config read failure never tightens injection.
     fn fixed_default() -> Self {
         Self {
             min_score: 0,
             char_budget: ACCEPTED_MEMORY_CHAR_CAP,
             skip_categories: Vec::new(),
             language_filter: true,
+            min_cosine: 0.0,
         }
     }
 
-    /// Whether `hit` should be skipped (a weak match, or an enforced category).
-    fn skips(&self, score: i64, category: &str) -> bool {
+    /// Whether `hit` should be skipped: a weak bm25 match, an enforced category,
+    /// or — when a cosine is present — semantically too far from the prompt. A hit
+    /// with no cosine (no embedding endpoint, or an unembedded lesson) is never
+    /// gated on relevance, so the no-embed keyword path is unchanged.
+    fn skips(&self, score: i64, category: &str, cosine: Option<f32>) -> bool {
         score < self.min_score
             || self
                 .skip_categories
                 .iter()
                 .any(|skip| skip.eq_ignore_ascii_case(category))
+            || (self.min_cosine > 0.0 && cosine.is_some_and(|c| c < self.min_cosine))
     }
 }
 
@@ -236,9 +249,10 @@ impl ContextHook for LocalMindContext {
                 let mut block = String::from("Relevant accepted project memory:\n");
                 let mut wrote = false;
                 for hit in hits {
-                    // Relevance gate + dedup-vs-enforced: a weak match, or a
-                    // category a rule already enforces, must not consume the budget.
-                    if policy.skips(hit.score, &hit.category) {
+                    // Relevance gate + dedup-vs-enforced: a weak bm25 match, a
+                    // semantically off-topic lesson (cosine below the threshold), or
+                    // a category a rule already enforces must not consume the budget.
+                    if policy.skips(hit.score, &hit.category, hit.cosine) {
                         continue;
                     }
                     // A lesson already injected as an always-on rule cue is not
@@ -570,6 +584,68 @@ mod tests {
         let hook = LocalMindContext::new(root);
         let used = hook.memories_used("how should I redact secrets");
         assert!(used.iter().any(|m| m.layer == "memory"));
+    }
+
+    #[test]
+    fn the_cosine_gate_skips_an_off_topic_hit_but_passes_an_on_topic_one() {
+        // A fixture-cosine test at the gate seam (no network embedder needed): an
+        // off-topic same-language lesson (cosine below the threshold) is skipped,
+        // an on-topic one passes, and a hit with no cosine always passes (the
+        // best-effort no-embed path).
+        let gate = InjectionPolicy {
+            min_score: 0,
+            char_budget: 1_200,
+            skip_categories: Vec::new(),
+            language_filter: true,
+            min_cosine: 0.6,
+        };
+        assert!(
+            !gate.skips(10, "CodePattern", Some(0.81)),
+            "an on-topic lesson (cosine ≥ threshold) is injected"
+        );
+        assert!(
+            gate.skips(10, "CodePattern", Some(0.40)),
+            "an off-topic same-language lesson (cosine < threshold) is gated out"
+        );
+        assert!(
+            !gate.skips(10, "CodePattern", None),
+            "a hit with no cosine (no embedding) always passes — best-effort"
+        );
+        assert!(
+            !gate.skips(10, "CodePattern", Some(0.60)),
+            "exactly at the threshold passes (only strictly-below is gated)"
+        );
+
+        // A disabled gate (0.0) never skips on relevance, even a near-zero cosine.
+        let disabled = InjectionPolicy {
+            min_cosine: 0.0,
+            min_score: 0,
+            char_budget: 1_200,
+            skip_categories: Vec::new(),
+            language_filter: true,
+        };
+        assert!(!disabled.skips(10, "CodePattern", Some(0.01)));
+    }
+
+    #[test]
+    fn the_default_cosine_gate_is_inert_without_an_embedding_endpoint() {
+        // The cosine gate ships default-on (0.6), but it is best-effort: with no
+        // embedding endpoint configured, every hit carries no cosine, so a relevant
+        // memory injects exactly as on the keyword-only path — byte-identical.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".localmind.toml"), "[learning]\nenabled = true\n").unwrap();
+        seed_memory(
+            root,
+            "mem-noembed",
+            "always redact secrets before persisting",
+        );
+        let hook = LocalMindContext::new(root);
+        let used = hook.memories_used("how should I redact secrets");
+        assert!(
+            used.iter().any(|m| m.id == "mem-noembed" && m.layer == "memory"),
+            "with no embed endpoint the default cosine gate must not drop a relevant memory: {used:?}"
+        );
     }
 
     #[test]
