@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="780" height="556" viewBox="0 0 780 556" role="img" aria-labelledby="t d">
   <title id="t">Four arms, one local model</title>
-  <desc id="d">Solve rate per language for four arms on the same pinned local model: raw 25 percent, LocalPilot harness 92 percent, Claude Code on the same model 88 percent, and LocalPilot with learning 93 percent.</desc>
+  <desc id="d">Solve rate per language for four arms on the same pinned local model: raw 25 percent, LocalPilot harness 92 percent, Claude Code on the same model 88 percent, and LocalPilot with learning 95 percent.</desc>
   <rect x="0.5" y="0.5" width="779" height="555" rx="12" fill="#0b1218" stroke="#20303a"/>
   <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
     <text x="28" y="37" font-size="21" font-weight="800" fill="#eef8f5">Four arms, one local model.</text>
@@ -80,8 +80,8 @@
       </g>
       <g transform="translate(0 388)">
         <text x="108" y="22" text-anchor="end" font-size="13" font-weight="700" fill="#d8e6e2">java</text>
-        <rect x="130" y="0" width="452" height="8" rx="2.5" fill="#38d6be"/>
-        <text x="588" y="8" font-size="9.5" font-weight="700" fill="#38d6be">87%</text>
+        <rect x="130" y="0" width="489" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="625" y="8" font-size="9.5" font-weight="700" fill="#38d6be">94%</text>
         <rect x="130" y="9" width="489" height="8" rx="2.5" fill="#7da7ff"/>
         <text x="625" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">94%</text>
         <rect x="130" y="18" width="489" height="8" rx="2.5" fill="#f0a868"/>
@@ -92,8 +92,8 @@
       <rect x="108" y="432" width="644" height="46" rx="7" fill="#111c24" stroke="#2a3d49"/>
       <g transform="translate(0 438)">
         <text x="108" y="22" text-anchor="end" font-size="13" font-weight="800" fill="#eef8f5">TOTAL</text>
-        <rect x="130" y="0" width="484" height="8" rx="2.5" fill="#38d6be"/>
-        <text x="620" y="8" font-size="9.5" font-weight="700" fill="#38d6be">93%</text>
+        <rect x="130" y="0" width="494" height="8" rx="2.5" fill="#38d6be"/>
+        <text x="630" y="8" font-size="9.5" font-weight="700" fill="#38d6be">95%</text>
         <rect x="130" y="9" width="478" height="8" rx="2.5" fill="#7da7ff"/>
         <text x="614" y="17" font-size="9.5" font-weight="700" fill="#7da7ff">92%</text>
         <rect x="130" y="18" width="458" height="8" rx="2.5" fill="#f0a868"/>
@@ -105,6 +105,6 @@
     <rect x="28" y="504" width="724" height="36" rx="7" fill="#0e211f" stroke="#24554d"/>
     <text x="44" y="527" font-size="13" font-weight="800" fill="#eef8f5">Same model: harness +67 over raw,</text>
     <text x="300" y="527" font-size="13" fill="#93a5a0">and learning out-solves the Claude Code harness</text>
-    <text x="736" y="527" text-anchor="end" font-size="14" font-weight="900" fill="#38d6be">93% vs 88%</text>
+    <text x="736" y="527" text-anchor="end" font-size="14" font-weight="900" fill="#38d6be">95% vs 88%</text>
   </g>
 </svg>

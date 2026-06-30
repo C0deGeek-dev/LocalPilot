@@ -112,13 +112,13 @@ reasoning settings.
 The model is only one part of a coding agent. In a pinned comparison across 225
 Aider-polyglot exercises, the same local model solved **25%** of tasks raw and
 **92%** through LocalPilot: a **67-point uplift** from tools, iteration, test
-feedback, and recovery. With learning on it reached **93%** — out-solving the
+feedback, and recovery. With learning on it reached **95%** — out-solving the
 Claude Code harness driving the *same* pinned local model (**88%**); a harness
 comparison on one model, not a model claim.
 
 ![LocalPilot harness versus the raw model](docs/assets/localpilot-vs-raw.svg)
 
-![All four arms on the same local model — raw 25%, LocalPilot harness 92%, Claude Code 88%, LocalPilot with learning 93%](docs/assets/localpilot-four-arm.svg)
+![All four arms on the same local model — raw 25%, LocalPilot harness 92%, Claude Code 88%, LocalPilot with learning 95%](docs/assets/localpilot-four-arm.svg)
 
 > [!NOTE]
 > Read the delta, not the absolute score. This is one model and quant; public
