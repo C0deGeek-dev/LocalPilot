@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0059: Accepted-Memory Injection Is Gated By Semantic Relevance, And A Lesson That Hurt The Uplift Eval Is Routed To Review
+
+Status: accepted. Implements the two halves ADR-0045/ADR-0046 left as mechanism:
+the relevance gate now has a real (semantic) signal, and the outcome-aware
+down-weight is wired to an outcome. Reuses LocalMind's `embed_query` /
+global-aware `vector_search` (D-LM-0023) and the route-to-review flag
+(D-LM-0016).
+
+A model-pinned benchmark showed learning is net-positive but noisy: a
+same-language but off-topic lesson injected into an unrelated task and misled the
+model (negative transfer). ADR-0045's relevance gate keyed only on the keyword
+bm25 score, which is **unnormalized** — there is no portable threshold to tighten
+— and ADR-0046's outcome-aware down-weight was never wired to an outcome.
+
+1. **Semantic relevance gate (default-on, best-effort).** The injection layer
+   embeds the prompt once per turn and scores each keyword candidate by
+   **normalized cosine** over the stored vectors, gating any hit below
+   `[memory] injection_min_cosine` (default `0.6`; `0.0` disables). Because cosine
+   is normalized and portable it ships **default-on** — unlike the
+   default-preserving levers of ADR-0045. It is **best-effort**: with no embedding
+   endpoint, an unreachable one, or an unembedded lesson, the hit carries no
+   cosine and is injected exactly as on the keyword path, so a no-embed run is
+   byte-identical. The keyword bm25 search stays the candidate floor; cosine only
+   re-filters it, never selects.
+
+2. **Outcome-aware down-weight (default-off).** When the uplift A/B eval shows an
+   arm that injected a set of lessons under-performed its control, those lessons
+   are routed to review (never deleted) for a human to re-judge, joined by the
+   per-turn `memories_used` audit. The join is the **A/B verdict, not a live
+   turn** — a single turn is too weak a signal (ADR-0046's intent). Gated by
+   `[memory] outcome_downweight` (default off); only `memory`-layer ids are
+   eligible; reversible.
+
+Both reuse existing primitives — no new retrieval engine, no second flag path —
+and never delete. Rollback is `injection_min_cosine = 0.0` and leaving
+`outcome_downweight` off.
+
 ## ADR-0058: The Solve Loop Can Build, Test, And Edit In The Workspace — De-Verbatim cwd, `&&` Shell, Anchored Edits, Verify-On-Eval
 
 Status: accepted. Refines ADR-0054 (the verify-before-done gate — flips its
