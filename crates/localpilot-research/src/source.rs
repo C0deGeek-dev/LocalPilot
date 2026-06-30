@@ -1,0 +1,79 @@
+//! The evidence-source abstraction and a best-effort fan-out over many sources.
+
+use async_trait::async_trait;
+
+use crate::{Evidence, SourceError};
+
+/// A place research evidence can be gathered from.
+///
+/// Implementations live in the binding layer (the CLI), where filesystem,
+/// network, and engine access exist; the loop depends only on this trait so it
+/// stays host-neutral and unit-testable with fakes.
+#[async_trait]
+pub trait Source: Send + Sync {
+    /// Stable label, used as the provenance source tag (e.g. `memory`, `web`).
+    fn label(&self) -> &str;
+
+    /// Gather up to `limit` snippets answering `question`.
+    async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError>;
+}
+
+/// A best-effort fan-out over several sources. A source that errors is recorded
+/// and skipped — it never aborts the run.
+#[derive(Default)]
+pub struct SourceSet {
+    sources: Vec<Box<dyn Source>>,
+}
+
+impl SourceSet {
+    /// An empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sources: Vec::new(),
+        }
+    }
+
+    /// Builder-style add.
+    #[must_use]
+    pub fn with(mut self, source: Box<dyn Source>) -> Self {
+        self.sources.push(source);
+        self
+    }
+
+    /// Add a source.
+    pub fn push(&mut self, source: Box<dyn Source>) {
+        self.sources.push(source);
+    }
+
+    /// Whether any source is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
+    /// Number of configured sources.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Gather across every source for one question. Returns the merged evidence
+    /// plus any source errors; an erroring source contributes its error and no
+    /// evidence, never failing the call (best-effort, partial-result contract).
+    pub async fn gather_all(
+        &self,
+        question: &str,
+        per_source: usize,
+    ) -> (Vec<Evidence>, Vec<SourceError>) {
+        let mut evidence = Vec::new();
+        let mut errors = Vec::new();
+        for source in &self.sources {
+            match source.gather(question, per_source).await {
+                Ok(mut hits) => evidence.append(&mut hits),
+                Err(err) => errors.push(err),
+            }
+        }
+        (evidence, errors)
+    }
+}
