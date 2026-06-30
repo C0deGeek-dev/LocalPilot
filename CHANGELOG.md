@@ -6,6 +6,22 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Vision (image input) is a resolved per-provider capability (ADR-0061).**
+  LocalPilot no longer assumes every local OpenAI-compatible server is text-only.
+  A model's vision support resolves in precedence **config > probe > false**: a new
+  per-provider `supports_vision` flag (user-set, or auto-written by LocalBox when it
+  loads a multimodal projector) wins; otherwise a best-effort, **read-only** probe
+  of a local llama.cpp server's documented `GET /props` `modalities.vision` (no
+  model inference; toggleable via `[discovery] vision_probe`, default on; an
+  unreachable/signal-less server is treated as unknown, never a false claim);
+  otherwise text-only. The OpenAI adapter's image-input gate becomes "official API
+  **or** vision resolved true", so an undeclared provider is byte-identical to
+  before. `doctor` reports the declared capability and `localpilot models` the full
+  resolved capability and its source; the interactive image-attach preflight now
+  refuses with actionable guidance (how to declare `supports_vision`) instead of
+  sending an image blind. No `GET /v1/models` augmentation and no active trial-image
+  probe. See `docs/04-provider-contract.md` §Vision and `docs/configuration.md`.
+
 - **New `/research` mode and `localpilot research` subcommand (ADR-0060).** A
   bounded research loop decomposes a topic into sub-questions, gathers evidence
   across local sources (ingested knowledge + accepted memory), cross-checks each

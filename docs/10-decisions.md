@@ -2,6 +2,66 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0061: Vision (Image-Input) Capability Resolves Config > Probe > False, And The Image Gate Is Lifted To Match
+
+Status: accepted. Keeps the change additive and default-off (cross-cutting
+KISS/default-off): an undeclared, unprobed provider is byte-identical to before.
+Honours the provider-contract capability model (ADR-0001, no vendor coupling) and
+clean-room provenance (ADR-0005) — the probe reads a documented public llama.cpp
+endpoint, never a private one.
+
+LocalPilot assumed every local OpenAI-compatible server was text-only: the OpenAI
+adapter advertised image input **only** for the official hosted API, so an
+image-capable local model (e.g. a llama.cpp server with a multimodal projector
+loaded) was refused images, and an image attached to any other model was sent
+blind. A model's vision support is a *capability* that should be resolved and
+acted on, not assumed from the source.
+
+1. **Capability resolves from two signals, precedence config > probe > false.**
+   The resolved vision support is: (1) an explicit per-provider `supports_vision`
+   config flag (authoritative — set by the user, or auto-written by LocalBox on a
+   vision launch); else (2) a best-effort, read-only discovery-time **probe**; else
+   (3) `false`. Config always wins so a user can override a wrong probe, and an
+   unknown probe never asserts a capability. The pure resolver
+   (`resolve_vision`/`VisionSource`) is shared by every surface so they cannot
+   diverge.
+
+2. **The OpenAI `Image` input gate becomes `OfficialApi OR resolved-true`.** The
+   adapter still advertises image input for the official API; a local/custom server
+   advertises it when vision resolves true (config-declared at provider-build time;
+   a probe lift is applied at the interactive image-attach seam). With the flag
+   defaulting unset, **no existing local provider changes behaviour**.
+
+3. **The probe is read-only `/props`, best-effort, default-on; no trial-image
+   probe.** llama.cpp's `llama-server` exposes a documented `GET /props` reporting
+   `modalities.vision` (set when an `--mmproj` projector is loaded); the probe reads
+   it and runs **no model inference** (`/props` is at the server root, so a trailing
+   `/v1` is stripped first). It is toggleable via `[discovery] vision_probe` (default
+   `true`) and is skipped when config already declared. An unreachable, non-200, or
+   signal-less server resolves to `None` (unknown ⇒ no vision), never a false claim.
+   An **active** trial-image probe (sending a 1×1 image through inference) is *not*
+   in v1.
+
+4. **LocalBox is the authoritative declarer for its launch path.** When LocalBox
+   loads the projector for a `-UseVision` agent launch it writes `supports_vision =
+   true` into the generated `.localpilot.toml`, so the primary local-vision path is
+   zero-config and never depends on the probe. (LocalBox-side; recorded in its
+   CHANGELOG.)
+
+5. **The preflight refuses-with-guidance, never sends blind.** An image attached to
+   a model not known to accept one is refused with an actionable message naming how
+   to declare `supports_vision`; a declared/probed-vision model passes.
+
+Boundary: LocalPilot does **not** augment the upstream `GET /v1/models` response
+with a non-standard vision field — llama-server owns that response, so augmenting
+it would be stateful, fragile, and non-standard; that is explicitly deferred. The
+`supports_vision` flag is a user/launcher **assertion**: a wrong declaration (a
+text-only model marked vision) can still send images that the server rejects, which
+`doctor`/`models` surface so the assertion is visible. `doctor` stays offline
+(deterministic, no egress), so it surfaces the config-declared half; the full
+config-or-probe resolution and its source surface in `localpilot models`, which
+already performs gated network discovery.
+
 ## ADR-0060: Research Is A Two-Surface, Provenance-Preserving Loop In Its Own Crate, With Web Egress Off By Default
 
 Status: accepted. Honours the ecosystem remote-egress policy (the five rules:

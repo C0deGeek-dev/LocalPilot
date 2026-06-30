@@ -140,6 +140,7 @@ and `--provider`.
 | `model` | string | none | Default model when a command does not pass `--model` |
 | `request_timeout_secs` | int | per adapter | HTTP timeout; useful for slow local inference |
 | `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
+| `supports_vision` | bool | none | Whether this provider's model accepts image (vision) input. A user assertion that resolves the model's vision capability (config > probe > false, ADR-0061): `true` lifts the image-input gate even for a local server; unset/`false` keeps the text-only default. LocalBox sets this automatically when it loads a multimodal projector. See [04-provider-contract.md](04-provider-contract.md) §Vision. |
 
 Any other keys under a provider table are preserved and passed through as
 provider options (for example `max_tokens` for `anthropic`, or the
@@ -156,6 +157,15 @@ keychain backend is an opt-in build feature (`keychain`, Windows only at present
 macOS/Linux use the fallback file for API-key credentials — ADR-0042). See
 [providers.md](providers.md) §Storing credentials and
 [07-security-and-privacy.md](07-security-and-privacy.md) §Stored API Credentials.
+
+### `[discovery]`
+
+Best-effort, read-only metadata LocalPilot reads from a configured server at
+discovery time (it never runs model inference).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `vision_probe` | bool | `true` | Probe a local server's read-only llama.cpp `GET /props` endpoint for vision (multimodal projector) support, so an undeclared but vision-capable server resolves its capability without a hand edit (ADR-0061). Best-effort: an unreachable or signal-less server is treated as unknown (no vision), never a false claim, and an explicit `supports_vision` always wins. Set `false` to never probe. |
 
 ### `[harness]`
 

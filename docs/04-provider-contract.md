@@ -199,6 +199,33 @@ If a server accepts neither encoding, the client error caches the rejection and
 the constraint is dropped for the session — native tool-calling, the floor. An
 unknown `constraint_mode` value falls back to `response_format`.
 
+### Vision (image input)
+
+Whether a provider accepts image (vision) input is a **resolved capability**, not
+an assumption from the source type (ADR-0061). It resolves in a fixed precedence —
+**config > probe > false**:
+
+1. **Config.** A per-provider `supports_vision` flag (see
+   [`configuration.md`](configuration.md)) is authoritative — set by the user, or
+   auto-written by LocalBox when it loads a multimodal projector for a vision
+   launch. It is a user/launcher **assertion**: declaring vision on a text-only
+   model can still send images the server rejects.
+2. **Probe.** When config does not declare it, a best-effort, **read-only**
+   discovery-time probe of a local llama.cpp `llama-server` reads the documented
+   `GET /props` `modalities.vision` field (set when an `--mmproj` projector is
+   loaded). It runs **no model inference**, is toggleable via `[discovery]
+   vision_probe` (default on), and an unreachable or signal-less server resolves to
+   *unknown* (no vision claimed), never a false positive. No private endpoint
+   behaviour is used; LocalPilot does **not** augment the `GET /v1/models` response.
+3. **Default false.** Otherwise the model is treated as text-only — byte-identical
+   to the prior behaviour for any undeclared, unprobed provider.
+
+The OpenAI adapter's `Image` input block is advertised when the source is the
+official API **or** vision resolves true. The official API is unaffected; a local
+server advertises image input only once vision is declared or probed. `doctor`
+surfaces the config-declared capability (it is offline); `localpilot models`
+surfaces the full resolved capability and which signal decided it.
+
 ## Quota Semantics
 
 Quota wait/resume honors provider contracts. A provider adapter may expose:
