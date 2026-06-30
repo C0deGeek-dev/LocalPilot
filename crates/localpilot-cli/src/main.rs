@@ -148,6 +148,12 @@ enum Command {
         /// Do not write a report artefact to the research output directory.
         #[arg(long)]
         no_report: bool,
+        /// Opt in to web research for this run. Prints an egress disclosure, then
+        /// fetches only allowlisted hosts (others are skipped and logged) and
+        /// audits every outbound request. Off by default; also requires
+        /// `[research.web].enabled = true` in config.
+        #[arg(long)]
+        web: bool,
     },
     /// Export a session transcript as a redacted, inspectable bundle.
     Export {
@@ -1293,12 +1299,14 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             topic,
             no_memory,
             no_report,
+            web,
         } => {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
             match research::options_from_config(&cwd, !no_report, !no_memory)? {
                 Some(options) => {
-                    research::run_local_research(&cwd, &topic, &options, &mut stdout).await?;
+                    research::run_research_command(&cwd, &topic, &options, web, &mut stdout)
+                        .await?;
                 }
                 None => writeln!(stdout, "research is disabled ([research].enabled = false)")?,
             }
