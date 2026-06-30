@@ -1431,7 +1431,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-codegraph"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "idna_adapter",
  "localmind-core",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-store"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.15",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "figment",
  "ignore",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-harness"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-localmind"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-mcp"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "localpilot-core",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-patchgen"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localpilot-config",
  "serde",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-quota"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localpilot-config",
  "localpilot-llm",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-recovery"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-research"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-rpc"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localpilot-core",
  "localpilot-harness",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-sandbox"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "dunce",
  "futures",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-selfreview"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ignore",
  "regex",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-skills"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "figment",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-store"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localpilot-config",
  "localpilot-core",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tools"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "insta",
  "ratatui",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-verify"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "localpilot-core",
  "localpilot-sandbox",

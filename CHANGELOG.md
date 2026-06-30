@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v1.2.0 - 2026-06-30
+
+Coordinated LocalX beta release.
+
 - **Vision (image input) is a resolved per-provider capability (ADR-0061).**
   LocalPilot no longer assumes every local OpenAI-compatible server is text-only.
   A model's vision support resolves in precedence **config > probe > false**: a new
