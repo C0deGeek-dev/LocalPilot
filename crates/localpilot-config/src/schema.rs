@@ -31,6 +31,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub history: HistoryConfig,
     pub self_improvement: SelfImprovementConfig,
+    pub research: ResearchConfig,
 }
 
 impl Default for Config {
@@ -52,8 +53,66 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             history: HistoryConfig::default(),
             self_improvement: SelfImprovementConfig::default(),
+            research: ResearchConfig::default(),
         }
     }
+}
+
+/// The `/research` mode and `localpilot research` subcommand configuration.
+///
+/// Local research (repo, accepted memory, ingested knowledge) is available by
+/// default — it is read-only and never leaves the machine. The **web** half is
+/// off by default and gated by [`ResearchWebConfig`]: an absent `[research]`
+/// block leaves outbound web research disabled, matching LocalPilot's
+/// local-first, no-telemetry posture (`policies/remote-egress.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchConfig {
+    /// Whether the research surface is usable at all. Default `true`: local-only
+    /// research is read-only and harmless. Set `false` to disable the surface.
+    pub enabled: bool,
+    /// Maximum sub-questions a single research run may pursue — the loop bound
+    /// that keeps a run finite. Default 6.
+    pub max_questions: usize,
+    /// Directory for written research report artefacts, relative to the project
+    /// root. `None` lets the host choose its default (`.localpilot/research/`).
+    pub output_dir: Option<String>,
+    /// Outbound web-research controls. Off by default.
+    pub web: ResearchWebConfig,
+}
+
+impl Default for ResearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_questions: 6,
+            output_dir: None,
+            web: ResearchWebConfig::default(),
+        }
+    }
+}
+
+/// Outbound web-research controls — the egress gate (`policies/remote-egress.md`).
+///
+/// Every field defaults to the most restrictive value: web research is **off**,
+/// no domain is pre-trusted, and there is no audit path until one is set. The
+/// off-switch (`enabled = false`) removes the entire outbound path regardless of
+/// the other fields. Per-session consent is enforced at runtime on top of this
+/// static config — config permits, the operator still confirms.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchWebConfig {
+    /// Master switch for outbound web research. Default `false`. While `false`,
+    /// no web request is ever made and the research loop runs local-only.
+    pub enabled: bool,
+    /// Domains that may be fetched without a per-fetch confirmation, e.g.
+    /// `docs.rs`. Empty (the default) means **every** domain must be confirmed
+    /// per fetch — there is no implicit trust.
+    pub allowlist: Vec<String>,
+    /// Path (relative to the project root) of the egress audit log that records
+    /// every outbound request. `None` lets the host choose its default
+    /// (`.localpilot/research/egress-audit.log`).
+    pub audit_log: Option<String>,
 }
 
 /// The outward half of the human-gated self-improvement loop (ADR-0034 / ADR-0053):

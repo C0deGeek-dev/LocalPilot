@@ -11,11 +11,13 @@ mod engine;
 mod report;
 mod source;
 mod synth;
+mod web;
 
 pub use engine::{run_research, Bounds, RunOutcome};
 pub use report::{ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
 pub use source::{Source, SourceSet};
 pub use synth::{HeuristicSynthesizer, Synthesizer};
+pub use web::{host_allowed, prepare_query, AuditEntry, FetchDecision, WebAccess};
 
 /// A fatal error in the research loop (decomposition or synthesis).
 #[derive(Debug, thiserror::Error)]
