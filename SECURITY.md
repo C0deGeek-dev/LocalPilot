@@ -2,7 +2,13 @@
 
 ## Supported Versions
 
-No released versions exist yet.
+Security fixes land on the latest release train. Earlier trains are not
+maintained — upgrade to the current minor.
+
+| Version | Supported |
+| --- | --- |
+| 1.2.x   | ✅        |
+| < 1.2   | ❌        |
 
 ## Reporting Security Issues
 
