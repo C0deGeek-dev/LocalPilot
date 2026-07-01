@@ -1518,7 +1518,7 @@ async fn run_default() -> anyhow::Result<()> {
             localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
         {
             if config.resolve_model(None).is_some() {
-                let profile = session_cmd::resolve_profile(None, false);
+                let profile = session_cmd::resolve_profile_from_config(&config);
                 return repl::run_chat(None, None, profile).await;
             }
         }
