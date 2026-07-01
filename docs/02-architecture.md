@@ -134,6 +134,13 @@ Owns:
 - rule engine
 - retry/discard/replan loop
 
+The benchmark-facing eval primitives (the scorecard wire contract, discipline
+metrics, blinded judge core, ablation scoring, gated check execution, and
+verify-command detection) live in the shared `localx-eval-core` crate
+(rev-pinned git dependency); the harness supplies the host-bound adapters —
+session-trace derivation, the live judge model call, and the permission-engine
+command gate.
+
 The harness may call tools through interfaces. It must not bypass permission
 checks.
 

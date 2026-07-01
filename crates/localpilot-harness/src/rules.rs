@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use localpilot_config::redact::contains_secret;
 use localpilot_config::{Cadence, RuleSeverity};
 
-use crate::quality::{CheckOutcome, CheckStatus};
+use crate::quality::{CheckOutcome, CheckSeverity, CheckStatus};
 
 /// When a rule runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -354,11 +354,11 @@ fn outcome_verdict(outcome: &CheckOutcome) -> RuleVerdict {
         )),
         CheckStatus::Errored => RuleVerdict::Block(format!("quality check `{name}` could not run")),
         CheckStatus::Failed => match outcome.severity {
-            Some(RuleSeverity::Off) => RuleVerdict::Allow,
-            Some(RuleSeverity::Warn) => {
+            Some(CheckSeverity::Off) => RuleVerdict::Allow,
+            Some(CheckSeverity::Warn) => {
                 RuleVerdict::Warn(format!("quality check `{name}` reported findings"))
             }
-            Some(RuleSeverity::Block) => {
+            Some(CheckSeverity::Block) => {
                 RuleVerdict::Block(format!("quality check `{name}` reported blocking findings"))
             }
             None => RuleVerdict::Retry(format!(
@@ -612,7 +612,7 @@ mod tests {
     fn gate_outcome(
         name: &str,
         status: CheckStatus,
-        severity: Option<RuleSeverity>,
+        severity: Option<CheckSeverity>,
     ) -> CheckOutcome {
         CheckOutcome {
             name: name.to_string(),
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn quality_gate_blocks_failed_block_denied_and_errored() {
         for outcome in [
-            gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+            gate_outcome("audit", CheckStatus::Failed, Some(CheckSeverity::Block)),
             gate_outcome("fmt", CheckStatus::Denied, None),
             gate_outcome("test", CheckStatus::Errored, None),
         ] {
@@ -659,7 +659,7 @@ mod tests {
         let verdict = gate_verdict(
             &[
                 gate_outcome("clippy", CheckStatus::Failed, None),
-                gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+                gate_outcome("audit", CheckStatus::Failed, Some(CheckSeverity::Block)),
             ],
             RuleSeverity::Block,
         );
@@ -683,7 +683,7 @@ mod tests {
             gate_outcomes: vec![gate_outcome(
                 "audit",
                 CheckStatus::Failed,
-                Some(RuleSeverity::Block),
+                Some(CheckSeverity::Block),
             )],
             ..RuleContext::default()
         };

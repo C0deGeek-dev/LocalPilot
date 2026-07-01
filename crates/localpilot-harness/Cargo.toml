@@ -27,6 +27,7 @@ localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-verify = { path = "../localpilot-verify" }
+localx-eval-core = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

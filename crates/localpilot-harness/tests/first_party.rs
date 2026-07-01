@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use localpilot_config::{load, CliOverrides, ConfigPaths};
 use localpilot_harness::{
-    complexity_delta_in_diff, extract_process, judge_prompt, resume_one_step, tests_added_in_diff,
-    DiffStat, EvidenceLedger, Judge, JudgeCache, JudgeInput, QualityBlock, ResultsBlock,
-    RuleEngine, Scorecard, SessionConfig, SessionRuntime, SpeedBlock, SCORECARD_SCHEMA,
+    complexity_delta_in_diff, extract_process, judge_prompt, resume_one_step, speed_from_events,
+    tests_added_in_diff, DiffStat, EvidenceLedger, Judge, JudgeCache, JudgeInput, QualityBlock,
+    ResultsBlock, RuleEngine, Scorecard, SessionConfig, SessionRuntime, SCORECARD_SCHEMA,
 };
 use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -339,7 +339,7 @@ fn run_offline(task: &FirstPartyTask) -> Scorecard {
             tests_added_in_diff(&diff_text),
         ),
         process: extract_process(&events, &ledger),
-        speed: SpeedBlock::from_events(&events, wall_ms),
+        speed: speed_from_events(&events, wall_ms),
         judge: offline_judge(&diff_text),
     }
 }
@@ -562,7 +562,7 @@ async fn run_live(
             tests_added_in_diff(&diff_text),
         ),
         process: extract_process(&events, &ledger),
-        speed: SpeedBlock::from_events(&events, wall_ms),
+        speed: speed_from_events(&events, wall_ms),
         judge: None,
     }
 }

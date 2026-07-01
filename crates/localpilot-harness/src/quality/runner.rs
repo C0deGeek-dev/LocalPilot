@@ -1,11 +1,13 @@
-﻿//! Quality-gate check execution.
+//! Quality-gate check execution.
 //!
 //! A check runs through the *same* permission engine and classification as any
-//! other command (ADR-0009, docs/05): the runner builds a [`PermissionRequest`]
-//! under a distinct tool identity, asks [`PermissionEngine::decide`], and spawns
-//! only when allowed. There is no path that skips the decision. Output is bounded
-//! and redacted before it becomes a finding.
+//! other command (ADR-0009, docs/05): the runner presents each command to
+//! [`PermissionEngine::decide`] under a distinct tool identity and spawns only
+//! when allowed. There is no path that skips the decision — the shared
+//! execution core asks the gate before every spawn, including fixers and
+//! re-runs. Output is bounded and redacted before it becomes a finding.
 
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,74 +16,20 @@ use localpilot_config::{AutoFix, CheckConfig, RuleSeverity};
 use localpilot_sandbox::{
     classify, Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest,
 };
+use localx_eval_core::check::{CheckCommand, CheckSpec, CommandGate};
+
+pub use localx_eval_core::check::{CheckOutcome, CheckSeverity, CheckStatus};
 
 /// The tool identity quality-gate checks present to the permission engine. A
 /// distinct name (not `run_shell`) means a ratification allowlist can authorize
 /// the gate without authorizing arbitrary shell.
 pub const QUALITY_CHECK_TOOL: &str = "quality_check";
 
-/// Cap on captured check output before truncation.
-const MAX_OUTPUT_BYTES: usize = 16 * 1024;
-
-/// Default per-check timeout. Full checks (test suites) can be slow.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
-/// What happened when a check ran.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckStatus {
-    /// The check command exited successfully.
-    Passed,
-    /// The check ran and reported findings (non-zero exit).
-    Failed,
-    /// The permission engine denied, or the user declined, the command.
-    Denied,
-    /// The command could not be started or timed out.
-    Errored,
-}
-
-/// The result of running one quality-gate check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckOutcome {
-    /// The check's name.
-    pub name: String,
-    /// What happened.
-    pub status: CheckStatus,
-    /// Bounded, redacted detail (exit code + captured output). Empty on a clean
-    /// pass.
-    pub detail: String,
-    /// Whether a fixer ran and the check was re-run.
-    pub fixed: bool,
-    /// The check's configured severity, carried so the `quality_gate` rule can
-    /// apply a per-check override (e.g. an advisory `audit` blocks).
-    pub severity: Option<RuleSeverity>,
-}
-
-impl CheckOutcome {
-    /// Whether the check passed.
-    #[must_use]
-    pub fn passed(&self) -> bool {
-        self.status == CheckStatus::Passed
-    }
-}
-
-/// The outcome of a single command invocation, before fix orchestration.
-enum RunResult {
-    /// Allowed and run; `success` is the exit-code verdict.
-    Ran { success: bool, detail: String },
-    /// The permission engine denied or the user declined.
-    Denied,
-    /// The command could not be started or timed out.
-    Errored(String),
-}
-
 /// Runs quality-gate checks through the permission engine and the sandbox.
 pub struct CheckRunner<'a> {
-    engine: &'a PermissionEngine,
-    approver: &'a dyn Approver,
-    interactivity: Interactivity,
-    trusted: bool,
+    gate: PermissionGate<'a>,
     root: &'a Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
 }
 
 impl<'a> CheckRunner<'a> {
@@ -96,172 +44,103 @@ impl<'a> CheckRunner<'a> {
         root: &'a Path,
     ) -> Self {
         Self {
-            engine,
-            approver,
-            interactivity,
-            trusted,
+            gate: PermissionGate {
+                engine,
+                approver,
+                interactivity,
+                trusted,
+            },
             root,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            timeout: None,
         }
     }
 
     /// Override the per-check timeout.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
         self
     }
 
     /// Run a check; when it fails and `auto_fix` allows it, run the fixer and
     /// re-run the check once. Every command goes through the permission engine.
     pub async fn run(&self, check: &CheckConfig) -> CheckOutcome {
-        match self.run_command(&check.program, &check.args).await {
-            RunResult::Ran { success: true, .. } => {
-                self.outcome(check, CheckStatus::Passed, String::new(), false)
-            }
-            RunResult::Denied => self.outcome(
-                check,
-                CheckStatus::Denied,
-                "permission engine denied the check command".to_string(),
-                false,
-            ),
-            RunResult::Errored(detail) => self.outcome(check, CheckStatus::Errored, detail, false),
-            RunResult::Ran {
-                success: false,
-                detail,
-            } => self.maybe_fix(check, detail).await,
+        let mut runner = localx_eval_core::check::CheckRunner::new(&self.gate, self.root);
+        if let Some(timeout) = self.timeout {
+            runner = runner.with_timeout(timeout);
         }
+        runner.run(&to_spec(check)).await
     }
+}
 
-    /// On a failing check, run the fixer (if `auto_fix` permits one) and re-run
-    /// the check once; otherwise report the failure as-is.
-    async fn maybe_fix(&self, check: &CheckConfig, first_detail: String) -> CheckOutcome {
-        let Some((program, args)) = fix_invocation(check) else {
-            return self.outcome(check, CheckStatus::Failed, first_detail, false);
-        };
-        // The fixer is itself a permission-checked command; its own result does
-        // not decide the outcome — the re-run of the check does.
-        let _ = self.run_command(program, args).await;
-        match self.run_command(&check.program, &check.args).await {
-            RunResult::Ran { success: true, .. } => {
-                self.outcome(check, CheckStatus::Passed, String::new(), true)
-            }
-            RunResult::Ran {
-                success: false,
-                detail,
-            } => self.outcome(check, CheckStatus::Failed, detail, true),
-            RunResult::Denied => self.outcome(
-                check,
-                CheckStatus::Denied,
-                "permission engine denied the check re-run".to_string(),
-                true,
-            ),
-            RunResult::Errored(detail) => self.outcome(check, CheckStatus::Errored, detail, true),
-        }
-    }
+/// The permission-engine command policy: classify the command, ask the engine,
+/// consult the approver on an `Ask`, and redact captured output.
+struct PermissionGate<'a> {
+    engine: &'a PermissionEngine,
+    approver: &'a dyn Approver,
+    interactivity: Interactivity,
+    trusted: bool,
+}
 
-    fn outcome(
-        &self,
-        check: &CheckConfig,
-        status: CheckStatus,
-        detail: String,
-        fixed: bool,
-    ) -> CheckOutcome {
-        CheckOutcome {
-            name: check.name.clone(),
-            status,
-            detail,
-            fixed,
-            severity: check.severity,
-        }
-    }
-
-    /// Classify, ask the permission engine, and — only if allowed — spawn the
-    /// command in the workspace root, capturing a bounded, redacted result.
-    async fn run_command(&self, program: &str, args: &[String]) -> RunResult {
-        let class = classify(program, args);
+impl CommandGate for PermissionGate<'_> {
+    fn allow(&self, command: &CheckCommand) -> impl Future<Output = bool> {
+        let class = classify(&command.program, &command.args);
         let request = PermissionRequest {
             tool: QUALITY_CHECK_TOOL.to_string(),
             effect: Effect::RunCommand(class),
             interactivity: self.interactivity,
             trusted: self.trusted,
-            detail: command_line(program, args),
+            detail: command_line(command),
         };
-        let allowed = match self.engine.decide(&request) {
-            Decision::Allow => true,
-            Decision::Deny => false,
-            Decision::Ask => self.approver.approve(&request).await,
-        };
-        if !allowed {
-            return RunResult::Denied;
-        }
-
-        let mut command = tokio::process::Command::new(program);
-        command
-            .args(args)
-            .current_dir(self.root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => return RunResult::Errored(format!("failed to start {program}: {error}")),
-        };
-        match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let code = output.status.code().unwrap_or(-1);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let detail = bound(redact::redact(&format!(
-                    "exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-                )));
-                RunResult::Ran {
-                    success: output.status.success(),
-                    detail,
-                }
-            }
-            Ok(Err(error)) => RunResult::Errored(error.to_string()),
-            Err(_) => {
-                RunResult::Errored(format!("check timed out after {}s", self.timeout.as_secs()))
+        async move {
+            match self.engine.decide(&request) {
+                Decision::Allow => true,
+                Decision::Deny => false,
+                Decision::Ask => self.approver.approve(&request).await,
             }
         }
     }
+
+    fn sanitize(&self, text: String) -> String {
+        redact::redact(&text)
+    }
 }
 
-/// The fixer invocation for a check, if `auto_fix` permits one and a fixer is
-/// configured. `Safe` and `Full` both run the configured fixer; the distinction
-/// is which command the profile chose, not how the runner invokes it.
-fn fix_invocation(check: &CheckConfig) -> Option<(&str, &[String])> {
-    match check.auto_fix {
+/// Map the configured check onto the shared execution spec: the fixer is
+/// offered only when `auto_fix` permits one (`Safe` and `Full` both run the
+/// configured fixer; the distinction is which command the profile chose, not
+/// how the runner invokes it), and the severity is carried for the gating rule.
+fn to_spec(check: &CheckConfig) -> CheckSpec {
+    let fixer = match check.auto_fix {
         AutoFix::No => None,
         AutoFix::Safe | AutoFix::Full => check
             .fix_program
-            .as_deref()
-            .map(|program| (program, check.fix_args.as_slice())),
+            .as_ref()
+            .map(|program| CheckCommand::new(program.clone(), check.fix_args.clone())),
+    };
+    CheckSpec {
+        name: check.name.clone(),
+        command: CheckCommand::new(check.program.clone(), check.args.clone()),
+        fixer,
+        severity: check.severity.map(check_severity),
     }
 }
 
-fn command_line(program: &str, args: &[String]) -> String {
-    if args.is_empty() {
-        program.to_string()
+/// Map the configured rule severity onto the outcome's severity.
+fn check_severity(severity: RuleSeverity) -> CheckSeverity {
+    match severity {
+        RuleSeverity::Off => CheckSeverity::Off,
+        RuleSeverity::Warn => CheckSeverity::Warn,
+        RuleSeverity::Block => CheckSeverity::Block,
+    }
+}
+
+fn command_line(command: &CheckCommand) -> String {
+    if command.args.is_empty() {
+        command.program.clone()
     } else {
-        format!("{program} {}", args.join(" "))
+        format!("{} {}", command.program, command.args.join(" "))
     }
-}
-
-/// Truncate `text` to the output cap on a char boundary.
-fn bound(mut text: String) -> String {
-    if text.len() <= MAX_OUTPUT_BYTES {
-        return text;
-    }
-    let mut end = MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    text.push_str("\n... [output truncated]");
-    text
 }
 
 #[cfg(test)]
@@ -449,6 +328,17 @@ mod tests {
         assert_eq!(outcome.status, CheckStatus::Failed);
         assert!(!outcome.fixed);
         assert!(!dir.path().join("marker.txt").is_file());
+    }
+
+    #[test]
+    fn severity_maps_one_to_one() {
+        let mut cfg = check("x", &[], AutoFix::No, None);
+        cfg.severity = Some(RuleSeverity::Block);
+        assert_eq!(to_spec(&cfg).severity, Some(CheckSeverity::Block));
+        cfg.severity = Some(RuleSeverity::Warn);
+        assert_eq!(to_spec(&cfg).severity, Some(CheckSeverity::Warn));
+        cfg.severity = Some(RuleSeverity::Off);
+        assert_eq!(to_spec(&cfg).severity, Some(CheckSeverity::Off));
     }
 
     fn refs(args: &[String]) -> Vec<&str> {
