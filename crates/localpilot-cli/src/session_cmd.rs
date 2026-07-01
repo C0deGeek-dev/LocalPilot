@@ -30,6 +30,23 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
     }
 }
 
+/// Map the configured `[permissions] profile` to a permission profile. The default
+/// (no-argument) REPL has no `--permission`/`--bypass` flags to consult, so it reads
+/// the profile from config instead of always assuming `Default` — otherwise a
+/// project that opted into `profile = "bypass"` would still be prompted per action.
+///
+/// The sole caller is the `tui`-gated default REPL, so this is dead code in a
+/// non-`tui` build; the test below still exercises it under either feature set.
+#[must_use]
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub fn resolve_profile_from_config(config: &localpilot_config::Config) -> Profile {
+    match config.permissions.profile {
+        localpilot_config::PermissionProfile::Default => Profile::Default,
+        localpilot_config::PermissionProfile::Relaxed => Profile::Relaxed,
+        localpilot_config::PermissionProfile::Bypass => Profile::Bypass,
+    }
+}
+
 /// Run print mode for one prompt.
 ///
 /// # Errors
@@ -392,6 +409,19 @@ mod tests {
         assert_eq!(resolve_profile(None, true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("relaxed"), true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("bypass"), false), Profile::Bypass);
+    }
+
+    #[test]
+    fn config_profile_maps_to_permission_profile() {
+        // The default REPL reads its profile from config; a project that set
+        // `profile = "bypass"` must actually run bypassed, not fall back to Default.
+        let mut config = localpilot_config::Config::default();
+        config.permissions.profile = localpilot_config::PermissionProfile::Default;
+        assert_eq!(resolve_profile_from_config(&config), Profile::Default);
+        config.permissions.profile = localpilot_config::PermissionProfile::Relaxed;
+        assert_eq!(resolve_profile_from_config(&config), Profile::Relaxed);
+        config.permissions.profile = localpilot_config::PermissionProfile::Bypass;
+        assert_eq!(resolve_profile_from_config(&config), Profile::Bypass);
     }
 
     /// A sink whose every write fails with the given pipe-closed error, standing in

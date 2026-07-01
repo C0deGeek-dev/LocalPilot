@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v1.2.1 - 2026-07-01
+
+Coordinated LocalX release.
+
+- **The default REPL honours the configured `[permissions] profile`.** `localpilot`
+  with no subcommand (the interactive REPL) previously always ran with the
+  `Default` profile, ignoring `[permissions] profile = "bypass"` in config. It now
+  resolves the profile from config, so a project (or LocalBox's bypass opt-in) that
+  asked for bypass actually runs bypassed instead of prompting per action.
+
 ## v1.2.0 - 2026-06-30
 
 Coordinated LocalX release.
