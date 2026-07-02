@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.0.0 - 2026-07-02
+
+Coordinated LocalX release.
+
+- **The eval primitives moved to the shared `localx-eval-core` crate.** The
+  capability-scorecard wire contract, discipline metrics, blinded judge core,
+  ablation, gate-mediated check runner, and verify-command detection now live
+  in the public `localx-llama` repository (consumed as a rev-pinned git
+  dependency) so LocalBench can grade against the same contract. LocalPilot's
+  public API is unchanged — host-bound adapters re-export the shared names.
+  Recorded as ADR-0062; ADR-0063 and ADR-0064 record the ecosystem's
+  in-process no-think filter and native TUI doctrine.
+
 ## v1.2.1 - 2026-07-01
 
 Coordinated LocalX release.
