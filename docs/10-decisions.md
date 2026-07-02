@@ -2,6 +2,117 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0064: The Non-Developer TUI Is Native ratatui, With The Guided-Launcher Doctrine Enforced By Tests
+
+Status: accepted. Applies to LocalBox (which ships the TUI) and records the
+ecosystem doctrine; LocalPilot's own inline-TUI rules (ADR-0021, ADR-0039) are
+unchanged and this decision follows their scrollback-safety lineage.
+
+The launcher TUI for non-developers is a native **ratatui** flow inside the
+product binary. The previous stack — a .NET/Terminal.Gui TUI talking to an
+out-of-process PowerShell backend over a JSON seam — is retired with the
+PowerShell sources.
+
+1. **Flow logic is pure; frontends only pick indexes.** Every guided-flow
+   decision (vocabulary, plan summary, customize transitions, save gates) is a
+   pure function layer with unit tests. The interactive frontends — a ratatui
+   inline-viewport list on a TTY, numbered plain-text menus otherwise — do
+   nothing but select indexes, so behaviour cannot fork between them and a
+   non-TTY session degrades gracefully by construction.
+
+2. **The non-dev doctrine is enforced by test, not convention.** Plain language
+   over jargon (a snapshot fails if implementation vocabulary leaks into the
+   plan summary); progressive disclosure (the fast path is model → short
+   confirm → launch, with power knobs one level down in Customize); safe
+   recommended defaults with markers; a recommended-tier model filter with an
+   explicit reveal for the rest (and a no-dead-end fallback when nothing is
+   marked recommended); fit-aware colouring; one-keystroke replay of a saved
+   default; scrollback-safe inline rendering (no alternate screen, no
+   whole-screen clear).
+
+3. **The TUI talks typed in-process calls.** There is no JSON back-channel
+   between the interface and the launcher: the ratatui flow calls the launcher
+   library directly, so the old TUI-API seam (and its smoke guard) retired with
+   the .NET TUI instead of being rebuilt in Rust.
+
+Boundary: machine consumers are not the TUI's job — scripted use goes through
+the CLI commands and their machine-output discipline (JSON to a clean stdout).
+
+## ADR-0063: The No-Think Filter Runs In-Process, Hosted By The Product Binary
+
+Status: accepted. Removes the last Python runtime dependency from the local
+stack; honours the provider contract (ADR-0001) — the filter presents the same
+documented Anthropic-compatible surface agents already speak.
+
+The think-stripping proxy that sits between a coding agent and a local
+llama-server is a Rust **in-process** HTTP filter (axum on the shared runtime
+tier), not a Python sidecar script.
+
+1. **The filter is a library with a bind-and-serve entry point.** The shared
+   runtime crate owns the streaming think-block stripper, the `/health`
+   endpoint reporting the proxied target (`{target_host, target_port}`), and
+   the forward path — unit-testable against a mock upstream with no socket.
+
+2. **The product binary hosts it by re-invoking itself.** LocalBox spawns the
+   proxy as its own executable in a plumbing mode, so there is no second
+   binary to distribute or version, and proxy lifecycle is ordinary process
+   management: the tri-state target check (right target / wrong target /
+   down), repoint-not-restart, and reap-before-probe semantics are preserved.
+
+3. **A gateway posture is explicit and guarded.** The proxy binds loopback by
+   default. A LAN exposure carries an optional API key that gates every
+   forwarding request (both common header spellings; `/health` stays open for
+   target checks), and a public-looking bind with no key is refused with a
+   remedy unless explicitly opted into.
+
+Boundary: the filter never rewrites model output beyond reasoning-block
+routing; sampler and template policy stay on the server side.
+
+## ADR-0062: The Shared llama Tier Is A Public Repo Of Narrow Crates, Consumed By Rev-Pinned Git Dependency; The Launcher Contract Is A Trait
+
+Status: accepted. Extends the narrow-crate rule (ADR-0001) across repository
+boundaries; clean-room provenance (ADR-0005) applies to the shared tier in
+full.
+
+The domain logic that LocalBox, LocalBench, and LocalPilot all need lives in a
+separate **public** repository of narrow crates (`localx-llama`), consumed by
+each product as a **git dependency pinned by revision** (recorded in each
+consumer's committed `Cargo.lock`; a local path override is used during active
+development). It is not a git submodule, and it is not vendored.
+
+1. **Three crates, one responsibility each.** A pure domain crate (model
+   catalog types, server-argument construction, VRAM/fit, config-layer
+   precedence, the tuner store schema, the launcher contract); a runtime crate
+   (process lifecycle, pin-verified downloads, health classification, the
+   in-process no-think filter, port and spawn utilities); and an eval crate
+   (the capability-scorecard wire contract, discipline metrics, the blinded
+   judge core, ablation, the gate-mediated check runner, verify-command
+   detection, the test-count grade table).
+
+2. **The launcher contract is a Rust trait with a versioned envelope.** What
+   was a documented list of PowerShell functions is now a trait the launcher
+   implements and consumers depend on: parameter obligations are the type
+   system's job, and compatibility is a small versioned envelope
+   (`api_version` / `launcher_export_version` / supported targets and
+   runtimes) gated by the consumer with a suffix-free product-version floor.
+   Conformance runs cross-repo in CI in both directions, so a breaking change
+   fails at its source.
+
+3. **LocalPilot's eval primitives moved down; hosts keep adapters.** The
+   shared eval crate owns contract types and pure math; anything bound to a
+   host (session-trace projection, the permission engine, live judge calls)
+   stays in the host as a thin adapter re-exporting the shared names, so the
+   host's public API survives the extraction.
+
+4. **Public visibility is load-bearing.** Consumers are public repositories:
+   a private shared dependency would break `cargo build` from source and
+   public CI. The tier holds nothing secret, so it is public, and no CI needs
+   a fetch token.
+
+Boundary: consumers must track a single revision of the shared tier per
+lockstep (two revisions of the crate in one dependency graph split the trait
+into incompatible types); pins are advanced deliberately, never floated.
+
 ## ADR-0061: Vision (Image-Input) Capability Resolves Config > Probe > False, And The Image Gate Is Lifted To Match
 
 Status: accepted. Keeps the change additive and default-off (cross-cutting
