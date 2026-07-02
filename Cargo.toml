@@ -36,7 +36,7 @@ homepage = "https://github.com/C0deGeek-dev/LocalPilot"
 rust-version = "1.82"
 
 [workspace.dependencies]
-anyhow = "=1.0.95"
+anyhow = "=1.0.103"
 # OS clipboard access for pasting an image into the chat input. Used only by the
 # interactive TUI (behind the cli `tui` feature), so the default binary links no
 # clipboard backend.
