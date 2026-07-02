@@ -6,6 +6,24 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.0.2 - 2026-07-02
+
+Coordinated LocalX release.
+
+- **Exiting the REPL no longer waits for background work.** The
+  first-session knowledge ingest runs detached; the runtime previously
+  waited for it on shutdown, so quitting hung after the closeout line
+  until the walk finished. Interrupted ingests resume on the next
+  session open.
+- **CI integration suites exec the prebuilt test binary** instead of
+  `cargo run` per invocation (a nested-cargo build-lock hang killed the
+  Linux test job on every run since June 27; Windows intermittently
+  failed replacing the running executable).
+- **Supply-chain gate healed**: the first-party `localx-llama` git tier
+  is allow-listed with its lockstep-pin justification, `anyhow` is
+  pinned to the patched 1.0.103 (RUSTSEC-2026-0190), and `quinn-proto`
+  to 0.11.15 (RUSTSEC-2026-0185).
+
 ## v2.0.1 - 2026-07-02
 
 Coordinated LocalX release.
