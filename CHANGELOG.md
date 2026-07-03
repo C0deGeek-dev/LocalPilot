@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.1.3 - 2026-07-03
+
+Coordinated LocalX release.
+
 - The harness step-completion gate no longer dead-locks its own commit. The
   `progress_updated` rule was made runtime-active but kept its `block` default,
   so once the gate re-read `PROGRESS.md` it refused to commit any step the model
