@@ -10,6 +10,12 @@ content lands.
 
 ## After the Purpose block
 
+> **LocalX workspace note.** Plans, tasks, and work tracking live in the private
+> LocalHub repo (`LocalHub/plans/localpilot/`), never in this repo — the `tasks/`
+> references below resolve there (this repo keeps a stub `tasks/README.md`
+> pointing to LocalHub). This repo keeps only its `docs/`, README, and CHANGELOG.
+> See `LocalX/CLAUDE.md`.
+
 > This is a *build-process* plan for LocalPilot — developer-process tooling,
 > not a shipped product artefact. Keep it separate from the product harness's
 > own `brief.md` / `PROGRESS.md` (runtime files spec'd in
@@ -17,11 +23,12 @@ content lands.
 
 > **Name-clash rule.** Never name a build-plan file `PROGRESS.md` or
 > `brief.md` — those names are reserved for the product harness runtime.
-> Build-plan tracking lives only in subject Progress-log sections under
-> `tasks/`.
+> Build-plan tracking lives in each subject's Progress-log section under the
+> plan's `LocalHub/plans/localpilot/<name>/` folder.
 
-Disposable timing for this repo: the plan and its `tasks/<name>/` folder are
-deleted (or archived out of the repo) **before v1**.
+Disposable timing for this repo: when a plan ships it is moved to
+`LocalHub/plans/localpilot/archive/` (archive, never delete — the LocalX
+workspace rule); shipped code/identifiers/commits stay plan-agnostic.
 
 ## §2 Verification-commands rows (repo defaults, mirror CI)
 
