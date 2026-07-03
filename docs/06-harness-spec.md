@@ -359,15 +359,17 @@ See ADR-0028 for the decision.
 > These are **runtime-active** (facts populated on the real path):
 > `no_stale_uncommitted`, `suite_green`, `quality_gate`, `commit_message_clean`,
 > `check_before_launch`, `attempt_limit` (the effective step cap is the
-> `StepLoop`; the rule receives `attempts = 1`). These are **declared but not
+> `StepLoop`; the rule receives `attempts = 1`), and `progress_updated` (the
+> headless completion gate re-reads `PROGRESS.md` after the turn and reports
+> whether the model actually ticked its step). These are **declared but not
 > evaluated on the live path** because the runtime does not yet populate their
 > facts — configuring them (e.g. `rules.secret_file_guard = "block"`) is
 > currently a no-op, so do not rely on them for enforcement:
 > `workspace_boundary` and `secret_file_guard` (real workspace containment and
 > secret-read protection are enforced by the **permission engine**, not these
-> rules — see `docs/07`), `test_first_when_configured` (no PreEdit evaluation is
-> emitted), `progress_updated` (`progress_reflects_completion` is currently
-> constant). `decision_logged` is not implemented as a rule — a deviation
+> rules — see `docs/07`; keeping them declared documents the intent the engine
+> enforces), `test_first_when_configured` (no PreEdit evaluation is emitted).
+> `decision_logged` is not implemented as a rule — a deviation
 > auto-appends to `DECISIONS.md` on replan, but nothing gates on it. Phase-cadence
 > `quality_gate` checks require a `phase_complete` trigger the live loop does not
 > emit outside tests. This list is the source of truth; treat a rule's prose
