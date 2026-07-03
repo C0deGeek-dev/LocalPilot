@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.1.1 - 2026-07-03
+
+Coordinated LocalX release.
+
 - The first-run "Trust this folder?" prompt is no longer clipped: the inline
   live region now grows to fit a modal gate (the trust prompt or a tool
   approval) so its `[y]/[n]` choice line is always visible, instead of falling
