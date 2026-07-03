@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.1.2 - 2026-07-03
+
+Coordinated LocalX release.
+
+- The interactive TUI build compiles again. `localpilot-cli`'s `tui`-gated
+  modules call `tracing`, but only `tracing-subscriber` was declared, so the
+  release build (`--features tui,learning`) had failed since 2.1.0 — the v2.1.0
+  and v2.1.1 LocalPilot release artifacts never built. Declaring the `tracing`
+  dependency restores it (the trust-gate fix below now reaches a published
+  release).
+
 ## v2.1.1 - 2026-07-03
 
 Coordinated LocalX release.
