@@ -57,11 +57,6 @@ impl WebAccess {
         }
     }
 
-    /// Withdraw per-session consent.
-    pub fn revoke_session(&mut self) {
-        self.session_opt_in = false;
-    }
-
     /// Whether outbound web research is currently permitted at all: config on
     /// **and** per-session consent granted.
     #[must_use]

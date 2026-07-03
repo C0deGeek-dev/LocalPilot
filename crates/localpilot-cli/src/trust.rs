@@ -1,11 +1,12 @@
-﻿//! Per-folder trust.
+//! Per-folder trust.
 //!
 //! The interactive REPL asks once, on first entry into a workspace folder,
 //! whether the folder is trusted. The answer is remembered in a small list under
 //! the user config directory so the prompt does not reappear for that folder.
 //! Trust is a convenience gate, not a security boundary — the permission engine
-//! still governs every effect — so failures here are swallowed rather than
-//! surfaced.
+//! still governs every effect — so a failure to persist is logged at warn level
+//! (it would otherwise silently re-prompt every session) rather than treated as
+//! fatal.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,11 +54,19 @@ pub fn remember(cwd: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
     let entry = format!("{}\n", key(cwd));
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-    {
-        let _ = file.write_all(entry.as_bytes());
+        .and_then(|mut file| file.write_all(entry.as_bytes()));
+    if let Err(error) = result {
+        // Not a security boundary, but a silent failure means the user is
+        // re-prompted to trust this folder every session with no way to see why.
+        tracing::warn!(
+            target: "localpilot::trust",
+            path = %path.display(),
+            %error,
+            "could not persist workspace trust; you may be asked to trust this folder again next session"
+        );
     }
 }

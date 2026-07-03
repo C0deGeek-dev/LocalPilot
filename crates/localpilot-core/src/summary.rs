@@ -62,13 +62,6 @@ impl StructuredSummary {
         self
     }
 
-    /// Attach budget metadata.
-    #[must_use]
-    pub fn with_budget(mut self, budget: SummaryBudget) -> Self {
-        self.budget = budget;
-        self
-    }
-
     /// Render as plain text: the title line followed by `- ` bullets.
     #[must_use]
     pub fn render(&self) -> String {

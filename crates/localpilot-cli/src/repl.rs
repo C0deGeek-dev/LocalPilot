@@ -307,7 +307,18 @@ pub async fn run_chat(
             let ingest_root = cwd.clone();
             let ingest_config = config.ingest.clone();
             tokio::task::spawn_blocking(move || {
-                let _ = localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode);
+                if let Err(error) =
+                    localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode)
+                {
+                    // A failed background index build makes knowledge_search return
+                    // nothing or stale results all session, indistinguishable from
+                    // "no matching knowledge" — surface it so it is diagnosable.
+                    tracing::warn!(
+                        target: "localpilot::ingest",
+                        %error,
+                        "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
+                    );
+                }
             });
         }
     }

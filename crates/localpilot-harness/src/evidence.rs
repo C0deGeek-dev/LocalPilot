@@ -166,13 +166,6 @@ impl EvidenceLedger {
         &self.records
     }
 
-    /// Mutable access to the call records, so a caller that knows the tool
-    /// schemas can fill in [`CallRecord::schema_valid`].
-    #[must_use]
-    pub fn calls_mut(&mut self) -> &mut [CallRecord] {
-        &mut self.records
-    }
-
     /// Fill [`CallRecord::schema_valid`] for every projected call from a caller
     /// that holds the tool schemas. `validate` maps a call's `(name, input)` to
     /// `Some(true)`/`Some(false)` when the tool is known and its arguments can be
@@ -186,12 +179,6 @@ impl EvidenceLedger {
         for record in &mut self.records {
             record.schema_valid = validate(&record.name, &record.input);
         }
-    }
-
-    /// How many calls invoked the named tool.
-    #[must_use]
-    pub fn count_for(&self, tool: &str) -> usize {
-        self.records.iter().filter(|r| r.name == tool).count()
     }
 
     /// Whether the named tool was invoked at least once.

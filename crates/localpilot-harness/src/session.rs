@@ -1282,13 +1282,6 @@ impl SessionRuntime {
         self.steer.clone()
     }
 
-    /// A snapshot of the background processes started this session (via
-    /// `run_background`), for the UI to display and manage. Sorted by id.
-    #[must_use]
-    pub fn background_processes(&self) -> Vec<localpilot_tools::ProcStatus> {
-        self.background.list()
-    }
-
     /// A clonable handle to the background-process registry, so the UI can list
     /// and stop processes while a turn is in flight (the registry is
     /// interior-mutable behind a single lock).
@@ -1302,16 +1295,6 @@ impl SessionRuntime {
     #[must_use]
     pub fn background_registry(&self) -> &localpilot_tools::BackgroundProcesses {
         self.background.as_ref()
-    }
-
-    /// Stop and forget the background process `id`, returning whether it existed.
-    pub fn stop_background_process(&self, id: &str) -> bool {
-        self.background.stop_now(id)
-    }
-
-    /// Stop and forget every background process started this session.
-    pub fn stop_all_background_processes(&self) {
-        self.background.kill_all();
     }
 
     /// The hook fabric, for registering observers, context hooks, and tool

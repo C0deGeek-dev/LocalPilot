@@ -214,13 +214,6 @@ impl ContextDiscovery {
         self
     }
 
-    /// Override the maximum nested-directory walk depth.
-    #[must_use]
-    pub fn with_max_dir_depth(mut self, depth: usize) -> Self {
-        self.max_dir_depth = depth;
-        self
-    }
-
     /// Discover, import-resolve, and merge the project's context files. Best-effort
     /// and non-fatal: an unreadable file or walk error is skipped, never returned
     /// as an error, so a partially-readable tree still yields the context it can.
