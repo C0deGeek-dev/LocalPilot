@@ -30,9 +30,10 @@ use localpilot_sandbox::{
 use localpilot_store::Store;
 use localpilot_tools::BackgroundProcesses;
 use localpilot_tui::{
-    banner_text, handle_input, history_block_text, parse_slash, render, AppInput, AppState,
-    ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, ImageAttachment, IngestAction,
-    Key, Mode, PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
+    banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
+    AppInput, AppState, ApprovalRequest, BackgroundCommand, BackgroundProcess, Header,
+    ImageAttachment, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
+    TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
@@ -2094,7 +2095,14 @@ fn draw_ui(
     // freshly committed history from native scrollback before it scrolled
     // off-screen; holding the band fixed keeps every committed block in scrollback.
     let size = terminal.size()?;
-    let want_height = LIVE_REGION_HEIGHT.min(size.height.max(1));
+    // A modal blocking prompt (the first-run trust gate, a tool approval) needs
+    // more rows than the fixed streaming band so its last line — the [y]/[n]
+    // choice — is never clipped below the viewport. Grow to fit it, clamped to
+    // the window; every other state keeps the fixed band, so streaming still
+    // never resizes the viewport per token.
+    let base = LIVE_REGION_HEIGHT.min(size.height.max(1));
+    let want_height = blocking_prompt_height(state, size.width)
+        .map_or(base, |needed| needed.clamp(base, size.height.max(1)));
     let area = terminal.get_frame().area();
     if area.height != want_height || area.width != size.width {
         resize_viewport(terminal, want_height)?;
