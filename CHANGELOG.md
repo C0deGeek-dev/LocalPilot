@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Research web egress no longer follows HTTP redirects: a 3xx is treated as a
+  miss and audited, so an allowlisted host cannot bounce a fetch to an
+  off-allowlist destination.
+- The headless completion gate now evaluates the progress rule against the real
+  `PROGRESS.md` — it flags a step claimed done but not ticked, instead of always
+  passing.
+- Silent failures on the live session path now warn: a failed workspace-trust
+  persist (which would otherwise re-prompt every session) and a failed
+  background project-knowledge index build (which would otherwise make
+  `knowledge_search` return nothing/stale results with no cause).
+- Docs: the harness spec now states which baseline rules are runtime-active vs
+  declared-only (workspace containment and secret-file reads are enforced by the
+  permission engine); alpha-era wording removed from the user docs.
+- Internal: removed dead public API with no callers.
+
 ## v2.0.2 - 2026-07-02
 
 Coordinated LocalX release.
