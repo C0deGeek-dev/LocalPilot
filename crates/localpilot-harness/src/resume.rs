@@ -202,11 +202,18 @@ pub async fn resume_one_step_with_events(
             .iter()
             .find(|outcome| outcome.name == "test")
             .map(CheckOutcome::passed);
+        // Re-read PROGRESS.md after the turn: did the model actually tick the
+        // step it claimed to complete? A best-effort re-read that cannot confirm
+        // the update leaves the (advisory) progress rule to flag it.
+        let progress_reflects_completion = read(&progress_path)
+            .ok()
+            .and_then(|raw| Progress::parse(&raw).ok())
+            .is_some_and(|updated| updated.step_is_done(step.number));
         let action = decide_step(
             rule_engine,
             &CompletionInputs {
                 tests_passed,
-                progress_reflects_completion: true,
+                progress_reflects_completion,
                 commit_message: commit_message.clone(),
                 attempts: 1,
                 max_attempts,

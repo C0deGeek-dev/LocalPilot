@@ -119,6 +119,14 @@ impl Progress {
         self.steps.iter().filter(|s| s.done).count()
     }
 
+    /// Whether the step with `number` is marked done in this snapshot. Used to
+    /// check, after a turn, whether the model actually reflected the completion
+    /// it claimed in `PROGRESS.md`.
+    #[must_use]
+    pub fn step_is_done(&self, number: usize) -> bool {
+        self.steps.iter().any(|s| s.number == number && s.done)
+    }
+
     /// Append a new step after the highest existing number, leaving existing
     /// steps (and their completion metadata) untouched. Returns the new number.
     pub fn append_step(&mut self, description: impl Into<String>) -> usize {
@@ -210,6 +218,14 @@ mod tests {
         assert_eq!(progress.steps[0].attempts, 1);
         assert_eq!(progress.next_incomplete().map(|s| s.number), Some(2));
         assert_eq!(progress.completed_count(), 1);
+    }
+
+    #[test]
+    fn step_is_done_tracks_the_checkbox_state() {
+        let progress = Progress::parse(VALID).unwrap();
+        assert!(progress.step_is_done(1), "step 1 is checked");
+        assert!(!progress.step_is_done(2), "step 2 is unchecked");
+        assert!(!progress.step_is_done(99), "an unknown step is not done");
     }
 
     #[test]
