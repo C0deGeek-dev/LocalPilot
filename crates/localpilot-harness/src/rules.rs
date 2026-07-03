@@ -174,7 +174,11 @@ rule!(
     ProgressUpdated,
     "progress_updated",
     critical = false,
-    default = RuleSeverity::Block,
+    // Advisory by default: the harness itself ticks PROGRESS.md when it commits a
+    // step (`Progress::mark_complete` on the commit path), so a not-yet-ticked
+    // step is a flag, not a hard stop — a Block here would deadlock the harness's
+    // own commit-and-tick flow. Configure to `block` to require the model to tick.
+    default = RuleSeverity::Warn,
     triggers = [PreCommit, StepComplete]
 );
 rule!(
