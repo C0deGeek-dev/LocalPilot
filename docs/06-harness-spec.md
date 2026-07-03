@@ -354,6 +354,25 @@ See ADR-0028 for the decision.
 
 ### Baseline Rules
 
+> **Runtime status.** Each rule below has verdict logic and unit tests, but a
+> rule only fires in a live run when the runtime populates its trigger facts.
+> These are **runtime-active** (facts populated on the real path):
+> `no_stale_uncommitted`, `suite_green`, `quality_gate`, `commit_message_clean`,
+> `check_before_launch`, `attempt_limit` (the effective step cap is the
+> `StepLoop`; the rule receives `attempts = 1`). These are **declared but not
+> evaluated on the live path** because the runtime does not yet populate their
+> facts — configuring them (e.g. `rules.secret_file_guard = "block"`) is
+> currently a no-op, so do not rely on them for enforcement:
+> `workspace_boundary` and `secret_file_guard` (real workspace containment and
+> secret-read protection are enforced by the **permission engine**, not these
+> rules — see `docs/07`), `test_first_when_configured` (no PreEdit evaluation is
+> emitted), `progress_updated` (`progress_reflects_completion` is currently
+> constant). `decision_logged` is not implemented as a rule — a deviation
+> auto-appends to `DECISIONS.md` on replan, but nothing gates on it. Phase-cadence
+> `quality_gate` checks require a `phase_complete` trigger the live loop does not
+> emit outside tests. This list is the source of truth; treat a rule's prose
+> below as its *intent*, gated by this status.
+
 #### `no_stale_uncommitted`
 
 At session start, block if unrelated uncommitted files exist.
