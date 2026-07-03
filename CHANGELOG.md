@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.1.0 - 2026-07-03
+
+Coordinated LocalX release.
+
 - Research web egress no longer follows HTTP redirects: a 3xx is treated as a
   miss and audited, so an allowlisted host cannot bounce a fetch to an
   off-allowlist destination.
