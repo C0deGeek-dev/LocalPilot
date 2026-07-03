@@ -407,6 +407,11 @@ remote-egress policy (`policies/remote-egress.md`) by construction:
   and checked against `[research.web] allowlist` (exact host or subdomain). An
   allowlisted host is fetched (bounded bytes and timeouts); every other host is
   **skipped and logged**, never fetched. An empty allowlist fetches nothing.
+- **Redirects are never followed.** The fetch client uses a no-redirect policy,
+  so an allowlisted host that returns a 3xx cannot bounce the request to a
+  non-allowlisted (or internal) host. A redirect is audited
+  (`decision=redirect-not-followed`) and yields no evidence — the allowlist is a
+  true egress boundary, not just a first-hop check.
 - **Only the sub-question leaves the machine.** The outbound text is the
   sub-question passed through the shared workspace redactor — never gathered
   evidence, file contents, or memory. The redactor is a second guard over the
