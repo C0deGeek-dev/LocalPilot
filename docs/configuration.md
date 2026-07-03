@@ -18,8 +18,8 @@ The configuration schema is **stable under semantic versioning** from v1.0:
   does not model are preserved (see `[providers.*]` options).
 - Defaults are stable: an omitted key behaves as documented here.
 
-Before v1.0 (the current `0.x` alphas) the schema may still change; such changes
-are noted in `CHANGELOG.md`.
+The configuration schema is SemVer-stable (LocalPilot has been ≥ 1.0.0 since
+2026-06-24); any change is noted in `CHANGELOG.md`.
 
 ## Project context files
 

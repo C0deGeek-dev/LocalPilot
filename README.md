@@ -161,7 +161,9 @@ recipes from your sessions — **on by default** as of this release, and
 **local-only** (it never leaves your machine). Candidates enter a review queue;
 only accepted lessons become durable, machine-wide memory and return as context
 in future sessions. It is review-gated and redacted, so this is disclosure, not
-a data grab — opt out any time with `[learning] enabled = false`.
+a data grab — opt out any time with `[learning] enabled = false` in the
+project's **`.localmind.toml`** (the learning engine's config, not
+`.localpilot.toml`; see [localmind-integration.md](docs/localmind-integration.md)).
 
 ```text
 session ──> candidate lessons ──> your review ──> project memory ──> later sessions
@@ -169,7 +171,10 @@ session ──> candidate lessons ──> your review ──> project memory ─
 
 In a controlled uplift evaluation, accepted lessons moved a deliberately
 headroom-rich task set from **0% to 100%**, and the effect held on a second
-model. Nothing is written to durable memory without review.
+model. By default (`[review] mode = "manual"`) nothing is written to durable
+memory without human review; the opt-in `trusted`/`automatic` review modes
+auto-promote high-confidence candidates without prompting — see
+[localmind-integration.md](docs/localmind-integration.md).
 
 ## Pick the right guide
 

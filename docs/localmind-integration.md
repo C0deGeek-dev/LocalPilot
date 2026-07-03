@@ -135,6 +135,23 @@ commits).
   candidates **offline and contacts nothing**; only `--apply` contacts the model
   (egress disclosed on stderr). The offline `learning freshness` pass needs no
   model and is the default; the live re-validation run is opportunistic.
+- **Review modes (`.localmind.toml` `[review] mode`).** The gate between a
+  candidate lesson and durable memory has four modes, set in the LocalMind
+  config, not `.localpilot.toml`:
+  - `manual` (**default**) — every candidate waits for a human `learning review`
+    decision. Nothing is promoted automatically.
+  - `assisted` — candidates are annotated (quality, duplicates, contradictions)
+    but still wait for a human.
+  - `trusted` — a high-confidence candidate (≥ `trusted_threshold`) auto-accepts,
+    and a high-confidence contradiction with a clear target auto-supersedes the
+    contradicted memory; duplicates, low-confidence, and non-`general`-quality
+    candidates still route to a human.
+  - `automatic` — as `trusted`, applied on every closeout.
+
+  `trusted`/`automatic` are an explicit opt-in: on those modes some accepted
+  memory is written **without a per-candidate prompt** (still local-only,
+  redacted, quality-gated, and never auto-deleting). Leave the default `manual`
+  if you want to approve every write.
 - `localpilot memory` uses LocalMind accepted memory for status, inspect, search,
   delete, and context-injection disable.
 - Agent turns contribute relevant accepted LocalMind memory as best-effort

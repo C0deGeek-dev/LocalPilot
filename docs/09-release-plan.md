@@ -1,5 +1,10 @@
 # Release Plan
 
+> **Historical — superseded.** This is the pre-1.0 release plan. LocalPilot ships
+> as part of the coordinated LocalX release train (currently v2.0.2); the live
+> ceremony lives in the private LocalHub repo (`policies/coordinated-release.md`).
+> Kept for history.
+
 ## Versioning
 
 Use semantic versioning after `0.1.0`.

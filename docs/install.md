@@ -1,4 +1,4 @@
-# Installing LocalPilot (alpha)
+# Installing LocalPilot
 
 LocalPilot is a Rust-native, provider-neutral coding-agent harness for Windows,
 Linux, and macOS (all tier-1).
@@ -18,7 +18,7 @@ git clone --recurse-submodules https://github.com/C0deGeek-dev/LocalPilot.git
 git submodule update --init --recursive
 ```
 
-## From source (recommended for alpha)
+## From source (recommended)
 
 ```sh
 # Linux / macOS
@@ -96,10 +96,13 @@ extract it, and put the binary on your `PATH`.
 ## From crates.io
 
 ```sh
-cargo install localpilot
+cargo install localpilot --features tui
 ```
 
-(Available once the crate is published; the source build above always works.)
+The `tui` feature is required for the interactive `chat` REPL — the default
+feature set is empty, so a bare `cargo install localpilot` yields a binary
+without `chat` (the `ask`/`print`/`harness` commands still work). (Available once
+the crate is published; the source build above always works.)
 
 ## Next steps
 
