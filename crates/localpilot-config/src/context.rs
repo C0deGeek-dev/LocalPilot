@@ -272,7 +272,13 @@ impl ContextDiscovery {
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let walker = ignore::WalkBuilder::new(&self.workspace_root)
             .max_depth(Some(self.max_dir_depth))
+            // Walk hidden directories so `.github/copilot-instructions.md` (and any
+            // nested instruction files under dot-dirs) are found...
             .hidden(false)
+            // ...but never descend into `.git`: it is never an instruction source
+            // and its thousands of loose objects dominated startup (a 40s+ stall on
+            // a large repo, versus milliseconds once pruned).
+            .filter_entry(|entry| entry.file_name() != ".git")
             .build();
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -476,6 +482,27 @@ mod tests {
         let nested_at = rendered.find("nested rules").unwrap();
         let global_at = rendered.find("global rules").unwrap();
         assert!(root_at < nested_at && nested_at < global_at, "{rendered}");
+    }
+
+    #[test]
+    fn nested_walk_prunes_the_git_directory() {
+        let ws = tempfile::tempdir().unwrap();
+        // A real nested instruction file is found; a stray one inside `.git` is
+        // not — `.git` is pruned so the walk never descends its (huge) object
+        // store, which otherwise dominated startup.
+        write(&ws.path().join("sub").join("CLAUDE.md"), "real nested");
+        write(&ws.path().join(".git").join("CLAUDE.md"), "git internal");
+
+        let ctx = discovery(ws.path(), None).discover();
+        let bodies: Vec<_> = ctx.files.iter().map(|f| f.body.as_str()).collect();
+        assert!(
+            bodies.iter().any(|b| b.contains("real nested")),
+            "a real nested instruction file must be discovered: {bodies:?}"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.contains("git internal")),
+            ".git must be pruned from the nested walk: {bodies:?}"
+        );
     }
 
     #[test]
