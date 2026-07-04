@@ -1,6 +1,6 @@
 [package]
 name = "localpilot-tools"
-version = "2.1.4"
+version = "2.1.5"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
