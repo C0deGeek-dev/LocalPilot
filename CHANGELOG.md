@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Removed three harness rules that were declared and unit-tested but never
+  evaluated on any live path: `workspace_boundary`, `secret_file_guard`, and
+  `test_first_when_configured`. Workspace containment and secret-file protection
+  are enforced solely by the permission engine at the tool-dispatch choke-point
+  (`dispatch_gated → PermissionEngine::decide`) on every profile including
+  `bypass` — the rules mirrored that boundary without ever firing, so two of them
+  carried a misleading `critical` flag. Their now-orphaned `RuleContext` fields
+  and the unused `pre_edit` trigger were removed with them. No enforcement
+  changes: the permission engine is unchanged. The harness spec's Runtime-status
+  note now states plainly that these properties are the permission engine's, not
+  the rule engine's.
+
 ## v2.1.5 - 2026-07-04
 
 Coordinated LocalX release.

@@ -18,7 +18,6 @@ pub enum Trigger {
     SessionStart,
     PreTool,
     PostTool,
-    PreEdit,
     PostEdit,
     PreShell,
     PostShell,
@@ -67,13 +66,9 @@ impl RuleVerdict {
 #[derive(Debug, Default, Clone)]
 pub struct RuleContext {
     pub uncommitted_unrelated: bool,
-    pub path_inside_workspace: Option<bool>,
-    pub path_secret_like: bool,
     pub commit_message: Option<String>,
     pub tests_passed: Option<bool>,
     pub progress_reflects_completion: Option<bool>,
-    pub test_first_required: bool,
-    pub editing_impl_before_tests: bool,
     pub attempts: u32,
     pub max_attempts: u32,
     /// Outcomes of the quality-gate checks that ran for this trigger, consumed by
@@ -143,27 +138,6 @@ rule!(
     triggers = [SessionStart]
 );
 rule!(
-    WorkspaceBoundary,
-    "workspace_boundary",
-    critical = true,
-    default = RuleSeverity::Block,
-    triggers = [PreTool, PreEdit]
-);
-rule!(
-    SecretFileGuard,
-    "secret_file_guard",
-    critical = true,
-    default = RuleSeverity::Warn,
-    triggers = [PreTool, PreEdit]
-);
-rule!(
-    TestFirstWhenConfigured,
-    "test_first_when_configured",
-    critical = false,
-    default = RuleSeverity::Warn,
-    triggers = [PreEdit]
-);
-rule!(
     SuiteGreen,
     "suite_green",
     critical = true,
@@ -219,39 +193,6 @@ impl NoStaleUncommitted {
                 severity,
                 "unrelated uncommitted changes are present; commit or stash them first",
             )
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl WorkspaceBoundary {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.path_inside_workspace == Some(false) {
-            at(
-                severity,
-                "the target path is outside the workspace boundary",
-            )
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl SecretFileGuard {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.path_secret_like {
-            at(severity, "the target looks like a secret-bearing file")
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl TestFirstWhenConfigured {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.test_first_required && ctx.editing_impl_before_tests {
-            at(severity, "implementation is being edited before its test")
         } else {
             RuleVerdict::Allow
         }
@@ -422,9 +363,6 @@ impl RuleEngine {
     pub fn with_baseline(config: &IndexMap<String, RuleSeverity>) -> Self {
         let rules: Vec<Box<dyn Rule>> = vec![
             Box::new(NoStaleUncommitted),
-            Box::new(WorkspaceBoundary),
-            Box::new(SecretFileGuard),
-            Box::new(TestFirstWhenConfigured),
             Box::new(SuiteGreen),
             Box::new(ProgressUpdated),
             Box::new(CommitMessageClean),
@@ -504,40 +442,6 @@ mod tests {
 
     #[test]
     fn each_baseline_rule_fires_on_its_condition() {
-        // workspace_boundary
-        assert!(matches!(
-            WorkspaceBoundary.evaluate(
-                &RuleContext {
-                    path_inside_workspace: Some(false),
-                    ..Default::default()
-                },
-                RuleSeverity::Block
-            ),
-            RuleVerdict::Block(_)
-        ));
-        // secret_file_guard
-        assert!(matches!(
-            SecretFileGuard.evaluate(
-                &RuleContext {
-                    path_secret_like: true,
-                    ..Default::default()
-                },
-                RuleSeverity::Warn
-            ),
-            RuleVerdict::Warn(_)
-        ));
-        // test_first_when_configured
-        assert!(matches!(
-            TestFirstWhenConfigured.evaluate(
-                &RuleContext {
-                    test_first_required: true,
-                    editing_impl_before_tests: true,
-                    ..Default::default()
-                },
-                RuleSeverity::Warn
-            ),
-            RuleVerdict::Warn(_)
-        ));
         // suite_green
         assert!(matches!(
             SuiteGreen.evaluate(
