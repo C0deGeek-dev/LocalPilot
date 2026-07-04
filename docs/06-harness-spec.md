@@ -605,6 +605,15 @@ the broker (opt-in), an unbounded loop is a defect, so the rails ship on with a
 conservative bound. Rollback/tuning is config — raise or set the explicit
 `tool_call_budget`/`turn_timeout_secs`.
 
+> **Ownership boundary.** The rail *constants* — the headless `200`/`600 s` and
+> interactive `500` defaults — live in `localpilot-config`
+> (`DEFAULT_HEADLESS_TOOL_BUDGET_MAX`, `DEFAULT_HEADLESS_TURN_TIMEOUT_SECS`,
+> `DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX`), not in the harness. The harness
+> `SessionConfig` leaves `tool_call_budget`, `tool_call_budget_max`, and
+> `turn_timeout` at `None`; the caller resolves the profile-aware defaults from
+> config and passes them in. The harness enforces the bound it is handed — it
+> does not own the numbers.
+
 ## Per-Turn Tool-Call Budget
 
 With neither budget key set in `[harness]`, a turn carries the built-in headless

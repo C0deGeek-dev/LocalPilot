@@ -262,13 +262,18 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
 
-**As shipped:** this crate is built and tested but **not yet wired to a caller**
-— it is intentionally staged, not live. It has no CLI, harness, or adapter
-entry point yet; the planned entry is a confirm-gated `localpilot self-review
-propose-patch` command that produces a worktree proposal and **stops at the
-`ApprovalToken` gate**. Wiring is deferred until the next self-improvement phase
-(see ADR-0034's as-shipped note). The gate stays correct by construction
-regardless: no autonomous path constructs a token.
+**As shipped:** this crate is the write half of the self-improvement loop and is
+**wired** — reached only through the confirm-gated `localpilot self-review
+propose-patch` / `promote` / `discard` commands. `propose-patch` has a model
+author a minimal, scope-confined edit for a ranked finding into an isolated
+worktree and **stops at the `ApprovalToken` gate**; `promote` applies it onto
+`main` only when an explicit human `--approve` mints the token (fast-forward
+only, never pushes); `discard` drops the worktree/branch. A proposal persists
+across invocations via its on-disk worktree plus its provenance record, so a
+human reviews the diff between proposing and promoting. The gate stays correct
+by construction: the sole `ApprovalToken` constructor is the explicit-human
+`--approve` path, so no autonomous path constructs a token (see ADR-0034's
+as-shipped note).
 
 ### `localpilot-quota`
 

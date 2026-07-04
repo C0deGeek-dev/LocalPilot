@@ -209,6 +209,17 @@ pub async fn resume_one_step_with_events(
             .ok()
             .and_then(|raw| Progress::parse(&raw).ok())
             .is_some_and(|updated| updated.step_is_done(step.number));
+        // The real per-step attempt/replan budget is owned by `step_loop`
+        // (`StepLoop`, above), which turns exhaustion into a bounded retry →
+        // discard → replan → give-up. The completion gate here judges only the
+        // step's *outcome* (tests, progress, commit message, quality), so the
+        // `attempt_limit` rule is intentionally fed a fixed `attempts = 1`: on
+        // this path it is a documented redundancy, not the enforcer (see
+        // `docs/06-harness-spec.md`, "Runtime status"). It is left as-is rather
+        // than dropped because with a configured `attempts_per_step = 1` a fed
+        // `attempts = max_attempts` would let the rule block an otherwise
+        // passing step — a behaviour change out of scope for a doc/dead-surface
+        // pass.
         let action = decide_step(
             rule_engine,
             &CompletionInputs {
