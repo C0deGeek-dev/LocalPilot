@@ -17,7 +17,7 @@
     <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
   </p>
   <p>
-    <img alt="version 2.1.3" src="https://img.shields.io/badge/version-2.1.3-7da7ff?style=flat-square">
+    <img alt="version 2.1.4" src="https://img.shields.io/badge/version-2.1.4-7da7ff?style=flat-square">
     <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-59636e?style=flat-square">
     <img alt="built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
     <img alt="GitHub stars" src="https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&amp;label=stars">
@@ -35,7 +35,7 @@ risky parts stay behind explicit permission boundaries.
 | **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
 | **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, or ACP adapter |
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
-| **Status** | `2.1.3` stable; public CLI, config, and provider contract follow SemVer |
+| **Status** | `2.1.4` stable; public CLI, config, and provider contract follow SemVer |
 
 ## Privacy by design
 
