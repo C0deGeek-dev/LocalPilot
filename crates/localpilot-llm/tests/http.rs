@@ -241,8 +241,8 @@ async fn response_body_decode_error_during_stream_is_not_reported_as_network() {
 
     assert!(events.iter().any(|event| matches!(
         event,
-        Err(ProviderError::StreamDecode(message))
-            if message.contains("response body read failed after stream opened")
+        Err(ProviderError::StreamTruncated { detail })
+            if detail.contains("response body read failed after stream opened")
     )));
     assert!(!events.iter().any(|event| matches!(
         event,

@@ -61,6 +61,15 @@ pub enum ProviderError {
     #[error("stream decode error: {0}")]
     StreamDecode(String),
 
+    /// The response stream ended before it completed — the server dropped the
+    /// connection mid-response, or closed the body without a completion marker.
+    /// Distinct from [`StreamDecode`](Self::StreamDecode), which is a malformed
+    /// but fully-framed event: a truncation is an infrastructure fault (a local
+    /// server that hung, crashed, or ran out of VRAM), so it is retryable and is
+    /// **not** treated as a bad model turn by the recovery ladder.
+    #[error("the response stream ended early: {detail}")]
+    StreamTruncated { detail: String },
+
     /// A tool call's streamed arguments did not parse as JSON. Carries the tool
     /// name and the byte length of the unparseable arguments, so the harness can
     /// recover an oversized write (e.g. steer the model to chunk the write)
@@ -97,13 +106,14 @@ impl ProviderError {
     /// Classify an error raised while reading an already-open response body.
     ///
     /// `reqwest` uses decode errors for invalid or truncated HTTP body framing,
-    /// so keep those in the stream-decode bucket instead of reporting them as
-    /// generic network failures.
+    /// so a decode error here means the stream was cut mid-response — classify it
+    /// as a [`StreamTruncated`](Self::StreamTruncated) (an infrastructure fault
+    /// the turn loop can retry), not a generic network failure.
     #[must_use]
     pub fn from_response_body_error(err: reqwest::Error) -> Self {
         let message = format!("response body read failed after stream opened: {err}");
         if err.is_decode() {
-            ProviderError::StreamDecode(message)
+            ProviderError::StreamTruncated { detail: message }
         } else {
             ProviderError::Network(message)
         }
@@ -124,7 +134,9 @@ impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         match self {
             ProviderError::RateLimit { quota } | ProviderError::Quota { quota } => quota.retryable,
-            ProviderError::Server { .. } | ProviderError::Network(_) => true,
+            ProviderError::Server { .. }
+            | ProviderError::Network(_)
+            | ProviderError::StreamTruncated { .. } => true,
             _ => false,
         }
     }
@@ -246,6 +258,11 @@ mod tests {
         }
         .is_retryable());
         assert!(ProviderError::Network("down".to_string()).is_retryable());
+        // A mid-stream truncation is an infrastructure fault the turn loop retries.
+        assert!(ProviderError::StreamTruncated {
+            detail: "cut".to_string()
+        }
+        .is_retryable());
         assert!(!ProviderError::Auth { request_id: None }.is_retryable());
         assert!(!ProviderError::InvalidRequest {
             message: "x".to_string()

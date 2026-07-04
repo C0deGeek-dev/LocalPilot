@@ -758,9 +758,9 @@ impl SseDecoder {
                 self.emit_done(out);
             } else {
                 self.done = true;
-                out.push_back(Err(ProviderError::StreamDecode(
-                    "stream ended before a completion marker".to_string(),
-                )));
+                out.push_back(Err(ProviderError::StreamTruncated {
+                    detail: "stream ended before a completion marker".to_string(),
+                }));
             }
         }
     }
@@ -1431,8 +1431,8 @@ mod tests {
         let events: Vec<_> = into_event_stream(body).collect().await;
         assert!(matches!(
             events.last(),
-            Some(Err(ProviderError::StreamDecode(message)))
-                if message.contains("completion marker")
+            Some(Err(ProviderError::StreamTruncated { detail }))
+                if detail.contains("completion marker")
         ));
     }
 
@@ -1443,8 +1443,8 @@ mod tests {
         ]);
         assert!(events.iter().any(|event| matches!(
             event,
-            Err(ProviderError::StreamDecode(message))
-                if message.contains("completion marker")
+            Err(ProviderError::StreamTruncated { detail })
+                if detail.contains("completion marker")
         )));
         assert!(!events
             .iter()

@@ -162,6 +162,26 @@ async fn stream_error_leaves_no_orphan() {
     assert_eq!(reason, StopReason::Done);
 }
 
+#[tokio::test]
+async fn stream_truncation_retries_the_turn_instead_of_a_bad_output_verdict() {
+    // A server that drops the stream mid-response (StreamTruncated) is a
+    // transient infrastructure fault, not a malformed model turn: the turn is
+    // retried (never routed to the bad-output / Degraded ladder), and a clean
+    // retry reaches Done.
+    let provider = FakeProvider::new()
+        .script(vec![
+            Ok(ModelEvent::TextDelta(
+                "partial answer before the server dropped".to_string(),
+            )),
+            Err(ProviderError::StreamTruncated {
+                detail: "connection reset".to_string(),
+            }),
+        ])
+        .text("recovered");
+    let reason = run_and_check(provider, SessionConfig::default()).await;
+    assert_eq!(reason, StopReason::Done);
+}
+
 /// One scripted model turn for the property: each variant exercises a
 /// different exit path of the loop.
 #[derive(Debug, Clone)]
