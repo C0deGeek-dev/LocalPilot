@@ -1,5 +1,6 @@
 ---
 source: crates/localpilot-cli/src/doctor.rs
+assertion_line: 719
 expression: render(&fixture())
 ---
 LocalPilot 0.0.0-test
@@ -21,6 +22,9 @@ tools:
   git (git): available
   ripgrep (rg): not found (optional)
   sqlite3 (sqlite3): not found (optional)
+
+mcp servers:
+  context7 (npx): connected; protocol 2025-06-18; 1 tool(s): get-library-docs (args: 2; command available)
 
 memory store: /work/.localmind
 capabilities: doctor-json, models-json

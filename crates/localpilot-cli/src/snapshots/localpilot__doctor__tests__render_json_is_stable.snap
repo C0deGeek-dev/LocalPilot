@@ -1,5 +1,6 @@
 ---
 source: crates/localpilot-cli/src/doctor.rs
+assertion_line: 724
 expression: render_json(&fixture())
 ---
 {
@@ -59,6 +60,21 @@ expression: render_json(&fixture())
       "command": "sqlite3",
       "available": false,
       "optional": true
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "context7",
+      "command": "npx",
+      "arg_count": 2,
+      "command_available": true,
+      "connected": true,
+      "protocol_version": "2025-06-18",
+      "tool_count": 1,
+      "tools": [
+        "get-library-docs"
+      ],
+      "error": null
     }
   ],
   "memory_root": "/work/.localmind",

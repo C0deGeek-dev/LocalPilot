@@ -8,7 +8,7 @@ mod doctor;
 #[path = "../src/output.rs"]
 mod output;
 
-use doctor::{ConfigPath, DoctorReport, ProviderStatus, ToolStatus, TrustState};
+use doctor::{ConfigPath, DoctorReport, McpServerStatus, ProviderStatus, ToolStatus, TrustState};
 use localpilot_config::CredentialSource;
 
 #[test]
@@ -60,6 +60,70 @@ fn doctor_renders_google_adc_source_without_file_contents() {
     assert!(rendered.contains("GOOGLE_APPLICATION_CREDENTIALS [google_adc_file]"));
     assert!(!rendered.contains("application_default_credentials"));
     assert!(!rendered.contains("refresh_token"));
+}
+
+#[test]
+fn doctor_reports_mcp_servers_without_printing_raw_args() {
+    let mut report = report();
+    report.mcp_servers = vec![
+        McpServerStatus {
+            name: "context7".to_string(),
+            command: "npx".to_string(),
+            arg_count: 2,
+            command_available: true,
+            connected: true,
+            protocol_version: Some("2025-06-18".to_string()),
+            tool_count: 2,
+            tools: vec![
+                "resolve-library-id".to_string(),
+                "get-library-docs".to_string(),
+            ],
+            error: None,
+        },
+        McpServerStatus {
+            name: "playwright".to_string(),
+            command: "npx".to_string(),
+            arg_count: 3,
+            command_available: true,
+            connected: false,
+            protocol_version: None,
+            tool_count: 0,
+            tools: Vec::new(),
+            error: Some("spawn npx: token [REDACTED] failed".to_string()),
+        },
+    ];
+
+    let rendered = doctor::render(&report);
+
+    assert!(rendered.contains("mcp servers:"));
+    assert!(rendered.contains("context7 (npx): connected; protocol 2025-06-18; 2 tool(s): resolve-library-id, get-library-docs"));
+    assert!(rendered.contains("failed; spawn npx: token [REDACTED] failed"));
+    assert!(rendered.contains("args: 2"));
+    assert!(!rendered.contains("@upstash/context7-mcp"));
+    assert!(!rendered.contains("secret-from-arg"));
+}
+
+#[test]
+fn doctor_json_includes_mcp_servers() {
+    let mut report = report();
+    report.mcp_servers = vec![McpServerStatus {
+        name: "context7".to_string(),
+        command: "npx".to_string(),
+        arg_count: 2,
+        command_available: true,
+        connected: true,
+        protocol_version: Some("2025-06-18".to_string()),
+        tool_count: 1,
+        tools: vec!["get-library-docs".to_string()],
+        error: None,
+    }];
+
+    let json: serde_json::Value =
+        serde_json::from_str(&doctor::render_json(&report)).expect("doctor JSON parses");
+
+    assert_eq!(json["mcp_servers"][0]["name"], "context7");
+    assert_eq!(json["mcp_servers"][0]["tools"][0], "get-library-docs");
+    assert_eq!(json["mcp_servers"][0]["arg_count"], 2);
 }
 
 fn report() -> DoctorReport {
@@ -126,6 +190,7 @@ fn report() -> DoctorReport {
                 optional: true,
             },
         ],
+        mcp_servers: Vec::new(),
         memory_root: Some("<memory-root>".to_string()),
         capabilities: vec![
             "doctor-json".to_string(),

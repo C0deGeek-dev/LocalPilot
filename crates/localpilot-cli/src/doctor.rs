@@ -7,10 +7,17 @@
 //! stdout or a snapshot.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use localpilot_config::{CliOverrides, ConfigPaths, CredentialSource, ProviderAuth};
+use localpilot_config::{
+    redact::redact, CliOverrides, ConfigPaths, CredentialSource, ProviderAuth,
+};
+use localpilot_mcp::{McpClient, StdioTransport, Transport};
 use serde::Serialize;
+
+const MCP_DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A point-in-time view of the local environment relevant to running the agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -25,6 +32,7 @@ pub struct DoctorReport {
     pub config_paths: Vec<ConfigPath>,
     pub providers: Vec<ProviderStatus>,
     pub tools: Vec<ToolStatus>,
+    pub mcp_servers: Vec<McpServerStatus>,
     /// The resolved LocalMind store root (walked up from the cwd), when one exists.
     pub memory_root: Option<String>,
     /// Stable capability tokens this build advertises, so a wrapper can
@@ -95,6 +103,20 @@ pub struct ToolStatus {
     pub optional: bool,
 }
 
+/// One configured MCP server and the result of probing its stdio endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub command: String,
+    pub arg_count: usize,
+    pub command_available: bool,
+    pub connected: bool,
+    pub protocol_version: Option<String>,
+    pub tool_count: usize,
+    pub tools: Vec<String>,
+    pub error: Option<String>,
+}
+
 /// Workspace trust state. Trust is established by the sandbox when a session
 /// starts; `doctor` only reports what it can observe ahead of that.
 // `Trusted`/`Untrusted` are produced by the sandbox trust check once a session
@@ -119,10 +141,18 @@ pub fn report() -> DoctorReport {
         config_paths: config_paths(),
         providers: providers(),
         tools: tools(),
+        mcp_servers: Vec::new(),
         memory_root: memory_root(),
         capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
     }
+}
+
+/// Gather a diagnostics report including a bounded live MCP probe.
+pub async fn report_with_mcp() -> DoctorReport {
+    let mut report = report();
+    report.mcp_servers = mcp_servers().await;
+    report
 }
 
 /// The resolved path of the running executable, when discoverable. Paired with
@@ -165,8 +195,8 @@ fn capabilities() -> Vec<String> {
 ///
 /// # Errors
 /// Returns any error from writing to `out`.
-pub fn run(out: &mut dyn Write) -> io::Result<()> {
-    run_with(out, crate::output::OutputFormat::Human)
+pub async fn run(out: &mut dyn Write) -> io::Result<()> {
+    run_with(out, crate::output::OutputFormat::Human).await
 }
 
 /// Gather a report and write it in the requested format. The JSON form is the
@@ -175,8 +205,8 @@ pub fn run(out: &mut dyn Write) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns any error from writing to `out`.
-pub fn run_with(out: &mut dyn Write, format: crate::output::OutputFormat) -> io::Result<()> {
-    let report = report();
+pub async fn run_with(out: &mut dyn Write, format: crate::output::OutputFormat) -> io::Result<()> {
+    let report = report_with_mcp().await;
     let rendered = match format {
         crate::output::OutputFormat::Human => render(&report),
         crate::output::OutputFormat::Json => render_json(&report),
@@ -262,6 +292,40 @@ pub fn render(report: &DoctorReport) -> String {
             (false, false) => "not found",
         };
         let _ = writeln!(s, "  {} ({}): {state}", t.name, t.command);
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "mcp servers:");
+    if report.mcp_servers.is_empty() {
+        let _ = writeln!(s, "  (none configured)");
+    }
+    for server in &report.mcp_servers {
+        let args = format!("args: {}", server.arg_count);
+        let command_state = if server.command_available {
+            "command available"
+        } else {
+            "command not found"
+        };
+        if server.connected {
+            let protocol = server
+                .protocol_version
+                .as_deref()
+                .map(|version| format!("; protocol {version}"))
+                .unwrap_or_default();
+            let tools = summarize_mcp_tools(&server.tools);
+            let _ = writeln!(
+                s,
+                "  {} ({}): connected{protocol}; {} tool(s): {tools} ({args}; {command_state})",
+                server.name, server.command, server.tool_count
+            );
+        } else {
+            let error = server.error.as_deref().unwrap_or("unknown error");
+            let _ = writeln!(
+                s,
+                "  {} ({}): failed; {error} ({args}; {command_state})",
+                server.name, server.command
+            );
+        }
     }
     let _ = writeln!(s);
 
@@ -437,6 +501,96 @@ fn tools() -> Vec<ToolStatus> {
     .collect()
 }
 
+async fn mcp_servers() -> Vec<McpServerStatus> {
+    let Some(config) = resolved_config() else {
+        return Vec::new();
+    };
+    let mut statuses = Vec::new();
+    for (name, server) in &config.mcp.servers {
+        statuses.push(probe_mcp_server(name, &server.command, &server.args).await);
+    }
+    statuses
+}
+
+fn resolved_config() -> Option<localpilot_config::Config> {
+    let cwd = std::env::current_dir().ok()?;
+    localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default()).ok()
+}
+
+async fn probe_mcp_server(name: &str, command: &str, args: &[String]) -> McpServerStatus {
+    let command_available = command_available(command);
+    let mut status = McpServerStatus {
+        name: name.to_string(),
+        command: command.to_string(),
+        arg_count: args.len(),
+        command_available,
+        connected: false,
+        protocol_version: None,
+        tool_count: 0,
+        tools: Vec::new(),
+        error: None,
+    };
+
+    if !command_available {
+        status.error = Some("command not found".to_string());
+        return status;
+    }
+
+    let probe = async {
+        let transport: Arc<dyn Transport> = Arc::new(StdioTransport::spawn(command, args)?);
+        let client = McpClient::new(Arc::clone(&transport));
+        let server_status = client.initialize().await?;
+        let tools = client.list_tools().await?;
+        Ok::<_, localpilot_mcp::McpError>((server_status, tools))
+    };
+
+    match tokio::time::timeout(MCP_DOCTOR_TIMEOUT, probe).await {
+        Ok(Ok((server_status, tools))) => {
+            status.connected = true;
+            status.protocol_version = Some(server_status.protocol_version);
+            status.tool_count = tools.len();
+            status.tools = tools.into_iter().map(|tool| tool.name).collect();
+        }
+        Ok(Err(error)) => {
+            status.error = Some(redact(&error.to_string()));
+        }
+        Err(_) => {
+            status.error = Some(format!("timed out after {}s", MCP_DOCTOR_TIMEOUT.as_secs()));
+        }
+    }
+    status
+}
+
+fn command_available(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.is_absolute()
+        || command.contains(std::path::MAIN_SEPARATOR)
+        || command.contains('/')
+        || command.contains('\\')
+    {
+        return path.is_file();
+    }
+    tool_on_path(command)
+}
+
+fn summarize_mcp_tools(tools: &[String]) -> String {
+    if tools.is_empty() {
+        return "(none)".to_string();
+    }
+    const MAX: usize = 6;
+    let shown = tools
+        .iter()
+        .take(MAX)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if tools.len() > MAX {
+        format!("{shown}, ... (+{} more)", tools.len() - MAX)
+    } else {
+        shown
+    }
+}
+
 /// Whether `command` resolves to an executable file on `PATH`.
 fn tool_on_path(command: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
@@ -545,6 +699,17 @@ mod tests {
                     optional: true,
                 },
             ],
+            mcp_servers: vec![McpServerStatus {
+                name: "context7".to_string(),
+                command: "npx".to_string(),
+                arg_count: 2,
+                command_available: true,
+                connected: true,
+                protocol_version: Some("2025-06-18".to_string()),
+                tool_count: 1,
+                tools: vec!["get-library-docs".to_string()],
+                error: None,
+            }],
             workspace_trust: TrustState::Unknown,
         }
     }

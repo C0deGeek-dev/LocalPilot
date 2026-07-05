@@ -18,6 +18,9 @@ tools:
   git (git): available
   ripgrep (rg): available
 
+mcp servers:
+  (none configured)
+
 memory store: <memory-root>
 capabilities: doctor-json, models-json, learning-workspace-flag, print-turn-timeout
 

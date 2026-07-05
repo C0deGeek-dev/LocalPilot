@@ -942,7 +942,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let is_tty = io::stdout().is_terminal();
             let resolved = output::resolve_format(format, json, is_tty);
             let mut stdout = io::stdout().lock();
-            doctor::run_with(&mut stdout, resolved)?;
+            doctor::run_with(&mut stdout, resolved).await?;
             stdout.flush()?;
         }
         Command::Models {
@@ -1537,7 +1537,7 @@ async fn run_default() -> anyhow::Result<()> {
         }
     }
     let mut stdout = io::stdout().lock();
-    doctor::run(&mut stdout)?;
+    doctor::run(&mut stdout).await?;
     stdout.flush()?;
     Ok(())
 }
