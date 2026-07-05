@@ -45,6 +45,26 @@ pub type ModelEventStream = Pin<Box<dyn Stream<Item = Result<ModelEvent, Provide
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 
+/// Safety valve for a `<think>` span that never closes — mirrors
+/// `localx-llama`'s `ThinkStripper::THINK_BAILOUT` (same bug family: a
+/// `<think>` string match can be a false positive, and nothing tells this
+/// filter no closing tag is coming until the stream itself ends). Unlike
+/// that stripper, `held` is drained almost every `push` call regardless of
+/// `in_thinking` (see `push`'s doc comment), so this filter tracks the
+/// running total in `thinking_bytes` instead of relying on `held.len()` —
+/// a run-away span delivered as many small deltas (the normal case for
+/// token-by-token SSE) would never trip a bare `held.len()` check.
+///
+/// 32 KiB, same reasoning as the LocalBox-side constant: generous for a
+/// legitimate long reasoning trace (local `keep_thinking` reasoning, or
+/// hosted Claude extended thinking, can run several thousand tokens), but
+/// bounded well under the turn's `LocalModelMaxOutputTokens` ceiling (16384
+/// tokens by default, ~60-90KB) so a misclassified span can't hold the
+/// visible reply hostage for the rest of the turn. Far larger than
+/// `THINK_CLOSE.len()` (8), so it cannot interact with
+/// `partial_tag_suffix`'s split-tag holdback.
+const THINKING_BAILOUT: usize = 32 * 1024;
+
 /// Routes `<think>`-tagged inline reasoning to [`ModelEvent::ReasoningDelta`]
 /// across delta boundaries.
 ///
@@ -52,14 +72,32 @@ const THINK_CLOSE: &str = "</think>";
 /// itself can be split across two deltas. Text that could be the start of a tag
 /// is held back until the next push (or [`InlineThinkingFilter::finish`])
 /// resolves it, so a partial tag at a chunk tail is never misrouted.
+///
+/// A `<think>` span that runs past `THINKING_BAILOUT` bytes without closing
+/// is given up on: `push` flips back to visible-text mode and flushes
+/// whatever's currently held as [`ModelEvent::TextDelta`] instead of
+/// continuing to route it to [`ModelEvent::ReasoningDelta`] (the "thinking"
+/// panel) for the rest of the turn.
 #[derive(Default)]
 pub(crate) struct InlineThinkingFilter {
     in_thinking: bool,
     held: String,
+    /// Cumulative bytes classified as reasoning in the current, still-open
+    /// span. Reset to 0 whenever a span (re)opens or bails out. Needed
+    /// because `held` itself does not accumulate the full span — see
+    /// `push`'s doc comment.
+    thinking_bytes: usize,
 }
 
 impl InlineThinkingFilter {
     /// Feed one text delta; returns the events that became unambiguous.
+    ///
+    /// Note for the bail-out below: reasoning content is *not* held in full
+    /// like `localx-llama`'s `ThinkStripper` buffers an in-think span — the
+    /// "no complete tag" branch below emits eagerly (minus a small
+    /// split-tag holdback) on every call, `in_thinking` or not. So `held`
+    /// alone never reflects how long the current span has run;
+    /// `thinking_bytes` tracks that instead.
     pub(crate) fn push(&mut self, delta: &str) -> Vec<ModelEvent> {
         self.held.push_str(delta);
         let mut events = Vec::new();
@@ -76,6 +114,30 @@ impl InlineThinkingFilter {
                 }
                 self.held.drain(..start + tag.len());
                 self.in_thinking = !self.in_thinking;
+                if self.in_thinking {
+                    // A span just (re)opened.
+                    self.thinking_bytes = 0;
+                }
+                continue;
+            }
+            if self.in_thinking
+                && self.thinking_bytes.saturating_add(self.held.len()) > THINKING_BAILOUT
+            {
+                // This span has run past THINKING_BAILOUT bytes total
+                // (across however many `push` calls it took) without a
+                // `</think>` in sight. Give up treating it as reasoning:
+                // flush whatever is currently held as ordinary visible text
+                // and flip back to text mode so anything after streams
+                // normally. Bytes already emitted as `ReasoningDelta` in
+                // earlier calls for this span can't be un-sent — this stops
+                // *more* of it from being misrouted, which is what unsticks
+                // the visible reply going forward.
+                let flushed = std::mem::take(&mut self.held);
+                if !flushed.is_empty() {
+                    events.push(ModelEvent::TextDelta(flushed));
+                }
+                self.in_thinking = false;
+                self.thinking_bytes = 0;
                 continue;
             }
             // No complete tag: emit everything except a tail that could still
@@ -84,6 +146,9 @@ impl InlineThinkingFilter {
             let emit_len = self.held.len() - keep;
             if emit_len > 0 {
                 let emitted: String = self.held.drain(..emit_len).collect();
+                if self.in_thinking {
+                    self.thinking_bytes += emitted.len();
+                }
                 events.push(make_event(emitted));
             }
             return events;
@@ -91,7 +156,10 @@ impl InlineThinkingFilter {
     }
 
     /// Flush held-back text at end of stream. A partial tag that never
-    /// completed is plain content; an unclosed thinking block stays reasoning.
+    /// completed is plain content; an unclosed thinking block stays
+    /// reasoning — unless it already bailed out past `THINKING_BAILOUT` in
+    /// `push`, in which case `in_thinking` is already `false` here and this
+    /// flushes as plain content too.
     pub(crate) fn finish(&mut self) -> Vec<ModelEvent> {
         if self.held.is_empty() {
             return Vec::new();
@@ -197,6 +265,68 @@ mod tests {
         let (text, reasoning) = run(&["trailing <thin"]);
         assert_eq!(text, "trailing <thin");
         assert_eq!(reasoning, "");
+    }
+
+    #[test]
+    fn reasoning_span_under_bailout_is_unaffected() {
+        let long = "z".repeat(THINKING_BAILOUT - 1);
+        let (text, reasoning) = run(&[&format!("<think>{long}")]);
+        assert_eq!(text, "");
+        assert_eq!(reasoning, long);
+    }
+
+    #[test]
+    fn reasoning_span_over_bailout_flushes_as_text_delta_mid_stream() {
+        let mut filter = InlineThinkingFilter::default();
+        let long = "z".repeat(THINKING_BAILOUT + 1);
+        // Flushed within this same push() call — not held for finish().
+        let events = filter.push(&format!("<think>{long}"));
+        assert_eq!(events, vec![ModelEvent::TextDelta(long.clone())]);
+
+        // Later text in a subsequent push() streams as ordinary TextDelta,
+        // proving `in_thinking` was reset to false, not just flushed once.
+        let events2 = filter.push(" more visible text");
+        assert_eq!(
+            events2,
+            vec![ModelEvent::TextDelta(" more visible text".to_string())]
+        );
+    }
+
+    #[test]
+    fn reasoning_span_delivered_as_many_small_deltas_still_trips_bailout() {
+        // Realistic SSE shape: the span arrives as many small deltas, not one
+        // giant one. A bailout keyed on `held.len()` alone would never fire
+        // here, because `held` is drained back to near-empty on every `push`
+        // regardless of `in_thinking` — this is why `thinking_bytes` tracks
+        // the running total across calls instead.
+        let mut filter = InlineThinkingFilter::default();
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        fn absorb(events: Vec<ModelEvent>, text: &mut String, reasoning: &mut String) {
+            for event in events {
+                match event {
+                    ModelEvent::TextDelta(t) => text.push_str(&t),
+                    ModelEvent::ReasoningDelta(r) => reasoning.push_str(&r),
+                    _ => {}
+                }
+            }
+        }
+        absorb(filter.push("<think>"), &mut text, &mut reasoning);
+        for _ in 0..(THINKING_BAILOUT + 100) {
+            absorb(filter.push("r"), &mut text, &mut reasoning);
+        }
+        assert!(
+            !text.is_empty(),
+            "bail-out never tripped across many small deltas (reasoning={}, text={})",
+            reasoning.len(),
+            text.len()
+        );
+        absorb(
+            filter.push(" more visible text"),
+            &mut text,
+            &mut reasoning,
+        );
+        assert!(text.contains("more visible text"), "text={text}");
     }
 
     #[test]

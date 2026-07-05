@@ -1431,7 +1431,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-codegraph"
-version = "2.1.5"
+version = "1.2.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "2.1.5"
+version = "1.2.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "2.1.5"
+version = "1.2.0"
 dependencies = [
  "idna_adapter",
  "localmind-core",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "2.1.5"
+version = "1.2.0"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1491,21 +1491,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "localmind-review"
-version = "2.1.5"
-dependencies = [
- "localmind-core",
-]
-
-[[package]]
 name = "localmind-store"
-version = "2.1.5"
+version = "1.2.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.15",
  "localmind-core",
  "localmind-inference",
- "localmind-review",
  "regex",
  "rusqlite",
  "serde",
