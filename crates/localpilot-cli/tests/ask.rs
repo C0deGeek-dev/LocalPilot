@@ -1,4 +1,4 @@
-﻿//! End-to-end test for `localpilot ask` against a mock OpenAI-compatible server.
+//! End-to-end test for `localpilot ask` against a mock OpenAI-compatible server.
 //! This exercises the Phase 2 "done when": a text-only ask streams an answer
 //! through configuration, the registry, and the provider — offline.
 
@@ -58,13 +58,8 @@ async fn ask_streams_text_from_a_configured_local_provider() {
 }
 
 fn localpilot_cmd() -> Command {
-    let mut command = Command::new("cargo");
-    command.args([
-        "run",
-        "--quiet",
-        "--manifest-path",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-        "--",
-    ]);
-    command
+    // The prebuilt test binary — never `cargo run` inside a test: nested
+    // cargo fights the build-dir lock under nextest (a hang on Linux, an
+    // exe-in-use failure on Windows) and re-resolves features.
+    Command::new(env!("CARGO_BIN_EXE_localpilot"))
 }

@@ -359,7 +359,7 @@ mod tests {
     fn gate_outcome(
         name: &str,
         status: crate::quality::CheckStatus,
-        severity: Option<localpilot_config::RuleSeverity>,
+        severity: Option<crate::quality::CheckSeverity>,
     ) -> CheckOutcome {
         CheckOutcome {
             name: name.to_string(),
@@ -394,15 +394,15 @@ mod tests {
 
     #[test]
     fn decide_step_blocks_an_audit_finding_over_a_lint_retry() {
+        use crate::quality::CheckSeverity;
         use crate::quality::CheckStatus;
-        use localpilot_config::RuleSeverity;
         // A blocking audit finding wins over an actionable lint retry.
         let action = decide_step(
             &engine(),
             &clean_inputs(),
             vec![
                 gate_outcome("clippy", CheckStatus::Failed, None),
-                gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+                gate_outcome("audit", CheckStatus::Failed, Some(CheckSeverity::Block)),
             ],
         );
         assert!(matches!(action, StepAction::Block(reason) if reason.contains("audit")));

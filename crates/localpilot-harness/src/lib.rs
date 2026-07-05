@@ -6,12 +6,10 @@
 //! engine layers on top of the permission engine and never bypasses it.
 #![forbid(unsafe_code)]
 
-mod ablation;
 mod brief;
 mod claim;
 mod compaction;
 mod decisions;
-mod discipline;
 mod dispatch_gate;
 mod error;
 mod evidence;
@@ -36,16 +34,11 @@ mod system_prompt;
 mod verify_target;
 mod worker;
 
-pub use ablation::{
-    ablation_matrix, attribute, composite_score, feature_signal, mean_std, rank, signal_value,
-    AblationArm, AttributionRow, CompositeOutcome, FeatureToggles,
-};
 pub use brief::Brief;
 pub use compaction::{
     compact, compact_with_summary, estimate_tokens, CompactionMetadata, CompactionMode,
 };
 pub use decisions::{today, Decision, Decisions};
-pub use discipline::DisciplineMetrics;
 pub use error::HarnessError;
 pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
 pub use handoff::{
@@ -53,11 +46,7 @@ pub use handoff::{
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,
 };
 pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
-pub use judge::{
-    blind, cohens_kappa, judge_prompt, parse_judge_block, parse_preference, preference_prompt,
-    resolve_preference, BlindedPair, Judge, JudgeBlock, JudgeCache, JudgeError, JudgeInput,
-    Preferred, RankingFixture, RankingTrust, RANKING_FIXTURES, RUBRIC,
-};
+pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
@@ -67,16 +56,25 @@ pub use project_analysis::{
 pub use project_instructions::{register_project_instructions_context, ProjectInstructionsContext};
 pub use quality::{
     program_on_path, propose_gate, ratify_gate, render_check, summarize_proposal, CheckOutcome,
-    CheckRunner, CheckStatus, GateRatification, ProposedCheck, ToolchainProfile,
+    CheckRunner, CheckSeverity, CheckStatus, GateRatification, ProposedCheck, ToolchainProfile,
     QUALITY_CHECK_TOOL,
 };
 pub use resume::{resume_one_step, resume_one_step_with_events, ResumeOutcome, QUOTA_PAUSE_KEY};
 pub use retrospective::{run_and_record, run_retrospective, Retrospective, RETROSPECTIVE_PROMPT};
 pub use rules::{trigger_for_cadence, Rule, RuleContext, RuleEngine, RuleVerdict, Trigger};
 pub use scorecard::{
-    build_scorecard, complexity_delta_in_diff, extract_process, single_run_discipline,
-    tests_added_in_diff, DiffStat, ProcessBlock, QualityBlock, ResultsBlock, RunInputs,
-    SchemaValidator, Scorecard, SpeedBlock, SCORECARD_SCHEMA,
+    build_scorecard, extract_process, single_run_discipline, speed_from_events, RunInputs,
+    SchemaValidator,
+};
+// The shared eval surface (scorecard contract, discipline metrics, blinded
+// judge, ablation) re-exported so consumers keep one import path.
+pub use localx_eval_core::{
+    ablation_matrix, attribute, blind, cohens_kappa, complexity_delta_in_diff, composite_score,
+    feature_signal, judge_prompt, mean_std, parse_judge_block, parse_preference, preference_prompt,
+    rank, resolve_preference, signal_value, tests_added_in_diff, AblationArm, AttributionRow,
+    BlindedPair, CompositeOutcome, DiffStat, DisciplineMetrics, FeatureToggles, Judge, JudgeBlock,
+    JudgeCache, JudgeError, JudgeInput, Preferred, ProcessBlock, QualityBlock, RankingFixture,
+    RankingTrust, ResultsBlock, Scorecard, SpeedBlock, RANKING_FIXTURES, RUBRIC, SCORECARD_SCHEMA,
 };
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,

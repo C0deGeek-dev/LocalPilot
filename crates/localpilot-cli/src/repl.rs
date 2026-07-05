@@ -30,9 +30,10 @@ use localpilot_sandbox::{
 use localpilot_store::Store;
 use localpilot_tools::BackgroundProcesses;
 use localpilot_tui::{
-    banner_text, handle_input, history_block_text, parse_slash, render, AppInput, AppState,
-    ApprovalRequest, BackgroundCommand, BackgroundProcess, Header, ImageAttachment, IngestAction,
-    Key, Mode, PlanItem, Profile as UiProfile, SlashAction, TrustPrompt, UiEvent,
+    banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
+    AppInput, AppState, ApprovalRequest, BackgroundCommand, BackgroundProcess, Header,
+    ImageAttachment, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
+    TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
@@ -141,13 +142,49 @@ fn describe(request: &PermissionRequest) -> ApprovalRequest {
 /// # Errors
 /// Returns an error if configuration, the provider, the workspace, or the
 /// terminal cannot be set up.
+/// Opt-in startup timing. With `LOCALPILOT_TIME_STARTUP=1` in the environment,
+/// each init step prints its own and the cumulative duration to stderr before the
+/// live region is drawn — to diagnose a slow startup (e.g. MCP server spawning).
+/// A no-op (zero cost, no output) when the variable is unset.
+struct StartupTimer {
+    on: bool,
+    start: Instant,
+    last: Instant,
+}
+
+impl StartupTimer {
+    fn new() -> Self {
+        let start = Instant::now();
+        Self {
+            on: std::env::var_os("LOCALPILOT_TIME_STARTUP").is_some(),
+            start,
+            last: start,
+        }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if !self.on {
+            return;
+        }
+        let now = Instant::now();
+        eprintln!(
+            "[startup] {label:<26} +{:>6} ms   (total {} ms)",
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.start).as_millis(),
+        );
+        self.last = now;
+    }
+}
+
 pub async fn run_chat(
     model: Option<&str>,
     provider_id: Option<&str>,
     profile: Profile,
 ) -> anyhow::Result<()> {
+    let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    timer.mark("config load");
 
     // Best-effort retention so `.localpilot/` cannot grow without bound. Errors
     // are ignored — cleanup must never block starting a chat — and it runs before
@@ -159,6 +196,7 @@ pub async fn run_chat(
         }
     }
 
+    timer.mark("store prune");
     let model = model
         .map(str::to_string)
         .or_else(|| config.resolve_model(provider_id))
@@ -182,16 +220,19 @@ pub async fn run_chat(
     // The real context window: per-provider config first, then best-effort
     // discovery from the local server's model listing. Failure means falling
     // back to the configured global budget, never an error.
+    timer.mark("provider registry");
     let mut context_window = provider.declaration().max_context_tokens;
     if context_window.is_none() {
         context_window = discovered_window(&config, provider_id, &model).await;
     }
+    timer.mark("context-window discovery");
 
     // Ask-gated actions suspend the turn and prompt in the TUI; the user's
     // y/n answer flows back through this channel to the permission engine.
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
+    timer.mark("mcp servers + tools");
     // Interactive session: apply the built-in safety rails so an unconfigured
     // project still bounds a runaway tool loop (ADR-0055). The interactive profile
     // uses a higher tool-call ceiling and no default wall-clock — a long
@@ -233,6 +274,7 @@ pub async fn run_chat(
         },
         Vec::new(),
     );
+    timer.mark("runtime (store + workspace)");
     runtime.set_broker(broker);
     // Hand the runtime the built provider map so `/model` switches are a lookup.
     runtime.set_registry(provider_registry);
@@ -241,6 +283,7 @@ pub async fn run_chat(
     // an undeclared-but-vision-capable local server. Default-off probe (a declared
     // provider is not probed); failure leaves the provider's declaration as the gate.
     runtime.set_image_support_override(resolved_image_support(&config, provider_id).await);
+    timer.mark("vision /props probe");
     localpilot_harness::register_project_analysis_context(
         &cwd,
         config.context.project_analysis,
@@ -257,6 +300,7 @@ pub async fn run_chat(
     // context-hook fabric; ingested folder knowledge is pulled on demand via the
     // knowledge_search tool rather than seeded here.
     localpilot_localmind::register_context_hook(&cwd, &mut runtime);
+    timer.mark("context hooks");
 
     let header = Header {
         version: env!("LOCALPILOT_VERSION").to_string(),
@@ -269,6 +313,7 @@ pub async fn run_chat(
         session_id: runtime.session_id().to_string(),
         update: crate::update::cached_notice(&cwd).await,
     };
+    timer.mark("update check");
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
     // sessions. Already-trusted folders (and bypass, which is explicit) skip it.
@@ -281,6 +326,7 @@ pub async fn run_chat(
     }
     // Seed the `@`-mention file list; refreshed after each turn (files may change).
     state.set_workspace_files(workspace_files(&cwd));
+    timer.mark("workspace file walk");
 
     // Seed prompt recall from the durable global history so Up/Down survives a
     // restart, scoped to this project (Ctrl-T views all projects). The store
@@ -292,6 +338,7 @@ pub async fn run_chat(
         localpilot_store::project_texts(&history_entries, &cwd),
         localpilot_store::all_texts(&history_entries),
     );
+    timer.mark("prompt history load");
 
     // Build the project knowledge index in the background on first use, so
     // `knowledge_search` has data without the first turn paying for a full walk.
@@ -307,11 +354,24 @@ pub async fn run_chat(
             let ingest_root = cwd.clone();
             let ingest_config = config.ingest.clone();
             tokio::task::spawn_blocking(move || {
-                let _ = localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode);
+                if let Err(error) =
+                    localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode)
+                {
+                    // A failed background index build makes knowledge_search return
+                    // nothing or stale results all session, indistinguishable from
+                    // "no matching knowledge" — surface it so it is diagnosable.
+                    tracing::warn!(
+                        target: "localpilot::ingest",
+                        %error,
+                        "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
+                    );
+                }
             });
         }
     }
 
+    timer.mark("knowledge index (mode check)");
+    timer.mark("READY — entering TUI");
     let session_id = runtime.session_id();
     let mut terminal = enter_terminal()?;
     // Print the launch banner once and seat the live region at the screen bottom.
@@ -1831,10 +1891,33 @@ fn slash_picker_exact_submit(state: &AppState, key: KeyEvent) -> bool {
     state.input.trim() == format!("/{}", suggestion.name)
 }
 
+/// Diagnostic: with `LOCALPILOT_DEBUG_STREAM=<file>` set, append each raw stream
+/// event to that file with the text shown escaped (`{:?}`, so `\n`, `<think>`,
+/// and blank runs are visible). Used to find what actually produces "empty lines"
+/// in a reply. A no-op when the variable is unset.
+fn debug_stream_log(kind: &str, text: &str) {
+    if let Some(path) = std::env::var_os("LOCALPILOT_DEBUG_STREAM") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "[{kind}] {text:?}");
+        }
+    }
+}
+
 fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
     match event {
-        RuntimeEvent::Text(text) => Some(UiEvent::TextDelta(text)),
-        RuntimeEvent::Reasoning(text) => Some(UiEvent::ReasoningDelta(text)),
+        RuntimeEvent::Text(text) => {
+            debug_stream_log("text", &text);
+            Some(UiEvent::TextDelta(text))
+        }
+        RuntimeEvent::Reasoning(text) => {
+            debug_stream_log("reasoning", &text);
+            Some(UiEvent::ReasoningDelta(text))
+        }
         RuntimeEvent::ToolStarted { id, name } => Some(UiEvent::ToolStarted { id, name }),
         RuntimeEvent::ToolFinished {
             id,
@@ -2083,7 +2166,14 @@ fn draw_ui(
     // freshly committed history from native scrollback before it scrolled
     // off-screen; holding the band fixed keeps every committed block in scrollback.
     let size = terminal.size()?;
-    let want_height = LIVE_REGION_HEIGHT.min(size.height.max(1));
+    // A modal blocking prompt (the first-run trust gate, a tool approval) needs
+    // more rows than the fixed streaming band so its last line — the [y]/[n]
+    // choice — is never clipped below the viewport. Grow to fit it, clamped to
+    // the window; every other state keeps the fixed band, so streaming still
+    // never resizes the viewport per token.
+    let base = LIVE_REGION_HEIGHT.min(size.height.max(1));
+    let want_height = blocking_prompt_height(state, size.width)
+        .map_or(base, |needed| needed.clamp(base, size.height.max(1)));
     let area = terminal.get_frame().area();
     if area.height != want_height || area.width != size.width {
         resize_viewport(terminal, want_height)?;

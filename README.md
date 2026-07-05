@@ -17,7 +17,7 @@
     <a href="https://c0degeek-dev.github.io/LocalStack/">LocalX</a>
   </p>
   <p>
-    <img alt="version 1.2.1" src="https://img.shields.io/badge/version-1.2.1-7da7ff?style=flat-square">
+    <img alt="version 2.1.5" src="https://img.shields.io/badge/version-2.1.5-7da7ff?style=flat-square">
     <img alt="Windows, Linux, and macOS" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-59636e?style=flat-square">
     <img alt="built with Rust" src="https://img.shields.io/badge/built%20with-Rust-b7410e?style=flat-square">
     <img alt="GitHub stars" src="https://img.shields.io/github/stars/C0deGeek-dev/LocalPilot?style=flat-square&amp;label=stars">
@@ -35,7 +35,7 @@ risky parts stay behind explicit permission boundaries.
 | **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
 | **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, or ACP adapter |
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
-| **Status** | `1.2.1` stable; public CLI, config, and provider contract follow SemVer |
+| **Status** | `2.1.5` stable; public CLI, config, and provider contract follow SemVer |
 
 ## Privacy by design
 
@@ -161,7 +161,9 @@ recipes from your sessions — **on by default** as of this release, and
 **local-only** (it never leaves your machine). Candidates enter a review queue;
 only accepted lessons become durable, machine-wide memory and return as context
 in future sessions. It is review-gated and redacted, so this is disclosure, not
-a data grab — opt out any time with `[learning] enabled = false`.
+a data grab — opt out any time with `[learning] enabled = false` in the
+project's **`.localmind.toml`** (the learning engine's config, not
+`.localpilot.toml`; see [localmind-integration.md](docs/localmind-integration.md)).
 
 ```text
 session ──> candidate lessons ──> your review ──> project memory ──> later sessions
@@ -169,7 +171,10 @@ session ──> candidate lessons ──> your review ──> project memory ─
 
 In a controlled uplift evaluation, accepted lessons moved a deliberately
 headroom-rich task set from **0% to 100%**, and the effect held on a second
-model. Nothing is written to durable memory without review.
+model. By default (`[review] mode = "manual"`) nothing is written to durable
+memory without human review; the opt-in `trusted`/`automatic` review modes
+auto-promote high-confidence candidates without prompting — see
+[localmind-integration.md](docs/localmind-integration.md).
 
 ## Pick the right guide
 

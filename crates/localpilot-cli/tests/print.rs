@@ -1,4 +1,4 @@
-﻿//! End-to-end test for `localpilot print` (non-interactive agent run).
+//! End-to-end test for `localpilot print` (non-interactive agent run).
 #![allow(clippy::unwrap_used)]
 
 use assert_cmd::Command;
@@ -60,13 +60,8 @@ async fn print_mode_emits_an_answer_and_makes_no_workspace_writes() {
 }
 
 fn localpilot_cmd() -> Command {
-    let mut command = Command::new("cargo");
-    command.args([
-        "run",
-        "--quiet",
-        "--manifest-path",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-        "--",
-    ]);
-    command
+    // The prebuilt test binary — never `cargo run` inside a test: nested
+    // cargo fights the build-dir lock under nextest (a hang on Linux, an
+    // exe-in-use failure on Windows) and re-resolves features.
+    Command::new(env!("CARGO_BIN_EXE_localpilot"))
 }

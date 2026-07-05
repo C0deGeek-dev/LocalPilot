@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use localpilot_config::redact::contains_secret;
 use localpilot_config::{Cadence, RuleSeverity};
 
-use crate::quality::{CheckOutcome, CheckStatus};
+use crate::quality::{CheckOutcome, CheckSeverity, CheckStatus};
 
 /// When a rule runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,7 +18,6 @@ pub enum Trigger {
     SessionStart,
     PreTool,
     PostTool,
-    PreEdit,
     PostEdit,
     PreShell,
     PostShell,
@@ -67,13 +66,9 @@ impl RuleVerdict {
 #[derive(Debug, Default, Clone)]
 pub struct RuleContext {
     pub uncommitted_unrelated: bool,
-    pub path_inside_workspace: Option<bool>,
-    pub path_secret_like: bool,
     pub commit_message: Option<String>,
     pub tests_passed: Option<bool>,
     pub progress_reflects_completion: Option<bool>,
-    pub test_first_required: bool,
-    pub editing_impl_before_tests: bool,
     pub attempts: u32,
     pub max_attempts: u32,
     /// Outcomes of the quality-gate checks that ran for this trigger, consumed by
@@ -143,27 +138,6 @@ rule!(
     triggers = [SessionStart]
 );
 rule!(
-    WorkspaceBoundary,
-    "workspace_boundary",
-    critical = true,
-    default = RuleSeverity::Block,
-    triggers = [PreTool, PreEdit]
-);
-rule!(
-    SecretFileGuard,
-    "secret_file_guard",
-    critical = true,
-    default = RuleSeverity::Warn,
-    triggers = [PreTool, PreEdit]
-);
-rule!(
-    TestFirstWhenConfigured,
-    "test_first_when_configured",
-    critical = false,
-    default = RuleSeverity::Warn,
-    triggers = [PreEdit]
-);
-rule!(
     SuiteGreen,
     "suite_green",
     critical = true,
@@ -174,7 +148,11 @@ rule!(
     ProgressUpdated,
     "progress_updated",
     critical = false,
-    default = RuleSeverity::Block,
+    // Advisory by default: the harness itself ticks PROGRESS.md when it commits a
+    // step (`Progress::mark_complete` on the commit path), so a not-yet-ticked
+    // step is a flag, not a hard stop — a Block here would deadlock the harness's
+    // own commit-and-tick flow. Configure to `block` to require the model to tick.
+    default = RuleSeverity::Warn,
     triggers = [PreCommit, StepComplete]
 );
 rule!(
@@ -215,39 +193,6 @@ impl NoStaleUncommitted {
                 severity,
                 "unrelated uncommitted changes are present; commit or stash them first",
             )
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl WorkspaceBoundary {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.path_inside_workspace == Some(false) {
-            at(
-                severity,
-                "the target path is outside the workspace boundary",
-            )
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl SecretFileGuard {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.path_secret_like {
-            at(severity, "the target looks like a secret-bearing file")
-        } else {
-            RuleVerdict::Allow
-        }
-    }
-}
-
-impl TestFirstWhenConfigured {
-    fn check(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict {
-        if ctx.test_first_required && ctx.editing_impl_before_tests {
-            at(severity, "implementation is being edited before its test")
         } else {
             RuleVerdict::Allow
         }
@@ -354,11 +299,11 @@ fn outcome_verdict(outcome: &CheckOutcome) -> RuleVerdict {
         )),
         CheckStatus::Errored => RuleVerdict::Block(format!("quality check `{name}` could not run")),
         CheckStatus::Failed => match outcome.severity {
-            Some(RuleSeverity::Off) => RuleVerdict::Allow,
-            Some(RuleSeverity::Warn) => {
+            Some(CheckSeverity::Off) => RuleVerdict::Allow,
+            Some(CheckSeverity::Warn) => {
                 RuleVerdict::Warn(format!("quality check `{name}` reported findings"))
             }
-            Some(RuleSeverity::Block) => {
+            Some(CheckSeverity::Block) => {
                 RuleVerdict::Block(format!("quality check `{name}` reported blocking findings"))
             }
             None => RuleVerdict::Retry(format!(
@@ -418,9 +363,6 @@ impl RuleEngine {
     pub fn with_baseline(config: &IndexMap<String, RuleSeverity>) -> Self {
         let rules: Vec<Box<dyn Rule>> = vec![
             Box::new(NoStaleUncommitted),
-            Box::new(WorkspaceBoundary),
-            Box::new(SecretFileGuard),
-            Box::new(TestFirstWhenConfigured),
             Box::new(SuiteGreen),
             Box::new(ProgressUpdated),
             Box::new(CommitMessageClean),
@@ -500,40 +442,6 @@ mod tests {
 
     #[test]
     fn each_baseline_rule_fires_on_its_condition() {
-        // workspace_boundary
-        assert!(matches!(
-            WorkspaceBoundary.evaluate(
-                &RuleContext {
-                    path_inside_workspace: Some(false),
-                    ..Default::default()
-                },
-                RuleSeverity::Block
-            ),
-            RuleVerdict::Block(_)
-        ));
-        // secret_file_guard
-        assert!(matches!(
-            SecretFileGuard.evaluate(
-                &RuleContext {
-                    path_secret_like: true,
-                    ..Default::default()
-                },
-                RuleSeverity::Warn
-            ),
-            RuleVerdict::Warn(_)
-        ));
-        // test_first_when_configured
-        assert!(matches!(
-            TestFirstWhenConfigured.evaluate(
-                &RuleContext {
-                    test_first_required: true,
-                    editing_impl_before_tests: true,
-                    ..Default::default()
-                },
-                RuleSeverity::Warn
-            ),
-            RuleVerdict::Warn(_)
-        ));
         // suite_green
         assert!(matches!(
             SuiteGreen.evaluate(
@@ -612,7 +520,7 @@ mod tests {
     fn gate_outcome(
         name: &str,
         status: CheckStatus,
-        severity: Option<RuleSeverity>,
+        severity: Option<CheckSeverity>,
     ) -> CheckOutcome {
         CheckOutcome {
             name: name.to_string(),
@@ -646,7 +554,7 @@ mod tests {
     #[test]
     fn quality_gate_blocks_failed_block_denied_and_errored() {
         for outcome in [
-            gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+            gate_outcome("audit", CheckStatus::Failed, Some(CheckSeverity::Block)),
             gate_outcome("fmt", CheckStatus::Denied, None),
             gate_outcome("test", CheckStatus::Errored, None),
         ] {
@@ -659,7 +567,7 @@ mod tests {
         let verdict = gate_verdict(
             &[
                 gate_outcome("clippy", CheckStatus::Failed, None),
-                gate_outcome("audit", CheckStatus::Failed, Some(RuleSeverity::Block)),
+                gate_outcome("audit", CheckStatus::Failed, Some(CheckSeverity::Block)),
             ],
             RuleSeverity::Block,
         );
@@ -683,7 +591,7 @@ mod tests {
             gate_outcomes: vec![gate_outcome(
                 "audit",
                 CheckStatus::Failed,
-                Some(RuleSeverity::Block),
+                Some(CheckSeverity::Block),
             )],
             ..RuleContext::default()
         };

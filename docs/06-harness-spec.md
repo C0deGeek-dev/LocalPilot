@@ -336,7 +336,6 @@ See ADR-0028 for the decision.
 - `session_start`
 - `pre_tool`
 - `post_tool`
-- `pre_edit`
 - `post_edit`
 - `pre_shell`
 - `post_shell`
@@ -354,29 +353,39 @@ See ADR-0028 for the decision.
 
 ### Baseline Rules
 
+> **Runtime status.** Each rule below has verdict logic and unit tests, but a
+> rule only fires in a live run when the runtime populates its trigger facts.
+> These are **runtime-active** (facts populated on the real path):
+> `no_stale_uncommitted`, `suite_green`, `quality_gate`, `commit_message_clean`,
+> `check_before_launch`, `attempt_limit` (the effective step cap is the
+> `StepLoop`; the rule receives `attempts = 1`), and `progress_updated` (the
+> headless completion gate re-reads `PROGRESS.md` after the turn and reports
+> whether the model actually ticked its step).
+>
+> **Workspace containment and secret-file protection are not harness rules.**
+> They are enforced **solely by the permission engine** at the tool-dispatch
+> choke-point — `dispatch_gated → PermissionEngine::decide` — which every file
+> and shell tool passes through on **every** profile, including `bypass`. A write
+> that resolves outside the workspace is denied there, and a read or edit of a
+> secret-like path is gated there (see [`docs/07`](07-security-and-privacy.md)),
+> independent of and prior to any rule evaluation. There is deliberately no
+> harness rule to configure for either property: the rule engine cannot grant a
+> side effect the permission engine denies, so mirroring these checks as rules
+> would only invite false reliance. The harness rule engine layers *workflow*
+> discipline (stale state, tests, commit hygiene, launch discipline) on top of
+> that boundary — it is not the boundary.
+>
+> Two further live-path caveats: `decision_logged` is not implemented as a rule —
+> a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it;
+> and phase-cadence `quality_gate` checks require a `phase_complete` trigger the
+> live loop does not emit outside tests. This list is the source of truth; treat
+> a rule's prose below as its *intent*, gated by this status.
+
 #### `no_stale_uncommitted`
 
 At session start, block if unrelated uncommitted files exist.
 
 Rationale: the harness must not mix user changes with agent changes.
-
-#### `workspace_boundary`
-
-Before file tools, deny writes outside workspace unless explicitly approved.
-
-#### `secret_file_guard`
-
-Before reads and edits, ask before touching secret-like files:
-
-- `.env`
-- private keys
-- credential stores
-- cloud config with tokens
-
-#### `test_first_when_configured`
-
-If a step is implementation-heavy and config requires test-first behavior, warn
-or block when implementation files are edited before tests.
 
 #### `suite_green`
 
@@ -583,6 +592,15 @@ This is a safety default, not a feature lever: unlike the verify gate (opt-in) o
 the broker (opt-in), an unbounded loop is a defect, so the rails ship on with a
 conservative bound. Rollback/tuning is config — raise or set the explicit
 `tool_call_budget`/`turn_timeout_secs`.
+
+> **Ownership boundary.** The rail *constants* — the headless `200`/`600 s` and
+> interactive `500` defaults — live in `localpilot-config`
+> (`DEFAULT_HEADLESS_TOOL_BUDGET_MAX`, `DEFAULT_HEADLESS_TURN_TIMEOUT_SECS`,
+> `DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX`), not in the harness. The harness
+> `SessionConfig` leaves `tool_call_budget`, `tool_call_budget_max`, and
+> `turn_timeout` at `None`; the caller resolves the profile-aware defaults from
+> config and passes them in. The harness enforces the bound it is handed — it
+> does not own the numbers.
 
 ## Per-Turn Tool-Call Budget
 

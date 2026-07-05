@@ -1,4 +1,8 @@
-﻿# Implementation Checklist
+# Implementation Checklist
+
+> **Historical — frozen at 2026-06-05, pre-1.0.** This checklist predates the
+> 1.0.0 cut and the v2.0.0 native-stack era; it is not a current status report.
+> For shipped behaviour, read the owning spec doc and `CHANGELOG.md`.
 
 Status as of 2026-06-05. Checked items mean the implementation exists and has
 local automated coverage unless the note says it still needs live validation.

@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used)]
 
 use localpilot_config::{load, CliOverrides, ConfigPaths};
-use localpilot_harness::{Judge, JudgeCache, RankingTrust};
+use localpilot_harness::{judge_ranking_selftest_live, Judge, JudgeCache, RankingTrust};
 use localpilot_llm::ProviderRegistry;
 
 #[test]
@@ -50,7 +50,7 @@ fn live_judge_ranking_selftest_is_gated() {
     let mut judge = Judge::new("live-ranking-selftest", JudgeCache::default());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let trust = rt
-        .block_on(judge.ranking_selftest_live(&provider, &model))
+        .block_on(judge_ranking_selftest_live(&mut judge, &provider, &model))
         .expect("the live ranking self-test should score the fixtures and return a verdict");
 
     match &trust {

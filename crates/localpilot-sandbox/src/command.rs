@@ -1,7 +1,12 @@
 //! Command risk classification.
 //!
-//! `run_shell` executes an argument list directly (no shell interpretation), so
-//! classification looks at the program and its arguments, not a shell string.
+//! `run_shell` runs in one of two modes: a direct argument list (no shell
+//! interpretation) or a shell-command string executed through the platform
+//! shell. Either way, classification here looks at a *program and its
+//! arguments*: the direct mode classifies them as given, and a shell string is
+//! parsed to a program + args first — but a shell string carrying shell
+//! metacharacters cannot be reduced that way, so it is classified `Unknown`,
+//! the most restrictive class, and is always gated (never silently downgraded).
 //! The per-OS classifiers are pure functions tested on every platform; the
 //! active-OS [`classify`] dispatches to the right one.
 

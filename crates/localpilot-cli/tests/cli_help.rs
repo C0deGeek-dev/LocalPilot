@@ -7,17 +7,11 @@ use assert_cmd::Command;
 #[test]
 #[cfg(feature = "tui")]
 fn tui_build_prints_top_level_help() {
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-            "--features",
-            "tui",
-            "--",
-            "--help",
-        ])
+    // The test only compiles with the tui feature, so the prebuilt test
+    // binary already carries it — never `cargo run` inside a test (nested
+    // cargo fights the build-dir lock under nextest).
+    let output = Command::new(env!("CARGO_BIN_EXE_localpilot"))
+        .arg("--help")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");

@@ -1,4 +1,4 @@
-﻿//! End-to-end tests for `localpilot memory`.
+//! End-to-end tests for `localpilot memory`.
 #![allow(clippy::unwrap_used)]
 
 use assert_cmd::Command;
@@ -67,13 +67,8 @@ fn promoted_memory(dir: &std::path::Path, lesson: &str) -> String {
 }
 
 fn localpilot_cmd() -> Command {
-    let mut command = Command::new("cargo");
-    command.args([
-        "run",
-        "--quiet",
-        "--manifest-path",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-        "--",
-    ]);
-    command
+    // The prebuilt test binary — never `cargo run` inside a test: nested
+    // cargo fights the build-dir lock under nextest (a hang on Linux, an
+    // exe-in-use failure on Windows) and re-resolves features.
+    Command::new(env!("CARGO_BIN_EXE_localpilot"))
 }

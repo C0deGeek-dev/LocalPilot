@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use localpilot_config::{load, AutoFix, Cadence, CheckConfig, CliOverrides, ConfigPaths};
 use localpilot_harness::{
-    complexity_delta_in_diff, extract_process, ratify_gate, resume_one_step, tests_added_in_diff,
-    CheckStatus, DiffStat, EvidenceLedger, ProposedCheck, QualityBlock, ResultsBlock, RuleEngine,
-    Scorecard, SessionConfig, SessionRuntime, SpeedBlock, SCORECARD_SCHEMA,
+    complexity_delta_in_diff, extract_process, ratify_gate, resume_one_step, speed_from_events,
+    tests_added_in_diff, CheckStatus, DiffStat, EvidenceLedger, ProposedCheck, QualityBlock,
+    ResultsBlock, RuleEngine, Scorecard, SessionConfig, SessionRuntime, SCORECARD_SCHEMA,
 };
 use localpilot_llm::{FakeProvider, ProviderRegistry};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -124,7 +124,7 @@ fn build_scorecard(
         },
         quality,
         process: extract_process(events, &ledger),
-        speed: SpeedBlock::from_events(events, wall_ms),
+        speed: speed_from_events(events, wall_ms),
         judge: None,
     }
 }

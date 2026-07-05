@@ -515,6 +515,17 @@ pub fn live_region_height(state: &AppState, width: u16) -> u16 {
     top_section_height(state, width) + composer_rows(state, width) + 2 + STATUS_ROWS
 }
 
+/// The live-region height a *modal blocking prompt* needs, when one is shown: the
+/// first-run trust gate or a pending tool approval. Both must display in full —
+/// their last line is the `[y]/[n]` choice the user has to see to answer — so the
+/// host grows its band to this (clamped to the window). Returns `None` for every
+/// other state (the activity tail, an open picker, plain idle), which keeps the
+/// fixed streaming band so per-token streaming never resizes the viewport.
+#[must_use]
+pub fn blocking_prompt_height(state: &AppState, width: u16) -> Option<u16> {
+    (state.trust.is_some() || state.approval.is_some()).then(|| live_region_height(state, width))
+}
+
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {
     let title = if state.busy {
         format!(
@@ -709,6 +720,12 @@ mod tests {
     /// gives the inline viewport — so tests see what the user sees.
     fn render_natural(state: &AppState, width: u16) -> String {
         let height = live_region_height(state, width).max(1);
+        render_at(state, width, height)
+    }
+
+    /// Render into a viewport of exactly `height` rows, to test what a specific
+    /// host band size shows (or clips).
+    fn render_at(state: &AppState, width: u16, height: u16) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, state)).unwrap();
@@ -960,6 +977,46 @@ mod tests {
         assert!(rendered.contains("Approve tool?"));
         assert!(rendered.contains("rm -rf build"));
         assert!(rendered.contains("[y] approve"));
+    }
+
+    #[test]
+    fn a_fixed_streaming_band_clips_the_trust_choice_that_the_grown_band_shows() {
+        // Regression: the host sized the inline viewport to a fixed 8-row band for
+        // every state, which clips the trust gate's last lines — including the
+        // [y]/[n] choice the user must see to answer. `blocking_prompt_height`
+        // grows the band to fit, so the choice is visible.
+        let mut state = state_with_input("");
+        state.trust = Some(TrustPrompt {
+            path: r"D:\repos\demo".to_string(),
+        });
+        let clipped = render_at(&state, 70, 8);
+        assert!(clipped.contains("Trust this folder?"), "{clipped}");
+        assert!(
+            !clipped.contains("[y] trust this folder"),
+            "the choice is clipped by the fixed band: {clipped}"
+        );
+        let needed = blocking_prompt_height(&state, 70).expect("trust is a blocking prompt");
+        assert!(needed > 8, "the trust gate needs more than the fixed band");
+        assert!(
+            render_at(&state, 70, needed).contains("[y] trust this folder"),
+            "the grown band must show the choice line"
+        );
+    }
+
+    #[test]
+    fn blocking_prompt_height_is_none_for_non_modal_states() {
+        // Idle, streaming activity, and an open picker all keep the fixed band, so
+        // the viewport is never resized per streamed token.
+        let mut state = state_with_input("hello");
+        assert_eq!(blocking_prompt_height(&state, 70), None);
+        state.streaming = "a streaming answer".to_string();
+        assert_eq!(blocking_prompt_height(&state, 70), None);
+        state.slash_picker = Some(SlashPicker {
+            query: "/c".to_string(),
+            items: Vec::new(),
+            selected: 0,
+        });
+        assert_eq!(blocking_prompt_height(&state, 70), None);
     }
 
     #[test]

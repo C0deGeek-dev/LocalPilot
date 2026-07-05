@@ -488,9 +488,9 @@ impl SseDecoder {
                 self.emit_done(out);
             } else {
                 self.done = true;
-                out.push_back(Err(ProviderError::StreamDecode(
-                    "stream ended before a completion marker".to_string(),
-                )));
+                out.push_back(Err(ProviderError::StreamTruncated {
+                    detail: "stream ended before a completion marker".to_string(),
+                }));
             }
         }
     }
@@ -578,10 +578,13 @@ impl SseDecoder {
                 if self.open_blocks.is_empty() && self.content_complete() {
                     self.emit_done(out);
                 } else {
+                    // `message_stop` arrived with a content block still open (or no
+                    // content framed): the response was cut mid-content, not a
+                    // malformed event — a truncation the turn loop can retry.
                     self.done = true;
-                    out.push_back(Err(ProviderError::StreamDecode(
-                        "stream stopped before content lifecycle completed".to_string(),
-                    )));
+                    out.push_back(Err(ProviderError::StreamTruncated {
+                        detail: "stream stopped before content lifecycle completed".to_string(),
+                    }));
                 }
             }
             Some("error") => {
@@ -822,8 +825,8 @@ mod tests {
         ]);
         assert!(events.iter().any(|event| matches!(
             event,
-            Err(ProviderError::StreamDecode(message))
-                if message.contains("completion marker")
+            Err(ProviderError::StreamTruncated { detail })
+                if detail.contains("completion marker")
         )));
         assert!(!events
             .iter()
@@ -850,8 +853,8 @@ mod tests {
         ]);
         assert!(events.iter().any(|event| matches!(
             event,
-            Err(ProviderError::StreamDecode(message))
-                if message.contains("completion marker")
+            Err(ProviderError::StreamTruncated { detail })
+                if detail.contains("completion marker")
         )));
         assert!(!events
             .iter()
@@ -866,8 +869,8 @@ mod tests {
         ]);
         assert!(events.iter().any(|event| matches!(
             event,
-            Err(ProviderError::StreamDecode(message))
-                if message.contains("completion marker")
+            Err(ProviderError::StreamTruncated { detail })
+                if detail.contains("completion marker")
         )));
         assert!(!events
             .iter()
@@ -882,7 +885,7 @@ mod tests {
         ]);
         assert!(events
             .iter()
-            .any(|event| matches!(event, Err(ProviderError::StreamDecode(_)))));
+            .any(|event| matches!(event, Err(ProviderError::StreamTruncated { .. }))));
         assert!(!events
             .iter()
             .any(|event| matches!(event, Ok(ModelEvent::Done))));
@@ -1012,8 +1015,8 @@ mod tests {
         let events: Vec<_> = into_event_stream(body).collect().await;
         assert!(matches!(
             events.last(),
-            Some(Err(ProviderError::StreamDecode(message)))
-                if message.contains("completion marker")
+            Some(Err(ProviderError::StreamTruncated { detail }))
+                if detail.contains("completion marker")
         ));
     }
 

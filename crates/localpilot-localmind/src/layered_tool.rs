@@ -176,8 +176,8 @@ mod tests {
     async fn fetch_returns_the_requested_body() {
         let dir = ingested();
         let ws = Workspace::new(dir.path()).unwrap();
-        let index = crate::layered::index_layer(dir.path(), "marker_widget", 5).unwrap();
-        let id = index[0].id.clone();
+        let hits = crate::ingest::search(dir.path(), "marker_widget").unwrap();
+        let id = hits[0].chunk_id.clone();
 
         let out = KnowledgeFetch
             .invoke(json!({ "ids": [id] }), &context(&ws))
@@ -204,9 +204,9 @@ mod tests {
     async fn expand_lists_document_neighbours() {
         let dir = ingested();
         let ws = Workspace::new(dir.path()).unwrap();
-        let index = crate::layered::index_layer(dir.path(), "marker_widget", 5).unwrap();
+        let hits = crate::ingest::search(dir.path(), "marker_widget").unwrap();
         let out = KnowledgeExpand
-            .invoke(json!({ "ids": [index[0].id.clone()] }), &context(&ws))
+            .invoke(json!({ "ids": [hits[0].chunk_id.clone()] }), &context(&ws))
             .await
             .unwrap();
         assert!(!out.is_error);

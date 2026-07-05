@@ -899,10 +899,16 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         .name("localpilot-main".to_string())
         .stack_size(MAIN_STACK_SIZE)
         .spawn(|| {
-            tokio::runtime::Builder::new_multi_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .build()?
-                .block_on(run())
+                .build()?;
+            let outcome = runtime.block_on(run());
+            // Detached background work (the first-session knowledge ingest is
+            // the big one) must never hold process exit hostage: a plain drop
+            // of the runtime waits for lingering blocking tasks to finish.
+            // Interrupted ingests resume on the next session open.
+            runtime.shutdown_background();
+            outcome
         })?;
     worker
         .join()

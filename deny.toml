@@ -70,3 +70,6 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# First-party LocalX shared tier (rev-pinned in Cargo.toml; the pin moves in
+# lockstep with LocalBox/LocalBench per the launcher-contract rule).
+allow-git = ["https://github.com/C0deGeek-dev/localx-llama"]

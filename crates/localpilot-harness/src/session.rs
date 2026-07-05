@@ -181,7 +181,9 @@ pub struct SessionConfig {
     /// clamped) per provider. Switchable mid-session.
     pub reasoning_effort: Option<localpilot_llm::ReasoningEffort>,
     /// How many times to retry a transient connection failure (network or
-    /// 5xx) before giving up, with exponential backoff between attempts.
+    /// 5xx) before giving up, with exponential backoff between attempts. Also
+    /// bounds retries of a mid-stream truncation (the server dropped the
+    /// response before completing it — see [`ProviderError::StreamTruncated`]).
     pub max_stream_retries: u32,
     /// Runtime context compaction mode.
     pub compaction_mode: CompactionMode,
@@ -1282,13 +1284,6 @@ impl SessionRuntime {
         self.steer.clone()
     }
 
-    /// A snapshot of the background processes started this session (via
-    /// `run_background`), for the UI to display and manage. Sorted by id.
-    #[must_use]
-    pub fn background_processes(&self) -> Vec<localpilot_tools::ProcStatus> {
-        self.background.list()
-    }
-
     /// A clonable handle to the background-process registry, so the UI can list
     /// and stop processes while a turn is in flight (the registry is
     /// interior-mutable behind a single lock).
@@ -1302,16 +1297,6 @@ impl SessionRuntime {
     #[must_use]
     pub fn background_registry(&self) -> &localpilot_tools::BackgroundProcesses {
         self.background.as_ref()
-    }
-
-    /// Stop and forget the background process `id`, returning whether it existed.
-    pub fn stop_background_process(&self, id: &str) -> bool {
-        self.background.stop_now(id)
-    }
-
-    /// Stop and forget every background process started this session.
-    pub fn stop_all_background_processes(&self) {
-        self.background.kill_all();
     }
 
     /// The hook fabric, for registering observers, context hooks, and tool
@@ -1840,6 +1825,10 @@ impl SessionRuntime {
         // estimate believed it fit. The first overflow forces a tighter
         // compaction and one retry; a second overflow this turn is terminal.
         let mut overflow_retried = false;
+        // A mid-stream truncation (the server dropped the response before it
+        // completed) is a transient infrastructure fault, retried up to
+        // `max_stream_retries` across turn iterations before giving up honestly.
+        let mut stream_truncated_retries: u32 = 0;
         // Total tool calls executed this turn, bounded by the budget controller.
         let mut tool_calls_used = 0usize;
         // Progress-aware ceiling: a productive turn extends to the hard max; a
@@ -1930,6 +1919,10 @@ impl SessionRuntime {
             let mut failed_tool: Option<String> = None;
             let mut output_limited = false;
             let mut overflow = false;
+            // The server dropped the stream before completing the response. Unlike
+            // a malformed turn, this is retried transiently, not fed to the
+            // bad-output recovery ladder.
+            let mut truncated = false;
             // Live degenerate-output guard, fed incrementally so a runaway
             // stream is aborted early without rescanning the whole turn.
             let mut monitor = StreamMonitor::default();
@@ -2005,6 +1998,17 @@ impl SessionRuntime {
                                 });
                                 self.record_event(SessionEventKind::QuotaPaused { reset });
                             }
+                            // A mid-stream truncation (the server dropped the
+                            // response before completing it — a local server that
+                            // hung, crashed, or ran out of VRAM) is an
+                            // infrastructure fault, not a bad model turn: it must
+                            // not spend recovery health toward Degraded or trigger
+                            // a "malformed output" repair aimed at a server that
+                            // already dropped. Retry the whole request instead.
+                            if matches!(err, ProviderError::StreamTruncated { .. }) {
+                                truncated = true;
+                                break;
+                            }
                             let _ = events
                                 .send(RuntimeEvent::Warning(format!("stream error: {err}")));
                             // A context-length rejection mid-stream is an
@@ -2032,6 +2036,34 @@ impl SessionRuntime {
                         },
                     }
                 }
+            }
+
+            if truncated {
+                // The server cut the stream mid-response. The partial text/calls
+                // this turn are discarded (never persisted), so re-issuing the
+                // same request is safe. Retry with backoff up to the transient
+                // ceiling, then stop with an honest reason — not a Degraded/
+                // malformed-output verdict the server, not the model, earned.
+                if stream_truncated_retries < self.config.max_stream_retries {
+                    stream_truncated_retries += 1;
+                    let max = self.config.max_stream_retries;
+                    let secs = 1u64 << (stream_truncated_retries - 1).min(5);
+                    let _ = events.send(RuntimeEvent::Warning(format!(
+                        "the model server ended the response early (it may have hung, crashed, \
+                         or run out of VRAM); retrying {stream_truncated_retries}/{max} in {secs}s"
+                    )));
+                    tokio::select! {
+                        () = cancel.cancelled() => return self.stop(events, StopReason::Cancelled),
+                        () = tokio::time::sleep(Duration::from_secs(secs)) => {}
+                    }
+                    continue;
+                }
+                let _ = events.send(RuntimeEvent::Warning(
+                    "the model server kept ending responses early; stopping this turn — check the \
+                     local server (it may have crashed or run out of VRAM)"
+                        .to_string(),
+                ));
+                return self.stop(events, StopReason::ProviderError);
             }
 
             if overflow {

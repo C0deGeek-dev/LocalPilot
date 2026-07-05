@@ -36,7 +36,7 @@ homepage = "https://github.com/C0deGeek-dev/LocalPilot"
 rust-version = "1.82"
 
 [workspace.dependencies]
-anyhow = "=1.0.95"
+anyhow = "=1.0.103"
 # OS clipboard access for pasting an image into the chat input. Used only by the
 # interactive TUI (behind the cli `tui` feature), so the default binary links no
 # clipboard backend.
@@ -79,6 +79,9 @@ insta = "=1.47.2"
 # macOS and Linux therefore use the `0600` fallback file — behaviour parity holds
 # (login/resolution work everywhere); only the backend differs. v3 is pinned
 # because v4 also requires edition 2024.
+# Shared LocalX eval primitives (scorecard contract, blind judge, ablation,
+# gated check runner, verify detection). Pinned by rev per the exact-pin policy.
+localx-eval-core = { git = "https://github.com/C0deGeek-dev/localx-llama.git", rev = "03768eabb6229062ab1ece6c64cd88a42de2a308" }
 keyring = { version = "=3.6.3", default-features = false, features = [
     "windows-native",
 ] }

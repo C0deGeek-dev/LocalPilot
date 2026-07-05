@@ -96,9 +96,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.95"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ac096ce696dc2fcabef30516bb13c0a68a11d30131d3df6f04711467681b04"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arboard"
@@ -1431,7 +1431,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "localmind-codegraph"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-core"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "serde",
  "thiserror",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-inference"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "idna_adapter",
  "localmind-core",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "localmind-mcp"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localmind-core",
  "localmind-store",
@@ -1491,13 +1491,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "localmind-review"
+version = "2.1.5"
+dependencies = [
+ "localmind-core",
+]
+
+[[package]]
 name = "localmind-store"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.15",
  "localmind-core",
  "localmind-inference",
+ "localmind-review",
  "regex",
  "rusqlite",
  "serde",
@@ -1510,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1550,13 +1558,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
  "tracing-subscriber",
  "wiremock",
 ]
 
 [[package]]
 name = "localpilot-config"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "figment",
  "ignore",
@@ -1574,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-core"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1584,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-harness"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1600,6 +1609,7 @@ dependencies = [
  "localpilot-store",
  "localpilot-tools",
  "localpilot-verify",
+ "localx-eval-core",
  "proptest",
  "serde",
  "serde_json",
@@ -1612,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-llm"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -1631,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-localmind"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1659,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-mcp"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "localpilot-core",
@@ -1674,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-patchgen"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localpilot-config",
  "serde",
@@ -1685,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-quota"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localpilot-config",
  "localpilot-llm",
@@ -1695,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-recovery"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "proptest",
  "serde",
@@ -1703,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-research"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -1713,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-rpc"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localpilot-core",
  "localpilot-harness",
@@ -1732,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-sandbox"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "dunce",
  "futures",
@@ -1743,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-selfreview"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "ignore",
  "regex",
@@ -1754,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-skills"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "figment",
@@ -1772,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-store"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localpilot-config",
  "localpilot-core",
@@ -1784,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tools"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "async-trait",
  "ignore",
@@ -1806,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-tui"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "insta",
  "ratatui",
@@ -1814,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "localpilot-verify"
-version = "1.2.1"
+version = "2.1.5"
 dependencies = [
  "localpilot-core",
  "localpilot-sandbox",
@@ -1822,6 +1832,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "localx-eval-core"
+version = "0.1.0"
+source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=03768eabb6229062ab1ece6c64cd88a42de2a308#03768eabb6229062ab1ece6c64cd88a42de2a308"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2231,9 +2253,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
  "bytes",
  "getrandom 0.3.1",

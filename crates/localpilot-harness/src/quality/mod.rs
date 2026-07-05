@@ -13,4 +13,4 @@ mod runner;
 pub use discovery::{program_on_path, propose_gate, ProposedCheck};
 pub use profiles::ToolchainProfile;
 pub use ratify::{ratify_gate, render_check, summarize_proposal, GateRatification};
-pub use runner::{CheckOutcome, CheckRunner, CheckStatus, QUALITY_CHECK_TOOL};
+pub use runner::{CheckOutcome, CheckRunner, CheckSeverity, CheckStatus, QUALITY_CHECK_TOOL};

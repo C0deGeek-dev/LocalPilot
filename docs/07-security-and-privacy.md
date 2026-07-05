@@ -407,6 +407,11 @@ remote-egress policy (`policies/remote-egress.md`) by construction:
   and checked against `[research.web] allowlist` (exact host or subdomain). An
   allowlisted host is fetched (bounded bytes and timeouts); every other host is
   **skipped and logged**, never fetched. An empty allowlist fetches nothing.
+- **Redirects are never followed.** The fetch client uses a no-redirect policy,
+  so an allowlisted host that returns a 3xx cannot bounce the request to a
+  non-allowlisted (or internal) host. A redirect is audited
+  (`decision=redirect-not-followed`) and yields no evidence — the allowlist is a
+  true egress boundary, not just a first-hop check.
 - **Only the sub-question leaves the machine.** The outbound text is the
   sub-question passed through the shared workspace redactor — never gathered
   evidence, file contents, or memory. The redactor is a second guard over the
@@ -424,6 +429,26 @@ A sample audit line:
 ```
 decision=allowed host=docs.rs url=https://docs.rs/tokio question=how does tokio schedule tasks
 ```
+
+### Two different network surfaces
+
+Research web egress (above) is the **allowlisted, audited, redacted** surface,
+default-off and reachable only via the loud `research --web` opt-in. It is *not*
+the only way the agent can touch the network, and the others are deliberately
+looser — know the difference:
+
+- **The builtin `fetch` tool** carries `Effect::Network` and no host allowlist:
+  under the `relaxed` permission profile an allowlisted `fetch` reaches **any**
+  host without the research path's per-host audit. It is a general fetch, gated
+  by the permission engine, not by the research allowlist.
+- **MCP tool servers** are gated as `Effect::Network` when invoked, but a stdio
+  MCP server is a local process that can do anything its own code does — the gate
+  covers *invoking the tool*, not what the server then reaches. Trust an MCP
+  server as you would any dependency you run.
+
+So "may the agent touch the network?" has two honest answers: the research path
+is a true audited allowlist boundary; `fetch`/MCP are permission-gated but
+host-agnostic. Choose the profile and allowlist accordingly.
 
 ## Quota Wait/Resume Safety
 

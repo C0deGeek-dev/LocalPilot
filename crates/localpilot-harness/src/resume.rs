@@ -202,11 +202,29 @@ pub async fn resume_one_step_with_events(
             .iter()
             .find(|outcome| outcome.name == "test")
             .map(CheckOutcome::passed);
+        // Re-read PROGRESS.md after the turn: did the model actually tick the
+        // step it claimed to complete? A best-effort re-read that cannot confirm
+        // the update leaves the (advisory) progress rule to flag it.
+        let progress_reflects_completion = read(&progress_path)
+            .ok()
+            .and_then(|raw| Progress::parse(&raw).ok())
+            .is_some_and(|updated| updated.step_is_done(step.number));
+        // The real per-step attempt/replan budget is owned by `step_loop`
+        // (`StepLoop`, above), which turns exhaustion into a bounded retry →
+        // discard → replan → give-up. The completion gate here judges only the
+        // step's *outcome* (tests, progress, commit message, quality), so the
+        // `attempt_limit` rule is intentionally fed a fixed `attempts = 1`: on
+        // this path it is a documented redundancy, not the enforcer (see
+        // `docs/06-harness-spec.md`, "Runtime status"). It is left as-is rather
+        // than dropped because with a configured `attempts_per_step = 1` a fed
+        // `attempts = max_attempts` would let the rule block an otherwise
+        // passing step — a behaviour change out of scope for a doc/dead-surface
+        // pass.
         let action = decide_step(
             rule_engine,
             &CompletionInputs {
                 tests_passed,
-                progress_reflects_completion: true,
+                progress_reflects_completion,
                 commit_message: commit_message.clone(),
                 attempts: 1,
                 max_attempts,

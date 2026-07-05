@@ -397,6 +397,11 @@ impl WebSource {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEB_FETCH_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(WEB_CONNECT_TIMEOUT_SECS))
+            // Do not auto-follow redirects: the host allowlist is checked once per
+            // proposed URL, so an allowlisted host that 302s to a non-allowlisted
+            // (or internal) host would otherwise be fetched un-audited. A 3xx is
+            // surfaced to `fetch`, which audits it and does not follow.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             client,
@@ -439,6 +444,15 @@ impl WebSource {
             .await
             .map_err(|error| SourceError::new("web", format!("fetch failed: {error}")))?;
         let status = response.status();
+        // A redirect is never followed (the target host is unvetted); audit and
+        // skip it so it can't become an un-allowlisted egress channel.
+        if status.is_redirection() {
+            append_audit(
+                &self.audit_log,
+                &audit_entry(url, host, "redirect-not-followed", query),
+            )?;
+            return Ok(None);
+        }
         let body = response
             .text()
             .await
@@ -855,6 +869,37 @@ mod tests {
         );
         let log = std::fs::read_to_string(&audit).unwrap();
         assert!(log.contains("decision=skipped"));
+    }
+
+    #[tokio::test]
+    async fn allowlisted_host_redirect_is_not_followed_and_is_audited() {
+        // An allowlisted host that 302s to another location must not be followed
+        // (that target host was never allowlisted), and the redirect is audited.
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "https://evil.example/x"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let evidence = source.gather("q", 3).await.unwrap();
+        assert!(evidence.is_empty(), "a redirect yields no evidence");
+        // The allowlisted host was requested once; the redirect target was not.
+        let hits = server.received_requests().await.unwrap();
+        assert_eq!(hits.len(), 1, "only the allowlisted host is contacted");
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=redirect-not-followed"),
+            "the redirect is audited: {log}"
+        );
     }
 
     #[tokio::test]

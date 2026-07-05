@@ -6,6 +6,112 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Removed three harness rules that were declared and unit-tested but never
+  evaluated on any live path: `workspace_boundary`, `secret_file_guard`, and
+  `test_first_when_configured`. Workspace containment and secret-file protection
+  are enforced solely by the permission engine at the tool-dispatch choke-point
+  (`dispatch_gated → PermissionEngine::decide`) on every profile including
+  `bypass` — the rules mirrored that boundary without ever firing, so two of them
+  carried a misleading `critical` flag. Their now-orphaned `RuleContext` fields
+  and the unused `pre_edit` trigger were removed with them. No enforcement
+  changes: the permission engine is unchanged. The harness spec's Runtime-status
+  note now states plainly that these properties are the permission engine's, not
+  the rule engine's.
+
+## v2.1.5 - 2026-07-04
+
+Coordinated LocalX release.
+
+## v2.1.4 - 2026-07-04
+
+Coordinated LocalX release.
+
+## v2.1.3 - 2026-07-03
+
+Coordinated LocalX release.
+
+- The harness step-completion gate no longer dead-locks its own commit. The
+  `progress_updated` rule was made runtime-active but kept its `block` default,
+  so once the gate re-read `PROGRESS.md` it refused to commit any step the model
+  had not already ticked — even though the harness ticks `PROGRESS.md` itself as
+  it commits. The rule is now advisory (`warn`) by default (still configurable to
+  `block`), restoring the commit-and-tick flow.
+
+## v2.1.2 - 2026-07-03
+
+Coordinated LocalX release.
+
+- The interactive TUI build compiles again. `localpilot-cli`'s `tui`-gated
+  modules call `tracing`, but only `tracing-subscriber` was declared, so the
+  release build (`--features tui,learning`) had failed since 2.1.0 — the v2.1.0
+  and v2.1.1 LocalPilot release artifacts never built. Declaring the `tracing`
+  dependency restores it (the trust-gate fix below now reaches a published
+  release).
+
+## v2.1.1 - 2026-07-03
+
+Coordinated LocalX release.
+
+- The first-run "Trust this folder?" prompt is no longer clipped: the inline
+  live region now grows to fit a modal gate (the trust prompt or a tool
+  approval) so its `[y]/[n]` choice line is always visible, instead of falling
+  below a fixed-height band. Streaming keeps the fixed band, so a per-token
+  redraw never resizes the viewport.
+
+## v2.1.0 - 2026-07-03
+
+Coordinated LocalX release.
+
+- Research web egress no longer follows HTTP redirects: a 3xx is treated as a
+  miss and audited, so an allowlisted host cannot bounce a fetch to an
+  off-allowlist destination.
+- The headless completion gate now evaluates the progress rule against the real
+  `PROGRESS.md` — it flags a step claimed done but not ticked, instead of always
+  passing.
+- Silent failures on the live session path now warn: a failed workspace-trust
+  persist (which would otherwise re-prompt every session) and a failed
+  background project-knowledge index build (which would otherwise make
+  `knowledge_search` return nothing/stale results with no cause).
+- Docs: the harness spec now states which baseline rules are runtime-active vs
+  declared-only (workspace containment and secret-file reads are enforced by the
+  permission engine); alpha-era wording removed from the user docs.
+- Internal: removed dead public API with no callers.
+
+## v2.0.2 - 2026-07-02
+
+Coordinated LocalX release.
+
+- **Exiting the REPL no longer waits for background work.** The
+  first-session knowledge ingest runs detached; the runtime previously
+  waited for it on shutdown, so quitting hung after the closeout line
+  until the walk finished. Interrupted ingests resume on the next
+  session open.
+- **CI integration suites exec the prebuilt test binary** instead of
+  `cargo run` per invocation (a nested-cargo build-lock hang killed the
+  Linux test job on every run since June 27; Windows intermittently
+  failed replacing the running executable).
+- **Supply-chain gate healed**: the first-party `localx-llama` git tier
+  is allow-listed with its lockstep-pin justification, `anyhow` is
+  pinned to the patched 1.0.103 (RUSTSEC-2026-0190), and `quinn-proto`
+  to 0.11.15 (RUSTSEC-2026-0185).
+
+## v2.0.1 - 2026-07-02
+
+Coordinated LocalX release.
+
+## v2.0.0 - 2026-07-02
+
+Coordinated LocalX release.
+
+- **The eval primitives moved to the shared `localx-eval-core` crate.** The
+  capability-scorecard wire contract, discipline metrics, blinded judge core,
+  ablation, gate-mediated check runner, and verify-command detection now live
+  in the public `localx-llama` repository (consumed as a rev-pinned git
+  dependency) so LocalBench can grade against the same contract. LocalPilot's
+  public API is unchanged — host-bound adapters re-export the shared names.
+  Recorded as ADR-0062; ADR-0063 and ADR-0064 record the ecosystem's
+  in-process no-think filter and native TUI doctrine.
+
 ## v1.2.1 - 2026-07-01
 
 Coordinated LocalX release.

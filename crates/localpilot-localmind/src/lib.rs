@@ -64,10 +64,7 @@ pub use inspector::{
     InspectedMemory, ProvenanceView,
 };
 pub use knowledge_tool::KnowledgeSearch;
-pub use layered::{
-    expand_layer, fetch_layer, index_layer, layered_pack, Expansion, FetchedBody, IndexEntry,
-    LayeredPack, RetrievalLayer,
-};
+pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
 pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
 pub use memory_search_tool::MemorySearch;
@@ -236,6 +233,13 @@ pub fn closeout_session(
         events.iter().map(|event| &event.kind),
     ));
 
+    // Learning is on by default but opt-out is honored fail-closed: `initialize`
+    // never clobbers an existing `.localmind.toml` (so a user's `enabled = false`
+    // survives), and `ProjectConfig::discover` runs `validate()`, which returns
+    // `LearningDisabled` when `[learning] enabled = false`. That surfaces here as
+    // `LearningError::Config` and the host caller treats it as "closeout skipped"
+    // — nothing is imported, extracted, or written. This is the single opt-out
+    // gate; there is no second `if enabled` check to keep in sync.
     initialize(project_root)?;
     let config =
         ProjectConfig::discover(project_root).map_err(|e| LearningError::Config(e.to_string()))?;

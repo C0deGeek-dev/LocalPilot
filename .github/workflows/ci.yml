@@ -132,3 +132,23 @@ jobs:
       # fresh root; then prove the produced binary runs.
       - run: cargo install --path crates/localpilot-cli --locked --root "$RUNNER_TEMP/install-smoke"
       - run: '"$RUNNER_TEMP/install-smoke/bin/localpilot" --help'
+
+  doc-drift:
+    name: doc drift guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: No retired PowerShell/.NET stack described as current
+        shell: bash
+        run: |
+          # The v2.0.0 native-Rust rewrite retired the PowerShell module and .NET
+          # TUI. Docs may reference them only as tagged history, never as current.
+          hits=$(grep -rniE '(Install-Module|\bPester\b|PSScriptAnalyzer|\.psm1|\.psd1)' \
+                   docs README.md --include='*.md' 2>/dev/null \
+                 | grep -viE 'retired|removed|history|migrat|1\.x|legacy|no longer' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::a doc describes the retired PowerShell/.NET stack as current:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "no retired-stack language in docs."

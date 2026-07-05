@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use localpilot_harness::{
     ablation_matrix, attribute, complexity_delta_in_diff, composite_score, extract_process,
-    mean_std, rank, tests_added_in_diff, AblationArm, CompositeOutcome, DiffStat, EvidenceLedger,
-    QualityBlock, ResultsBlock, RuleEngine, Scorecard, SessionConfig, SessionRuntime, SpeedBlock,
-    SCORECARD_SCHEMA,
+    mean_std, rank, speed_from_events, tests_added_in_diff, AblationArm, CompositeOutcome,
+    DiffStat, EvidenceLedger, QualityBlock, ResultsBlock, RuleEngine, Scorecard, SessionConfig,
+    SessionRuntime, SCORECARD_SCHEMA,
 };
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -152,7 +152,7 @@ fn run_arm(task: &SweepTask, arm: &AblationArm) -> Scorecard {
             tests_added_in_diff(&diff_text),
         ),
         process: extract_process(&events, &ledger),
-        speed: SpeedBlock::from_events(&events, wall_ms),
+        speed: speed_from_events(&events, wall_ms),
         judge: None,
     }
 }
