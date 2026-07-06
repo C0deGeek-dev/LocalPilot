@@ -1,11 +1,16 @@
-﻿//! CLI logging setup.
+//! CLI logging setup.
 //!
 //! Two modes, chosen by the environment:
 //!
 //! * Default — no `LOCALPILOT_LOG` set: logging follows `RUST_LOG` and writes to
 //!   the terminal, matching the historical `tracing_subscriber::fmt::init`
 //!   behaviour. This is left untouched so non-interactive commands keep their
-//!   stderr diagnostics.
+//!   stderr diagnostics. **Exception:** when the interactive `chat` TUI will own
+//!   the terminal, no terminal subscriber is installed at all — a mid-session
+//!   event (a provider error, a background-ingest warning) would print raw
+//!   ANSI/LF lines into the raw-mode inline viewport and corrupt it. The TUI
+//!   already surfaces provider warnings/errors as transcript notices; anything
+//!   more detailed is the file mode's job.
 //! * File — `LOCALPILOT_LOG` set to a filter (e.g. `debug`): logs are written to
 //!   a per-run file under `<cwd>/.localpilot/logs/` and nothing is emitted to the
 //!   terminal. The interactive `chat` TUI owns stdout, so terminal logging would
@@ -34,9 +39,14 @@ const TRANSPORT_DIRECTIVES: &str = "hyper=info,hyper_util=info,h2=info,reqwest=i
 /// Initialise logging. Returns the path of the active log file when file logging
 /// is enabled, so the caller can tell the user where to look; returns `None` in
 /// the default terminal mode.
-pub fn init(cwd: &Path) -> Option<PathBuf> {
+///
+/// `terminal_owned` says the command about to run is the interactive chat TUI:
+/// the terminal belongs to it, so the default terminal subscriber must not be
+/// installed (events are dropped unless `LOCALPILOT_LOG` routes them to a file).
+pub fn init(cwd: &Path, terminal_owned: bool) -> Option<PathBuf> {
     match std::env::var(ENV_VAR) {
         Ok(value) if !value.trim().is_empty() => init_file(cwd, value.trim()),
+        _ if terminal_owned => None,
         _ => {
             // Historical behaviour: terminal logging driven by `RUST_LOG`.
             let _ = tracing_subscriber::fmt().try_init();

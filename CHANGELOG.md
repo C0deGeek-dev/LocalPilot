@@ -6,6 +6,42 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Interactive-session hardening: child processes and the terminal are now
+  isolated from each other so a session can no longer freeze, lose Ctrl+C, or
+  have its display corrupted.
+  - **Child processes never take the interactive stdin or console.** Every child
+    spawned while the TUI may own the terminal — `run_shell` and its subtree,
+    background processes, MCP servers, and the stream-editor — gets a null stdin
+    (a child that reads stdin was consuming the TUI's keystrokes, including the
+    Ctrl+C key event raw mode depends on) and is detached from the console: on
+    Windows its own invisible console via `CREATE_NO_WINDOW` (a shared console
+    let any child or grandchild read `CONIN$` or re-cook the console mode), on
+    Unix a non-foreground process group so a direct `/dev/tty` read gets
+    SIGTTIN. Pinned by `spawn_invariants` source tests.
+  - **All UI text is scrubbed of terminal-control bytes before it can render.**
+    A degenerating local model's deltas, colored tool output, an ANSI-laden
+    notice, or a hostile update tag could previously reach the terminal raw and
+    flip its charset/wrap/keyboard-protocol modes out from under the TUI. Every
+    `UiEvent` text payload is now stripped of C0/C1 controls and whole ANSI
+    CSI/OSC sequences; the streaming path carries an incomplete trailing escape
+    across deltas (bounded) so a sequence split over two deltas is still
+    swallowed whole. Pastes route through the same scrub.
+  - The `chat` TUI no longer installs the default terminal log subscriber while
+    it owns the terminal, so a mid-session tracing event can't print raw lines
+    into the inline viewport (file logging via `LOCALPILOT_LOG` is unaffected).
+  - A panic under the event loop now restores the terminal (raw mode, keyboard
+    enhancement flags, bracketed paste) before the panic message prints, and a
+    launch-banner failure falls through to terminal teardown instead of leaving
+    the shell raw.
+  - Resuming a session replays the tail of its conversation into the transcript
+    instead of showing a blank screen; `/compact` and `/research` (and
+    research-mode prompts) run through the event pump so the UI stays live and
+    Ctrl+C cancels them; session close-out now learns from the session the user
+    actually ended in after `/new`, `/continue`, or `/fork`.
+  - Bumped `localx-eval-core` to the revision that isolates gated-check children
+    from the host terminal (the same stdin-inheritance class of bug in the eval
+    `CheckRunner`).
+
 - Removed three harness rules that were declared and unit-tested but never
   evaluated on any live path: `workspace_boundary`, `secret_file_guard`, and
   `test_first_when_configured`. Workspace containment and secret-file protection

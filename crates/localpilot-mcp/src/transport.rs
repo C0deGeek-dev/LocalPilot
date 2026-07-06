@@ -16,6 +16,11 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::McpError;
 
+/// Windows `CREATE_NO_WINDOW`: give the server its own invisible console
+/// instead of attaching it to the interactive TUI's (see `StdioTransport::spawn`).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// A request/response transport to an MCP server.
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -63,12 +68,23 @@ impl StdioTransport {
     /// Returns [`McpError::Transport`] if the process cannot be spawned or its
     /// stdio cannot be captured.
     pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
-        let mut child = Command::new(command)
+        let mut builder = Command::new(command);
+        builder
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        // An MCP server lives for the whole session next to the interactive
+        // TUI. Isolate it from the user's terminal: on Windows a shared
+        // console would let it read `CONIN$` (stealing keystrokes) or re-cook
+        // the shared console mode; on Unix a new process group means a direct
+        // `/dev/tty` read gets SIGTTIN instead of the TUI's input.
+        #[cfg(windows)]
+        builder.creation_flags(CREATE_NO_WINDOW);
+        #[cfg(unix)]
+        builder.process_group(0);
+        let mut child = builder
             .spawn()
             .map_err(|e| McpError::Transport(format!("spawn {command}: {e}")))?;
         let stdin = child

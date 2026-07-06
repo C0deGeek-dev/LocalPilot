@@ -311,7 +311,15 @@ pub async fn run_chat(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string()),
         session_id: runtime.session_id().to_string(),
-        update: crate::update::cached_notice(&cwd).await,
+        // Remote-sourced (a release tag via the GitHub API) and rendered into
+        // the banner without passing the state scrub — strip control bytes so
+        // a garbled or hostile tag can never reach the terminal raw.
+        update: crate::update::cached_notice(&cwd).await.map(|notice| {
+            notice
+                .chars()
+                .filter(|c| !c.is_ascii_control() && !('\u{80}'..='\u{9f}').contains(c))
+                .collect()
+        }),
     };
     timer.mark("update check");
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
@@ -372,28 +380,38 @@ pub async fn run_chat(
 
     timer.mark("knowledge index (mode check)");
     timer.mark("READY — entering TUI");
-    let session_id = runtime.session_id();
+    install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal()?;
-    // Print the launch banner once and seat the live region at the screen bottom.
-    launch_banner(&mut terminal, banner_text(&state.header))?;
-    let result = event_loop(
-        &mut terminal,
-        &mut state,
-        &mut runtime,
-        &mut approval_rx,
-        CommandHost {
-            approval_tx,
-            cwd: &cwd,
-            model: &model,
-            provider_id,
-            history: &history,
-        },
-    )
-    .await;
+    // Print the launch banner once and seat the live region at the screen
+    // bottom. A banner failure must still fall through to `leave_terminal` —
+    // an early `?` here would leave the shell in raw mode.
+    let result = match launch_banner(&mut terminal, banner_text(&state.header)) {
+        Ok(()) => {
+            event_loop(
+                &mut terminal,
+                &mut state,
+                &mut runtime,
+                &mut approval_rx,
+                CommandHost {
+                    approval_tx,
+                    cwd: &cwd,
+                    model: &model,
+                    provider_id,
+                    history: &history,
+                },
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     leave_terminal(&mut terminal)?;
     // Learn from the finished session. This is best-effort so terminal teardown
-    // is never held hostage by the learning subsystem.
-    crate::context_inject::close_out(&cwd, session_id);
+    // is never held hostage by the learning subsystem. The id is read *after*
+    // the event loop: `/new`, `/continue`, and `/fork` re-point the runtime
+    // mid-run, and a close-out against the id captured at startup would check
+    // the abandoned (often empty) session for lessons instead of the one the
+    // user actually worked in.
+    crate::context_inject::close_out(&cwd, runtime.session_id());
     result
 }
 
@@ -532,10 +550,7 @@ async fn submit_current_input(
         if state.mode == Mode::Research {
             // In research mode a bare prompt is a topic to research locally, not
             // a model turn.
-            state.busy = true;
-            let outcome = run_research_prompt(state, host, &model_prompt).await;
-            state.busy = false;
-            outcome
+            run_research_prompt(terminal, state, approval_rx, host, &model_prompt).await
         } else {
             state.busy = true;
             let outcome = run_turn(
@@ -658,10 +673,42 @@ async fn run_slash(
             state.apply(UiEvent::Notice("conversation cleared".to_string()));
         }
         SlashAction::Compact { force } => {
-            let summary = if force {
-                runtime.compact_conversation_force().await
-            } else {
-                runtime.compact_conversation().await
+            // Smart compaction may call the summarizer model, which can take
+            // up to the provider timeout against a wedged server. Drive it
+            // through the event pump so the UI stays live and Ctrl+C cancels
+            // (the summarizer future is dropped; the conversation is only
+            // mutated on completion, so a cancel leaves it unchanged).
+            let (_events, mut rx) = broadcast::channel::<RuntimeEvent>(4);
+            let cancel = CancellationToken::new();
+            state.busy = true;
+            let operation = async {
+                Ok(tokio::select! {
+                    summary = async {
+                        if force {
+                            runtime.compact_conversation_force().await
+                        } else {
+                            runtime.compact_conversation().await
+                        }
+                    } => Some(summary),
+                    () = cancel.cancelled() => None,
+                })
+            };
+            let summary = drive_runtime_operation(
+                terminal,
+                state,
+                approval_rx,
+                &mut rx,
+                &cancel,
+                std::time::Instant::now(),
+                None,
+                None,
+                operation,
+            )
+            .await;
+            state.busy = false;
+            let Some(summary) = summary? else {
+                state.apply(UiEvent::Notice("compaction cancelled".to_string()));
+                return Ok(());
             };
             state.apply(UiEvent::ContextUsage {
                 context_used: summary.context_used,
@@ -758,7 +805,7 @@ async fn run_slash(
             // current mode unchanged.
             Some(topic) => {
                 state.apply(UiEvent::UserMessage(format!("/research {topic}")));
-                run_research_prompt(state, host, &topic).await?;
+                run_research_prompt(terminal, state, approval_rx, host, &topic).await?;
             }
             // A bare `/research` enters persistent research mode.
             None => {
@@ -1067,6 +1114,12 @@ fn load_session_from_input(state: &mut AppState, runtime: &mut SessionRuntime, i
     }
 }
 
+/// How many trailing conversation messages a resume replays into the transcript
+/// view. The model's context is fully restored by `load_session` regardless;
+/// this only bounds what is re-shown on screen. Matches the `/sessions`
+/// listing's recent-10 convention.
+const RESUME_REPLAY_MESSAGES: usize = 10;
+
 fn load_session_id(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
@@ -1076,6 +1129,7 @@ fn load_session_id(
         Ok(()) => {
             state.clear_conversation_view();
             state.header.session_id = session.to_string();
+            replay_recent_transcript(state, runtime, session);
             state.apply(UiEvent::Notice(format!(
                 "resumed session {session}; current profile and trust apply"
             )));
@@ -1084,6 +1138,69 @@ fn load_session_id(
             state.apply(UiEvent::Notice(format!("resume failed: {error}")));
         }
     }
+}
+
+/// Re-show the tail of a resumed session's conversation so the user sees what
+/// they are continuing, not an empty screen. View-only: the runtime already
+/// holds the full restored history. User and assistant text messages only
+/// (tool traffic and runtime-synthesized repairs would be noise), routed
+/// through `state.apply` so the normal transcript invariants and scrubbing
+/// hold. Best-effort — an unreadable transcript degrades to the resume notice.
+fn replay_recent_transcript(
+    state: &mut AppState,
+    runtime: &SessionRuntime,
+    session: localpilot_core::SessionId,
+) {
+    use localpilot_core::Role;
+    let Ok(messages) = runtime.store().read_transcript(session) else {
+        return;
+    };
+    let (skipped, shown) = replay_selection(messages, RESUME_REPLAY_MESSAGES);
+    if skipped > 0 {
+        state.apply(UiEvent::Notice(format!(
+            "… {skipped} earlier message(s) not shown (context fully restored)"
+        )));
+    }
+    for (role, text) in shown {
+        match role {
+            Role::User => state.apply(UiEvent::UserMessage(text)),
+            _ => {
+                state.apply(UiEvent::TextDelta(text));
+                state.apply(UiEvent::TurnComplete);
+            }
+        }
+    }
+}
+
+/// Pick which resumed messages are re-shown: authored (non-synthetic) user and
+/// assistant text, keeping only the trailing `limit`. Returns how many eligible
+/// messages were elided along with the ones to show, oldest-first.
+fn replay_selection(
+    messages: Vec<localpilot_core::Message>,
+    limit: usize,
+) -> (usize, Vec<(localpilot_core::Role, String)>) {
+    use localpilot_core::Role;
+    let shown: Vec<(Role, String)> = messages
+        .into_iter()
+        .filter(|message| !message.is_synthetic())
+        .filter_map(|message| {
+            if !matches!(message.role, Role::User | Role::Assistant) {
+                return None;
+            }
+            let text = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some((message.role, text))
+        })
+        .collect();
+    let skipped = shown.len().saturating_sub(limit);
+    (skipped, shown.into_iter().skip(skipped).collect())
 }
 
 /// Handle the synchronous, fast `/ingest` actions (state reads/writes that
@@ -1341,9 +1458,14 @@ fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::R
 
 /// Run a local research pass for `topic` and post its output to the transcript.
 /// Local-only: web research is reached through the headless `research --web`
-/// path, not the interactive surface.
+/// path, not the interactive surface. The pass calls the model provider —
+/// potentially several sequential requests, each bounded only by the provider
+/// timeout — so it is driven through the event pump: the UI stays live and
+/// Ctrl+C cancels (dropping the in-flight research future).
 async fn run_research_prompt(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     host: &CommandHost<'_>,
     topic: &str,
 ) -> anyhow::Result<()> {
@@ -1356,9 +1478,38 @@ async fn run_research_prompt(
             return Ok(());
         }
     };
-    let mut output = Vec::new();
-    let result = crate::research::run_local_research(host.cwd, topic, &options, &mut output).await;
-    apply_command_result(state, output, result);
+    let (_events, mut rx) = broadcast::channel::<RuntimeEvent>(4);
+    let cancel = CancellationToken::new();
+    let cwd = host.cwd;
+    state.busy = true;
+    let operation = async {
+        let mut output = Vec::new();
+        let result = tokio::select! {
+            result = crate::research::run_local_research(cwd, topic, &options, &mut output) => {
+                Some(result)
+            }
+            () = cancel.cancelled() => None,
+        };
+        Ok((output, result))
+    };
+    let outcome = drive_runtime_operation(
+        terminal,
+        state,
+        approval_rx,
+        &mut rx,
+        &cancel,
+        std::time::Instant::now(),
+        None,
+        None,
+        operation,
+    )
+    .await;
+    state.busy = false;
+    let (output, result) = outcome?;
+    match result {
+        Some(result) => apply_command_result(state, output, result),
+        None => state.apply(UiEvent::Notice("research cancelled".to_string())),
+    }
     Ok(())
 }
 
@@ -1673,9 +1824,11 @@ fn resolve_event(
 }
 
 fn insert_paste(state: &mut AppState, text: String) {
-    // Normalize line endings so the row count and the expanded text are clean
-    // whether the paste arrived as a bracketed event or a key burst.
-    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    // Route the paste through the same scrub the transcript uses: line
+    // endings normalized, control bytes dropped, and whole ANSI sequences
+    // swallowed (e.g. colors copied out of another terminal), so nothing
+    // control-ish reaches the composer render or the model.
+    let text = localpilot_tui::scrub_text(text);
     if text.lines().count() >= 4 || text.len() > 400 {
         let placeholder = state.register_paste(text);
         state.insert_input(&placeholder);
@@ -2182,9 +2335,54 @@ fn draw_ui(
     Ok(())
 }
 
+/// Restore the terminal before a panic message prints. A panic under the
+/// event loop unwinds past `leave_terminal`, which would leave the user's
+/// shell in raw mode with the kitty keyboard flags and bracketed paste still
+/// enabled — and print the panic message staircased into the raw-mode screen.
+/// The hook undoes the `enter_terminal` state first, then defers to the
+/// previous hook.
+///
+/// Restore runs only when the *driver thread* panics. The event loop is the
+/// root future of `Runtime::block_on`, polled on the thread that installed
+/// this hook — a panic there is fatal to the session, so restoring is right.
+/// A panic on any other thread is a tokio task panic the runtime catches
+/// (surfacing as a `JoinError`) while the session keeps running; restoring
+/// then would itself break raw-mode input under the live TUI. Installed once,
+/// just before raw mode is enabled; every restore operation is a harmless
+/// no-op on a terminal that was already restored normally.
+fn install_terminal_restore_panic_hook() {
+    let driver = std::thread::current().id();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == driver {
+            let mut stdout = io::stdout();
+            let _ = execute!(
+                stdout,
+                PopKeyboardEnhancementFlags,
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
+            let _ = terminal::disable_raw_mode();
+        }
+        previous(info);
+    }));
+}
+
 fn enter_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
-    let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
+    // Raw mode is on from here: an error in the rest of the setup must not
+    // leave the shell raw on the early-return path.
+    match enter_terminal_inner() {
+        Ok(terminal) => Ok(terminal),
+        Err(error) => {
+            let _ = terminal::disable_raw_mode();
+            Err(error)
+        }
+    }
+}
+
+fn enter_terminal_inner() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+    let mut stdout = io::stdout();
     // Stay in the main screen buffer (no alternate screen) and do not capture the
     // mouse, so native scrollback, selection, copy/paste, and scrollwheel keep
     // working. Bracketed paste is still enabled so large pastes arrive as one
@@ -2402,6 +2600,35 @@ mod tests {
                 "turn-{i} was lost while the live-region content oscillated"
             );
         }
+    }
+
+    #[test]
+    fn resume_replay_keeps_the_conversation_tail_and_skips_noise() {
+        use localpilot_core::{Message, Role};
+        // Tool traffic, synthetic repairs, and system prompts are noise; only
+        // authored user/assistant text is re-shown, bounded to the trailing N.
+        let mut messages = vec![
+            Message::text(Role::System, "setup prompt"),
+            Message::text(Role::User, "repair").into_synthetic("tool repair"),
+            Message::text(Role::Tool, "tool result"),
+        ];
+        for i in 0..6 {
+            messages.push(Message::text(Role::User, format!("q{i}")));
+            messages.push(Message::text(Role::Assistant, format!("a{i}")));
+        }
+
+        let (skipped, shown) = replay_selection(messages, 10);
+        assert_eq!(skipped, 2, "12 eligible messages, limit 10");
+        assert_eq!(shown.len(), 10);
+        assert_eq!(
+            shown.first().unwrap().1,
+            "q1",
+            "oldest shown is the tail start"
+        );
+        assert_eq!(shown.last().unwrap().1, "a5", "newest message is kept");
+        assert!(shown
+            .iter()
+            .all(|(role, _)| matches!(role, Role::User | Role::Assistant)));
     }
 
     #[test]

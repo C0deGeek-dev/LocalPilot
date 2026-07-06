@@ -14,6 +14,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+#[cfg(windows)]
+use crate::builtins::CREATE_NO_WINDOW;
 use crate::builtins::{binary_placeholder, cap, looks_binary};
 use crate::contract::{
     Idempotency, Postcondition, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
@@ -461,6 +463,12 @@ impl Tool for RunShell {
             // The de-verbatim spawn cwd: a launched shell cannot `cd` into the
             // verbatim `\\?\…` containment root, so it must run in `process_dir()`.
             .current_dir(ctx.workspace.process_dir())
+            // Never inherit the interactive console's stdin: the child (and its
+            // grandchildren under the shell wrapper) would share the TUI's input
+            // handle, and any of them that reads stdin steals the user's
+            // keystrokes — including the Ctrl+C key event raw mode relies on.
+            // A command that needs input gets immediate EOF instead of hanging.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // We reap the whole process tree explicitly on timeout (below). Do not
@@ -469,9 +477,20 @@ impl Tool for RunShell {
             // real workload (a hung test run can hold gigabytes).
             .kill_on_drop(false);
         // On Unix, lead a new process group so a timeout can signal the whole tree
-        // with a single negative-pid kill, even after the group leader exits.
+        // with a single negative-pid kill, even after the group leader exits. The
+        // new group is also never the terminal's foreground group, so a child
+        // that opens `/dev/tty` directly gets SIGTTIN/SIGTTOU instead of the
+        // TUI's keystrokes or terminal modes.
         #[cfg(unix)]
         command.process_group(0);
+        // On Windows, give the child its own invisible console instead of
+        // attaching it to the TUI's. A shared console lets any child (or
+        // grandchild) read the console input buffer via CONIN$ — stealing
+        // keystrokes even with a null stdin — or re-cook the shared console
+        // mode with SetConsoleMode, breaking raw mode and the keyboard
+        // protocol out from under crossterm.
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
 
         let child = command
             .spawn()
@@ -582,6 +601,33 @@ mod tests {
         assert!(
             format!("{err:?}").contains("timed out"),
             "expected a timeout error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_shell_never_hands_the_interactive_stdin_to_the_child() {
+        // `sort` with no input file reads stdin until EOF. With an inherited
+        // interactive stdin the child would sit consuming the console's input
+        // — stealing the TUI's keystrokes — until the timeout reaped it. With
+        // stdin nulled it sees immediate EOF and exits at once.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            retention: None,
+            processes: None,
+        };
+        let input = json!({ "program": "sort", "timeout_secs": 10 });
+        let output = RunShell
+            .invoke(input, &ctx)
+            .await
+            .expect("sort on a null stdin must exit promptly, not hit the timeout");
+        assert!(
+            !output.is_error,
+            "sort on a null stdin should exit cleanly: {}",
+            output.text
         );
     }
 

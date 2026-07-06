@@ -135,9 +135,25 @@ impl BackgroundProcesses {
         command
             .args(&args)
             .current_dir(cwd)
+            // Never inherit the interactive console's stdin: a background child
+            // lives for the rest of the session, and one that reads stdin would
+            // permanently steal the TUI's keystrokes (typing and the Ctrl+C key
+            // event both go to whichever process reads the console first).
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // On Unix, lead a new process group: never the terminal's foreground
+        // group, so a child that opens `/dev/tty` directly gets SIGTTIN/SIGTTOU
+        // instead of the TUI's keystrokes or terminal modes.
+        #[cfg(unix)]
+        command.process_group(0);
+        // On Windows, give the child its own invisible console instead of the
+        // TUI's shared one (see `CREATE_NO_WINDOW` in `builtins`): a session-long
+        // background child must never be able to read `CONIN$` or re-cook the
+        // shared console mode.
+        #[cfg(windows)]
+        command.creation_flags(crate::builtins::CREATE_NO_WINDOW);
 
         let mut child = command
             .spawn()
@@ -521,6 +537,32 @@ mod tests {
         );
         assert!(procs.list().is_empty(), "a stopped process is forgotten");
         assert!(!procs.stop(&id).await, "stopping an unknown id is a no-op");
+    }
+
+    #[tokio::test]
+    async fn a_background_child_never_inherits_the_interactive_stdin() {
+        // `sort` with no input file reads stdin until EOF. With an inherited
+        // interactive stdin it would sit on the console — consuming the TUI's
+        // keystrokes for the rest of the session — and register as Running.
+        // With stdin nulled it sees immediate EOF and exits within the grace.
+        let dir = tempfile::tempdir().unwrap();
+        let procs = BackgroundProcesses::new();
+
+        let outcome = procs
+            .start(
+                RunShellExecution::Direct {
+                    program: "sort".to_string(),
+                    args: Vec::new(),
+                },
+                dir.path(),
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, StartOutcome::ExitedEarly { .. }),
+            "sort on a null stdin must exit before the grace period"
+        );
     }
 
     #[tokio::test]

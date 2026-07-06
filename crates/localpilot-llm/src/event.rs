@@ -321,11 +321,7 @@ mod tests {
             reasoning.len(),
             text.len()
         );
-        absorb(
-            filter.push(" more visible text"),
-            &mut text,
-            &mut reasoning,
-        );
+        absorb(filter.push(" more visible text"), &mut text, &mut reasoning);
         assert!(text.contains("more visible text"), "text={text}");
     }
 

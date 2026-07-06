@@ -256,6 +256,12 @@ pub struct AppState {
     pub spinner: usize,
     /// Seconds elapsed in the in-flight turn, updated by the host each tick.
     pub working_secs: u64,
+    /// An incomplete trailing escape sequence held back from the visible text
+    /// stream, completed by the next [`UiEvent::TextDelta`] (see
+    /// [`scrub_streaming`]). Cleared when the stream ends or is discarded.
+    text_escape_carry: String,
+    /// The same holdback for the reasoning stream.
+    reasoning_escape_carry: String,
 }
 
 impl AppState {
@@ -294,6 +300,8 @@ impl AppState {
             busy: false,
             spinner: 0,
             working_secs: 0,
+            text_escape_carry: String::new(),
+            reasoning_escape_carry: String::new(),
         }
     }
 
@@ -604,6 +612,8 @@ impl AppState {
     pub fn clear_conversation_view(&mut self) {
         self.transcript.clear();
         self.streaming.clear();
+        self.text_escape_carry.clear();
+        self.reasoning_escape_carry.clear();
         self.thinking.text.clear();
         self.plan.clear();
         self.active_tools.clear();
@@ -889,9 +899,18 @@ impl AppState {
     }
 
     /// Apply a mapped runtime/UI event to the state.
+    ///
+    /// Every text payload is scrubbed of terminal-control bytes first: state
+    /// text is rendered into the terminal verbatim (both the live region and
+    /// the `insert_before` scrollback commits), so a stray ESC/C0 byte — a
+    /// degenerating local model's delta, colored tool output, an ANSI-laden
+    /// notice — would otherwise reach the terminal raw and can flip its modes
+    /// (charset, wrapping, keyboard-protocol state) out from under the TUI.
     pub fn apply(&mut self, event: UiEvent) {
+        let event = scrub_event(event);
         match event {
             UiEvent::TextDelta(delta) => {
+                let delta = scrub_streaming(&mut self.text_escape_carry, delta);
                 let delta = if self.streaming.is_empty() {
                     delta.trim_start_matches(['\r', '\n']).to_string()
                 } else {
@@ -902,6 +921,7 @@ impl AppState {
                 }
             }
             UiEvent::ReasoningDelta(delta) => {
+                let delta = scrub_streaming(&mut self.reasoning_escape_carry, delta);
                 // Skip whitespace-only reasoning deltas so the thinking panel
                 // does not fill with blank lines.
                 if !delta.trim().is_empty() {
@@ -909,6 +929,10 @@ impl AppState {
                 }
             }
             UiEvent::TurnComplete => {
+                // The stream ended: an escape sequence still held back can
+                // never complete, so it is dropped with the carry.
+                self.text_escape_carry.clear();
+                self.reasoning_escape_carry.clear();
                 self.flush_streaming_assistant();
             }
             UiEvent::UserMessage(text) => self.transcript.push(TranscriptLine {
@@ -941,8 +965,12 @@ impl AppState {
             }
             UiEvent::RecoveryNotice(text) => {
                 // Drop the in-progress (bad) streamed text so the retry starts on a
-                // fresh line instead of appending to the discarded output.
+                // fresh line instead of appending to the discarded output. Both
+                // escape carries go with it — the retry is a fresh stream, and a
+                // stale unterminated-sequence holdback would swallow its start.
                 self.streaming.clear();
+                self.text_escape_carry.clear();
+                self.reasoning_escape_carry.clear();
                 self.transcript.push(TranscriptLine {
                     speaker: "system".to_string(),
                     text,
@@ -1093,6 +1121,216 @@ pub enum UiEvent {
     /// Replace the set of background processes shown in the status line.
     BackgroundProcesses(Vec<BackgroundProcess>),
     Quit,
+}
+
+/// The longest incomplete trailing escape sequence a streaming scrub holds
+/// back for the next delta. Real sequences (SGR colors, cursor moves) are a
+/// handful of bytes. Past this bound the unterminated sequence stops being
+/// carried and is dropped to the end of the current payload — faithful OSC
+/// semantics (a real terminal would swallow that content too) — so a
+/// malformed "sequence" can never hold the visible stream hostage across
+/// deltas.
+const ESCAPE_CARRY_MAX: usize = 64;
+
+/// Remove terminal-control bytes from one complete text payload. `\n` and
+/// `\t` are legitimate layout; `\r\n`/`\r` are normalized to `\n` (a bare
+/// `\r` written to the terminal overwrites the current row); every other C0
+/// byte, DEL, and the C1 range is dropped — ESC in particular, since an
+/// escape sequence reaching the terminal raw can flip charset/wrap/
+/// keyboard-protocol modes the TUI depends on. Whole ANSI CSI/OSC sequences
+/// are swallowed so colored text degrades to its plain content. Clean text
+/// (the overwhelmingly common case) is returned unchanged without allocating.
+///
+/// Streaming deltas go through [`AppState`]'s carry-aware path instead, so a
+/// sequence split across two deltas is still swallowed whole.
+pub fn scrub_text(text: String) -> String {
+    match scrub_core(&text) {
+        None => text,
+        Some((mut clean, tail)) => {
+            // A complete payload has no next delta: a truncated trailing
+            // escape is dropped, but a trailing bare `\r` is still a newline.
+            if tail == "\r" {
+                clean.push('\n');
+            }
+            clean
+        }
+    }
+}
+
+/// Scrub one streaming delta, holding an incomplete trailing escape sequence
+/// (or a bare `\r` that may be the CR half of a split CRLF) in `carry` so the
+/// next delta can complete it — otherwise a color code split across two
+/// deltas would leak its printable tail (`[31m`) into the stream.
+fn scrub_streaming(carry: &mut String, delta: String) -> String {
+    let input = if carry.is_empty() {
+        delta
+    } else {
+        let mut held = std::mem::take(carry);
+        held.push_str(&delta);
+        held
+    };
+    match scrub_core(&input) {
+        // A non-empty carry always contains a dirty byte, so a `None` fast
+        // path here implies the carry was empty and `input` is the raw delta.
+        None => input,
+        Some((clean, tail)) => {
+            *carry = tail;
+            clean
+        }
+    }
+}
+
+/// Core scrubber. Returns `None` when the input is already clean (no
+/// allocation needed), otherwise the cleaned text plus a held-back tail: an
+/// incomplete trailing escape sequence (bounded by [`ESCAPE_CARRY_MAX`]) or a
+/// trailing bare `\r`, either of which a following streaming delta may
+/// complete.
+fn scrub_core(text: &str) -> Option<(String, String)> {
+    // `is_ascii_control` covers 0x00..=0x1F and DEL (0x7F), so `\r` and ESC
+    // are both "dirty"; `\n`/`\t` are the allowed exceptions. C1 controls
+    // (U+0080..=U+009F) are dirty too: U+009B is a single-codepoint CSI that
+    // xterm/VTE-family terminals execute even when it arrives as UTF-8 text.
+    let dirty = |c: char| {
+        (c.is_ascii_control() && c != '\n' && c != '\t') || ('\u{80}'..='\u{9f}').contains(&c)
+    };
+    if !text.chars().any(dirty) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut tail = String::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\r' => match chars.peek() {
+                Some((_, '\n')) => {
+                    chars.next();
+                    out.push('\n');
+                }
+                Some(_) => out.push('\n'),
+                // Possibly the CR half of a CRLF split across deltas.
+                None => tail.push('\r'),
+            },
+            '\n' | '\t' => out.push(c),
+            '\u{1b}' => {
+                if !consume_escape_sequence(&mut chars) {
+                    // The sequence runs off the end of this payload: hold it
+                    // (bounded) so the next delta can complete it.
+                    let rest = &text[at..];
+                    if rest.len() <= ESCAPE_CARRY_MAX {
+                        tail.push_str(rest);
+                    }
+                    break;
+                }
+            }
+            c if c.is_ascii_control() || ('\u{80}'..='\u{9f}').contains(&c) => {}
+            c => out.push(c),
+        }
+    }
+    Some((out, tail))
+}
+
+/// Consume the remainder of an escape sequence whose ESC byte was just seen:
+/// CSI (`ESC [ … final-byte`), OSC (`ESC ] … BEL` or `ESC ] … ESC \`), or a
+/// two-character escape. Returns `false` when the sequence is cut off by
+/// end-of-input (the caller may carry it into the next delta); never
+/// over-consumes past a sequence terminator.
+fn consume_escape_sequence(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> bool {
+    match chars.peek().map(|&(_, c)| c) {
+        Some('[') => {
+            chars.next();
+            for (_, c) in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    return true;
+                }
+            }
+            false
+        }
+        Some(']') => {
+            chars.next();
+            while let Some((_, c)) = chars.next() {
+                if c == '\u{7}' {
+                    return true;
+                }
+                if c == '\u{1b}' {
+                    if matches!(chars.peek(), Some((_, '\\'))) {
+                        chars.next();
+                    }
+                    return true;
+                }
+            }
+            false
+        }
+        Some(_) => {
+            chars.next();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Scrub every externally sourced text payload of a [`UiEvent`] before it can
+/// enter rendered state. Enumerated per variant so a new text-bearing event
+/// fails review here rather than silently bypassing the scrub.
+fn scrub_event(event: UiEvent) -> UiEvent {
+    match event {
+        UiEvent::UserMessage(text) => UiEvent::UserMessage(scrub_text(text)),
+        UiEvent::Notice(text) => UiEvent::Notice(scrub_text(text)),
+        UiEvent::RecoveryNotice(text) => UiEvent::RecoveryNotice(scrub_text(text)),
+        UiEvent::ShowMemoryPanel(body) => UiEvent::ShowMemoryPanel(scrub_text(body)),
+        UiEvent::QuotaPaused { reset } => UiEvent::QuotaPaused {
+            reset: scrub_text(reset),
+        },
+        UiEvent::PlanUpdated(plan) => UiEvent::PlanUpdated(
+            plan.into_iter()
+                .map(|item| PlanItem {
+                    title: scrub_text(item.title),
+                    status: scrub_text(item.status),
+                })
+                .collect(),
+        ),
+        UiEvent::ToolStarted { id, name } => UiEvent::ToolStarted {
+            id,
+            name: scrub_text(name),
+        },
+        UiEvent::ToolFinished {
+            id,
+            name,
+            is_error,
+            output,
+        } => UiEvent::ToolFinished {
+            id,
+            name: scrub_text(name),
+            is_error,
+            output: scrub_text(output),
+        },
+        UiEvent::ApprovalRequested(request) => UiEvent::ApprovalRequested(ApprovalRequest {
+            tool: scrub_text(request.tool),
+            target: scrub_text(request.target),
+            risk_class: scrub_text(request.risk_class),
+        }),
+        UiEvent::BackgroundProcesses(processes) => UiEvent::BackgroundProcesses(
+            processes
+                .into_iter()
+                .map(|process| BackgroundProcess {
+                    id: process.id,
+                    command: scrub_text(process.command),
+                    alive: process.alive,
+                })
+                .collect(),
+        ),
+        // The streaming deltas are scrubbed in their `apply` arms through the
+        // per-stream escape carries, so a sequence split across two deltas is
+        // still swallowed whole.
+        event @ (UiEvent::TextDelta(_)
+        | UiEvent::ReasoningDelta(_)
+        | UiEvent::Usage { .. }
+        | UiEvent::ContextUsage { .. }
+        | UiEvent::TurnComplete
+        | UiEvent::ApprovalResolved
+        | UiEvent::ToggleThinking
+        | UiEvent::ToggleMemoryPanel
+        | UiEvent::Quit) => event,
+    }
 }
 
 fn compact_tool_output(output: &str) -> String {
@@ -1351,6 +1589,98 @@ mod tests {
         assert_eq!(taken[0].media_type, "image/png");
         assert_eq!(taken[0].data, "aGVsbG8=");
         assert!(state.images.is_empty());
+    }
+
+    #[test]
+    fn control_bytes_never_reach_streamed_state() {
+        // A degenerating local model can emit raw ESC/C0 bytes in its deltas;
+        // rendered verbatim they would flip terminal modes under the TUI.
+        let mut state = state();
+        state.apply(UiEvent::TextDelta(
+            "safe \u{1b}[31mred\u{1b}[0m text\u{7} bell\u{8} bs".to_string(),
+        ));
+        assert_eq!(state.streaming, "safe red text bell bs");
+    }
+
+    #[test]
+    fn ansi_sequences_are_scrubbed_from_tool_output_lines() {
+        let mut state = state();
+        state.apply(UiEvent::ToolFinished {
+            id: "call_1".to_string(),
+            name: "run_shell".to_string(),
+            is_error: true,
+            output: "\u{1b}[1;31merror\u{1b}[0m: it broke".to_string(),
+        });
+        assert_eq!(
+            state.transcript.last().unwrap().text,
+            "run_shell error: error: it broke"
+        );
+    }
+
+    #[test]
+    fn osc_sequences_and_bare_carriage_returns_are_scrubbed_from_notices() {
+        let mut state = state();
+        state.apply(UiEvent::Notice(
+            "\u{1b}]0;title\u{7}line one\rline two".to_string(),
+        ));
+        assert_eq!(state.transcript.last().unwrap().text, "line one\nline two");
+    }
+
+    #[test]
+    fn c1_controls_are_scrubbed() {
+        // U+009B is a one-codepoint CSI that VTE-family terminals execute even
+        // from UTF-8 text; it must never reach rendered state.
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("a\u{9b}31mb\u{85}c".to_string()));
+        assert_eq!(state.streaming, "a31mbc");
+    }
+
+    #[test]
+    fn an_ansi_sequence_split_across_deltas_leaves_no_residue() {
+        // Realistic SSE shape: a color code arrives cut mid-sequence. The
+        // carry holds the partial tail so the next delta completes it whole.
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("red \u{1b}[3".to_string()));
+        state.apply(UiEvent::TextDelta("1mtext\u{1b}[0m end".to_string()));
+        assert_eq!(state.streaming, "red text end");
+    }
+
+    #[test]
+    fn a_crlf_split_across_deltas_yields_one_newline() {
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("line one\r".to_string()));
+        state.apply(UiEvent::TextDelta("\nline two".to_string()));
+        assert_eq!(state.streaming, "line one\nline two");
+    }
+
+    #[test]
+    fn the_escape_carry_is_dropped_when_the_stream_ends() {
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("answer\u{1b}[3".to_string()));
+        state.apply(UiEvent::TurnComplete);
+        assert_eq!(state.transcript.last().unwrap().text, "answer");
+
+        // A fresh turn must not inherit the stale holdback.
+        state.apply(UiEvent::TextDelta("next".to_string()));
+        assert_eq!(state.streaming, "next");
+    }
+
+    #[test]
+    fn a_runaway_incomplete_sequence_is_dropped_not_carried() {
+        // An "OSC" that never terminates must not hold the stream hostage:
+        // past the carry bound it is discarded and the stream continues.
+        let mut state = state();
+        let runaway = format!("start\u{1b}]0;{}", "t".repeat(200));
+        state.apply(UiEvent::TextDelta(runaway));
+        state.apply(UiEvent::TextDelta("visible".to_string()));
+        assert_eq!(state.streaming, "startvisible");
+    }
+
+    #[test]
+    fn clean_text_passes_the_scrub_unchanged() {
+        let mut state = state();
+        state.apply(UiEvent::TextDelta("plain\ttext\nwith café 😀".to_string()));
+        assert_eq!(state.streaming, "plain\ttext\nwith café 😀");
     }
 
     #[test]

@@ -917,12 +917,20 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
 
 async fn run() -> anyhow::Result<std::process::ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some(log_path) = logging::init(&cwd) {
+    let cli = Cli::parse();
+    // `chat` (and the bare `localpilot` default, which launches chat when a
+    // provider is configured) hands the terminal to the raw-mode TUI, so the
+    // default terminal log subscriber must not write into it mid-session.
+    // File logging via LOCALPILOT_LOG is unaffected.
+    #[cfg(feature = "tui")]
+    let terminal_owned = matches!(cli.command, Some(Command::Chat { .. }) | None);
+    #[cfg(not(feature = "tui"))]
+    let terminal_owned = false;
+    if let Some(log_path) = logging::init(&cwd, terminal_owned) {
         // The path goes to stderr (not the TUI's stdout) so the user knows where
         // to tail the run's log.
         eprintln!("localpilot: logging to {}", log_path.display());
     }
-    let cli = Cli::parse();
     maybe_show_learning_notice();
 
     let command = match cli.command {

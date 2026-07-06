@@ -118,6 +118,16 @@ pub(crate) fn binary_placeholder(len: usize) -> String {
     format!("<binary data: {len} bytes, not shown>")
 }
 
+/// Windows `CREATE_NO_WINDOW`: the child gets its own console (with no
+/// window) instead of attaching to the interactive TUI's console. A shared
+/// console would let any child or grandchild read the console input buffer
+/// via `CONIN$` — stealing keystrokes even with a null stdin — or re-cook the
+/// shared console mode with `SetConsoleMode`, breaking raw mode and the
+/// keyboard protocol out from under the TUI. Applied to every child spawned
+/// while a session may own the terminal.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
     Effect::ReadPath {
         inside_workspace: ctx.workspace.contains(path),
@@ -1643,6 +1653,9 @@ async fn run_stream_editor(text: &str, input: &ReplaceInFileInput) -> Result<Str
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Keep the stream editor off the interactive console (see CREATE_NO_WINDOW).
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     for (key, value) in envs {
         command.env(key, value);
     }
