@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.2.0 - 2026-07-06
+
+Coordinated LocalX release.
+
 - Interactive-session hardening: child processes and the terminal are now
   isolated from each other so a session can no longer freeze, lose Ctrl+C, or
   have its display corrupted.
