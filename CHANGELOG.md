@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.3.0 - 2026-07-07
+
+Coordinated LocalX release.
+
 - The harness spec's discard/reset recovery rung is implemented (ADR-0066):
   a rule set to the new `discard` severity (`[harness.rules]`, e.g.
   `quality_gate = "discard"`) abandons a failed attempt and restores the
