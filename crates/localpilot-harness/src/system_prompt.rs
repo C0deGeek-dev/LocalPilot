@@ -147,12 +147,10 @@ permission profile: reads, writes, commands, and network effects may be denied
 or require approval.
 
 Split a large implementation across several small, focused files rather than
-emitting one enormous file. Many small modules are easier to read, and each
-tool call stays small enough to send reliably — a single oversized write can be
-truncated in transit and fail. Treat a request to keep everything in one file as
-a preference, not a hard rule: once one file would become very large, prefer
-splitting it (for example a web app into separate HTML, CSS, and JS files) over
-one giant write.
+emitting one enormous file — modular files read better and keep each tool call
+small enough to send reliably. Treat 'keep it in one file' as a preference, not
+a hard rule: split a web app into separate HTML, CSS, and JS files once one file
+would grow too large.
 
 Even when running under `bypass` (which grants technical allow-all on commands
 and file effects), do not commit or push changes unless the user explicitly asks

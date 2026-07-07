@@ -2515,9 +2515,11 @@ mod tests {
         ));
         // ...but any other error is a real read failure that must be reported,
         // so an image paste never fails silently with no message.
-        assert!(!clipboard_error_is_missing_image(&arboard::Error::Unknown {
-            description: "decode failed".to_string(),
-        }));
+        assert!(!clipboard_error_is_missing_image(
+            &arboard::Error::Unknown {
+                description: "decode failed".to_string(),
+            }
+        ));
     }
 
     fn test_header() -> Header {

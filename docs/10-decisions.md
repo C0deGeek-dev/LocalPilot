@@ -2,6 +2,79 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0069: Oversized Single-File Writes Are Prevented At The Prompt And The Write Tool, Not Only Recovered
+
+Status: accepted. Complements ADR-0038 (an oversized malformed write is
+recovered by chunking): that rung is the *cure*; this ADR adds *prevention* so
+the pathological single-huge-file generation is usually avoided before the call
+is ever sent.
+
+1. **Always-on prompt guidance.** The agent system prompt now instructs the
+   model to split a large implementation across several small, modular files
+   rather than emitting one enormous file, and to treat a "keep it in one file"
+   request as a preference that yields once a file would become very large. This
+   is the only surface that reaches every run — the curated seed lessons are
+   ingest-gated and do not.
+2. **Soft write-size guard in the tool path.** `write_file` refuses a single
+   payload larger than a soft limit (64 KiB) with a message steering the model
+   to split into modular files or build the file up with `append_file`. The
+   limit sits above any normal source file, so it only trips on the pathological
+   path; `append_file` is deliberately unguarded because it is the piece-wise
+   escape hatch.
+3. **Recovery is unchanged.** The ADR-0038 chunked-write recovery remains as the
+   backstop for an oversized call that still slips through. Prevention plus cure,
+   not prevention instead of cure.
+4. **Seed reinforcement.** The opt-in curated coding lessons gain the same
+   "decompose a large implementation into modular files" guidance; this only
+   reaches a project after `ingest run`, so it reinforces (1), it does not
+   replace it.
+
+## ADR-0068: Research Web Egress Supports Wildcard Allow And A Deny List, With Deny Winning
+
+Status: accepted. Extends ADR-0060 (research web egress off by default). The
+`[research.web]` gate gains broader-but-carve-out expressiveness without
+weakening the fail-closed default.
+
+1. **Wildcard patterns in both lists.** A list entry of `*` matches every host;
+   `*.example.com` matches `example.com` and any subdomain; a bare domain keeps
+   the prior exact-or-subdomain rule. One `host_matches` helper serves the
+   allowlist and the new disallowlist (no duplicate matcher).
+2. **A `disallowlist`, checked first.** `[research.web].disallowlist` blocks
+   hosts even when the allowlist — including `*` — would permit them. Deny is
+   evaluated before allow and wins ties, so `allowlist = ["*"]` with a
+   `disallowlist` allows broad access while carving out specific domains.
+3. **Fail-closed default is unchanged.** `enabled = false` with empty lists still
+   fetches nothing, and per-session operator consent is still required at
+   runtime; the wildcard is only ever an entry the user typed, never a default.
+4. **Egress-safety is pinned by tests**: deny-beats-wildcard-allow,
+   deny-beats-exact-allow, `*.domain` matches apex and subdomain, and the empty
+   fail-closed default.
+
+## ADR-0067: Research Findings Are Concise Claims With Raw Source Text Carried As Separate Evidence
+
+Status: accepted. Refines ADR-0060 (the research loop) after raw retrieved
+chunks (JavaScript, HTML boilerplate, analytics) were surfacing verbatim as
+"findings" and breaking the report layout.
+
+1. **A finding is a claim, not a snippet.** `Finding` gains an `evidence` field.
+   A deterministic sanitize pass in the research loop (one choke point, after
+   synthesis and before cross-check) moves any statement that is a code/HTML blob
+   or is over-long into `evidence` and replaces the statement with a concise,
+   single-line excerpt; a clean statement is only whitespace-flattened. No
+   finding is ever dropped.
+2. **The model-free path stays model-free.** This is a deterministic sanitize,
+   not a model-backed synthesizer (explicitly not built): the degrade path
+   labels an excerpt honestly ("Excerpt from {source}: …") rather than
+   fabricating a summary. A future model-backed synthesizer could improve wording
+   without changing this contract.
+3. **One pass fixes both consumers.** Because sanitize runs in the loop, both the
+   rendered Markdown report and the enqueued review-queue memory candidates get
+   the clean statement — a raw blob can no longer leak into memory.
+4. **Rendering is defensive.** The Markdown heading flattens the statement so it
+   can never break the `_(supported)_`/`Sources:` layout, and evidence renders in
+   a fenced block whose fence is chosen longer than any backtick run inside it,
+   truncated at a display cap.
+
 ## ADR-0066: The Discard/Reset Rung Is Real, Fed By Rule Severity, With A True Working-Tree Restore
 
 Status: accepted. Implements the harness-spec anti-sunk-cost `discard`
@@ -229,6 +302,15 @@ text-only model marked vision) can still send images that the server rejects, wh
 (deterministic, no egress), so it surfaces the config-declared half; the full
 config-or-probe resolution and its source surface in `localpilot models`, which
 already performs gated network discovery.
+
+Addendum (image paste in interactive chat): an explicit image paste (Ctrl+V, or a
+terminal that routes it as a bracketed paste) re-runs this same config > probe
+resolution once before the preflight decides, so a vision server that became
+reachable after session start is picked up; on refusal the notice now names both
+levers (`supports_vision` and `[discovery] vision_probe`). Separately, a clipboard
+read that fails for any reason other than "no image present" always surfaces a
+notice, so an image paste never fails silently — closing the "nothing happened, no
+message" gap without changing the default-false capability posture.
 
 ## ADR-0060: Research Is A Two-Surface, Provenance-Preserving Loop In Its Own Crate, With Web Egress Off By Default
 

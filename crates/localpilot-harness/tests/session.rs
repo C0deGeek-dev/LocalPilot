@@ -257,7 +257,7 @@ async fn compaction_summary_does_not_produce_two_system_messages() {
         Arc::clone(&provider),
         &[],
         SessionConfig {
-            context_token_limit: 1_200,
+            context_token_limit: 1_400,
             ..SessionConfig::default()
         },
         Profile::Default,
@@ -506,7 +506,7 @@ async fn manual_compaction_stores_a_summary_for_future_turns() {
         Arc::clone(&provider),
         &[],
         SessionConfig {
-            context_token_limit: 1_200,
+            context_token_limit: 1_400,
             ..SessionConfig::default()
         },
         Profile::Default,
