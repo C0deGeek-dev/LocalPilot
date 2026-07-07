@@ -76,6 +76,9 @@ struct CommandHost<'a> {
     provider_id: Option<&'a str>,
     /// The durable prompt-history store; submitted prompts are appended here.
     history: &'a localpilot_store::PromptHistory,
+    /// Loaded config, used to re-resolve the active provider's vision capability
+    /// when the user pastes an image (config wins, else a best-effort probe).
+    config: &'a localpilot_config::Config,
 }
 
 /// An [`Approver`] that suspends the turn and asks the user through the TUI.
@@ -400,6 +403,7 @@ pub async fn run_chat(
                     model: &model,
                     provider_id,
                     history: &history,
+                    config: &config,
                 },
             )
             .await
@@ -464,7 +468,7 @@ async fn event_loop(
                             crate::trust::remember(host.cwd);
                         }
                     } else if is_clipboard_image_key(key) {
-                        attach_clipboard_image(state, runtime, false);
+                        attach_clipboard_image(state, runtime, &host, false).await;
                     } else if handle_paste_burst(state, &mut paste_burst, key, buffered_after) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
@@ -490,7 +494,7 @@ async fn event_loop(
                 // clipboard image through paste, so probe the clipboard for one.
                 Event::Paste(text) if state.trust.is_none() => {
                     if text.trim().is_empty() {
-                        attach_clipboard_image(state, runtime, true);
+                        attach_clipboard_image(state, runtime, &host, true).await;
                     } else {
                         insert_paste(state, text);
                     }
@@ -1848,14 +1852,27 @@ const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
 /// encode/oversize failure surfaces as a notice and never disturbs the session.
 /// `quiet_when_absent` suppresses the "no image" notice for the empty-paste
 /// fallback path, where a normal text paste simply had nothing to insert.
-fn attach_clipboard_image(state: &mut AppState, runtime: &SessionRuntime, quiet_when_absent: bool) {
+async fn attach_clipboard_image(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    host: &CommandHost<'_>,
+    quiet_when_absent: bool,
+) {
     if !runtime.active_accepts_images() {
-        // Refuse with guidance rather than sending an image blind to a model not
-        // known to accept one: tell the user how to declare the capability.
+        // An explicit paste is a strong signal the user wants images. The
+        // capability may be unresolved (probe was off at startup, or the server
+        // came up afterwards), so re-resolve it once — config wins, else a
+        // best-effort `/props` probe — before deciding.
+        let resolved = resolved_image_support(host.config, host.provider_id).await;
+        runtime.set_image_support_override(resolved);
+    }
+    if !runtime.active_accepts_images() {
+        // Still not known to accept images: refuse rather than send one blind to
+        // a text-only model, and name both levers that enable it.
         state.apply(UiEvent::Notice(format!(
-            "the current model is not known to accept images — if provider '{}' \
-             supports vision, declare `supports_vision = true` for it in \
-             .localpilot.toml",
+            "the current model is not known to accept images. To paste images, set \
+             `supports_vision = true` for provider '{}' in .localpilot.toml, or enable \
+             `[discovery] vision_probe = true` to auto-detect a local vision server.",
             runtime.active_provider_id()
         )));
         return;
@@ -1869,9 +1886,21 @@ fn attach_clipboard_image(state: &mut AppState, runtime: &SessionRuntime, quiet_
     };
     let image = match clipboard.get_image() {
         Ok(image) => image,
-        Err(_) => {
-            if !quiet_when_absent {
-                state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
+        Err(error) => {
+            if clipboard_error_is_missing_image(&error) {
+                // Genuinely nothing to paste (e.g. an empty text paste): stay
+                // quiet on the empty-paste probe path, but still tell a
+                // deliberate Ctrl+V there was no image.
+                if !quiet_when_absent {
+                    state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
+                }
+            } else {
+                // A real read failure is never swallowed — this is the "nothing
+                // happened, no message" case users hit when a paste-routed image
+                // fails to decode.
+                state.apply(UiEvent::Notice(format!(
+                    "couldn't read the clipboard image: {error}"
+                )));
             }
             return;
         }
@@ -1895,6 +1924,13 @@ fn attach_clipboard_image(state: &mut AppState, runtime: &SessionRuntime, quiet_
     let placeholder = state.register_image("image/png", data, png.len());
     state.insert_input(&placeholder);
     state.apply(UiEvent::Notice(format!("attached {width}×{height} image")));
+}
+
+/// Whether a clipboard read error means "there is simply no image on the
+/// clipboard" (benign — nothing to paste) rather than a real read/decode failure
+/// that must always be surfaced to the user.
+fn clipboard_error_is_missing_image(error: &arboard::Error) -> bool {
+    matches!(error, arboard::Error::ContentNotAvailable)
 }
 
 /// Encode arboard's raw RGBA clipboard pixels to PNG bytes.
@@ -2469,6 +2505,20 @@ mod tests {
     use super::*;
     use localpilot_tui::TranscriptLine;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn a_missing_clipboard_image_is_benign_but_a_read_failure_is_surfaced() {
+        // "No image on the clipboard" is the quiet, benign case on the
+        // empty-paste probe path...
+        assert!(clipboard_error_is_missing_image(
+            &arboard::Error::ContentNotAvailable
+        ));
+        // ...but any other error is a real read failure that must be reported,
+        // so an image paste never fails silently with no message.
+        assert!(!clipboard_error_is_missing_image(&arboard::Error::Unknown {
+            description: "decode failed".to_string(),
+        }));
+    }
 
     fn test_header() -> Header {
         Header {

@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Chat: pasting an image works more reliably. An explicit paste re-resolves the
+  provider's vision capability (config > probe) before refusing — catching a
+  vision server that came up after startup — and a clipboard read that fails for
+  any reason other than "no image present" now always shows a notice instead of
+  doing nothing silently. When the model still isn't known to accept images, the
+  notice names both ways to enable it (`supports_vision` or `[discovery]
+  vision_probe`).
 - The agent now avoids dumping a whole project into one giant file: the always-on
   prompt steers it to split a large implementation into smaller modular files,
   and `write_file` refuses a single payload over a soft 64 KiB limit — steering

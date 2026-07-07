@@ -226,6 +226,14 @@ server advertises image input only once vision is declared or probed. `doctor`
 surfaces the config-declared capability (it is offline); `localpilot models`
 surfaces the full resolved capability and which signal decided it.
 
+In interactive chat, pasting an image (Ctrl+V, or a terminal that routes it as a
+bracketed paste) re-resolves this capability once before deciding: if vision is
+not already known, LocalPilot runs the same config > probe resolution again
+(catching a server that came up after startup), attaches on success, and
+otherwise shows a notice naming both levers (`supports_vision` and `[discovery]
+vision_probe`). A clipboard read that fails for any reason other than "no image
+present" always surfaces a notice — an image paste never fails silently.
+
 ## Quota Semantics
 
 Quota wait/resume honors provider contracts. A provider adapter may expose:
