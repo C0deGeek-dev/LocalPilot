@@ -2,6 +2,31 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0065: Memory-Injection Retrieval Consumes The Engine's Rerank Stage, Opt-In Via The Engine's Own Config Keys
+
+Status: accepted. Refines ADR-0059 (semantic relevance gate); the engine-side
+contract is LocalMind D-LM-0026.
+
+The always-on context-injection retrieval (`context_hits`) gains an **opt-in
+rerank stage** consumed from the engine's `localmind-search` crate instead of
+a host-grown reordering: when the project's `.localmind.toml` sets
+`[retrieval] rerank = true` *and* an embedding endpoint is configured
+(`ProjectConfig::rerank_active`, the engine's single gate), the top
+`rerank_window` keyword candidates are reordered by the **same stored-vector
+cosines the ADR-0059 relevance gate already computes** (`rerank_scored`, the
+engine's stored-vector entry point) — no second embedding pass on the
+injection path.
+
+1. **Keyword stays the candidate floor** (mirrors D-LM-0022): rerank reorders
+   keyword candidates, never introduces hits.
+2. **Default-off and byte-identical when off**: without the flag, without an
+   endpoint, or without stored vectors the injected order is unchanged — the
+   ADR-0045/0059 posture (additive, best-effort, offline-identical) holds.
+3. **Gate and rerank share one score source** (the `vector_index` cosines), so
+   filtering and ordering can never disagree about a memory's relevance.
+4. This closes the ecosystem's one live parallel-retrieval risk by consuming
+   the engine capability rather than duplicating it (reuse-before-add).
+
 ## ADR-0064: The Non-Developer TUI Is Native ratatui, With The Guided-Launcher Doctrine Enforced By Tests
 
 Status: accepted. Applies to LocalBox (which ships the TUI) and records the

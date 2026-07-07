@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Memory-injection retrieval honors LocalMind's `[retrieval] rerank` /
+  `rerank_window` keys: with rerank opted in and an embedding endpoint
+  configured, the top keyword candidates are reordered by the same
+  stored-vector cosines the relevance gate already computes (ADR-0065,
+  engine contract D-LM-0026). Default off; the injected order is
+  byte-identical when off.
+- The embedded LocalMind engine was advanced, bringing its SQLite
+  concurrency pragmas (WAL + busy timeout at every open — the session and
+  the standalone CLI share one database file) and `status`/`eval` CLI
+  fixes into the bundled copy.
+
 ## v2.2.0 - 2026-07-06
 
 Coordinated LocalX release.

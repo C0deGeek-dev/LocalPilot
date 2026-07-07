@@ -348,6 +348,17 @@ pub fn context_hits(
     // has no stored vector) the cosine is `None` and the hit is injected exactly
     // as today, so a no-embed run is byte-identical.
     let cosines = relevance_cosines(&persistence, query);
+    // The opt-in rerank stage (`[retrieval] rerank` + an embedding endpoint):
+    // reorder the top keyword candidates by the same stored-vector cosines the
+    // gate uses, through the engine's rerank policy — keyword stays the
+    // candidate floor, a hit without a stored vector keeps its slot, and with
+    // the flag off (the default) the order is byte-identical.
+    let hits = match (&cosines, active_rerank_window(project_root)) {
+        (Some(by_id), Some(window)) => localmind_search::rerank_scored(hits, window, |hit| {
+            by_id.get(&hit.memory_id.to_string()).copied()
+        }),
+        _ => hits,
+    };
     Ok(hits
         .into_iter()
         .take(CONTEXT_MEMORY_LIMIT)
@@ -366,6 +377,15 @@ pub fn context_hits(
             }
         })
         .collect())
+}
+
+/// The rerank window, when the project opts in (`[retrieval] rerank = true`
+/// **and** an embedding endpoint is configured — `ProjectConfig::rerank_active`
+/// is the single gate). `None` leaves the keyword blend order untouched, the
+/// default posture.
+fn active_rerank_window(project_root: &Path) -> Option<usize> {
+    let config = localmind_store::ProjectConfig::discover(project_root).ok()?;
+    config.rerank_active().then(|| config.rerank_window())
 }
 
 /// Cosine similarity of `query` to each accepted memory that has a stored vector,
@@ -1098,6 +1118,117 @@ mod tests {
         .unwrap();
         let hits = context_hits(dir.path(), "anything", None).unwrap();
         assert!(hits.is_empty());
+    }
+
+    /// A fixture `/v1/embeddings` server whose vector depends on the input
+    /// text: `cypress` and the plain query embed to `[0, 1]`, the `lesson`
+    /// bodies without `cypress` to `[1, 0]` — so the semantically-closer
+    /// memory is NOT the keyword-stronger one.
+    fn content_aware_embeddings_server(max_requests: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..max_requests {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            request.extend_from_slice(&buffer[..read]);
+                            let text = String::from_utf8_lossy(&request);
+                            if text.contains("\r\n\r\n") && text.trim_end().ends_with('}') {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                let vector = if text.contains("cypress") {
+                    "[0.0,1.0]"
+                } else if text.contains("lesson") {
+                    "[1.0,0.0]"
+                } else {
+                    "[0.0,1.0]"
+                };
+                let body = format!("{{\"data\":[{{\"embedding\":{vector}}}]}}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn seed_two_memories(root: &Path) {
+        for body in [
+            "redwood task lesson about builds",
+            "cypress task lesson about builds",
+        ] {
+            let lesson = crate::SeedLesson {
+                body: body.to_string(),
+                category: Some("Process".to_string()),
+                confidence: Some(0.8),
+                related_files: Vec::new(),
+                related_entities: Vec::new(),
+                evidence: None,
+                tags: Vec::new(),
+            };
+            crate::seed_memory(root, &[lesson], false).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_rerank_stage_reorders_injection_candidates_only_when_opted_in() {
+        // Query "redwood task" keyword-prefers the redwood memory (two term
+        // matches vs one); the stub embeddings make the cypress memory the
+        // semantically closer one. Rerank off → keyword order. Rerank on →
+        // the cypress memory climbs.
+        let base_url = content_aware_embeddings_server(32);
+
+        // Off (default posture): keyword order, byte-identical.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n",
+            ),
+        )
+        .unwrap();
+        seed_two_memories(dir.path());
+        let hits = context_hits(dir.path(), "redwood task", None).unwrap();
+        assert!(hits.len() >= 2, "both memories must be candidates");
+        assert!(
+            hits[0].snippet.contains("redwood"),
+            "rerank off: keyword order stands, got {:?}",
+            hits.iter().map(|h| h.snippet.clone()).collect::<Vec<_>>()
+        );
+
+        // On: the stored-vector rerank reorders the top candidates.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!(
+                "[learning]\nenabled = true\n\n[retrieval]\nrerank = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n",
+            ),
+        )
+        .unwrap();
+        seed_two_memories(dir.path());
+        let hits = context_hits(dir.path(), "redwood task", None).unwrap();
+        assert!(hits.len() >= 2, "both memories must be candidates");
+        assert!(
+            hits[0].snippet.contains("cypress"),
+            "rerank on: the semantically closer memory must climb, got {:?}",
+            hits.iter().map(|h| h.snippet.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -1498,6 +1498,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "localmind-search"
+version = "2.2.0"
+dependencies = [
+ "localmind-core",
+ "localmind-store",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "localmind-store"
 version = "2.2.0"
 dependencies = [
@@ -1649,6 +1659,7 @@ dependencies = [
  "localmind-core",
  "localmind-inference",
  "localmind-mcp",
+ "localmind-search",
  "localmind-store",
  "localpilot-config",
  "localpilot-core",

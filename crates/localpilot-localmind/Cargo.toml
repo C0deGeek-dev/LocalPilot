@@ -15,6 +15,7 @@ localmind-codegraph = { path = "../../external/localmind/crates/localmind-codegr
 localmind-core = { path = "../../external/localmind/crates/localmind-core" }
 localmind-inference = { path = "../../external/localmind/crates/localmind-inference" }
 localmind-mcp = { path = "../../external/localmind/crates/localmind-mcp" }
+localmind-search = { path = "../../external/localmind/crates/localmind-search" }
 localmind-store = { path = "../../external/localmind/crates/localmind-store" }
 schemars = { workspace = true }
 serde_json = { workspace = true }
