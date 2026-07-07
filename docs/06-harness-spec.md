@@ -362,6 +362,14 @@ See ADR-0028 for the decision.
 > headless completion gate re-reads `PROGRESS.md` after the turn and reports
 > whether the model actually ticked its step).
 >
+> **The `discard` verdict is runtime-active via rule severity** (ADR-0066): a
+> rule configured `[harness.rules] <name> = "discard"` escalates its
+> actionable (`retry`) failures to `discard`, and the resume loop then
+> restores the working tree to committed state (tracked files reset,
+> attempt-created files removed; the git-ignored `.localpilot/` record
+> untouched) before the fresh attempt — the anti-sunk-cost reset below.
+> `block` still outranks `discard`, which outranks `retry`.
+>
 > **Workspace containment and secret-file protection are not harness rules.**
 > They are enforced **solely by the permission engine** at the tool-dispatch
 > choke-point — `dispatch_gated → PermissionEngine::decide` — which every file

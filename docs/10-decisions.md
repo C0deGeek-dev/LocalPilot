@@ -2,6 +2,38 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0066: The Discard/Reset Rung Is Real, Fed By Rule Severity, With A True Working-Tree Restore
+
+Status: accepted. Implements the harness-spec anti-sunk-cost `discard`
+verdict that had been documented but structurally unreachable
+(`RuleVerdict::Discard` was never constructed; the worker folded `Discard`
+into `Retry`; the resume arm was dead and restored nothing).
+
+1. **Construction path is config-driven rule severity.** `RuleSeverity` gains
+   `discard`: a rule configured `[harness.rules] <name> = "discard"` (e.g.
+   `quality_gate = "discard"`) escalates its actionable `retry` failures to
+   `RuleVerdict::Discard`. It is an *escalation*, not a ceiling — `block`
+   still wins, `allow`/`warn` pass through. Rule-level only: per-check
+   `severity = "discard"` is rejected at config load, because the per-check
+   severity rides the shared check-runner contract, which has no discard
+   notion.
+2. **The worker preserves discard-ness.** `StepAction::Discard` ranks between
+   `Retry` and `Block`; the resume loop feeds it to the anti-sunk-cost
+   `StepLoop` as `AttemptResult::Discard`, reaching the previously-dead
+   `DiscardAndReset` arm.
+3. **DiscardAndReset now restores committed state** before the fresh attempt:
+   `git reset --hard HEAD` + `git clean -fd` (ignored files — the
+   `.localpilot/` execution record — untouched; the resume flow refuses to
+   start over unrelated uncommitted changes, so everything removed belongs to
+   the discarded attempt). The abandoned attempt still closes its transcript
+   branch with a failure digest and the fresh attempt forks from the step
+   anchor, so the discarded line stays auditable.
+4. **Default behaviour is unchanged**: no baseline rule defaults to
+   `discard`; without the config the ladder is Retry-only exactly as before.
+   An end-to-end harness test on a scratch repository pins the contract: a
+   discarded attempt's stray file never leaks into the next attempt or the
+   step commit.
+
 ## ADR-0065: Memory-Injection Retrieval Consumes The Engine's Rerank Stage, Opt-In Via The Engine's Own Config Keys
 
 Status: accepted. Refines ADR-0059 (semantic relevance gate); the engine-side

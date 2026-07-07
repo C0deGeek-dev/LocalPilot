@@ -166,8 +166,28 @@ pub async fn resume_one_step_with_events(
             });
             let window = estimate_window(&quota, 1);
             let paused = PausedRun::new(step.number, "provider", &window);
-            if let Ok(json) = serde_json::to_string(&paused) {
-                let _ = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes());
+            // A failed marker write must be visible: without the marker a later
+            // `resume` can't see the pause window and retries into the same
+            // limit. The pause itself still proceeds (the outcome carries the
+            // reason) — only silence is unacceptable.
+            match serde_json::to_string(&paused) {
+                Ok(json) => {
+                    if let Err(error) = runtime.store().put_cache(QUOTA_PAUSE_KEY, json.as_bytes())
+                    {
+                        tracing::warn!(
+                            target: "localpilot::harness",
+                            %error,
+                            "could not persist the quota pause marker; a later resume will not see this pause window"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "localpilot::harness",
+                        %error,
+                        "could not serialize the quota pause marker; a later resume will not see this pause window"
+                    );
+                }
             }
             return Ok(ResumeOutcome {
                 step_number: step.number,
@@ -245,57 +265,72 @@ pub async fn resume_one_step_with_events(
                     gate: final_gate,
                 });
             }
-            // An actionable finding: feed it back through the anti-sunk-cost loop.
-            StepAction::Retry(reason) => match step_loop.on_attempt(AttemptResult::Retry(reason)) {
-                StepDecision::RetrySameContext(feedback) => {
-                    prompt = retry_prompt(&step, &feedback);
-                }
-                StepDecision::DiscardAndReset(feedback) => {
-                    // The abandoned attempt closes its branch with a digest of
-                    // what failed, and the fresh attempt forks from the step
-                    // anchor, so the discarded line of work stays auditable.
-                    runtime.record_event(SessionEventKind::BranchClosed {
-                        summary: StructuredSummary::new(
-                            "Step attempt abandoned:",
-                            vec![feedback.clone()],
-                        ),
-                    });
-                    if let Some(from) = step_anchor {
-                        runtime.record_event(SessionEventKind::BranchForked { from });
+            // An actionable finding: feed it back through the anti-sunk-cost
+            // loop. A `discard` action abandons the attempt outright — the
+            // loop then answers `DiscardAndReset`, which restores committed
+            // state before the fresh attempt (the spec's discard rung).
+            StepAction::Retry(_) | StepAction::Discard(_) => {
+                match step_loop.on_attempt(match action {
+                    StepAction::Retry(reason) => AttemptResult::Retry(reason),
+                    StepAction::Discard(reason) => AttemptResult::Discard(reason),
+                    // Unreachable: the outer match arm only binds Retry/Discard.
+                    _ => AttemptResult::Success,
+                }) {
+                    StepDecision::RetrySameContext(feedback) => {
+                        prompt = retry_prompt(&step, &feedback);
                     }
-                    prompt = retry_prompt(&step, &feedback);
+                    StepDecision::DiscardAndReset(feedback) => {
+                        // Restore committed state FIRST — the discarded attempt's
+                        // edits must not leak into the fresh attempt — then close
+                        // the branch with a digest of what failed and fork from
+                        // the step anchor, so the discarded line stays auditable.
+                        restore_committed_state(root)?;
+                        runtime.record_event(SessionEventKind::BranchClosed {
+                            summary: StructuredSummary::new(
+                                "Step attempt abandoned (working tree restored):",
+                                vec![feedback.clone()],
+                            ),
+                        });
+                        if let Some(from) = step_anchor {
+                            runtime.record_event(SessionEventKind::BranchForked { from });
+                        }
+                        prompt = retry_prompt(&step, &feedback);
+                    }
+                    StepDecision::Replan(logs) => {
+                        runtime.record_event(SessionEventKind::BranchClosed {
+                            summary: StructuredSummary::new(
+                                "Step attempt abandoned:",
+                                logs.clone(),
+                            ),
+                        });
+                        record_replan(root, &progress.name, step.number, &logs)?;
+                        return Ok(ResumeOutcome {
+                            step_number: step.number,
+                            committed: false,
+                            blocked_reason: Some(format!(
+                                "replanned after {} failed attempts; recorded in DECISIONS.md",
+                                logs.len()
+                            )),
+                            paused: false,
+                            gate: final_gate,
+                        });
+                    }
+                    StepDecision::GiveUp => {
+                        return Ok(ResumeOutcome {
+                            step_number: step.number,
+                            committed: false,
+                            blocked_reason: Some(
+                                "gave up: the replan cap was reached for this step".to_string(),
+                            ),
+                            paused: false,
+                            gate: final_gate,
+                        });
+                    }
+                    // `on_attempt` only returns `Commit` for a `Success` result, which
+                    // this loop never feeds; treat it as a pass for completeness.
+                    StepDecision::Commit => break,
                 }
-                StepDecision::Replan(logs) => {
-                    runtime.record_event(SessionEventKind::BranchClosed {
-                        summary: StructuredSummary::new("Step attempt abandoned:", logs.clone()),
-                    });
-                    record_replan(root, &progress.name, step.number, &logs)?;
-                    return Ok(ResumeOutcome {
-                        step_number: step.number,
-                        committed: false,
-                        blocked_reason: Some(format!(
-                            "replanned after {} failed attempts; recorded in DECISIONS.md",
-                            logs.len()
-                        )),
-                        paused: false,
-                        gate: final_gate,
-                    });
-                }
-                StepDecision::GiveUp => {
-                    return Ok(ResumeOutcome {
-                        step_number: step.number,
-                        committed: false,
-                        blocked_reason: Some(
-                            "gave up: the replan cap was reached for this step".to_string(),
-                        ),
-                        paused: false,
-                        gate: final_gate,
-                    });
-                }
-                // `on_attempt` only returns `Commit` for a `Success` result, which
-                // this loop never feeds; treat it as a pass for completeness.
-                StepDecision::Commit => break,
-            },
+            }
         }
     }
 
@@ -389,6 +424,17 @@ fn legacy_test_check(command: &str) -> Option<CheckConfig> {
         auto_fix: AutoFix::No,
         severity: None,
     })
+}
+
+/// Restore the working tree to committed state after a discarded attempt:
+/// tracked files reset to `HEAD`, files the attempt created removed. Ignored
+/// files (the `.localpilot/` execution record) are untouched (`clean`
+/// without `-x`), and a resume refuses to start over unrelated uncommitted
+/// changes, so everything removed here belongs to the discarded attempt.
+fn restore_committed_state(root: &Path) -> Result<(), HarnessError> {
+    git(root, &["reset", "--hard", "HEAD"])?;
+    git(root, &["clean", "-fd"])?;
+    Ok(())
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, HarnessError> {

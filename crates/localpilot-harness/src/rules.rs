@@ -100,12 +100,15 @@ pub trait Rule: Send + Sync {
     fn evaluate(&self, ctx: &RuleContext, severity: RuleSeverity) -> RuleVerdict;
 }
 
-/// Map a violation to a verdict at a severity. `Off` disables (allow).
+/// Map a violation to a verdict at a severity. `Off` disables (allow);
+/// `discard` asks the loop to abandon the attempt and restore committed
+/// state (the anti-sunk-cost reset).
 fn at(severity: RuleSeverity, reason: impl Into<String>) -> RuleVerdict {
     match severity {
         RuleSeverity::Off => RuleVerdict::Allow,
         RuleSeverity::Warn => RuleVerdict::Warn(reason.into()),
         RuleSeverity::Block => RuleVerdict::Block(reason.into()),
+        RuleSeverity::Discard => RuleVerdict::Discard(reason.into()),
     }
 }
 
@@ -324,11 +327,18 @@ fn rank(verdict: &RuleVerdict) -> u8 {
     }
 }
 
-/// Apply the rule-level severity as a ceiling on the reduced verdict.
+/// Apply the rule-level severity as a ceiling on the reduced verdict —
+/// except `discard`, which is an *escalation*: an actionable `retry` failure
+/// becomes `discard` (abandon the attempt, restore committed state, fresh
+/// attempt) while `block` still wins and `allow`/`warn` pass through.
 fn apply_ceiling(verdict: RuleVerdict, rule_severity: RuleSeverity) -> RuleVerdict {
     match rule_severity {
         RuleSeverity::Block => verdict,
         RuleSeverity::Off => RuleVerdict::Allow,
+        RuleSeverity::Discard => match verdict {
+            RuleVerdict::Retry(reason) => RuleVerdict::Discard(reason),
+            other => other,
+        },
         RuleSeverity::Warn => match verdict {
             RuleVerdict::Allow => RuleVerdict::Allow,
             other => RuleVerdict::Warn(

@@ -92,6 +92,8 @@ pub async fn run(
             enforce_readable_errors: config.tools.readable_errors,
             repair_mode: config.tools.repair,
             turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
+            verify_before_done: config.harness.verify_before_done,
+            verify_command: config.harness.verify_command.clone(),
             ..SessionConfig::default()
         },
         Vec::new(),

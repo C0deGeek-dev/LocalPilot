@@ -100,18 +100,20 @@ async fn login_with(
         return Err(anyhow!("no key entered; nothing stored"));
     }
 
-    // Validate with one minimal request unless skipped. A rejection or a network
-    // failure is non-fatal: we report it and offer to store anyway, so an offline
-    // setup or an unlisted-but-valid key is never blocked.
+    // Validate with one minimal request unless skipped. The two failure modes
+    // differ: a key the provider actively REJECTED is not stored (persisting
+    // it would seed every later session with a known-bad credential) — the
+    // explicit `--no-verify` override stores it anyway and says so. A network
+    // or endpoint failure stays non-fatal: an offline setup or an
+    // unlisted-but-valid key is never blocked.
     if !options.no_verify {
         match validate(info, key).await {
             Ok(true) => writeln!(out, "key accepted by {}", info.display)?,
             Ok(false) => {
-                writeln!(
-                    out,
-                    "warning: {} rejected the key; storing it anyway",
+                return Err(anyhow!(
+                    "{} rejected the key; nothing stored (re-run with --no-verify to store it anyway)",
                     info.display
-                )?;
+                ));
             }
             Err(error) => {
                 writeln!(
@@ -359,6 +361,76 @@ mod tests {
             !text.contains("sk-ant-paste-test-key"),
             "the full key must never be echoed: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_provider_rejected_key_is_not_stored_without_the_explicit_override() {
+        use localpilot_config::{Config, ProviderConfig};
+        // A stub endpoint answering 401 — the definitive rejection leg.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = [0_u8; 2048];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+            }
+        });
+        let mut config = Config::default();
+        config.providers.insert(
+            "claude".to_string(),
+            ProviderConfig {
+                kind: "anthropic".to_string(),
+                base_url: Some(format!("http://{addr}")),
+                ..ProviderConfig::default()
+            },
+        );
+        let info = resolve_provider("claude", Some(&config)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::with_file(Some(dir.path().join("credentials.json")));
+
+        // Rejected: nothing stored, and the error names the override.
+        let result = login_with(
+            &info,
+            LoginOptions {
+                no_browser: true,
+                no_verify: false,
+            },
+            &Secret::new("sk-rejected-key"),
+            &store,
+            &mut Vec::new(),
+        )
+        .await;
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("rejected the key"), "{message}");
+        assert!(message.contains("--no-verify"), "{message}");
+        assert!(
+            store.get("claude").is_none(),
+            "a provider-rejected key must not be persisted"
+        );
+
+        // The explicit override stores it anyway (offline/gateway escape hatch).
+        let mut out = Vec::new();
+        login_with(
+            &info,
+            LoginOptions {
+                no_browser: true,
+                no_verify: true,
+            },
+            &Secret::new("sk-rejected-key"),
+            &store,
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("stored claude credential"));
+        assert!(store.get("claude").is_some());
     }
 
     #[tokio::test]

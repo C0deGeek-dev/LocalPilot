@@ -102,6 +102,15 @@ fn validate_checks(checks: &[CheckConfig]) -> Result<(), ConfigError> {
                 check.name
             )));
         }
+        if check.severity == Some(crate::schema::RuleSeverity::Discard) {
+            // The per-check severity rides the shared check-runner contract,
+            // which has no discard notion; discard is a rule-level escalation.
+            return Err(ConfigError::InvalidCheck(format!(
+                "check {:?}: severity \"discard\" is rule-level only — set \
+                 [harness.rules] (e.g. quality_gate = \"discard\") instead",
+                check.name
+            )));
+        }
     }
     Ok(())
 }

@@ -126,6 +126,10 @@ pub enum StepAction {
     Commit,
     /// A check returned an actionable finding; feed the reason back and retry.
     Retry(String),
+    /// A rule at `discard` severity fired: abandon the attempt, restore the
+    /// working tree to committed state, and start the next attempt fresh
+    /// (the anti-sunk-cost reset).
+    Discard(String),
     /// A blocking rule fired (a failing test, a dirty commit message, an `audit`
     /// finding). No retry will clear it; surface the reason to model and user.
     Block(String),
@@ -133,10 +137,8 @@ pub enum StepAction {
 
 /// Evaluate the post-step rules — including the `quality_gate` rule fed the
 /// `gate_outcomes` for this step — and reduce them to one [`StepAction`]. A
-/// `block` verdict wins over a `retry`, which wins over a clean commit; a
-/// warning does not stop the step. A `discard` verdict is treated as a retry:
-/// resetting context requires a fresh runtime, which the gate never demands
-/// (its actionable findings are always `retry`).
+/// `block` verdict wins over a `discard`, which wins over a `retry`, which
+/// wins over a clean commit; a warning does not stop the step.
 #[must_use]
 pub fn decide_step(
     engine: &RuleEngine,
@@ -158,9 +160,8 @@ pub fn decide_step(
         for (name, verdict) in engine.evaluate(trigger, &ctx) {
             let candidate = match verdict {
                 RuleVerdict::Allow | RuleVerdict::Warn(_) => continue,
-                RuleVerdict::Retry(reason) | RuleVerdict::Discard(reason) => {
-                    StepAction::Retry(reason)
-                }
+                RuleVerdict::Retry(reason) => StepAction::Retry(reason),
+                RuleVerdict::Discard(reason) => StepAction::Discard(reason),
                 RuleVerdict::Block(reason) => StepAction::Block(format!("{name}: {reason}")),
             };
             if action_rank(&candidate) > action_rank(&action) {
@@ -175,7 +176,8 @@ fn action_rank(action: &StepAction) -> u8 {
     match action {
         StepAction::Commit => 0,
         StepAction::Retry(_) => 1,
-        StepAction::Block(_) => 2,
+        StepAction::Discard(_) => 2,
+        StepAction::Block(_) => 3,
     }
 }
 
@@ -187,7 +189,7 @@ fn action_rank(action: &StepAction) -> u8 {
 pub fn evaluate_completion(engine: &RuleEngine, inputs: &CompletionInputs) -> CompletionDecision {
     match decide_step(engine, inputs, Vec::new()) {
         StepAction::Commit => CompletionDecision::Commit,
-        StepAction::Retry(reason) | StepAction::Block(reason) => {
+        StepAction::Retry(reason) | StepAction::Discard(reason) | StepAction::Block(reason) => {
             CompletionDecision::Blocked(reason)
         }
     }

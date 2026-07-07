@@ -6,6 +6,24 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The harness spec's discard/reset recovery rung is implemented (ADR-0066):
+  a rule set to the new `discard` severity (`[harness.rules]`, e.g.
+  `quality_gate = "discard"`) abandons a failed attempt and restores the
+  working tree to committed state before the fresh attempt, instead of
+  iterating in place. Off by default; the Retry-only ladder is unchanged
+  without the config.
+- `verify_before_done` (and `verify_command`) are honored in interactive chat
+  and the rpc wire client, not only `session`/`eval` — a parity test now pins
+  the harness config keys across all three entry points.
+- `login` no longer stores a key the provider actively rejected; the error
+  names the `--no-verify` override for gateways and offline setups (a
+  network/validation failure still stores with a warning, unchanged).
+- A quota pause-marker write failure is logged instead of silently swallowed
+  (a later `resume` cannot see a pause window that was never persisted).
+- Docs: SECURITY.md and the historical release plan no longer name moving
+  version literals; the architecture doc gains the missing
+  `localpilot-selfreview` and `localpilot-verify` crate sections; the README
+  session verb list matches the CLI (`prune`, not `fork`).
 - Memory-injection retrieval honors LocalMind's `[retrieval] rerank` /
   `rerank_window` keys: with rerank opted in and an embedding endpoint
   configured, the top keyword candidates are reordered by the same

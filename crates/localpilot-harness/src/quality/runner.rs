@@ -122,16 +122,21 @@ fn to_spec(check: &CheckConfig) -> CheckSpec {
         name: check.name.clone(),
         command: CheckCommand::new(check.program.clone(), check.args.clone()),
         fixer,
-        severity: check.severity.map(check_severity),
+        severity: check.severity.and_then(check_severity),
     }
 }
 
-/// Map the configured rule severity onto the outcome's severity.
-fn check_severity(severity: RuleSeverity) -> CheckSeverity {
+/// Map the configured rule severity onto the outcome's severity. `Discard`
+/// has no shared-check-runner counterpart and is rejected for per-check
+/// severities at config load; a discard-configured *rule* leaves the check's
+/// own outcome at the default (retry-shaped) severity and escalates at the
+/// rule layer instead.
+fn check_severity(severity: RuleSeverity) -> Option<CheckSeverity> {
     match severity {
-        RuleSeverity::Off => CheckSeverity::Off,
-        RuleSeverity::Warn => CheckSeverity::Warn,
-        RuleSeverity::Block => CheckSeverity::Block,
+        RuleSeverity::Off => Some(CheckSeverity::Off),
+        RuleSeverity::Warn => Some(CheckSeverity::Warn),
+        RuleSeverity::Block => Some(CheckSeverity::Block),
+        RuleSeverity::Discard => None,
     }
 }
 

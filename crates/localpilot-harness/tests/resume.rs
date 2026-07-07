@@ -343,6 +343,49 @@ async fn exhausted_retries_replan_and_record_a_decision() {
 }
 
 #[tokio::test]
+async fn a_discard_severity_finding_restores_committed_state_before_the_fresh_attempt() {
+    let dir = sample_repo();
+    let root = dir.path();
+
+    // Attempt 1 writes a stray junk file but never the marker, so the gate
+    // fails; with `quality_gate = "discard"` the failure escalates to the
+    // discard rung, which must RESTORE COMMITTED STATE — the stray file may
+    // not leak into attempt 2, which writes the marker and commits.
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call(
+                "c1",
+                "write_file",
+                json!({ "path": "stray.txt", "content": "junk from the abandoned attempt" }),
+            )
+            .text("done")
+            .tool_call("c2", "write_file", write_marker_call())
+            .text("fixed"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+
+    let mut severities = indexmap::IndexMap::new();
+    severities.insert("quality_gate".to_string(), RuleSeverity::Discard);
+    let rules = RuleEngine::with_baseline(&severities);
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[marker_check()], 3)
+        .await
+        .unwrap();
+
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert!(root.join("marker.txt").is_file());
+    assert!(
+        !root.join("stray.txt").exists(),
+        "the discarded attempt's file must be removed by the working-tree restore"
+    );
+    // The committed tree carries only the fresh attempt's work.
+    let tracked = git_output(root, &["ls-files"]);
+    assert!(tracked.contains("marker.txt"), "tracked: {tracked}");
+    assert!(!tracked.contains("stray.txt"), "tracked: {tracked}");
+    // Two attempts were made (the model was re-prompted after the discard).
+    assert!(provider.requests().len() >= 2);
+}
+
+#[tokio::test]
 async fn an_audit_finding_blocks_without_retrying() {
     let dir = sample_repo();
     let root = dir.path();

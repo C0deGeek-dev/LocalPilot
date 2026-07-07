@@ -893,6 +893,14 @@ pub enum RuleSeverity {
     Off,
     Warn,
     Block,
+    /// Escalate the rule's actionable (`retry`) failures to `discard`: the
+    /// attempt is abandoned and the working tree restored to committed state
+    /// before a fresh attempt, instead of iterating in place — the
+    /// anti-sunk-cost reset. Rule-level only: a per-check
+    /// `severity = "discard"` is rejected at load (set `[harness.rules]`
+    /// instead), because the per-check severity rides the shared check-runner
+    /// contract, which has no discard notion.
+    Discard,
 }
 
 /// One quality-gate check (ADR-0009). Stored as a program plus an argument list

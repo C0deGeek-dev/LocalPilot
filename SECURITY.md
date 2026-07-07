@@ -2,13 +2,14 @@
 
 ## Supported Versions
 
-Security fixes land on the latest release train. Earlier trains are not
-maintained — upgrade to the current minor.
+Security fixes land on the latest release train (the version in the top-level
+`VERSION` file). Earlier trains are not maintained — upgrade to the current
+release.
 
 | Version | Supported |
 | --- | --- |
-| 1.2.x   | ✅        |
-| < 1.2   | ❌        |
+| latest release train | ✅ |
+| earlier trains | ❌ |
 
 ## Reporting Security Issues
 

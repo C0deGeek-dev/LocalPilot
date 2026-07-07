@@ -262,6 +262,33 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
 
+### `localpilot-selfreview`
+
+Owns the read-only front of the human-gated self-improvement loop
+(ADR-0034/0047/0053): the `observe → detect → propose` stages that scan a
+repository for advisory health findings (drift, leftover markers, stale
+decision indexes, incomplete plan rows, broken doc links, heuristic missing
+tests), fold in model-emitted harness-friction findings, and rank everything
+into one advisory report — plus the pure finding→draft-spec mapping for the
+outward emitter.
+
+Must not own: any write or publish path — it writes nothing; the
+patch-generating half lives in `localpilot-patchgen` and publication is
+`ApprovalToken`-gated in the CLI. Prior lessons are injected by the host, so
+the crate carries no memory dependency.
+
+### `localpilot-verify`
+
+Owns deterministic verification of executed tool calls against their
+contracts: after a call runs, a `Verifier` turns the recorded result into a
+`Verdict` (`Verified`/`Unverified`/`Failed`) so the loop can refuse a
+"success" claim no postcondition supports. Deterministic-first; an effect a
+contract marks unverifiable is recorded as unverified, never as success.
+
+Must not own: command execution or permissioning — it judges outcomes the
+runtime observed. (Distinct from the `verify_before_done` finalize gate,
+which reuses the quality-gate `CheckRunner`.)
+
 **As shipped:** this crate is the write half of the self-improvement loop and is
 **wired** — reached only through the confirm-gated `localpilot self-review
 propose-patch` / `promote` / `discard` commands. `propose-patch` has a model

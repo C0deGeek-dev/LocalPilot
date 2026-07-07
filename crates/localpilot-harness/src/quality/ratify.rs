@@ -1,4 +1,4 @@
-﻿//! Quality-gate ratification.
+//! Quality-gate ratification.
 //!
 //! Discovery (see [`super::discovery`]) proposes; the user ratifies. Ratification
 //! is the trust boundary (ADR-0009, docs/07): a proposed check is untrusted and
@@ -146,6 +146,7 @@ fn severity_str(severity: RuleSeverity) -> &'static str {
         RuleSeverity::Off => "off",
         RuleSeverity::Warn => "warn",
         RuleSeverity::Block => "block",
+        RuleSeverity::Discard => "discard",
     }
 }
 
