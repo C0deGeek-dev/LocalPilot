@@ -45,6 +45,12 @@ Rules:
 - require approval for overwrite until trust is established
 - create parent directories only inside workspace
 - preserve newline style where possible
+- refuse a single payload larger than the soft write-size limit (64 KiB),
+  steering the model to split the work into smaller modular files or to build
+  the file up with `append_file` — an oversized write risks being truncated in
+  transit, so this prevents the malformed-call failure before it happens rather
+  than only recovering from it (see [06-harness-spec.md](06-harness-spec.md)
+  Bad-Output Recovery)
 
 ### `edit_file`
 

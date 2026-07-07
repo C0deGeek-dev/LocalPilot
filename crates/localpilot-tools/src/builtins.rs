@@ -76,6 +76,13 @@ fn paths_detail(input: &Value, prefix: &str) -> String {
 /// Cap on a tool's textual output before truncation.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Soft cap on a single `write_file` payload. A write larger than this risks
+/// being truncated in transit (an oversized tool call can arrive as malformed
+/// JSON), so the tool refuses it and steers the model to split the work into
+/// smaller files rather than emitting one giant file. Well above any normal
+/// source file, so it only trips on the pathological single-huge-file path.
+const MAX_WRITE_BYTES: usize = 64 * 1024;
+
 pub(crate) fn cap(text: String) -> ToolOutput {
     if text.len() <= MAX_OUTPUT_BYTES {
         return ToolOutput::ok(text);
@@ -571,6 +578,15 @@ impl Tool for WriteFile {
     }
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: WriteFileInput = parse_input(&input)?;
+        if input.content.len() > MAX_WRITE_BYTES {
+            return Err(ToolError::InvalidInput(format!(
+                "content is {} bytes, over the {MAX_WRITE_BYTES}-byte single-write limit — a write \
+                 this large risks being truncated in transit. Split the work into several smaller, \
+                 modular files instead of one huge file, or create the file with `write_file` and \
+                 add the rest with `append_file`.",
+                input.content.len()
+            )));
+        }
         let path = ctx.workspace.normalize(Path::new(&input.path))?;
         // Existence is checked on the path itself: a non-UTF-8 (binary) file
         // fails `read_to_string` but must still refuse an overwrite=false

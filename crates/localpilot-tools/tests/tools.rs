@@ -207,6 +207,46 @@ async fn write_file_in_workspace_and_denied_outside() {
 }
 
 #[tokio::test]
+async fn write_file_refuses_an_oversized_payload_and_steers_to_split() {
+    let (dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let huge = "a".repeat(64 * 1024 + 1);
+    let res = dispatch(
+        &registry,
+        "write_file",
+        json!({ "path": "big.txt", "content": huge }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(res.is_error, "an oversized write must be refused");
+    assert!(
+        res.output.contains("modular") && res.output.contains("append_file"),
+        "the refusal steers to split: {}",
+        res.output
+    );
+    assert!(
+        !dir.path().join("big.txt").exists(),
+        "nothing is written when the guard trips"
+    );
+
+    // A normal-sized write is unaffected.
+    let ok = dispatch(
+        &registry,
+        "write_file",
+        json!({ "path": "small.txt", "content": "hello" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(!ok.is_error, "{}", ok.output);
+}
+
+#[tokio::test]
 async fn untrusted_overwrite_prompts_for_approval() {
     let (_dir, ws) = workspace_with(&[("f.txt", "old")]);
     let registry = ToolRegistry::with_builtins();

@@ -558,6 +558,13 @@ retry:
   [`append_file`](05-tool-system.md). This recovers the write instead of replaying
   the same oversized call until the budget is spent. See ADR-0038.
 
+  The chunked-write path is the *cure*; there is also a *prevention*. The
+  always-on agent prompt tells the model to split a large implementation across
+  several small modular files rather than emitting one giant file, and
+  `write_file` refuses a single payload over a soft size limit
+  ([05-tool-system.md](05-tool-system.md)) with the same steer — so the
+  oversized call is usually avoided before it is ever sent.
+
 A third lever acts on a tool call whose arguments are *well-formed JSON but do not
 match the tool's schema* — a distinct failure from the wire-malformed cases above
 (it parses, so it is not a bad-output turn):

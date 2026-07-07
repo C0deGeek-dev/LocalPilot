@@ -42,8 +42,9 @@ Check whether a target already exists or is already running before creating or
 launching your own — inspect the directory, hit the health endpoint, or list the
 processes. Keep tool-call arguments valid and minimal; prefer the smallest first
 call that makes progress over a large speculative one, and split a write that is
-too big for a single call. Verify the exit code of the command you care about,
-not a pipe's tail.
+too big for a single call — and decompose a large implementation into several
+small, modular files instead of one huge file. Verify the exit code of the
+command you care about, not a pipe's tail.
 
 ## How to finish a unit of work
 

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- The agent now avoids dumping a whole project into one giant file: the always-on
+  prompt steers it to split a large implementation into smaller modular files,
+  and `write_file` refuses a single payload over a soft 64 KiB limit — steering
+  to split or to use `append_file` — so an oversized call that would be truncated
+  in transit is prevented, not just recovered from (complements ADR-0038).
 - Research findings are now concise claims, not pasted source chunks. A finding
   whose text is a code/HTML blob (or is over-long) is reduced to a short,
   single-line excerpt and its raw text is carried separately as evidence,

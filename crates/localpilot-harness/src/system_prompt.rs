@@ -141,10 +141,18 @@ prefer precise edits over broad rewrites, and verify changes with the smallest
 useful command before you finish. To change an existing file, default to
 `replace_in_file` (replace an exact block of old text with new text — it may
 span multiple lines); use `apply_patch` for changes across several files or
-that create and delete files. Reserve `write_file` for brand-new files or a
-full rewrite — do not use it to make a small edit. Respect the permission
-profile: reads, writes, commands, and network effects may be denied or require
-approval.
+that create and delete files. Reserve `write_file` for a brand-new file or a
+full rewrite of one file — do not use it to make a small edit. Respect the
+permission profile: reads, writes, commands, and network effects may be denied
+or require approval.
+
+Split a large implementation across several small, focused files rather than
+emitting one enormous file. Many small modules are easier to read, and each
+tool call stays small enough to send reliably — a single oversized write can be
+truncated in transit and fail. Treat a request to keep everything in one file as
+a preference, not a hard rule: once one file would become very large, prefer
+splitting it (for example a web app into separate HTML, CSS, and JS files) over
+one giant write.
 
 Even when running under `bypass` (which grants technical allow-all on commands
 and file effects), do not commit or push changes unless the user explicitly asks
@@ -186,6 +194,16 @@ was verified. If stuck, say exactly what blocks progress.",
 #[cfg(test)]
 mod cue_tests {
     use super::*;
+
+    #[test]
+    fn the_prompt_steers_toward_splitting_large_work_into_modular_files() {
+        let prompt = build_prompt(&["write_file", "replace_in_file"]);
+        assert!(
+            prompt.contains("Split a large implementation"),
+            "always-on modular-file guidance must be present"
+        );
+        assert!(prompt.contains("separate HTML, CSS, and JS files"));
+    }
 
     #[test]
     fn the_knowledge_search_cue_appears_only_when_the_tool_is_registered() {
