@@ -664,6 +664,7 @@ impl AppState {
         ("ingest", "Manage workspace ingestion"),
         ("knowledge", "Query the knowledge base"),
         ("context", "Build a context bundle"),
+        ("research", "Research a topic locally (/research [topic])"),
         ("bg", "List background processes (/bg stop <id>|all)"),
         ("quit", "Exit LocalPilot"),
     ];
@@ -1430,6 +1431,15 @@ mod tests {
         // Preserves the table order and only keeps the "se" prefix.
         assert_eq!(names, ["sessions", "session"]);
         assert!(picker.items.iter().all(|i| !i.description.is_empty()));
+    }
+
+    #[test]
+    fn slash_picker_offers_research() {
+        let mut s = state();
+        s.open_slash_picker("/re".to_string());
+        let picker = s.slash_picker.as_ref().expect("picker open");
+        let names: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"research"), "research missing: {names:?}");
     }
 
     #[test]

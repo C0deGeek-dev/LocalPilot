@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Chat: `/research` now appears in the slash-command autocomplete list.
+- Chat: Ctrl+C exits the app even while a slash command is being typed; the
+  autocomplete overlay no longer captures the global quit key (the `@`-mention
+  picker is fixed the same way).
+
 ## v2.3.0 - 2026-07-07
 
 Coordinated LocalX release.

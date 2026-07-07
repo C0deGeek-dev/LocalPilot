@@ -334,6 +334,12 @@ fn handle_key(state: &mut AppState, key: Key) {
     // edits refilter the list (closing it once the input leaves slash context).
     if state.slash_picker.is_some() {
         match key {
+            // Ctrl+C must always quit, even mid-slash-command: the picker is a
+            // transient overlay, not a reason to swallow the global exit key.
+            Key::CtrlC => {
+                state.close_slash_picker();
+                state.should_quit = true;
+            }
             Key::Up => state.slash_picker_prev(),
             Key::Down => state.slash_picker_next(),
             Key::Enter | Key::Tab => state.slash_picker_select(),
@@ -356,6 +362,12 @@ fn handle_key(state: &mut AppState, key: Key) {
     // and edits refilter (closing it once the input leaves mention context).
     if state.file_picker.is_some() {
         match key {
+            // Ctrl+C must always quit, even mid-mention: same rule as the slash
+            // picker above — a transient overlay never captures the global exit.
+            Key::CtrlC => {
+                state.close_file_picker();
+                state.should_quit = true;
+            }
             Key::Up => state.file_picker_prev(),
             Key::Down => state.file_picker_next(),
             Key::Enter | Key::Tab => state.file_picker_select(),
@@ -551,6 +563,33 @@ mod tests {
         assert!(state.trust.is_none());
         assert!(!state.trusted);
         assert!(state.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_while_a_slash_command_is_typed() {
+        let mut state = state();
+        state.trust = None;
+        state.input = "/com".to_string();
+        state.input_cursor = state.input.len();
+        state.open_slash_picker("/com".to_string());
+        assert!(state.slash_picker.is_some());
+
+        handle_key(&mut state, Key::CtrlC);
+        assert!(state.should_quit, "Ctrl+C must quit with the picker open");
+        assert!(state.slash_picker.is_none());
+    }
+
+    #[test]
+    fn typing_c_into_a_slash_command_does_not_quit() {
+        let mut state = state();
+        state.trust = None;
+        state.input = "/".to_string();
+        state.input_cursor = state.input.len();
+        state.open_slash_picker("/".to_string());
+
+        handle_key(&mut state, Key::Char('c'));
+        assert!(!state.should_quit, "plain 'c' must not quit");
+        assert_eq!(state.input, "/c");
     }
 
     #[test]
