@@ -34,17 +34,21 @@ pub struct WebAccess {
     enabled: bool,
     session_opt_in: bool,
     allowlist: Vec<String>,
+    disallowlist: Vec<String>,
 }
 
 impl WebAccess {
     /// Construct from config. Starts **inactive**: `session_opt_in` is false
-    /// until [`grant_session`](Self::grant_session) is called.
+    /// until [`grant_session`](Self::grant_session) is called. `disallowlist`
+    /// takes priority over `allowlist` (a disallowlisted host is skipped even
+    /// when the allowlist — including `*` — would permit it).
     #[must_use]
-    pub fn new(enabled: bool, allowlist: Vec<String>) -> Self {
+    pub fn new(enabled: bool, allowlist: Vec<String>, disallowlist: Vec<String>) -> Self {
         Self {
             enabled,
             session_opt_in: false,
             allowlist,
+            disallowlist,
         }
     }
 
@@ -71,7 +75,11 @@ impl WebAccess {
         if !self.is_active() {
             return FetchDecision::Disabled;
         }
-        if host_allowed(&self.allowlist, host) {
+        // Disallow wins over allow: a blocked host is skipped even under `*`.
+        if host_matches(&self.disallowlist, host) {
+            return FetchDecision::Disabled;
+        }
+        if host_matches(&self.allowlist, host) {
             FetchDecision::Allowed
         } else {
             FetchDecision::NeedsConfirmation
@@ -79,20 +87,37 @@ impl WebAccess {
     }
 }
 
-/// Whether `host` matches the allowlist: an exact (case-insensitive) match or a
-/// subdomain of an allowlisted domain. An empty host or empty allowlist entry
-/// never matches, so `evildocs.rs` is not allowed by `docs.rs` and
-/// `docs.rs.evil.com` is not allowed by `docs.rs`.
+/// Whether `host` matches any pattern in `patterns`. A pattern is one of:
+/// `*` (matches every host); `*.example.com` (matches `example.com` and any
+/// subdomain); or a bare domain, matched as an exact (case-insensitive) host or
+/// a subdomain of it. An empty host or empty pattern never matches, so
+/// `evildocs.rs` is not matched by `docs.rs` and `docs.rs.evil.com` is not
+/// matched by `docs.rs`.
 #[must_use]
-pub fn host_allowed(allowlist: &[String], host: &str) -> bool {
+pub fn host_matches(patterns: &[String], host: &str) -> bool {
     let host = host.trim().to_ascii_lowercase();
     if host.is_empty() {
         return false;
     }
-    allowlist.iter().any(|domain| {
-        let domain = domain.trim().to_ascii_lowercase();
-        !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().to_ascii_lowercase();
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern == "*" {
+            return true;
+        }
+        // `*.domain` matches the domain itself and any subdomain.
+        let domain = pattern.strip_prefix("*.").unwrap_or(&pattern);
+        !domain.is_empty() && (host == *domain || host.ends_with(&format!(".{domain}")))
     })
+}
+
+/// Whether `host` matches the allowlist. Retained as a thin alias over
+/// [`host_matches`] for callers that pass a single list.
+#[must_use]
+pub fn host_allowed(allowlist: &[String], host: &str) -> bool {
+    host_matches(allowlist, host)
 }
 
 /// One outbound-request record for the egress audit log.
@@ -140,7 +165,7 @@ mod tests {
 
     #[test]
     fn new_access_is_inactive_until_opt_in() {
-        let mut access = WebAccess::new(true, vec!["docs.rs".to_string()]);
+        let mut access = WebAccess::new(true, vec!["docs.rs".to_string()], Vec::new());
         assert!(!access.is_active(), "config-on alone must not activate");
         assert_eq!(access.decide_host("docs.rs"), FetchDecision::Disabled);
         access.grant_session();
@@ -150,7 +175,7 @@ mod tests {
 
     #[test]
     fn config_off_cannot_be_opted_in() {
-        let mut access = WebAccess::new(false, vec!["docs.rs".to_string()]);
+        let mut access = WebAccess::new(false, vec!["docs.rs".to_string()], Vec::new());
         access.grant_session();
         assert!(
             !access.is_active(),
@@ -161,7 +186,7 @@ mod tests {
 
     #[test]
     fn non_allowlisted_host_needs_confirmation() {
-        let mut access = WebAccess::new(true, vec!["docs.rs".to_string()]);
+        let mut access = WebAccess::new(true, vec!["docs.rs".to_string()], Vec::new());
         access.grant_session();
         assert_eq!(
             access.decide_host("crates.io"),
@@ -171,7 +196,7 @@ mod tests {
 
     #[test]
     fn empty_allowlist_confirms_everything() {
-        let mut access = WebAccess::new(true, Vec::new());
+        let mut access = WebAccess::new(true, Vec::new(), Vec::new());
         access.grant_session();
         assert_eq!(
             access.decide_host("docs.rs"),
@@ -189,6 +214,55 @@ mod tests {
         assert!(!host_allowed(&list, "docs.rs.evil.com"));
         assert!(!host_allowed(&list, ""));
         assert!(!host_allowed(&[String::new()], "docs.rs"));
+    }
+
+    #[test]
+    fn star_matches_every_host() {
+        let list = vec!["*".to_string()];
+        assert!(host_matches(&list, "anything.example.com"));
+        assert!(host_matches(&list, "docs.rs"));
+        assert!(!host_matches(&list, ""), "empty host still never matches");
+    }
+
+    #[test]
+    fn star_dot_domain_matches_domain_and_subdomains() {
+        let list = vec!["*.pinterest.com".to_string()];
+        assert!(host_matches(&list, "pinterest.com"), "apex included");
+        assert!(host_matches(&list, "www.pinterest.com"));
+        assert!(!host_matches(&list, "notpinterest.com"));
+    }
+
+    #[test]
+    fn disallowlist_beats_allowlist_including_wildcard() {
+        let mut access = WebAccess::new(
+            true,
+            vec!["*".to_string()],
+            vec!["reddit.com".to_string(), "*.pinterest.com".to_string()],
+        );
+        access.grant_session();
+        // `*` allows the open web...
+        assert_eq!(access.decide_host("docs.rs"), FetchDecision::Allowed);
+        // ...but disallowlisted hosts are skipped outright, subdomains included.
+        assert_eq!(access.decide_host("reddit.com"), FetchDecision::Disabled);
+        assert_eq!(
+            access.decide_host("old.reddit.com"),
+            FetchDecision::Disabled
+        );
+        assert_eq!(
+            access.decide_host("www.pinterest.com"),
+            FetchDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn disallowlist_beats_an_exact_allow_entry() {
+        let mut access = WebAccess::new(
+            true,
+            vec!["docs.rs".to_string()],
+            vec!["docs.rs".to_string()],
+        );
+        access.grant_session();
+        assert_eq!(access.decide_host("docs.rs"), FetchDecision::Disabled);
     }
 
     #[test]

@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Research web egress: `[research.web].allowlist` now accepts `*` (all hosts)
+  and `*.example.com` (domain + subdomains), and a new `disallowlist` blocks
+  specific domains even when the allowlist would permit them (disallow is
+  checked first and wins). Lets you allow broad access while carving out
+  specific domains. Fail-closed defaults are unchanged.
 - `learning review list` is now readable: each row leads with a bracketed id
   and category and the body is shown as a single-line snippet (long bodies are
   truncated); `review show <id>` still prints the full entry.

@@ -369,7 +369,8 @@ operator still opts in for that run.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch for outbound web research. While `false`, no web request is ever made and the loop runs local-only — this is the kill switch a runtime opt-in cannot override. |
-| `allowlist` | array of string | `[]` | Domains that may be fetched (exact host or a subdomain). Empty → every host is skipped, so nothing is fetched. There is no implicit trust. |
+| `allowlist` | array of string | `[]` | Domains that may be fetched (exact host or a subdomain). Empty → every host is skipped, so nothing is fetched. There is no implicit trust. `*` matches every host (allow the open web); `*.example.com` matches `example.com` and any subdomain. |
+| `disallowlist` | array of string | `[]` | Domains that are always blocked, even when the allowlist would permit them. Checked **before** the allowlist, so a match is skipped outright. Same `*` / `*.example.com` patterns as `allowlist`. Empty → blocks nothing. Pair `allowlist = ["*"]` with a `disallowlist` to allow broad access while carving out specific domains. |
 | `audit_log` | string | _(unset)_ | Path (relative to the project root) of the egress audit log recording every outbound request and skip. Unset → `.localpilot/research/egress-audit.log`. |
 
 Web research is reachable only via the headless `localpilot research --web` flag,

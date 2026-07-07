@@ -131,8 +131,17 @@ pub struct ResearchWebConfig {
     pub enabled: bool,
     /// Domains that may be fetched without a per-fetch confirmation, e.g.
     /// `docs.rs`. Empty (the default) means **every** domain must be confirmed
-    /// per fetch — there is no implicit trust.
+    /// per fetch — there is no implicit trust. An entry of `*` matches every
+    /// host (allow the open web); `*.example.com` matches `example.com` and any
+    /// subdomain.
     pub allowlist: Vec<String>,
+    /// Domains that are always blocked, even when the allowlist would permit
+    /// them. Checked **before** the allowlist, so a disallowlisted host is
+    /// skipped outright. Supports the same `*` / `*.example.com` patterns as the
+    /// allowlist. Empty (the default) blocks nothing. Use `allowlist = ["*"]`
+    /// with a `disallowlist` to allow broad access while carving out specific
+    /// domains.
+    pub disallowlist: Vec<String>,
     /// Path (relative to the project root) of the egress audit log that records
     /// every outbound request. `None` lets the host choose its default
     /// (`.localpilot/research/egress-audit.log`).

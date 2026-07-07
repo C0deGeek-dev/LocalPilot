@@ -338,7 +338,11 @@ fn build_web_source(
         .audit_log
         .clone()
         .map_or_else(|| default_audit_log(root), |path| root.join(path));
-    let mut access = WebAccess::new(web_config.enabled, web_config.allowlist.clone());
+    let mut access = WebAccess::new(
+        web_config.enabled,
+        web_config.allowlist.clone(),
+        web_config.disallowlist.clone(),
+    );
 
     writeln!(out, "web research opt-in (egress disclosure):")?;
     writeln!(
@@ -360,6 +364,13 @@ fn build_web_source(
                 web_config.allowlist.join(", ")
             )?;
             writeln!(out, "  non-allowlisted hosts are skipped and logged")?;
+        }
+        if !web_config.disallowlist.is_empty() {
+            writeln!(
+                out,
+                "  blocked domains (disallowlist wins over allowlist): {}",
+                web_config.disallowlist.join(", ")
+            )?;
         }
         writeln!(out, "  audit log: {}", audit_log.display())?;
     } else {
@@ -821,7 +832,7 @@ mod tests {
         enabled: bool,
         audit_log: PathBuf,
     ) -> (WebSource, Arc<FakeProvider>) {
-        let mut access = WebAccess::new(enabled, allowlist);
+        let mut access = WebAccess::new(enabled, allowlist, Vec::new());
         access.grant_session();
         let fake = Arc::new(FakeProvider::new().text(server_url));
         let source =
