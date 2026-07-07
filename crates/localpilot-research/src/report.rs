@@ -51,13 +51,27 @@ pub enum ClaimStatus {
 /// A synthesised statement about the topic with its supporting provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
-    /// The claim itself.
+    /// The claim itself — a concise, single-line natural-language statement.
+    /// Raw source text never lives here; it is carried in `evidence` so a
+    /// finding reads as a claim, not a pasted code/HTML chunk.
     pub statement: String,
     /// Whether gathered evidence backs it (set by the loop's cross-check, not
     /// trusted from the synthesizer).
     pub status: ClaimStatus,
     /// The evidence backing the statement; empty implies `Unsupported`.
     pub supporting: Vec<Provenance>,
+    /// The raw supporting snippet, kept separate from the claim when the source
+    /// text is a code/HTML blob or too long to read as a statement. `None` when
+    /// the statement already stands on its own.
+    #[serde(default)]
+    pub evidence: Option<String>,
+}
+
+/// Collapse all runs of whitespace (including newlines) into single spaces and
+/// trim the ends, so multi-line source text renders as one readable line.
+#[must_use]
+pub fn flatten_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The full result of a research run.

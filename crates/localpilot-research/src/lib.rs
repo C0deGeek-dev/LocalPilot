@@ -16,7 +16,7 @@ mod web;
 
 pub use engine::{run_research, Bounds, RunOutcome};
 pub use output::{candidates_from, render_markdown, CandidateSpec};
-pub use report::{ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
+pub use report::{flatten_whitespace, ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
 pub use source::{Source, SourceSet};
 pub use synth::{HeuristicSynthesizer, Synthesizer};
 pub use web::{host_allowed, host_matches, prepare_query, AuditEntry, FetchDecision, WebAccess};
@@ -107,6 +107,7 @@ mod tests {
                 statement: format!("claim about {topic}"),
                 status: ClaimStatus::Supported, // deliberately wrong; cross-check fixes it
                 supporting: Vec::new(),
+                evidence: None,
             }])
         }
     }

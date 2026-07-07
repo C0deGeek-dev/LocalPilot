@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Research findings are now concise claims, not pasted source chunks. A finding
+  whose text is a code/HTML blob (or is over-long) is reduced to a short,
+  single-line excerpt and its raw text is carried separately as evidence,
+  rendered in a fenced block that can't break the report layout. This also stops
+  raw blobs from leaking into enqueued memory candidates.
 - Research web egress: `[research.web].allowlist` now accepts `*` (all hosts)
   and `*.example.com` (domain + subdomains), and a new `disallowlist` blocks
   specific domains even when the allowlist would permit them (disallow is

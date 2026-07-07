@@ -5,7 +5,11 @@
 //! the candidates into LocalMind's review queue happen in the binding layer
 //! (subject 04): a candidate is never auto-accepted into durable memory.
 
-use crate::{ClaimStatus, Provenance, ResearchReport};
+use crate::{flatten_whitespace, ClaimStatus, Provenance, ResearchReport};
+
+/// Longest raw evidence shown inline in the Markdown artefact before it is
+/// truncated; the finding still carries the full text.
+const MAX_EVIDENCE_CHARS: usize = 4000;
 
 /// A host-neutral memory-candidate proposal derived from a finding. The binding
 /// layer maps this onto LocalMind's `CandidateLesson` and routes it through the
@@ -66,10 +70,13 @@ pub fn render_markdown(report: &ResearchReport) -> String {
                 ClaimStatus::Supported => "supported",
                 ClaimStatus::Unsupported => "unsupported — no evidence found",
             };
+            // Flatten defensively: a statement must never break the heading's
+            // `_(tag)_` suffix or the following `Sources:` block, even if a
+            // caller hands render an unsanitised report.
             out.push_str(&format!(
                 "### {}. {} _({tag})_\n",
                 index + 1,
-                finding.statement
+                flatten_whitespace(&finding.statement)
             ));
             if finding.supporting.is_empty() {
                 out.push('\n');
@@ -85,6 +92,9 @@ pub fn render_markdown(report: &ResearchReport) -> String {
                 }
                 out.push('\n');
             }
+            if let Some(evidence) = &finding.evidence {
+                push_evidence_block(&mut out, evidence);
+            }
         }
     }
 
@@ -99,6 +109,41 @@ pub fn render_markdown(report: &ResearchReport) -> String {
     out
 }
 
+/// Append a finding's raw evidence as a fenced block. The fence is chosen longer
+/// than any backtick run in the content, so a snippet that itself contains
+/// ``` ``` ``` can never break out of the block. Over-long evidence is truncated.
+fn push_evidence_block(out: &mut String, evidence: &str) {
+    let truncated: String = evidence.chars().take(MAX_EVIDENCE_CHARS).collect();
+    let clipped = evidence.chars().count() > MAX_EVIDENCE_CHARS;
+    let fence = backtick_fence(&truncated);
+    out.push_str("Evidence:\n");
+    out.push_str(&fence);
+    out.push('\n');
+    out.push_str(&truncated);
+    if clipped {
+        out.push_str("\n… (truncated)");
+    }
+    out.push('\n');
+    out.push_str(&fence);
+    out.push_str("\n\n");
+}
+
+/// A backtick fence at least one longer than the longest backtick run in `text`
+/// (minimum three), so `text` cannot terminate the fenced block early.
+fn backtick_fence(text: &str) -> String {
+    let mut longest = 0;
+    let mut current = 0;
+    for ch in text.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +154,40 @@ mod tests {
             statement: statement.to_string(),
             status,
             supporting,
+            evidence: None,
         }
+    }
+
+    #[test]
+    fn evidence_renders_in_a_fence_that_survives_backticks_in_the_snippet() {
+        let mut report = ResearchReport::new("t");
+        let mut f = finding(
+            "Excerpt from web: some claim",
+            ClaimStatus::Supported,
+            vec![Provenance::new("web", None)],
+        );
+        f.evidence = Some("```js\nfn();\n```".to_string());
+        report.findings = vec![f];
+
+        let md = render_markdown(&report);
+        assert!(md.contains("Evidence:"));
+        // The claim heading stays on one clean line.
+        assert!(md.contains("### 1. Excerpt from web: some claim _(supported)_"));
+        // A fence longer than the ``` inside the snippet wraps it.
+        assert!(md.contains("````"), "fence escapes inner backticks: {md}");
+    }
+
+    #[test]
+    fn multiline_statement_never_breaks_the_heading() {
+        let mut report = ResearchReport::new("t");
+        report.findings = vec![finding(
+            "line one\nline two",
+            ClaimStatus::Supported,
+            vec![Provenance::new("memory", Some("m1".to_string()))],
+        )];
+        let md = render_markdown(&report);
+        assert!(md.contains("### 1. line one line two _(supported)_"));
+        assert!(md.contains("Sources:"));
     }
 
     #[test]

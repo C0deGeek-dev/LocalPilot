@@ -59,6 +59,10 @@ impl Synthesizer for HeuristicSynthesizer {
                 statement: e.snippet.clone(),
                 status: ClaimStatus::Supported,
                 supporting: vec![e.provenance.clone()],
+                // The loop's sanitize pass splits a raw snippet into a concise
+                // claim plus separate evidence; the model-free path leaves that
+                // to it rather than guessing a summary here.
+                evidence: None,
             })
             .collect())
     }

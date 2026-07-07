@@ -734,6 +734,7 @@ mod tests {
             statement: "caches speed reads".to_string(),
             status: ClaimStatus::Supported,
             supporting: vec![Provenance::new("memory", Some("mem_1".to_string()))],
+            evidence: None,
         }];
         let path = write_report(dir.path(), "caching", &report).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
