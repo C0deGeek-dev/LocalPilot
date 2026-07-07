@@ -6,6 +6,9 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `learning review list` is now readable: each row leads with a bracketed id
+  and category and the body is shown as a single-line snippet (long bodies are
+  truncated); `review show <id>` still prints the full entry.
 - Chat: `/research` now appears in the slash-command autocomplete list.
 - Chat: Ctrl+C exits the app even while a slash command is being typed; the
   autocomplete overlay no longer captures the global quit key (the `@`-mention

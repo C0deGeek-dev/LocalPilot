@@ -170,18 +170,43 @@ pub fn review_list(cwd: &std::path::Path, out: &mut dyn Write) -> anyhow::Result
         for &item_index in cluster {
             let item = &items[item_index];
             let seen = if item.seen_count > 1 {
-                format!("\t(seen {}x)", item.seen_count)
+                format!(" (seen {}x)", item.seen_count)
             } else {
                 String::new()
             };
+            // Keep the row scannable: the id and category lead, and the body is
+            // flattened to a single-line snippet so a long lesson never blows out
+            // the row. `review show <id>` prints the full untruncated body.
             writeln!(
                 out,
-                "{}\t{}\t{:.2}\t{}\t{}{}",
-                item.id, item.state, item.confidence, item.category, item.summary, seen
+                "[{}] {} ({}, {:.2}) — {}{}",
+                item.id,
+                item.category,
+                item.state,
+                item.confidence,
+                review_snippet(&item.summary),
+                seen
             )?;
         }
     }
+    writeln!(out, "\nuse `review show <id>` for the full entry")?;
     Ok(())
+}
+
+/// Longest review-list body shown inline before it is truncated to a snippet.
+const REVIEW_SNIPPET_CHARS: usize = 80;
+
+/// Flatten a candidate body to a single-line snippet for the review list: strip
+/// line breaks and cap the length, appending an ellipsis when truncated.
+fn review_snippet(body: &str) -> String {
+    let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let snippet: String = chars.by_ref().take(REVIEW_SNIPPET_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
 }
 
 /// Back up the store, then delete every pending review candidate. A one-time
@@ -687,6 +712,40 @@ mod tests {
                 .iter()
                 .all(|item| item.state != "Pending"),
             "no pending candidate survives the purge"
+        );
+    }
+
+    #[test]
+    fn review_snippet_flattens_newlines_and_truncates_long_bodies() {
+        let short = review_snippet("a short body");
+        assert_eq!(short, "a short body");
+
+        let multiline = review_snippet("first line\n  second line\tthird");
+        assert_eq!(multiline, "first line second line third");
+
+        let long = "word ".repeat(40);
+        let snippet = review_snippet(&long);
+        assert!(snippet.ends_with('…'), "long body truncated: {snippet}");
+        assert!(
+            snippet.chars().count() <= REVIEW_SNIPPET_CHARS + 1,
+            "snippet capped: {snippet}"
+        );
+    }
+
+    #[test]
+    fn review_list_leads_with_bracketed_id_and_hints_full_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_pending(dir.path());
+        let id = learning::review_list(dir.path()).unwrap()[0].id.clone();
+
+        let mut out = Vec::new();
+        review_list(dir.path(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains(&format!("[{id}]")), "bracketed id: {text}");
+        assert!(
+            text.contains("use `review show <id>` for the full entry"),
+            "hint present: {text}"
         );
     }
 
