@@ -183,6 +183,37 @@ Required commands:
 - `localpilot memory delete`
 - `localpilot memory disable`
 
+## Named Sessions
+
+Sessions are identified by a UUID. A UUID is precise but not memorable, so a
+session may also be given a human name and later resumed by that name instead of
+by id.
+
+Rules:
+
+- a name is optional; an unnamed session is unaffected
+- names are unique within a workspace — naming a session to a name another
+  session already holds is rejected (case-insensitive)
+- a name is trimmed; an empty name, or one that parses as a session id (a UUID),
+  is rejected as ambiguous
+- because a session id is a UUID, a resume reference is disambiguated without a
+  flag: a value that parses as a UUID resolves by id, otherwise by name
+- the name is stored in the workspace session index (`.localpilot/index.json`),
+  not in the replayable event log — it is metadata, not transcript
+- renaming is idempotent for the owning session (re-applying its own name, in any
+  case, is not a clash)
+
+Surfaces:
+
+- in-session: `/name <text>` (alias `/rename <text>`) names the current session;
+  the name shows in the header and status line
+- `localpilot session name <id|name> <new-name>` names or renames a session
+- `localpilot session list` and `/sessions` show the name beside the id
+- resume by name or id: `localpilot session resume <id|name>`,
+  `localpilot print --resume <id|name>`, and
+  `localpilot chat --resume <id|name>` (the interactive launcher, which also
+  accepts `--continue` for the most recent session)
+
 ## Quota Wait/Resume
 
 Some providers enforce token, message, session, or time-window limits. LocalPilot

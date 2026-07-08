@@ -183,6 +183,7 @@ pub async fn run_chat(
     model: Option<&str>,
     provider_id: Option<&str>,
     profile: Profile,
+    resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<()> {
     let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
@@ -316,6 +317,7 @@ pub async fn run_chat(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string()),
         session_id: runtime.session_id().to_string(),
+        session_name: None,
         // Remote-sourced (a release tag via the GitHub API) and rendered into
         // the banner without passing the state scrub — strip control bytes so
         // a garbled or hostile tag can never reach the terminal raw.
@@ -340,6 +342,14 @@ pub async fn run_chat(
     // Seed the `@`-mention file list; refreshed after each turn (files may change).
     state.set_workspace_files(workspace_files(&cwd));
     timer.mark("workspace file walk");
+
+    // Boot straight into a session the CLI asked for (`--resume <id|name>` or
+    // `--continue`). Context is rebuilt from the event log and the transcript tail
+    // is replayed into the view, exactly as the in-session `/resume` does. The
+    // reference was already resolved to an id by `resolve_resume`.
+    if let Some(session) = resume {
+        load_session_id(&mut state, &mut runtime, session);
+    }
 
     // Seed prompt recall from the durable global history so Up/Down survives a
     // restart, scoped to this project (Ctrl-T views all projects). The store
@@ -599,6 +609,7 @@ async fn run_slash(
             runtime.start_new_session();
             state.clear_conversation_view();
             state.header.session_id = runtime.session_id().to_string();
+            state.header.session_name = None;
             state.apply(UiEvent::Notice(format!(
                 "started new session {}",
                 runtime.session_id()
@@ -609,6 +620,8 @@ async fn run_slash(
             match runtime.fork_session(mark_fork) {
                 Ok(id) => {
                     state.header.session_id = id.to_string();
+                    // The branch is a distinct session and inherits no name.
+                    state.header.session_name = None;
                     let verb = if mark_fork { "forked" } else { "cloned" };
                     state.apply(UiEvent::Notice(format!("{verb} into session {id}")));
                 }
@@ -639,8 +652,13 @@ async fn run_slash(
                     } else {
                         ""
                     };
+                    let name = entry
+                        .name
+                        .as_deref()
+                        .map(|n| format!(" \"{n}\""))
+                        .unwrap_or_default();
                     state.apply(UiEvent::Notice(format!(
-                        "{} — {} message(s){current}",
+                        "{}{name} — {} message(s){current}",
                         entry.id, entry.message_count
                     )));
                 }
@@ -653,6 +671,18 @@ async fn run_slash(
         },
         SlashAction::LoadSession(id) => load_session_from_input(state, runtime, &id),
         SlashAction::ContinueSession(id) => continue_session(state, runtime, id.as_deref()),
+        SlashAction::NameSession(name) => {
+            let id = runtime.session_id();
+            match runtime.store().set_session_name(id, &name) {
+                Ok(()) => {
+                    state.header.session_name = Some(name.clone());
+                    state.apply(UiEvent::Notice(format!("named this session \"{name}\"")));
+                }
+                Err(error) => {
+                    state.apply(UiEvent::Notice(format!("could not name session: {error}")));
+                }
+            }
+        }
         SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
             Some(effort) => {
                 runtime.set_reasoning_effort(Some(effort));
@@ -1135,6 +1165,13 @@ fn load_session_id(
         Ok(()) => {
             state.clear_conversation_view();
             state.header.session_id = session.to_string();
+            // Surface the conversation's name (if any) in the header on resume.
+            state.header.session_name = runtime
+                .store()
+                .list_sessions()
+                .ok()
+                .and_then(|sessions| sessions.into_iter().find(|e| e.id == session))
+                .and_then(|entry| entry.name);
             replay_recent_transcript(state, runtime, session);
             state.apply(UiEvent::Notice(format!(
                 "resumed session {session}; current profile and trust apply"
@@ -2529,6 +2566,7 @@ mod tests {
             model: "test-model".into(),
             workspace: "ws".into(),
             session_id: "session".into(),
+            session_name: None,
             update: None,
         }
     }

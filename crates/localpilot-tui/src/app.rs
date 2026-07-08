@@ -68,6 +68,8 @@ pub enum SlashAction {
     LoadSession(String),
     /// Continue the latest previous session, or a specific session when set.
     ContinueSession(Option<String>),
+    /// Name (or rename) the current session (`/name` / `/rename`).
+    NameSession(String),
     HarnessResume,
     WaitResume,
     /// Switch the active provider/model mid-session, or — with no provider — list
@@ -147,6 +149,13 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         _ if name == "session" => SlashAction::Invalid {
             command: "session".to_string(),
             reason: "usage: /session <id> (see /sessions)".to_string(),
+        },
+        _ if matches!(name, "name" | "rename") && !args.is_empty() => {
+            SlashAction::NameSession(args.to_string())
+        }
+        _ if matches!(name, "name" | "rename") => SlashAction::Invalid {
+            command: name.to_string(),
+            reason: "usage: /name <text> — a name for this conversation".to_string(),
         },
         _ if name == "effort" => SlashAction::Invalid {
             command: "effort".to_string(),
@@ -458,7 +467,8 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         | SlashAction::Tree
         | SlashAction::Sessions
         | SlashAction::LoadSession(_)
-        | SlashAction::ContinueSession(_) => {
+        | SlashAction::ContinueSession(_)
+        | SlashAction::NameSession(_) => {
             state.apply(UiEvent::Notice(
                 "session lifecycle commands are handled by the host".to_string(),
             ));
@@ -536,6 +546,7 @@ mod tests {
                 model: "m".into(),
                 workspace: "w".into(),
                 session_id: "s".into(),
+                session_name: None,
                 update: None,
             },
             Mode::Agent,
@@ -716,6 +727,24 @@ mod tests {
         handle_key(&mut state, Key::PageDown);
         assert_eq!(state.input, "prompt");
         assert_eq!(state.input_cursor, state.input.len());
+    }
+
+    #[test]
+    fn name_and_rename_slash_commands_are_parsed() {
+        assert_eq!(
+            parse_slash("/name my refactor"),
+            Some(SlashAction::NameSession("my refactor".to_string()))
+        );
+        // `/rename` is an alias for `/name`.
+        assert_eq!(
+            parse_slash("/rename my refactor"),
+            Some(SlashAction::NameSession("my refactor".to_string()))
+        );
+        // A bare `/name` with no text is a usage error, not a session op.
+        assert!(matches!(
+            parse_slash("/name"),
+            Some(SlashAction::Invalid { command, .. }) if command == "name"
+        ));
     }
 
     #[test]

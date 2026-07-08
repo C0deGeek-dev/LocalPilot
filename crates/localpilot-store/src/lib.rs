@@ -49,6 +49,12 @@ pub struct SessionIndexEntry {
     pub message_count: usize,
     pub created_unix: u64,
     pub updated_unix: u64,
+    /// A human-given name for this conversation, unique within the workspace when
+    /// set. `#[serde(default)]` so index files written before names existed still
+    /// load. Set via [`Store::set_session_name`]; resolved by
+    /// [`Store::find_session_by_name`] for resume-by-name.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -245,18 +251,86 @@ impl Store {
         if let Some(entry) = index.sessions.iter_mut().find(|e| e.id == session) {
             entry.message_count = message_count;
             entry.updated_unix = now;
+            // `name` is intentionally left untouched — a message append must never
+            // clear a name the user set.
         } else {
             index.sessions.push(SessionIndexEntry {
                 id: session,
                 message_count,
                 created_unix: now,
                 updated_unix: now,
+                name: None,
             });
         }
         atomic_write(
             &self.index_path(),
             serde_json::to_string_pretty(&index)?.as_bytes(),
         )
+    }
+
+    /// Give `session` a human name, unique within this workspace, so it can later
+    /// be resumed by name instead of by id. Upserts the index entry, so a
+    /// brand-new session with no persisted messages can still be named.
+    ///
+    /// The name is trimmed; a name that is empty or parses as a session id (a
+    /// UUID) is rejected as ambiguous. Renaming a session to a name a *different*
+    /// session already holds fails with [`StoreError::NameTaken`]; re-applying a
+    /// session's own name (any case) is idempotent.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::InvalidName`] for an empty or id-shaped name,
+    /// [`StoreError::NameTaken`] if another session holds the name, or an io/serde
+    /// error on index read/write.
+    pub fn set_session_name(&self, session: SessionId, name: &str) -> Result<(), StoreError> {
+        let name = name.trim();
+        if name.is_empty() || name.parse::<SessionId>().is_ok() {
+            return Err(StoreError::InvalidName(name.to_string()));
+        }
+        let mut index = self.load_index()?;
+        // Uniqueness is case-insensitive so `Abc` and `abc` cannot both resolve.
+        if let Some(clash) = index
+            .sessions
+            .iter()
+            .find(|e| e.id != session && name_matches(e.name.as_deref(), name))
+        {
+            return Err(StoreError::NameTaken {
+                name: name.to_string(),
+                existing: clash.id,
+            });
+        }
+        let now = now_unix();
+        if let Some(entry) = index.sessions.iter_mut().find(|e| e.id == session) {
+            entry.name = Some(name.to_string());
+        } else {
+            index.sessions.push(SessionIndexEntry {
+                id: session,
+                message_count: 0,
+                created_unix: now,
+                updated_unix: now,
+                name: Some(name.to_string()),
+            });
+        }
+        atomic_write(
+            &self.index_path(),
+            serde_json::to_string_pretty(&index)?.as_bytes(),
+        )
+    }
+
+    /// Find the session named `name` (case-insensitive, trimmed). Returns `None`
+    /// when no session carries the name. Names are unique, so at most one matches.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the index exists but cannot be read or parsed.
+    pub fn find_session_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<SessionIndexEntry>, StoreError> {
+        let name = name.trim();
+        Ok(self
+            .load_index()?
+            .sessions
+            .into_iter()
+            .find(|e| name_matches(e.name.as_deref(), name)))
     }
 
     // --- cache -------------------------------------------------------------
@@ -466,6 +540,12 @@ impl Store {
     }
 }
 
+/// Whether an entry's stored name equals `query`, case-insensitively. A session
+/// with no name never matches.
+fn name_matches(stored: Option<&str>, query: &str) -> bool {
+    stored.is_some_and(|n| n.eq_ignore_ascii_case(query))
+}
+
 /// Which sessions a policy removes: those that fall outside the most-recent
 /// `max_sessions` window, or were last updated before the `max_age_days` cutoff.
 /// A `0` on either axis disables that constraint.
@@ -576,6 +656,7 @@ mod tests {
             message_count: 1,
             created_unix: updated_unix,
             updated_unix,
+            name: None,
         }
     }
 
@@ -594,6 +675,71 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[test]
+    fn set_and_find_session_by_name_roundtrips_case_insensitively() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        // Naming works before any message is persisted (upsert).
+        store.set_session_name(session, "  My Refactor ").unwrap();
+
+        let found = store.find_session_by_name("my refactor").unwrap();
+        assert_eq!(found.map(|e| e.id), Some(session));
+        // Trimmed on write.
+        assert_eq!(
+            store.list_sessions().unwrap()[0].name.as_deref(),
+            Some("My Refactor")
+        );
+        assert!(store.find_session_by_name("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_message_append_preserves_a_name() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        store.set_session_name(session, "keep-me").unwrap();
+        store
+            .append_message(session, &Message::text(Role::User, "hi"))
+            .unwrap();
+        assert_eq!(
+            store.find_session_by_name("keep-me").unwrap().map(|e| e.id),
+            Some(session)
+        );
+    }
+
+    #[test]
+    fn naming_rejects_empty_or_id_shaped_names() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        assert!(matches!(
+            store.set_session_name(session, "   "),
+            Err(StoreError::InvalidName(_))
+        ));
+        // A name that parses as a UUID would be ambiguous with a session id.
+        assert!(matches!(
+            store.set_session_name(session, &SessionId::new().to_string()),
+            Err(StoreError::InvalidName(_))
+        ));
+    }
+
+    #[test]
+    fn names_are_unique_but_reapplying_your_own_name_is_idempotent() {
+        let (_dir, store) = store();
+        let a = SessionId::new();
+        let b = SessionId::new();
+        store.set_session_name(a, "shared").unwrap();
+        // A different session cannot take the name (case-insensitive clash).
+        assert!(matches!(
+            store.set_session_name(b, "SHARED"),
+            Err(StoreError::NameTaken { existing, .. }) if existing == a
+        ));
+        // The owner may re-set its own name (any case) without error.
+        store.set_session_name(a, "Shared").unwrap();
+        assert_eq!(
+            store.find_session_by_name("shared").unwrap().map(|e| e.id),
+            Some(a)
+        );
     }
 
     #[test]

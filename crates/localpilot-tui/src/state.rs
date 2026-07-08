@@ -54,6 +54,9 @@ pub struct Header {
     pub model: String,
     pub workspace: String,
     pub session_id: String,
+    /// The conversation's name, when the user has set one (`/name` / `/rename`).
+    /// Shown in place of the raw id in the header and status line.
+    pub session_name: Option<String>,
     /// A newer release tag, if one is available (shown in the header).
     pub update: Option<String>,
 }
@@ -654,6 +657,8 @@ impl AppState {
         ("tree", "Show the session event tree"),
         ("sessions", "List this workspace's sessions"),
         ("session", "Resume a session by id"),
+        ("name", "Name this session (/name <text>)"),
+        ("rename", "Rename this session (/rename <text>)"),
         ("continue", "Continue the previous session"),
         ("clear", "Clear the conversation view"),
         ("compact", "Summarize and compact the context"),
@@ -1362,6 +1367,7 @@ mod tests {
                 model: "m".into(),
                 workspace: "w".into(),
                 session_id: "s".into(),
+                session_name: None,
                 update: None,
             },
             Mode::Agent,

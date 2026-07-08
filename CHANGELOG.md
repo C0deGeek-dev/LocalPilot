@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Sessions can be named and resumed by name. In `chat`, `/name <text>` (alias
+  `/rename <text>`) names the current conversation; the name shows in the header,
+  the status line, and beside the id in `/sessions` and `session list`. Resume by
+  that name anywhere an id is accepted — `chat --resume <name>` (with a new
+  `--continue` for the most recent session), `print --resume <name>`, and
+  `session resume <name>` — no flag needed to tell a name from an id, since an id
+  is a UUID. `session name <id|name> <new-name>` names or renames from the shell.
+  Names are unique per workspace and stored in the session index, not the
+  transcript.
 - Chat: pasting an image works more reliably. An explicit paste re-resolves the
   provider's vision capability (config > probe) before refusing — catching a
   vision server that came up after startup — and a clipboard read that fails for

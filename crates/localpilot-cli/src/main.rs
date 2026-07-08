@@ -221,6 +221,12 @@ enum Command {
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
         bypass: bool,
+        /// Open the most recent session in this workspace instead of a fresh one.
+        #[arg(long = "continue", conflicts_with = "resume")]
+        continue_latest: bool,
+        /// Open the session with this id or name (see `session list`).
+        #[arg(long)]
+        resume: Option<String>,
     },
     /// Run the agent loop once non-interactively and print the answer (pipelines).
     ///
@@ -397,9 +403,17 @@ enum SessionCommand {
         #[arg(long)]
         output: std::path::PathBuf,
     },
+    /// Give a session a name so it can be resumed by name (see `session resume`
+    /// and `--resume`). Names are unique within the workspace.
+    Name {
+        /// The session id or its current name (see `session list`).
+        id: String,
+        /// The new name for the conversation.
+        name: String,
+    },
     /// Resume a session and run one prompt against it (print mode).
     Resume {
-        /// The session id (see `session list`).
+        /// The session id or name (see `session list`).
         id: String,
         /// The prompt text.
         #[arg(long)]
@@ -1347,9 +1361,12 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             provider,
             permission,
             bypass,
+            continue_latest,
+            resume,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
-            repl::run_chat(model.as_deref(), provider.as_deref(), profile).await?;
+            let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
+            repl::run_chat(model.as_deref(), provider.as_deref(), profile, resume).await?;
         }
         Command::Print {
             prompt,
@@ -1423,6 +1440,10 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 session_cmd::export_session(&id, &output)?;
                 println!("exported {id} to {}", output.display());
             }
+            SessionCommand::Name { id, name } => {
+                session_cmd::name_session(&id, &name)?;
+                println!("named session {id} \"{name}\"");
+            }
             SessionCommand::Resume {
                 id,
                 prompt,
@@ -1433,7 +1454,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 allow_writes,
             } => {
                 let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
-                let session = id.parse::<SessionId>()?;
+                let session = session_cmd::resolve_session_ref(&id)?;
                 let outcome = session_cmd::print_mode(
                     &prompt,
                     &model,
@@ -1533,7 +1554,7 @@ async fn run_default() -> anyhow::Result<()> {
         {
             if config.resolve_model(None).is_some() {
                 let profile = session_cmd::resolve_profile_from_config(&config);
-                return repl::run_chat(None, None, profile).await;
+                return repl::run_chat(None, None, profile, None).await;
             }
         }
     }

@@ -62,6 +62,34 @@ For Google Cloud projects that require ADC instead of an API key, configure a
 [providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)
 §Google Cloud Vertex AI Gemini with ADC.
 
+## Name a conversation and resume it by name
+
+Every session has a UUID, but a name is easier to remember. Name the current
+conversation from inside `chat`:
+
+```text
+/name my-refactor        # or the alias: /rename my-refactor
+```
+
+The name shows in the header and status line, and beside the id in `/sessions`
+and `localpilot session list`. Names are unique per workspace.
+
+Resume by name (or id) from the shell — no flag needed to tell them apart, since a
+session id is a UUID:
+
+```sh
+localpilot chat --resume my-refactor    # reopen it interactively
+localpilot chat --continue              # reopen the most recent session
+localpilot session resume my-refactor --prompt "..." --model <m>
+localpilot print --resume my-refactor "..." --model <m>
+```
+
+You can also name or rename a session from outside a chat:
+
+```sh
+localpilot session name <id-or-name> my-refactor
+```
+
 ## Add an MCP tool server
 
 Configure a Model Context Protocol server so its tools become available to the

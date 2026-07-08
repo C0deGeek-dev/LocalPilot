@@ -224,16 +224,37 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
     }
 }
 
-/// Resolve `--continue` / `--resume <id>` into a session id.
+/// Resolve a session reference — a full session id (UUID) or a conversation name
+/// — into a session id, looking a name up in this workspace's index. A session id
+/// is a UUID, so a human name can never be mistaken for one.
 ///
 /// # Errors
-/// Returns an error for an unparsable id, or `--continue` with no sessions.
+/// Returns an error if the reference is neither a parseable id nor a known name
+/// in this workspace, or if the index cannot be read.
+pub fn resolve_session_ref(reference: &str) -> anyhow::Result<localpilot_core::SessionId> {
+    if let Ok(id) = reference.parse::<localpilot_core::SessionId>() {
+        return Ok(id);
+    }
+    let cwd = std::env::current_dir()?;
+    let entry = Store::open(&cwd)
+        .find_session_by_name(reference)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no session id or name matches {reference:?} in this workspace")
+        })?;
+    Ok(entry.id)
+}
+
+/// Resolve `--continue` / `--resume <id-or-name>` into a session id.
+///
+/// # Errors
+/// Returns an error for a reference that is neither a valid id nor a known name,
+/// or `--continue` with no sessions.
 pub fn resolve_resume(
     continue_latest: bool,
     resume: Option<&str>,
 ) -> anyhow::Result<Option<localpilot_core::SessionId>> {
-    if let Some(id) = resume {
-        return Ok(Some(id.parse()?));
+    if let Some(reference) = resume {
+        return Ok(Some(resolve_session_ref(reference)?));
     }
     if !continue_latest {
         return Ok(None);
@@ -243,6 +264,20 @@ pub fn resolve_resume(
         .latest_session()?
         .ok_or_else(|| anyhow::anyhow!("no sessions exist in this workspace yet"))?;
     Ok(Some(latest.id))
+}
+
+/// Name (or rename) a session so it can later be resumed by name. `reference` is
+/// the session's id or its current name; `name` is the new name.
+///
+/// # Errors
+/// Returns an error if the reference does not resolve, the name is empty or
+/// id-shaped, the name is already used by another session, or the index write
+/// fails.
+pub fn name_session(reference: &str, name: &str) -> anyhow::Result<()> {
+    let id = resolve_session_ref(reference)?;
+    let cwd = std::env::current_dir()?;
+    Store::open(&cwd).set_session_name(id, name)?;
+    Ok(())
 }
 
 /// Print this workspace's sessions, most recent first.
@@ -258,9 +293,14 @@ pub fn list_sessions(out: &mut impl Write) -> anyhow::Result<()> {
         return Ok(());
     }
     for entry in sessions {
+        let name = entry
+            .name
+            .as_deref()
+            .map(|n| format!("  name: {n}"))
+            .unwrap_or_default();
         writeln!(
             out,
-            "{}  messages: {:<4} updated: {}",
+            "{}  messages: {:<4} updated: {}{name}",
             entry.id, entry.message_count, entry.updated_unix
         )?;
     }

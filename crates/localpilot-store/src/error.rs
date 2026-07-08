@@ -1,5 +1,7 @@
 //! Store error type.
 
+use localpilot_core::SessionId;
+
 /// Errors produced while persisting or reading local state.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -19,6 +21,16 @@ pub enum StoreError {
     /// A caller-supplied key was not usable as a file name.
     #[error("invalid storage key: {0}")]
     InvalidKey(String),
+
+    /// A session name was empty, or looked like a session id (a name that parses
+    /// as a UUID would be ambiguous with an id when resuming).
+    #[error("invalid session name: {0}")]
+    InvalidName(String),
+
+    /// The requested session name is already held by a different session in this
+    /// workspace; names are unique so a name always resolves to one session.
+    #[error("session name {name:?} is already used by session {existing}")]
+    NameTaken { name: String, existing: SessionId },
 
     /// A record was written by a format version this build cannot read.
     #[error("unsupported record format version {found} (this build reads up to {supported})")]

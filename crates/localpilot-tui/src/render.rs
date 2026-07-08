@@ -136,7 +136,11 @@ pub fn banner_text(header: &Header) -> Text<'static> {
         vec![
             Span::raw(gutter),
             Span::styled(
-                format!("ws:{} · session:{}", header.workspace, header.session_id),
+                format!(
+                    "ws:{} · session:{}",
+                    header.workspace,
+                    header.session_name.as_deref().unwrap_or(&header.session_id)
+                ),
                 dim,
             ),
         ],
@@ -611,12 +615,14 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
     ]);
 
     // The banner scrolls away, so the status line keeps the model and a short
-    // session id always visible.
-    let short_session = state
-        .header
-        .session_id
-        .get(..8)
-        .unwrap_or(state.header.session_id.as_str());
+    // session id (or the conversation's name, when set) always visible.
+    let short_session = state.header.session_name.as_deref().unwrap_or_else(|| {
+        state
+            .header
+            .session_id
+            .get(..8)
+            .unwrap_or(state.header.session_id.as_str())
+    });
     let mut line2 = format!("{} · session:{short_session}", state.header.model);
     if let Some(cost) = f.cost_usd {
         line2.push_str(&format!("  est ${cost:.4}"));
@@ -694,6 +700,7 @@ mod tests {
                 model: "m".into(),
                 workspace: "w".into(),
                 session_id: "s".into(),
+                session_name: None,
                 update: None,
             },
             Mode::Agent,
