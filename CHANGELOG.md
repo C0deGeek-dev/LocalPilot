@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Chat: Ctrl+C is now staged like a shell. With a prompt typed (or a slash /
+  `@`-mention autocomplete open), the first Ctrl+C clears the composer and
+  dismisses the overlay; a second Ctrl+C on an empty composer quits. On an empty
+  composer it quits right away. (Esc still quits immediately.)
 - Sessions can be named and resumed by name. In `chat`, `/name <text>` (alias
   `/rename <text>`) names the current conversation; the name shows in the header,
   the status line, and beside the id in `/sessions` and `session list`. Resume by

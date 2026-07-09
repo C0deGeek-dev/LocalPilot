@@ -343,12 +343,10 @@ fn handle_key(state: &mut AppState, key: Key) {
     // edits refilter the list (closing it once the input leaves slash context).
     if state.slash_picker.is_some() {
         match key {
-            // Ctrl+C must always quit, even mid-slash-command: the picker is a
-            // transient overlay, not a reason to swallow the global exit key.
-            Key::CtrlC => {
-                state.close_slash_picker();
-                state.should_quit = true;
-            }
+            // Ctrl+C is handled globally (staged clear-then-quit): a slash
+            // command in progress is non-empty input, so the first press clears
+            // it (closing this overlay); a second press on empty input quits.
+            Key::CtrlC => state.ctrl_c(),
             Key::Up => state.slash_picker_prev(),
             Key::Down => state.slash_picker_next(),
             Key::Enter | Key::Tab => state.slash_picker_select(),
@@ -371,12 +369,10 @@ fn handle_key(state: &mut AppState, key: Key) {
     // and edits refilter (closing it once the input leaves mention context).
     if state.file_picker.is_some() {
         match key {
-            // Ctrl+C must always quit, even mid-mention: same rule as the slash
-            // picker above — a transient overlay never captures the global exit.
-            Key::CtrlC => {
-                state.close_file_picker();
-                state.should_quit = true;
-            }
+            // Ctrl+C is handled globally (staged clear-then-quit): same rule as
+            // the slash picker above — the first press clears the in-progress
+            // mention (closing this overlay), a second on empty input quits.
+            Key::CtrlC => state.ctrl_c(),
             Key::Up => state.file_picker_prev(),
             Key::Down => state.file_picker_next(),
             Key::Enter | Key::Tab => state.file_picker_select(),
@@ -395,7 +391,8 @@ fn handle_key(state: &mut AppState, key: Key) {
     }
 
     match key {
-        Key::Esc | Key::CtrlC => state.should_quit = true,
+        Key::Esc => state.should_quit = true,
+        Key::CtrlC => state.ctrl_c(),
         Key::Enter => submit_input(state),
         Key::Backspace => state.backspace_input(),
         Key::Delete => state.delete_input(),
@@ -577,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_even_while_a_slash_command_is_typed() {
+    fn ctrl_c_while_a_slash_command_is_typed_clears_first_then_quits() {
         let mut state = state();
         state.trust = None;
         state.input = "/com".to_string();
@@ -585,9 +582,42 @@ mod tests {
         state.open_slash_picker("/com".to_string());
         assert!(state.slash_picker.is_some());
 
+        // First press abandons the in-progress command and dismisses the picker,
+        // without quitting — matching the shell convention Ctrl+C users expect.
         handle_key(&mut state, Key::CtrlC);
-        assert!(state.should_quit, "Ctrl+C must quit with the picker open");
+        assert!(!state.should_quit, "first Ctrl+C must clear, not quit");
+        assert!(state.input.is_empty());
         assert!(state.slash_picker.is_none());
+
+        // Second press, now on an empty composer, quits.
+        handle_key(&mut state, Key::CtrlC);
+        assert!(state.should_quit, "second Ctrl+C on empty input must quit");
+    }
+
+    #[test]
+    fn ctrl_c_clears_a_typed_prompt_before_quitting() {
+        let mut state = state();
+        state.trust = None;
+        state.input = "half a prompt".to_string();
+        state.input_cursor = state.input.len();
+
+        handle_key(&mut state, Key::CtrlC);
+        assert!(!state.should_quit, "first Ctrl+C must clear, not quit");
+        assert!(state.input.is_empty());
+        assert_eq!(state.input_cursor, 0);
+
+        handle_key(&mut state, Key::CtrlC);
+        assert!(state.should_quit, "second Ctrl+C on empty input must quit");
+    }
+
+    #[test]
+    fn ctrl_c_on_an_empty_composer_quits_immediately() {
+        let mut state = state();
+        state.trust = None;
+        assert!(state.input.is_empty());
+
+        handle_key(&mut state, Key::CtrlC);
+        assert!(state.should_quit, "Ctrl+C on empty input quits right away");
     }
 
     #[test]

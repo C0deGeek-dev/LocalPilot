@@ -466,6 +466,29 @@ impl AppState {
         }
     }
 
+    /// Clear the composer: empty the input, reset the cursor, leave any history
+    /// navigation, and dismiss the slash/mention autocomplete overlays. Used by
+    /// staged Ctrl+C so the first press wipes a pending prompt.
+    pub fn clear_input(&mut self) {
+        self.leave_history_navigation();
+        self.input.clear();
+        self.input_cursor = 0;
+        self.close_slash_picker();
+        self.close_file_picker();
+    }
+
+    /// Staged Ctrl+C. The first press clears a non-empty composer (dismissing any
+    /// open autocomplete overlay as a side effect); once the composer is empty a
+    /// press quits. Mirrors the shell convention: Ctrl+C abandons the current
+    /// line before it exits the program.
+    pub fn ctrl_c(&mut self) {
+        if self.input.is_empty() {
+            self.should_quit = true;
+        } else {
+            self.clear_input();
+        }
+    }
+
     /// A valid UTF-8 byte offset for rendering the input cursor.
     #[must_use]
     pub fn normalized_input_cursor(&self) -> usize {
