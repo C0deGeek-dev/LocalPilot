@@ -25,7 +25,8 @@ use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntim
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
-    Approver, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile, Workspace,
+    Approver, Effect, Interactivity, PermissionEngine, PermissionEngineHandle, PermissionRequest,
+    Profile, Workspace,
 };
 use localpilot_store::Store;
 use localpilot_tools::BackgroundProcesses;
@@ -741,6 +742,7 @@ async fn run_slash(
                 std::time::Instant::now(),
                 None,
                 None,
+                None,
                 operation,
             )
             .await;
@@ -1032,7 +1034,7 @@ async fn warn_unknown_model(
 fn is_live_slash(action: &SlashAction) -> bool {
     matches!(
         action,
-        SlashAction::ToggleThinking | SlashAction::Background(_)
+        SlashAction::ToggleThinking | SlashAction::Background(_) | SlashAction::SetProfile(_)
     )
 }
 
@@ -1041,6 +1043,7 @@ fn is_live_slash(action: &SlashAction) -> bool {
 fn run_live_slash(
     state: &mut AppState,
     background: Option<&Arc<BackgroundProcesses>>,
+    permissions: Option<&PermissionEngineHandle>,
     action: SlashAction,
 ) {
     match action {
@@ -1052,6 +1055,22 @@ fn run_live_slash(
             }
             None => state.apply(UiEvent::Notice(
                 "background controls are unavailable right now".to_string(),
+            )),
+        },
+        // A profile switch only reconfigures this side's permission engine, so
+        // it need not wait for the model: the runtime snapshots the shared
+        // handle per tool call, and the swap governs the very next call.
+        SlashAction::SetProfile(profile) => match permissions {
+            Some(handle) => {
+                handle.set(PermissionEngine::new(sandbox_profile(profile), Vec::new()));
+                state.profile = profile;
+                state.apply(UiEvent::Notice(format!(
+                    "permission profile: {} (in force from the next tool call)",
+                    profile.label()
+                )));
+            }
+            None => state.apply(UiEvent::Notice(
+                "profile changes are unavailable during this operation".to_string(),
             )),
         },
         _ => {}
@@ -1547,6 +1566,7 @@ async fn run_research_prompt(
         std::time::Instant::now(),
         None,
         None,
+        None,
         operation,
     )
     .await;
@@ -1620,6 +1640,9 @@ async fn run_harness_command(
         Ok(String::from_utf8_lossy(&output).into_owned())
     };
 
+    // The harness resume builds its own inner runtime with the profile
+    // captured above, so a mid-run profile swap has nothing to apply to —
+    // profile slash commands keep the idle-only notice here.
     let summary = drive_runtime_operation(
         terminal,
         state,
@@ -1627,6 +1650,7 @@ async fn run_harness_command(
         &mut rx,
         &cancel,
         started,
+        None,
         None,
         None,
         operation,
@@ -1658,6 +1682,9 @@ async fn run_turn(
     // A clonable Arc, so `/bg` can run mid-turn without touching the runtime the
     // turn future has mutably borrowed.
     let background = runtime.background_handle();
+    // Same pattern for the permission engine, so `/unrestricted` (and the other
+    // profile commands) apply while the model is still generating.
+    let permissions = runtime.permission_engine_handle();
     let turn = async {
         let _ = runtime
             .run_turn_with_attachments(prompt, attachments, &events, &cancel)
@@ -1673,6 +1700,7 @@ async fn run_turn(
         started,
         Some(&steer),
         Some(&background),
+        Some(&permissions),
         turn,
     )
     .await
@@ -1688,6 +1716,7 @@ async fn drive_runtime_operation<F, T>(
     started: std::time::Instant,
     steer: Option<&localpilot_harness::SteerQueue>,
     background: Option<&Arc<BackgroundProcesses>>,
+    permissions: Option<&PermissionEngineHandle>,
     operation: F,
 ) -> anyhow::Result<T>
 where
@@ -1725,6 +1754,7 @@ where
                         cancel,
                         steer,
                         background,
+                        permissions,
                         &mut paste_burst,
                         buffered_after,
                     );
@@ -1788,6 +1818,7 @@ fn resolve_event(
     cancel: &CancellationToken,
     steer: Option<&localpilot_harness::SteerQueue>,
     background: Option<&Arc<BackgroundProcesses>>,
+    permissions: Option<&PermissionEngineHandle>,
     paste_burst: &mut PasteBurst,
     buffered_after: bool,
 ) -> Option<oneshot::Sender<bool>> {
@@ -1836,7 +1867,7 @@ fn resolve_event(
                                 // Clear the input line, then run the allowlisted
                                 // command against UI state / the shared handle.
                                 let _ = state.take_input_for_submit();
-                                run_live_slash(state, background, action);
+                                run_live_slash(state, background, permissions, action);
                             }
                             _ => state.apply(UiEvent::Notice(
                                 "slash commands run when the current turn is idle".to_string(),
@@ -2613,6 +2644,35 @@ mod tests {
         terminal
             .draw(|frame| render(frame, state))
             .expect("draw live region");
+    }
+
+    #[test]
+    fn profile_slash_commands_apply_mid_turn_through_the_shared_handle() {
+        // A profile switch only reconfigures this side's permission engine, so
+        // it is allowlisted for mid-turn execution...
+        let action = SlashAction::SetProfile(UiProfile::Unrestricted);
+        assert!(is_live_slash(&action));
+
+        // ...and applying it swaps the shared engine (what the runtime
+        // snapshots on the next tool call) and the footer profile together.
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        let handle =
+            PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
+        run_live_slash(&mut state, None, Some(&handle), action);
+        assert_eq!(handle.profile(), Profile::Unrestricted);
+        assert_eq!(state.profile, UiProfile::Unrestricted);
+
+        // A drive with no handle (compaction, research, harness resume — the
+        // last runs its own inner runtime) degrades to a notice and changes
+        // neither side.
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        run_live_slash(
+            &mut state,
+            None,
+            None,
+            SlashAction::SetProfile(UiProfile::Bypass),
+        );
+        assert_eq!(state.profile, UiProfile::Default);
     }
 
     #[test]

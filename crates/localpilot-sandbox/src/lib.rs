@@ -1,4 +1,4 @@
-﻿//! Execution policy and sandbox for LocalPilot.
+//! Execution policy and sandbox for LocalPilot.
 //!
 //! Owns the workspace path boundary, per-OS command risk classification, the
 //! permission engine and its three profiles (`default`/`relaxed`/`bypass`), and
@@ -17,7 +17,7 @@ pub use command::{classify, classify_posix, classify_windows, CommandClass};
 pub use error::SandboxError;
 pub use path::Workspace;
 pub use permission::{
-    Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile,
-    ScriptedApprover,
+    Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
+    PermissionRequest, Profile, ScriptedApprover,
 };
 pub use secret_path::is_secret_like;
