@@ -255,10 +255,13 @@ An always-on terminal session with:
 - optional thinking/reasoning side panel
 
 Interactive slash commands are REPL-scoped. Mode and permission switches
-(`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`), the reasoning panel
-(`/think`), reasoning effort (`/effort <level>`), and session controls (`/new`,
-`/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act on the live
-session. The rest:
+(`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`, `/unrestricted`), the
+reasoning panel (`/think`), reasoning effort (`/effort <level>`), and session
+controls (`/new`, `/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act
+on the live session. Permission switches also apply **while a turn is
+running** — they only reconfigure LocalPilot's own permission engine, which is
+consulted fresh per tool call, so the new profile governs the very next tool
+call without waiting for the model (ADR-0071). The rest:
 
 - `/clear` clears the visible conversation and runtime message history while
   preserving the session id, workspace, trust decision, provider/model, mode,

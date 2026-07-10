@@ -23,7 +23,9 @@ use localpilot_recovery::{
     detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryAction,
     RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
 };
-use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile};
+use localpilot_sandbox::{
+    Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
+};
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
 use localpilot_tools::{Broker, ToolContext, ToolRegistry};
 use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
@@ -555,7 +557,9 @@ pub enum SwitchError {
 pub struct SessionRuntime {
     provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
-    engine: PermissionEngine,
+    /// Shared + swappable so an interactive host can change the permission
+    /// profile while a turn is in flight; every tool call snapshots it fresh.
+    engine: PermissionEngineHandle,
     approver: Box<dyn Approver>,
     store: Store,
     workspace: localpilot_sandbox::Workspace,
@@ -665,7 +669,7 @@ impl SessionRuntime {
         let mut runtime = Self {
             provider,
             tools,
-            engine,
+            engine: PermissionEngineHandle::new(engine),
             approver,
             store,
             workspace,
@@ -1060,9 +1064,10 @@ impl SessionRuntime {
             retention: Some(&retention),
             processes: Some(self.background.as_ref()),
         };
+        let engine = self.engine.snapshot();
         let result = self
             .tools
-            .dispatch(&call, &ctx, &self.engine, self.approver.as_ref())
+            .dispatch(&call, &ctx, &engine, self.approver.as_ref())
             .await;
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
@@ -1105,10 +1110,22 @@ impl SessionRuntime {
         self.last_quota.as_ref()
     }
 
-    /// Replace the active permission profile for subsequent turns. Interactive
-    /// hosts use this when a slash command changes profile mid-session.
+    /// Replace the active permission profile. Interactive hosts use this when
+    /// a slash command changes profile between turns; the swap lands in the
+    /// same shared handle [`Self::permission_engine_handle`] exposes, so both
+    /// paths stay consistent.
     pub fn set_permission_profile(&mut self, profile: Profile, allowlist: Vec<String>) {
-        self.engine = PermissionEngine::new(profile, allowlist);
+        self.engine.set(PermissionEngine::new(profile, allowlist));
+    }
+
+    /// The shared, swappable permission-engine handle. An interactive host
+    /// clones it before starting a turn so a profile slash command can apply
+    /// *while the model is generating* — the runtime snapshots the engine per
+    /// tool call, so the swap takes effect from the next call without needing
+    /// the mutable runtime borrow the in-flight turn holds.
+    #[must_use]
+    pub fn permission_engine_handle(&self) -> PermissionEngineHandle {
+        self.engine.clone()
     }
 
     /// Install the pull-discovery broker (ADR-0031). When set, the per-turn tool
@@ -1437,8 +1454,9 @@ impl SessionRuntime {
     /// gate (`run_gate_checks`) and the verify-before-done gate, so there is no
     /// second command-running path.
     async fn run_check(&self, check: &CheckConfig, root: &Path) -> CheckOutcome {
+        let engine = self.engine.snapshot();
         let runner = CheckRunner::new(
-            &self.engine,
+            &engine,
             self.approver.as_ref(),
             self.config.interactivity,
             self.config.trusted,
@@ -2469,12 +2487,15 @@ impl SessionRuntime {
                                 processes: Some(self.background.as_ref()),
                             };
                             let gates = self.hooks.gates();
+                            // Snapshot per call: a mid-turn profile swap through
+                            // the shared handle applies from the next tool call.
+                            let engine = self.engine.snapshot();
                             tokio::select! {
                                 () = cancel.cancelled() => None,
                                 result = self.tools.dispatch_gated(
                                     &active_call,
                                     &ctx,
-                                    &self.engine,
+                                    &engine,
                                     self.approver.as_ref(),
                                     &gates,
                                 ) => Some(result),
@@ -2964,6 +2985,55 @@ mod tests {
         );
         runtime.set_registry(registry);
         (runtime, dir)
+    }
+
+    #[tokio::test]
+    async fn a_profile_swap_through_the_shared_handle_governs_the_next_dispatch() {
+        // What a mid-turn `/unrestricted` does: swap the engine through the
+        // shared handle while holding no mutable borrow of the runtime, and
+        // the next dispatch is evaluated under the new profile.
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::new(
+            fake_with_id("a"),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::new(Vec::new())),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                model: "m".to_string(),
+                interactivity: Interactivity::NonInteractive,
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+
+        // Default profile, non-interactive: an unknown command class is denied
+        // by the permission engine before it ever spawns.
+        let denied = runtime
+            .run_user_shell("definitely-not-a-real-command", &[], true)
+            .await;
+        assert!(
+            denied.output.contains("permission denied"),
+            "{}",
+            denied.output
+        );
+
+        let handle = runtime.permission_engine_handle();
+        handle.set(PermissionEngine::new(Profile::Unrestricted, Vec::new()));
+
+        // Same call after the swap: the engine no longer denies it (the spawn
+        // itself may fail — the command does not exist — but that error is not
+        // a permission denial).
+        let allowed = runtime
+            .run_user_shell("definitely-not-a-real-command", &[], true)
+            .await;
+        assert!(
+            !allowed.output.contains("permission denied"),
+            "{}",
+            allowed.output
+        );
     }
 
     /// A single-provider runtime over `provider`, for capability checks.

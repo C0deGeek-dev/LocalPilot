@@ -247,6 +247,53 @@ fn untrusted_floor(decision: Decision, trusted: bool) -> Decision {
     }
 }
 
+/// A shared, swappable handle to the session's [`PermissionEngine`].
+///
+/// The interactive host swaps profiles mid-turn (`/unrestricted` while the
+/// model is generating): the runtime holds this handle and snapshots the
+/// engine per tool call, so a swap applies from the very next call without
+/// needing mutable access to the runtime the in-flight turn already borrows.
+/// A poisoned lock recovers the inner value — a panicked writer can only have
+/// completed or not completed the swap; both states are valid engines.
+#[derive(Debug, Clone)]
+pub struct PermissionEngineHandle {
+    engine: std::sync::Arc<std::sync::RwLock<PermissionEngine>>,
+}
+
+impl PermissionEngineHandle {
+    /// Wrap an engine for shared access.
+    #[must_use]
+    pub fn new(engine: PermissionEngine) -> Self {
+        Self {
+            engine: std::sync::Arc::new(std::sync::RwLock::new(engine)),
+        }
+    }
+
+    /// The current engine, cloned. Callers evaluate a whole tool call against
+    /// one consistent snapshot; the next call observes any swap.
+    #[must_use]
+    pub fn snapshot(&self) -> PermissionEngine {
+        match self.engine.read() {
+            Ok(engine) => engine.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Replace the engine; every subsequent snapshot sees the new one.
+    pub fn set(&self, engine: PermissionEngine) {
+        match self.engine.write() {
+            Ok(mut current) => *current = engine,
+            Err(poisoned) => *poisoned.into_inner() = engine,
+        }
+    }
+
+    /// The active profile (a convenience over [`Self::snapshot`]).
+    #[must_use]
+    pub fn profile(&self) -> Profile {
+        self.snapshot().profile()
+    }
+}
+
 /// An approval source consulted when a decision is [`Decision::Ask`].
 ///
 /// `approve` is asynchronous so an interactive front-end can suspend the turn
@@ -554,6 +601,28 @@ mod tests {
             ));
             assert_eq!(decision, Decision::Deny, "profile {profile:?}");
         }
+    }
+
+    #[test]
+    fn engine_handle_swaps_are_visible_to_later_snapshots() {
+        let handle = PermissionEngineHandle::new(engine(Profile::Default));
+        let clone = handle.clone();
+        assert_eq!(handle.profile(), Profile::Default);
+
+        // A swap through one clone (the host's mid-turn slash command) is
+        // observed by the next snapshot through the other (the runtime's next
+        // tool call).
+        clone.set(engine(Profile::Unrestricted));
+        assert_eq!(handle.profile(), Profile::Unrestricted);
+        let decision = handle.snapshot().decide(&req(
+            Effect::ReadPath {
+                inside_workspace: false,
+                secret_like: false,
+            },
+            Interactivity::NonInteractive,
+            true,
+        ));
+        assert_eq!(decision, Decision::Allow);
     }
 
     #[test]

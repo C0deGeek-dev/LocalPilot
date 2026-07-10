@@ -2,6 +2,33 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0071: Permission Profile Slash Commands Apply Mid-Turn Through A Shared Engine Handle
+
+Status: accepted. Extends ADR-0070 after `/unrestricted` proved to be
+idle-only: a profile switch only reconfigures LocalPilot's own permission
+engine, so making the user wait out a generating model was gratuitous.
+
+1. **The engine is shared and swappable.** `SessionRuntime` holds the
+   permission engine behind a `PermissionEngineHandle`
+   (`Arc<RwLock<PermissionEngine>>` in `localpilot-sandbox`); the runtime
+   snapshots it fresh per tool call (it always re-decided per call — the swap
+   just needed a path around the turn's mutable runtime borrow). A poisoned
+   lock recovers the inner value: a half-finished swap is impossible, both
+   pre- and post-swap engines are valid.
+2. **Profile slash commands join the mid-turn allowlist.** `SetProfile` is
+   accepted by the live-slash gate — the same pattern `/bg` uses (a cloned
+   handle, never the borrowed runtime) — swaps the shared engine, updates the
+   footer, and notices that the profile is in force from the next tool call.
+   `set_permission_profile` (the idle path) writes through the same handle, so
+   the two paths cannot diverge.
+3. **Scope: the agent turn only.** Drives without a live session runtime
+   (compaction, research, the harness resume — which constructs its own inner
+   runtime from the profile captured at start) degrade to an explanatory
+   notice. A pending approval prompt still captures its y/n keys first; the
+   switch applies once answered.
+4. Pinned by an engine-handle swap test, a runtime dispatch test (deny → swap
+   via handle → next dispatch allowed), and a live-slash wiring test.
+
 ## ADR-0070: Out-Of-Workspace Access Is Grantable — Prompt, Standing Read Grants, And An Unrestricted Profile
 
 Status: accepted. Amends the permission-profile rules in docs/07 after an
