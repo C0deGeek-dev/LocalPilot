@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Map the `--permission` / `--bypass` flags to a permission profile. `--bypass`
-/// wins, and is never the default.
+/// wins, and neither `bypass` nor `unrestricted` is ever the default.
 #[must_use]
 pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
     if bypass {
@@ -26,6 +26,7 @@ pub fn resolve_profile(permission: Option<&str>, bypass: bool) -> Profile {
     match permission {
         Some("relaxed") => Profile::Relaxed,
         Some("bypass") => Profile::Bypass,
+        Some("unrestricted") => Profile::Unrestricted,
         _ => Profile::Default,
     }
 }
@@ -44,7 +45,25 @@ pub fn resolve_profile_from_config(config: &localpilot_config::Config) -> Profil
         localpilot_config::PermissionProfile::Default => Profile::Default,
         localpilot_config::PermissionProfile::Relaxed => Profile::Relaxed,
         localpilot_config::PermissionProfile::Bypass => Profile::Bypass,
+        localpilot_config::PermissionProfile::Unrestricted => Profile::Unrestricted,
     }
+}
+
+/// Build the session workspace for `cwd`, granting each configured
+/// `[permissions] extra_read_roots` directory standing read scope. A root that
+/// cannot be granted (typically: it does not exist) is reported to stderr and
+/// skipped, so a stale config entry degrades one grant instead of the session.
+pub fn workspace_with_read_roots(
+    cwd: &std::path::Path,
+    config: &localpilot_config::Config,
+) -> Result<Workspace, localpilot_sandbox::SandboxError> {
+    let mut workspace = Workspace::new(cwd)?;
+    for root in &config.permissions.extra_read_roots {
+        if let Err(error) = workspace.add_read_root(std::path::Path::new(root)) {
+            eprintln!("warning: skipping [permissions] extra_read_roots entry {root:?}: {error}");
+        }
+    }
+    Ok(workspace)
 }
 
 /// Run print mode for one prompt.
@@ -170,7 +189,7 @@ pub async fn build_runtime(
         PermissionEngine::new(profile, Vec::new()),
         Box::new(ScriptedApprover::new(Vec::new())),
         Store::open(cwd),
-        Workspace::new(cwd)?,
+        workspace_with_read_roots(cwd, &config)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.to_string(),
@@ -445,6 +464,10 @@ mod tests {
         assert_eq!(resolve_profile(None, false), Profile::Default);
         assert_eq!(resolve_profile(Some("relaxed"), false), Profile::Relaxed);
         assert_eq!(resolve_profile(Some("default"), false), Profile::Default);
+        assert_eq!(
+            resolve_profile(Some("unrestricted"), false),
+            Profile::Unrestricted
+        );
         // --bypass always wins and is explicit.
         assert_eq!(resolve_profile(None, true), Profile::Bypass);
         assert_eq!(resolve_profile(Some("relaxed"), true), Profile::Bypass);
@@ -462,6 +485,26 @@ mod tests {
         assert_eq!(resolve_profile_from_config(&config), Profile::Relaxed);
         config.permissions.profile = localpilot_config::PermissionProfile::Bypass;
         assert_eq!(resolve_profile_from_config(&config), Profile::Bypass);
+        config.permissions.profile = localpilot_config::PermissionProfile::Unrestricted;
+        assert_eq!(resolve_profile_from_config(&config), Profile::Unrestricted);
+    }
+
+    #[test]
+    fn workspace_with_read_roots_grants_configured_roots_and_skips_missing_ones() {
+        let cwd = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        std::fs::write(granted.path().join("note.md"), "x").unwrap();
+
+        let mut config = localpilot_config::Config::default();
+        config.permissions.extra_read_roots = vec![
+            granted.path().display().to_string(),
+            // A stale entry must degrade to a skipped grant, not a failed session.
+            granted.path().join("no-such-dir").display().to_string(),
+        ];
+
+        let workspace = workspace_with_read_roots(cwd.path(), &config).unwrap();
+        assert!(workspace.read_scoped(&granted.path().join("note.md")));
+        assert!(!workspace.contains(granted.path()));
     }
 
     /// A sink whose every write fails with the given pipe-closed error, standing in

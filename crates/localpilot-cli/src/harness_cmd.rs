@@ -442,7 +442,7 @@ where
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
     let provider = provider_for(root, provider_id)?;
-    let workspace = Workspace::new(root)?;
+    let workspace = crate::session_cmd::workspace_with_read_roots(root, &config)?;
     let rules = RuleEngine::with_baseline(&config.harness.rules);
     let test_command = config.harness.test_command.clone();
     let checks = config.harness.checks.clone();

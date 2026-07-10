@@ -138,6 +138,9 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         _ if name == "default" && args.is_empty() => SlashAction::SetProfile(Profile::Default),
         _ if name == "relaxed" && args.is_empty() => SlashAction::SetProfile(Profile::Relaxed),
         _ if name == "bypass" && args.is_empty() => SlashAction::SetProfile(Profile::Bypass),
+        _ if name == "unrestricted" && args.is_empty() => {
+            SlashAction::SetProfile(Profile::Unrestricted)
+        }
         _ if matches!(name, "think" | "thinking") && args.is_empty() => SlashAction::ToggleThinking,
         _ if name == "effort" && !args.is_empty() => SlashAction::SetEffort(args.to_string()),
         _ if name == "new" && args.is_empty() => SlashAction::NewSession,
@@ -214,6 +217,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
                 | "default"
                 | "relaxed"
                 | "bypass"
+                | "unrestricted"
                 | "think"
                 | "thinking"
                 | "clear"

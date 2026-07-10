@@ -238,7 +238,8 @@ engine.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `profile` | `default` \| `relaxed` \| `bypass` | `default` | Permission profile. `bypass` is never the default and is always surfaced |
+| `profile` | `default` \| `relaxed` \| `bypass` \| `unrestricted` | `default` | Permission profile. `bypass` and `unrestricted` are never the default and are always surfaced. `unrestricted` approves everything — out-of-workspace paths included — with no prompts; the user accepts full responsibility |
+| `extra_read_roots` | array of string | `[]` | Absolute directories granted standing **read** scope in addition to the workspace, in every profile including non-interactive runs. Writes keep the workspace boundary; secret-like reads keep their gate. A missing directory is reported and skipped at startup |
 
 ### `[quota]`
 

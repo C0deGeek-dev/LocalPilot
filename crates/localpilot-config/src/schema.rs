@@ -1044,9 +1044,15 @@ impl HarnessConfig {
 #[serde(default)]
 pub struct PermissionsConfig {
     pub profile: PermissionProfile,
+    /// Directories (absolute paths) granted standing *read* scope in addition
+    /// to the workspace. Reads under these roots are treated like in-workspace
+    /// reads by the permission engine; writes keep the workspace boundary. A
+    /// listed directory that does not exist is reported and skipped at
+    /// startup, never silently widened or ignored.
+    pub extra_read_roots: Vec<String>,
 }
 
-/// Permission profile. `Bypass` is never the default.
+/// Permission profile. `Bypass` and `Unrestricted` are never the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionProfile {
@@ -1054,6 +1060,9 @@ pub enum PermissionProfile {
     Default,
     Relaxed,
     Bypass,
+    /// Approves everything, including out-of-workspace paths, with no
+    /// prompts. The user explicitly accepts full responsibility.
+    Unrestricted,
 }
 
 /// Quota wait/resume configuration.
@@ -1127,6 +1136,21 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn permissions_parse_the_unrestricted_profile_and_extra_read_roots() {
+        let config: PermissionsConfig = serde_json::from_value(json!({
+            "profile": "unrestricted",
+            "extra_read_roots": ["D:/notes", "/home/user/refs"],
+        }))
+        .unwrap();
+        assert_eq!(config.profile, PermissionProfile::Unrestricted);
+        assert_eq!(config.extra_read_roots, ["D:/notes", "/home/user/refs"]);
+        // Both keys default: absent means the default profile and no grants.
+        let config: PermissionsConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(config.profile, PermissionProfile::Default);
+        assert!(config.extra_read_roots.is_empty());
     }
 
     #[test]

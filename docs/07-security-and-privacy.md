@@ -217,7 +217,14 @@ deliberately. Profiles apply in both agent mode and harness mode.
 - `relaxed`: a user-defined allowlist auto-approves common safe actions; the rest
   still prompt.
 - `bypass`: a launch mode that approves everything with no prompts, equivalent to
-  running fully localpilot.
+  running fully localpilot. The single exception is an out-of-workspace path,
+  which prompts (see the boundary rule below).
+- `unrestricted`: a launch mode that approves everything — out-of-workspace
+  paths included — with no prompts at all. The user explicitly accepts full
+  responsibility. Like `bypass` it is never the default, must be set explicitly
+  (`--permission unrestricted`, the `/unrestricted` slash command, or
+  `[permissions] profile`), is always surfaced in the footer/status output, and
+  does not disable redaction or logging (ADR-0070).
 
 Rules:
 
@@ -234,12 +241,25 @@ Rules:
   or config, and the active profile is always shown in the footer/status output.
 - `bypass` does not silently disable redaction or logging; disabling those
   requires separate explicit settings.
-- **Bypass keeps the workspace boundary for path effects only.** The file
-  tools' read/write effects carry path information, and an out-of-workspace
-  path is still denied under bypass. Shell commands carry no path
+- **Bypass keeps the workspace boundary for path effects only — as a prompt,
+  never a dead end.** The file tools' read/write effects carry path
+  information, and an out-of-workspace path under bypass prompts in an
+  interactive session and is denied non-interactively — exactly the `default`
+  gate, so bypass is never *weaker* than `default` (ADR-0070; it previously
+  hard-denied with no way to approve). Shell commands carry no path
   information: bypass auto-allows every command class, and a command's own
   file access is not contained (its working directory is the workspace root,
   nothing more). Treat bypass as full shell access for the model.
+- **Standing read grants: `[permissions] extra_read_roots`.** Directories
+  listed there (absolute paths, canonicalized at startup) are treated like
+  in-workspace paths for *read* effects only, in every profile and in
+  non-interactive runs — the config-file counterpart of approving the same
+  read prompt every session. Writes under a granted root keep the workspace
+  boundary, and secret-like reads keep their own gate. A listed directory
+  that cannot be canonicalized (typically: it does not exist) is reported at
+  startup and skipped, never silently widened. A denied out-of-workspace
+  access names this key, the interactive prompt, and `--permission
+  unrestricted` in its error, so the denial is actionable (ADR-0070).
 - **The containment root and the spawn working directory are distinct
   spellings of the same directory.** The sandbox canonicalizes the workspace
   root to a verbatim extended-length path (`\\?\…` on Windows); that verbatim
@@ -253,8 +273,10 @@ Rules:
 - Harness rule verdicts still apply on top of the permission profile. A profile
   controls prompting, not the harness correctness gates.
 
-Bypass removes the main safety net against model-initiated destructive actions.
-It should be used only in disposable or sandboxed environments.
+Bypass removes the main safety net against model-initiated destructive actions,
+and unrestricted additionally removes the workspace boundary for the file
+tools. Both should be used only in disposable or sandboxed environments, or
+where the user has deliberately accepted the risk.
 
 ## Reliability Contract — Permission Invariants
 

@@ -2,6 +2,40 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0070: Out-Of-Workspace Access Is Grantable — Prompt, Standing Read Grants, And An Unrestricted Profile
+
+Status: accepted. Amends the permission-profile rules in docs/07 after an
+out-of-workspace `list_files` denial proved to be a dead end: under `bypass`
+the path effect was hard-denied with no prompt (strictly *weaker* than
+`default`, which asks), and no profile offered a standing or non-interactive
+grant.
+
+1. **Bypass asks instead of hard-denying the workspace boundary.** An
+   out-of-workspace path effect under `bypass` now takes the same gate as
+   `default`: prompt when interactive, deny when non-interactive. Bypass's
+   "no prompts" property is narrowed to everything *inside* the boundary; the
+   one prompt it keeps is the boundary itself. This is a permission-contract
+   change; the pinned test is
+   `bypass_asks_for_out_of_workspace_paths_and_denies_them_headless`.
+2. **`[permissions] extra_read_roots` — standing read grants.** Configured
+   directories are canonicalized at startup and widen only the *read* scope
+   (`Workspace::read_scoped`), in every profile and non-interactively. Writes
+   and `Workspace::resolve` keep the hard boundary; secret-like reads keep
+   their gate; a root that fails to canonicalize is reported and skipped —
+   never silently widened or ignored.
+3. **A fourth profile, `unrestricted`.** Approves every effect — out-of-
+   workspace paths included — with no prompts; the user explicitly accepts
+   full responsibility. Never the default; set per launch (`--permission
+   unrestricted`), per session (`/unrestricted`), or per project config. It
+   is rendered in the footer in the strongest warning style, implies
+   workspace trust like `bypass`, and does not disable redaction, logging,
+   or harness rule verdicts.
+4. **Denials are actionable.** An out-of-workspace permission denial names
+   the target and all three remedies (interactive approval,
+   `extra_read_roots`, `--permission unrestricted`) in the model-visible
+   error, so the model can relay how the user lifts the restriction instead
+   of dead-ending.
+
 ## ADR-0069: Oversized Single-File Writes Are Prevented At The Prompt And The Write Tool, Not Only Recovered
 
 Status: accepted. Complements ADR-0038 (an oversized malformed write is

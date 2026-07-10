@@ -188,9 +188,10 @@ impl ToolRegistry {
         // asks to always confirm) raises an `Allow` to `Ask`, so even the
         // relaxed profile pauses for a destructive, un-undoable action. This is
         // tighten-only — it never turns a `Deny` into anything weaker — and it
-        // does not touch `bypass`, whose whole point is no prompts.
+        // does not touch `bypass` or `unrestricted`, whose whole point is no
+        // prompts.
         let contract = tool.contract();
-        let force_confirm = engine.profile() != Profile::Bypass
+        let force_confirm = !matches!(engine.profile(), Profile::Bypass | Profile::Unrestricted)
             && (matches!(contract.reversibility, Reversibility::Irreversible)
                 || matches!(contract.confirmation, Confirmation::Always));
 
@@ -214,11 +215,7 @@ impl ToolRegistry {
             if !allowed {
                 return ToolResult::error(
                     call.id.clone(),
-                    format_tool_output(
-                        tool.name(),
-                        &format!("permission denied for {}", tool.name()),
-                        true,
-                    ),
+                    format_tool_output(tool.name(), &denial_message(tool.name(), &request), true),
                 );
             }
         }
@@ -253,6 +250,25 @@ impl ToolRegistry {
             ),
         }
     }
+}
+
+/// The model-visible text for a denied tool call. An out-of-workspace path
+/// denial names the target and every way the user can grant the access, so it
+/// is an actionable answer instead of a dead end.
+fn denial_message(tool: &str, request: &PermissionRequest) -> String {
+    let mut message = format!("permission denied for {tool}");
+    if request.effect.is_outside_workspace() {
+        if !request.detail.is_empty() {
+            message.push_str(&format!(" ({})", request.detail));
+        }
+        message.push_str(
+            ": the path is outside the workspace. The user can approve the prompt in an \
+             interactive session, grant standing read access by listing the directory in \
+             `extra_read_roots` under `[permissions]` in .localpilot.toml, or relaunch with \
+             `--permission unrestricted`.",
+        );
+    }
+    message
 }
 
 /// Bound an output to the context budget: keep the head and tail, spill the

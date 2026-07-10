@@ -27,10 +27,18 @@ pub enum Profile {
     Relaxed,
     /// A launch mode that approves everything with no prompts. Never the
     /// default. Path-bearing effects (the file tools) keep the workspace
-    /// boundary, and redaction/logging stay on — but shell commands carry no
-    /// path information, so bypass auto-allows any command class; a command's
-    /// own file access is not contained. See docs/07 §Permission Profiles.
+    /// boundary — an out-of-workspace path prompts interactively and is denied
+    /// headless, so bypass is never weaker than `default` — and
+    /// redaction/logging stay on. Shell commands carry no path information, so
+    /// bypass auto-allows any command class; a command's own file access is
+    /// not contained. See docs/07 §Permission Profiles.
     Bypass,
+    /// A launch mode that approves everything, including out-of-workspace
+    /// paths, with no prompts at all. The user explicitly accepts full
+    /// responsibility. Never the default; must be set explicitly per launch or
+    /// per project config. Redaction and logging stay on. See docs/07
+    /// §Permission Profiles and ADR-0070.
+    Unrestricted,
 }
 
 /// Whether the session can prompt the user.
@@ -114,13 +122,18 @@ impl PermissionEngine {
     #[must_use]
     pub fn decide(&self, request: &PermissionRequest) -> Decision {
         match self.profile {
+            Profile::Unrestricted => Decision::Allow,
             Profile::Bypass => {
                 // Approve everything except an out-of-workspace *path* effect:
                 // the workspace boundary is not silently lifted by bypass for
-                // the file tools. Commands carry no path information and are
-                // allowed as-is (see the Profile::Bypass docs).
+                // the file tools. It is lifted the same way `default` lifts it
+                // — an interactive approval — never harder: a hard deny here
+                // would make the most permissive prompting profile *weaker*
+                // than `default` for the one effect it still gates. Commands
+                // carry no path information and are allowed as-is (see the
+                // Profile::Bypass docs).
                 if request.effect.is_outside_workspace() {
-                    Decision::Deny
+                    ask_or_deny(request.interactivity)
                 } else {
                     Decision::Allow
                 }
@@ -369,16 +382,63 @@ mod tests {
     }
 
     #[test]
-    fn bypass_still_denies_out_of_workspace_writes() {
-        let decision = engine(Profile::Bypass).decide(&req(
+    fn bypass_asks_for_out_of_workspace_paths_and_denies_them_headless() {
+        // Bypass keeps the workspace boundary but is never weaker than
+        // `default`: an out-of-workspace path effect prompts interactively
+        // (the one prompt bypass keeps) and is denied non-interactively.
+        for effect in [
             Effect::WritePath {
                 inside_workspace: false,
                 overwrite: false,
             },
-            Interactivity::Interactive,
-            true,
-        ));
-        assert_eq!(decision, Decision::Deny);
+            Effect::ReadPath {
+                inside_workspace: false,
+                secret_like: false,
+            },
+        ] {
+            assert_eq!(
+                engine(Profile::Bypass).decide(&req(effect, Interactivity::Interactive, true)),
+                Decision::Ask,
+                "effect {effect:?}"
+            );
+            assert_eq!(
+                engine(Profile::Bypass).decide(&req(effect, Interactivity::NonInteractive, true)),
+                Decision::Deny,
+                "effect {effect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrestricted_allows_everything_without_prompting() {
+        // The user explicitly accepted full responsibility: every effect —
+        // out-of-workspace paths, secret reads, destructive commands — is
+        // allowed with no prompt, in both interactivity modes.
+        let effects = [
+            Effect::ReadPath {
+                inside_workspace: false,
+                secret_like: true,
+            },
+            Effect::WritePath {
+                inside_workspace: false,
+                overwrite: true,
+            },
+            Effect::RunCommand(CommandClass::Destructive),
+            Effect::RunCommand(CommandClass::Privileged),
+            Effect::Network,
+        ];
+        for effect in effects {
+            for interactivity in [Interactivity::Interactive, Interactivity::NonInteractive] {
+                // `trusted: false` too: unrestricted does not consult the trust floor.
+                let decision =
+                    engine(Profile::Unrestricted).decide(&req(effect, interactivity, false));
+                assert_eq!(
+                    decision,
+                    Decision::Allow,
+                    "effect {effect:?} {interactivity:?}"
+                );
+            }
+        }
     }
 
     #[test]

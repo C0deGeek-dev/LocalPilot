@@ -592,12 +592,14 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         "-".to_string()
     };
-    let profile_style = if state.profile == Profile::Bypass {
-        Style::default()
+    let profile_style = match state.profile {
+        Profile::Bypass => Style::default()
             .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
+            .add_modifier(Modifier::BOLD),
+        // The strongest warning colour: unrestricted lifted the workspace
+        // boundary too, so it must never blend into the footer.
+        Profile::Unrestricted => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Profile::Default | Profile::Relaxed => Style::default(),
     };
 
     let effort = f

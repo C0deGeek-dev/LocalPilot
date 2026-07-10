@@ -9,7 +9,7 @@ use localpilot_harness::{SessionConfig, SessionRuntime};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_rpc::{serve, serve_acp, RpcApprover, ServeContext};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, Workspace};
+use localpilot_sandbox::{Interactivity, PermissionEngine, Profile};
 use localpilot_store::Store;
 
 /// Which stdio protocol to serve.
@@ -69,7 +69,7 @@ pub async fn run(
         PermissionEngine::new(profile, Vec::new()),
         Box::new(approver),
         Store::open(&cwd),
-        Workspace::new(&cwd)?,
+        crate::session_cmd::workspace_with_read_roots(&cwd, &config)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.clone(),
@@ -77,7 +77,7 @@ pub async fn run(
             // session as interactive so ask-class effects reach the client
             // instead of being denied outright.
             interactivity: Interactivity::Interactive,
-            trusted: profile == Profile::Bypass,
+            trusted: matches!(profile, Profile::Bypass | Profile::Unrestricted),
             context_token_limit,
             compaction_mode: compaction_mode(config.compaction.mode),
             summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
@@ -165,5 +165,6 @@ fn profile_label(profile: Profile) -> &'static str {
         Profile::Default => "default",
         Profile::Relaxed => "relaxed",
         Profile::Bypass => "bypass",
+        Profile::Unrestricted => "unrestricted",
     }
 }

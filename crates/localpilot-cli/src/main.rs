@@ -184,7 +184,7 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -199,7 +199,7 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -215,7 +215,7 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -245,7 +245,7 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -276,7 +276,7 @@ enum Command {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -424,7 +424,7 @@ enum SessionCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -787,7 +787,7 @@ enum HarnessCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.
@@ -802,7 +802,7 @@ enum HarnessCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
-        /// Permission profile (default | relaxed | bypass).
+        /// Permission profile (default | relaxed | bypass | unrestricted).
         #[arg(long)]
         permission: Option<String>,
         /// Shorthand for `--permission bypass`. Must be set explicitly.

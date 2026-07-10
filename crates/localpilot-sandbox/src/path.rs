@@ -17,6 +17,12 @@ use crate::error::SandboxError;
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
+    /// Extra directories the user granted standing *read* scope
+    /// (`[permissions] extra_read_roots`). They widen only
+    /// [`Workspace::read_scoped`] — the permission engine's read decision —
+    /// never [`Workspace::resolve`] or [`Workspace::contains`], which remain
+    /// the hard containment boundary.
+    read_roots: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -29,7 +35,27 @@ impl Workspace {
             path: root.display().to_string(),
             source,
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            read_roots: Vec::new(),
+        })
+    }
+
+    /// Grant standing read scope under an existing directory, canonicalizing
+    /// it. The grant affects only [`Workspace::read_scoped`]; writes and the
+    /// containment guarantees of [`Workspace::resolve`] are unchanged.
+    ///
+    /// # Errors
+    /// Returns [`SandboxError::Io`] if `root` cannot be canonicalized (for
+    /// example, it does not exist) — the caller should surface the bad config
+    /// entry rather than silently widening or narrowing scope.
+    pub fn add_read_root(&mut self, root: &Path) -> Result<(), SandboxError> {
+        let root = std::fs::canonicalize(root).map_err(|source| SandboxError::Io {
+            path: root.display().to_string(),
+            source,
+        })?;
+        self.read_roots.push(root);
+        Ok(())
     }
 
     /// The canonicalized workspace root.
@@ -99,6 +125,21 @@ impl Workspace {
     pub fn contains(&self, candidate: &Path) -> bool {
         match self.normalize(candidate) {
             Ok(real) => real.starts_with(&self.root),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether a candidate path is in *read* scope: inside the workspace, or
+    /// under a granted extra read root. This drives the permission engine's
+    /// read decision only — it must never guard a write, and
+    /// [`Workspace::resolve`] never consults it.
+    #[must_use]
+    pub fn read_scoped(&self, candidate: &Path) -> bool {
+        match self.normalize(candidate) {
+            Ok(real) => {
+                real.starts_with(&self.root)
+                    || self.read_roots.iter().any(|root| real.starts_with(root))
+            }
             Err(_) => false,
         }
     }
@@ -209,6 +250,38 @@ mod tests {
         let (_dir, ws) = workspace();
         // An absolute path on a system root is outside any temp workspace.
         assert!(!ws.contains(Path::new("C:\\Windows\\System32")));
+    }
+
+    #[test]
+    fn read_scoped_covers_the_workspace_and_extra_read_roots_only() {
+        let (_dir, mut ws) = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("notes.md"), b"x").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        // Before the grant, outside paths are not read-scoped.
+        assert!(!ws.read_scoped(&outside.path().join("notes.md")));
+
+        ws.add_read_root(outside.path()).unwrap();
+
+        // The workspace itself stays read-scoped.
+        assert!(ws.read_scoped(Path::new("src/lib.rs")));
+        // The granted root and its children are read-scoped...
+        assert!(ws.read_scoped(outside.path()));
+        assert!(ws.read_scoped(&outside.path().join("notes.md")));
+        // ...but an unrelated directory is not.
+        assert!(!ws.read_scoped(elsewhere.path()));
+
+        // The grant never widens the hard containment boundary.
+        assert!(!ws.contains(outside.path()));
+        assert!(ws.resolve(outside.path()).is_err());
+    }
+
+    #[test]
+    fn add_read_root_rejects_a_missing_directory() {
+        let (_dir, mut ws) = workspace();
+        let missing = std::env::temp_dir().join("localpilot-no-such-read-root");
+        assert!(ws.add_read_root(&missing).is_err());
     }
 
     #[test]

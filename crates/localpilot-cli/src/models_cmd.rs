@@ -395,6 +395,9 @@ fn profile(config: &Config) -> localpilot_sandbox::Profile {
         localpilot_config::PermissionProfile::Default => localpilot_sandbox::Profile::Default,
         localpilot_config::PermissionProfile::Relaxed => localpilot_sandbox::Profile::Relaxed,
         localpilot_config::PermissionProfile::Bypass => localpilot_sandbox::Profile::Bypass,
+        localpilot_config::PermissionProfile::Unrestricted => {
+            localpilot_sandbox::Profile::Unrestricted
+        }
     }
 }
 

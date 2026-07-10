@@ -137,7 +137,9 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn read_path_effect(ctx: &ToolContext<'_>, path: &Path) -> Effect {
     Effect::ReadPath {
-        inside_workspace: ctx.workspace.contains(path),
+        // Reads use the wider read scope (workspace + granted extra read
+        // roots); writes below stay on the hard workspace boundary.
+        inside_workspace: ctx.workspace.read_scoped(path),
         secret_like: is_secret_like(path),
     }
 }

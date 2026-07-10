@@ -251,12 +251,12 @@ pub async fn run_chat(
             tx: approval_tx.clone(),
         }),
         Store::open(&cwd),
-        Workspace::new(&cwd)?,
+        crate::session_cmd::workspace_with_read_roots(&cwd, &config)?,
         RecoveryEngine::new(RecoveryBudget::default()),
         SessionConfig {
             model: model.to_string(),
             interactivity: Interactivity::Interactive,
-            trusted: profile == Profile::Bypass,
+            trusted: matches!(profile, Profile::Bypass | Profile::Unrestricted),
             context_token_limit: localpilot_harness::effective_context_limit(
                 context_window,
                 config.harness.context_token_limit,
@@ -331,8 +331,11 @@ pub async fn run_chat(
     timer.mark("update check");
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
-    // sessions. Already-trusted folders (and bypass, which is explicit) skip it.
-    if profile != Profile::Bypass && !crate::trust::is_trusted(&cwd) {
+    // sessions. Already-trusted folders (and bypass/unrestricted, which are
+    // explicit) skip it.
+    if !matches!(profile, Profile::Bypass | Profile::Unrestricted)
+        && !crate::trust::is_trusted(&cwd)
+    {
         state.trust = Some(TrustPrompt {
             path: cwd.display().to_string(),
         });
@@ -2253,6 +2256,7 @@ fn ui_profile(profile: Profile) -> UiProfile {
         Profile::Default => UiProfile::Default,
         Profile::Relaxed => UiProfile::Relaxed,
         Profile::Bypass => UiProfile::Bypass,
+        Profile::Unrestricted => UiProfile::Unrestricted,
     }
 }
 
@@ -2261,6 +2265,7 @@ fn sandbox_profile(profile: UiProfile) -> Profile {
         UiProfile::Default => Profile::Default,
         UiProfile::Relaxed => Profile::Relaxed,
         UiProfile::Bypass => Profile::Bypass,
+        UiProfile::Unrestricted => Profile::Unrestricted,
     }
 }
 

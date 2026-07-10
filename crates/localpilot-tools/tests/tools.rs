@@ -144,6 +144,147 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
 }
 
 #[tokio::test]
+async fn out_of_workspace_read_is_grantable_interactively_and_denial_is_actionable() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::Interactive, true);
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    std::fs::write(outside_dir.path().join("notes.md"), "outside note").unwrap();
+
+    // An interactive approval grants the read: the sandbox resolves the path
+    // without enforcing containment once the engine and user said yes.
+    let approved = dispatch(
+        &registry,
+        "list_files",
+        json!({ "path": outside_dir.path().to_str().unwrap() }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(vec![true]),
+    )
+    .await;
+    assert!(!approved.is_error, "{}", approved.output);
+    assert!(approved.output.contains("notes.md"));
+
+    // A refusal denies with an actionable message: it names every way the
+    // user can grant the access instead of a bare "permission denied".
+    let refused = dispatch(
+        &registry,
+        "list_files",
+        json!({ "path": outside_dir.path().to_str().unwrap() }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert!(refused.is_error);
+    assert!(refused.output.contains("permission denied"));
+    assert!(refused.output.contains("outside the workspace"));
+    assert!(refused.output.contains("extra_read_roots"));
+    assert!(refused.output.contains("--permission unrestricted"));
+}
+
+#[tokio::test]
+async fn extra_read_root_grants_headless_reads_but_never_writes() {
+    let (_dir, mut ws) = workspace_with(&[]);
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside_file = outside_dir.path().join("granted.txt");
+    std::fs::write(&outside_file, "granted contents").unwrap();
+    ws.add_read_root(outside_dir.path()).unwrap();
+
+    let registry = ToolRegistry::with_builtins();
+    // Non-interactive: the standing grant must work with no prompt available.
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+
+    let read = dispatch(
+        &registry,
+        "read_file",
+        json!({ "path": outside_file.to_str().unwrap() }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.output);
+    assert!(read.output.contains("granted contents"));
+
+    // The grant is read-only: a write under the same root keeps the boundary.
+    let escape = outside_dir.path().join("escape.txt");
+    let write = dispatch(
+        &registry,
+        "write_file",
+        json!({ "path": escape.to_str().unwrap(), "content": "x" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(write.is_error);
+    assert!(!escape.exists());
+}
+
+#[tokio::test]
+async fn bypass_asks_for_an_out_of_workspace_read_instead_of_hard_denying() {
+    // Bypass keeps the workspace boundary, but as a prompt, never a dead end —
+    // the most permissive prompting profile must not be weaker than `default`.
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::Interactive, true);
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    std::fs::write(outside_dir.path().join("notes.md"), "x").unwrap();
+
+    let approved = dispatch(
+        &registry,
+        "list_files",
+        json!({ "path": outside_dir.path().to_str().unwrap() }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::new(vec![true]),
+    )
+    .await;
+    assert!(!approved.is_error, "{}", approved.output);
+    assert!(approved.output.contains("notes.md"));
+}
+
+#[tokio::test]
+async fn unrestricted_allows_out_of_workspace_reads_and_writes_without_prompting() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    // Headless and never consulted: the approver would deny if asked.
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let engine = PermissionEngine::new(Profile::Unrestricted, Vec::new());
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    std::fs::write(outside_dir.path().join("notes.md"), "outside note").unwrap();
+
+    let read = dispatch(
+        &registry,
+        "read_file",
+        json!({ "path": outside_dir.path().join("notes.md").to_str().unwrap() }),
+        &c,
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.output);
+    assert!(read.output.contains("outside note"));
+
+    let target = outside_dir.path().join("written.txt");
+    let write = dispatch(
+        &registry,
+        "write_file",
+        json!({ "path": target.to_str().unwrap(), "content": "x" }),
+        &c,
+        &engine,
+        &ScriptedApprover::new(Vec::new()),
+    )
+    .await;
+    assert!(!write.is_error, "{}", write.output);
+    assert!(target.exists());
+}
+
+#[tokio::test]
 async fn read_file_returns_a_placeholder_for_binary_content() {
     let (_dir, ws) = workspace_with(&[]);
     // GLB-style header: ASCII magic followed by raw NUL/control bytes — the

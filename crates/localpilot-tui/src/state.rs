@@ -27,12 +27,14 @@ impl Mode {
     }
 }
 
-/// Permission profile shown in the UI. `bypass` is always surfaced.
+/// Permission profile shown in the UI. `bypass` and `unrestricted` are always
+/// surfaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Default,
     Relaxed,
     Bypass,
+    Unrestricted,
 }
 
 impl Profile {
@@ -42,6 +44,7 @@ impl Profile {
             Profile::Default => "default",
             Profile::Relaxed => "relaxed",
             Profile::Bypass => "BYPASS",
+            Profile::Unrestricted => "UNRESTRICTED",
         }
     }
 }
@@ -668,6 +671,10 @@ impl AppState {
         ("default", "Use the default permission profile"),
         ("relaxed", "Use the relaxed permission profile"),
         ("bypass", "Use the bypass permission profile"),
+        (
+            "unrestricted",
+            "Approve everything, workspace boundary included — you take responsibility",
+        ),
         ("think", "Toggle the reasoning panel"),
         ("effort", "Set reasoning effort: minimal|low|medium|high"),
         (
