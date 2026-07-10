@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Install: `install.ps1`/`install.sh` keep LocalMind pinned to its tested
+  release commit for a release build of LocalPilot, but a dev build (working
+  tree not exactly on a clean version tag) now fetches and checks out
+  LocalMind's latest `main` instead, so iterating on both repos together
+  doesn't get stuck on a stale pinned snapshot. See
+  [docs/localmind-integration.md](docs/localmind-integration.md#pin-policy-pinned-for-releases-floating-for-dev-builds).
 - Chat: Ctrl+C is now staged like a shell. With a prompt typed (or a slash /
   `@`-mention autocomplete open), the first Ctrl+C clears the composer and
   dismisses the overlay; a second Ctrl+C on an empty composer quits. On an empty

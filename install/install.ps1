@@ -5,6 +5,10 @@
 #   ./install/install.ps1 -Features ''            # no interactive TUI
 #   ./install/install.ps1 -Toolchain stable       # force a toolchain
 #   ./install/install.ps1 -Target x86_64-pc-windows-gnu   # force a target
+#
+# A dev build (working tree not exactly on a clean release tag) tracks
+# LocalMind's latest `main` instead of the pinned release commit; see
+# docs/localmind-integration.md.
 #requires -Version 5
 param(
     [string]$Features = 'tui',
@@ -21,10 +25,31 @@ $root = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $root 'crates/localpilot-cli'
 
 # The LocalMind learning engine is a git submodule and is always linked into the
-# CLI.
+# CLI. A release build (working tree exactly on a clean version tag) stays on
+# the pinned, tested LocalMind commit; any other build is treated as local
+# development and tracks LocalMind's latest `main` instead. See
+# docs/localmind-integration.md for the rationale.
+$isReleaseBuild = $false
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    git -C $root describe --tags --exact-match --match 'v[0-9]*' *> $null
+    $tagMatch = ($LASTEXITCODE -eq 0)
+    $clean = -not (git -C $root status --porcelain)
+    $isReleaseBuild = $tagMatch -and $clean
+}
+
 if ((Test-Path (Join-Path $root '.gitmodules')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "updating submodules ..."
     git -C $root submodule update --init --recursive
+    if (-not $isReleaseBuild) {
+        $localmind = Join-Path $root 'external/localmind'
+        Write-Host "dev build detected: tracking LocalMind's latest main instead of the pinned release ..."
+        git -C $localmind fetch origin main
+        if ($LASTEXITCODE -eq 0) {
+            git -C $localmind checkout FETCH_HEAD
+        } else {
+            Write-Warning "could not fetch LocalMind's latest main; staying on the pinned commit."
+        }
+    }
 }
 
 # The interactive TUI (crossterm) is unstable under the windows-gnu toolchain;

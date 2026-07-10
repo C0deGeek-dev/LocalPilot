@@ -62,6 +62,25 @@ git submodule update --init --recursive
 CI checks out submodules recursively. The adapter is a one-way edge: LocalPilot
 depends on LocalMind, never the reverse.
 
+### Pin policy: pinned for releases, floating for dev builds
+
+The submodule pins one exact LocalMind commit in the LocalPilot git index —
+currently a tagged LocalMind release. A release build of LocalPilot (working
+tree exactly on a clean version tag) always builds against that tested,
+known-good commit; it is never a moving target. The pin is advanced
+deliberately as part of cutting a LocalPilot release (check out the new
+LocalMind tag under `external/localmind`, commit the updated gitlink), not
+floated automatically.
+
+A non-release LocalPilot build — the working tree is not exactly on a clean
+`vX.Y.Z` tag, i.e. `LOCALPILOT_VERSION` would carry a `git describe` suffix
+like `-N-g<hash>` or `-dirty` (see `crates/localpilot-cli/build.rs`) — is
+treated as local development. `install/install.ps1` and `install/install.sh`
+detect this and fetch + check out LocalMind's latest `origin/main` instead of
+the pinned commit, so iterating on both repos together doesn't get stuck on a
+stale snapshot. This only changes what the install script checks out locally;
+it never rewrites the committed submodule gitlink.
+
 ## Current Surfaces
 
 - `localpilot-localmind::closeout_session` imports an LocalPilot transcript into
