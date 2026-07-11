@@ -161,3 +161,58 @@ the durable session event log (with the client's self-reported identity from
 labelled with the driving client so they never masquerade as the session's
 own retrospective. See
 [localmind-integration.md](localmind-integration.md#driver-interventions-ride-the-same-bridge).
+
+### Registering the server with an agent host
+
+Claude Code — project `.mcp.json` (trust it when prompted; reload to pick up
+changes):
+
+```json
+{
+  "mcpServers": {
+    "localpilot": {
+      "command": "localpilot",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+OpenAI Codex — `~/.codex/config.toml` (or a trusted project's
+`.codex/config.toml`); `codex mcp add` does the same interactively:
+
+```toml
+[mcp_servers.localpilot]
+command = "localpilot"
+args = ["mcp", "serve"]
+```
+
+Add `--model`, `--permission`, `--resume <id-or-name>`, or `--no-approvals`
+to `args` as needed. The `events` wait cap (20 s) sits well under common
+client tool-call timeouts; if a host configures a shorter tool timeout (e.g.
+Codex `tool_timeout_sec`), pass a smaller `wait_ms` when polling.
+
+### Driving well
+
+A driving host gets better results — and better lessons — by treating the
+session as a colleague, not a puppet:
+
+- **Let it work.** Poll `events` with a generous `wait_ms` and read what the
+  session is doing before reacting; a `tool_stuck` or repeated-failure
+  pattern is a signal, a single imperfect step usually is not.
+- **Steer sparingly and specifically.** One concrete correction ("run the
+  failing test before editing") beats a paragraph of guidance. Corrections
+  become review-gated lesson candidates verbatim — a sharp steer today is a
+  reusable lesson tomorrow; a vague one is review-queue noise.
+- **Teach, don't do.** Prefer a steer that changes the session's approach
+  over cancelling and dictating the answer; a cancellation carries almost no
+  reusable signal.
+- **Answer asks deliberately.** `reply_permission` carries exactly the
+  authority a human at the prompt would have — deny anything you would not
+  have typed yes to. For unattended watching, start with `--no-approvals`
+  so every ask denies.
+- **Carry the session id.** Take it from `hello`/`status` and resume by id
+  (`--resume <id>`); a session with no turns yet is not visible to
+  `--continue`. After a reconnect, resume polling from your last cursor —
+  the feed retained the events, and a poll that never got its reply before a
+  disconnect lost nothing.
