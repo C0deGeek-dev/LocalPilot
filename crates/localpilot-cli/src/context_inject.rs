@@ -4,7 +4,49 @@
 //! (`register_context_hook`); this module keeps the host-side session close-out
 //! that runs on exit.
 
+use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// The same frames the TUI spinner uses, so exit-time progress looks like the
+/// session that just ended.
+const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
+
+/// Run `work` with a live progress line on stderr, so a slow close-out stage
+/// (model-backed lesson extraction can take a while against a busy local
+/// server) is announced instead of looking like a hang. On a TTY the label
+/// animates in place and is cleared when the stage finishes — the stage's own
+/// summary line then prints on a clean row. On a non-TTY stderr the label
+/// prints once, keeping captured logs clean.
+fn with_progress<T>(label: &str, work: impl FnOnce() -> T) -> T {
+    if !std::io::stderr().is_terminal() {
+        eprintln!("{label} …");
+        return work();
+    }
+    let running = Arc::new(AtomicBool::new(true));
+    let spinner = {
+        let running = Arc::clone(&running);
+        let label = label.to_string();
+        std::thread::spawn(move || {
+            let mut frame = 0usize;
+            let mut err = std::io::stderr();
+            while running.load(Ordering::Relaxed) {
+                let _ = write!(err, "\r{} {label} …", SPINNER[frame % SPINNER.len()]);
+                let _ = err.flush();
+                frame = frame.wrapping_add(1);
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            // Clear the animated line so whatever prints next starts clean.
+            let _ = write!(err, "\r{}\r", " ".repeat(label.chars().count() + 4));
+            let _ = err.flush();
+        })
+    };
+    let value = work();
+    running.store(false, Ordering::Relaxed);
+    let _ = spinner.join();
+    value
+}
 
 /// Close out a finished session into LocalMind: extract candidate lessons and
 /// enqueue them for review, then keep the code graph current. Best-effort and
@@ -23,7 +65,10 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
     {
         return;
     }
-    match localpilot_localmind::closeout_session(cwd, &store, session) {
+    let closeout = with_progress("learning: checking the session for lessons", || {
+        localpilot_localmind::closeout_session(cwd, &store, session)
+    });
+    match closeout {
         Ok(summary) => {
             // Record the just-closed session so on-demand `knowledge_search` in
             // any later turn of this run excludes the in-progress conversation
@@ -40,7 +85,10 @@ pub fn close_out(cwd: &Path, session: localpilot_core::SessionId) {
     // Keep the code graph current while the workspace is quiet. Bounded so a
     // large edit burst cannot stall shutdown; leftovers wait for the next
     // session close, and an up-to-date graph is a cheap no-op.
-    let graph_current = match localpilot_localmind::codegraph_reindex(cwd, CODEGRAPH_BATCH_LIMIT) {
+    let reindex = with_progress("learning: updating the code graph", || {
+        localpilot_localmind::codegraph_reindex(cwd, CODEGRAPH_BATCH_LIMIT)
+    });
+    let graph_current = match reindex {
         Ok(summary) => {
             if summary.reindexed + summary.pruned > 0 {
                 eprintln!(
