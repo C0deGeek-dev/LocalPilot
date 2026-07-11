@@ -83,6 +83,35 @@ impl Effect {
             }
         )
     }
+
+    /// A short human-readable class for an approval prompt, shared by every
+    /// asking surface. Honest about why the ask exists: an in-workspace
+    /// read/write can still ask (the untrusted floor turns its allow into an
+    /// ask), and describing it as out-of-workspace misstates the risk to the
+    /// approver.
+    #[must_use]
+    pub fn risk_label(self) -> &'static str {
+        match self {
+            Effect::ReadPath {
+                secret_like: true, ..
+            } => "read a secret-like path",
+            Effect::ReadPath {
+                inside_workspace: false,
+                ..
+            } => "read outside the workspace",
+            Effect::ReadPath { .. } => "read a file",
+            Effect::WritePath {
+                inside_workspace: false,
+                ..
+            } => "write outside the workspace",
+            Effect::WritePath {
+                overwrite: true, ..
+            } => "overwrite a file",
+            Effect::WritePath { .. } => "write a file",
+            Effect::RunCommand(_) => "run a command",
+            Effect::Network => "make a network request",
+        }
+    }
 }
 
 /// A request to evaluate one effect.
@@ -351,6 +380,43 @@ impl Approver for ScriptedApprover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn risk_labels_are_honest_about_workspace_scope() {
+        // Bug it prevents: an untrusted-floor ask for an in-workspace read
+        // being described as "read outside the workspace" — the approver was
+        // shown a scarier risk than the one being decided.
+        let inside_read = Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        };
+        assert_eq!(inside_read.risk_label(), "read a file");
+        let outside_read = Effect::ReadPath {
+            inside_workspace: false,
+            secret_like: false,
+        };
+        assert_eq!(outside_read.risk_label(), "read outside the workspace");
+        // A secret-like read reads as secret-like wherever it lives.
+        let secret = Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: true,
+        };
+        assert_eq!(secret.risk_label(), "read a secret-like path");
+        // Writes name the boundary crossing ahead of the overwrite detail.
+        let outside_overwrite = Effect::WritePath {
+            inside_workspace: false,
+            overwrite: true,
+        };
+        assert_eq!(
+            outside_overwrite.risk_label(),
+            "write outside the workspace"
+        );
+        let inside_overwrite = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+        };
+        assert_eq!(inside_overwrite.risk_label(), "overwrite a file");
+    }
 
     fn req(effect: Effect, interactivity: Interactivity, trusted: bool) -> PermissionRequest {
         PermissionRequest {

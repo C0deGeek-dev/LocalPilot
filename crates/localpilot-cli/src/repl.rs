@@ -109,26 +109,12 @@ impl Approver for TuiApprover {
 
 /// Map a permission request into the UI's approval view model.
 fn describe(request: &PermissionRequest) -> ApprovalRequest {
-    let (target_kind, risk_class) = match request.effect {
-        Effect::ReadPath { secret_like, .. } => (
-            "path",
-            if secret_like {
-                "read a secret-like path"
-            } else {
-                "read outside the workspace"
-            },
-        ),
-        Effect::WritePath { overwrite, .. } => (
-            "path",
-            if overwrite {
-                "overwrite a file"
-            } else {
-                "write a file"
-            },
-        ),
-        Effect::RunCommand(_) => ("command", "run a command"),
-        Effect::Network => ("network", "make a network request"),
+    let target_kind = match request.effect {
+        Effect::ReadPath { .. } | Effect::WritePath { .. } => "path",
+        Effect::RunCommand(_) => "command",
+        Effect::Network => "network",
     };
+    let risk_class = request.effect.risk_label();
     let target = if request.detail.is_empty() {
         format!("({target_kind})")
     } else {

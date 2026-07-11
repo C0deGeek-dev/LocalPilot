@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Permission prompts describe the actual risk. An in-workspace read or write
+  that asks only because the session is untrusted (the default-profile floor)
+  now reads "read a file" / "write a file" instead of falsely claiming
+  "read outside the workspace"; out-of-workspace writes now say so. One
+  shared label serves the TUI and every wire adapter.
 - A driven session learns from its driver: corrections made over
   `localpilot mcp serve` — steers, cancellations, permission denials — are
   recorded as `driver_intervention` events in the session event log (named

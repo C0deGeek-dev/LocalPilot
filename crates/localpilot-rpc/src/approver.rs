@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use localpilot_core::EventId;
-use localpilot_sandbox::{Approver, Effect, PermissionRequest};
+use localpilot_sandbox::{Approver, PermissionRequest};
 use tokio::sync::{mpsc, oneshot};
 
 /// How long an unanswered ask waits before it is denied.
@@ -107,7 +107,7 @@ impl Approver for RpcApprover {
             ask_id: ask_id.clone(),
             tool: request.tool.clone(),
             detail: request.detail.clone(),
-            risk: risk_label(request.effect).to_string(),
+            risk: request.effect.risk_label().to_string(),
         });
         Box::pin(async move {
             // A closed channel (serve loop gone) is a denial, never approval.
@@ -123,28 +123,5 @@ impl Approver for RpcApprover {
             self.registry.forget(&ask_id);
             decision
         })
-    }
-}
-
-/// A short human-readable class for the ask, mirroring what interactive
-/// surfaces show.
-fn risk_label(effect: Effect) -> &'static str {
-    match effect {
-        Effect::ReadPath { secret_like, .. } => {
-            if secret_like {
-                "read a secret-like path"
-            } else {
-                "read outside the workspace"
-            }
-        }
-        Effect::WritePath { overwrite, .. } => {
-            if overwrite {
-                "overwrite a file"
-            } else {
-                "write a file"
-            }
-        }
-        Effect::RunCommand(_) => "run a command",
-        Effect::Network => "make a network request",
     }
 }
