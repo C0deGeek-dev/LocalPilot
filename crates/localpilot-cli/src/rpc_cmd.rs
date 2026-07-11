@@ -25,12 +25,14 @@ pub enum WireProtocol {
 ///
 /// # Errors
 /// Returns an error if configuration, the provider, or the workspace cannot
-/// be set up, or the transport fails.
+/// be set up, a resumed session's event log cannot be read, or the transport
+/// fails.
 pub async fn run(
     model: Option<&str>,
     provider_id: Option<&str>,
     profile: Profile,
     protocol: WireProtocol,
+    resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
@@ -111,6 +113,12 @@ pub async fn run(
         config.context.instruction_char_budget,
         &mut runtime,
     );
+
+    // Resume before serving so the handshake reports the resumed session's id;
+    // the current profile and trust stay in force, exactly as the REPL's resume.
+    if let Some(session) = resume {
+        runtime.load_session(session)?;
+    }
 
     // The Native serve path moves `cwd` into the serve context; keep a copy so
     // the session can be closed out into LocalMind when the client disconnects.

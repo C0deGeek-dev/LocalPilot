@@ -92,6 +92,14 @@ redaction before persistence, and a durable session event log under
 on stdin/stdout. One JSON object per LF line in each direction; every record
 carries the protocol version (`"v": 1`).
 
+A session lives as long as the process. To pick an earlier session back up,
+`--continue` opens the most recent session in the workspace and
+`--resume <id-or-name>` opens a specific one (same flags as `chat`; the two
+are mutually exclusive). The `hello` reply reports the resumed session's id.
+The conversation is rebuilt from the session's durable event log; the current
+permission profile and trust state apply — nothing resumes with stale
+elevated permissions.
+
 Commands in: `hello`, `prompt` (with a `disposition` of `immediate`, `steer`,
 or `follow_up`), `cancel`, `permission_reply`, `status`, `shutdown`. Events
 out mirror the runtime's session events (`text_delta`, `tool_started`,

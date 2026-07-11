@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- RPC: `localpilot rpc` accepts `--continue` (most recent session in the
+  workspace) and `--resume <id-or-name>`, matching `chat`, so a headless
+  driver can pick an earlier session back up across process restarts. The
+  `hello` reply reports the resumed session's id; the current permission
+  profile and trust state apply, never the resumed log's. See
+  [docs/embedding.md](docs/embedding.md#rpc-over-stdio).
 - Install: `install.ps1`/`install.sh` keep LocalMind pinned to its tested
   release commit for a release build of LocalPilot, but a dev build (working
   tree not exactly on a clean version tag) now fetches and checks out

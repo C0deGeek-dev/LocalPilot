@@ -205,6 +205,12 @@ enum Command {
         /// Shorthand for `--permission bypass`. Must be set explicitly.
         #[arg(long)]
         bypass: bool,
+        /// Open the most recent session in this workspace instead of a fresh one.
+        #[arg(long = "continue", conflicts_with = "resume")]
+        continue_latest: bool,
+        /// Open the session with this id or name (see `session list`).
+        #[arg(long)]
+        resume: Option<String>,
     },
     /// Launch the interactive terminal REPL (the TUI). Requires the `tui` build feature.
     #[cfg(feature = "tui")]
@@ -1003,13 +1009,17 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             provider,
             permission,
             bypass,
+            continue_latest,
+            resume,
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
             rpc_cmd::run(
                 model.as_deref(),
                 provider.as_deref(),
                 profile,
                 rpc_cmd::WireProtocol::Native,
+                resume,
             )
             .await?;
         }
@@ -1025,6 +1035,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 provider.as_deref(),
                 profile,
                 rpc_cmd::WireProtocol::Acp,
+                None,
             )
             .await?;
         }
@@ -1678,6 +1689,43 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn rpc_resume_flags_parse_and_conflict() {
+        // Fresh session by default.
+        let cli = Cli::try_parse_from(["localpilot", "rpc"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Rpc {
+                continue_latest: false,
+                resume: None,
+                ..
+            })
+        ));
+        // `--continue` opens the latest session.
+        let cli = Cli::try_parse_from(["localpilot", "rpc", "--continue"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Rpc {
+                continue_latest: true,
+                ..
+            })
+        ));
+        // `--resume` takes an id or name.
+        let cli = Cli::try_parse_from(["localpilot", "rpc", "--resume", "review-run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Rpc {
+                resume: Some(_),
+                ..
+            })
+        ));
+        // The two are mutually exclusive, as on `chat`.
+        assert!(
+            Cli::try_parse_from(["localpilot", "rpc", "--continue", "--resume", "review-run"])
+                .is_err()
+        );
     }
 
     #[test]
