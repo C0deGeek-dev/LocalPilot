@@ -41,6 +41,7 @@ Sessions are rebuilt from a durable event log, so you can resume or fork them.
 localpilot rpc            # newline-delimited JSON commands in, streamed events out
 localpilot rpc --continue # same, resuming the workspace's most recent session
 localpilot acp            # Agent Client Protocol (JSON-RPC over stdio) for editors
+localpilot mcp serve      # MCP server: another agent host drives + steers a session
 ```
 
 Embedding and headless drive are covered in

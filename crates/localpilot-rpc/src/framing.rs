@@ -72,6 +72,50 @@ impl LineFraming {
     }
 }
 
+/// LF-framed JSON record reader over any byte source (the JSON-RPC adapters'
+/// shared input path). Malformed JSON records are skipped — the next record
+/// may be fine.
+pub(crate) struct JsonRecordReader<R> {
+    source: R,
+    framing: LineFraming,
+    queued: std::collections::VecDeque<Vec<u8>>,
+    eof: bool,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
+    pub(crate) fn new(source: R) -> Self {
+        Self {
+            source,
+            framing: LineFraming::default(),
+            queued: std::collections::VecDeque::new(),
+            eof: false,
+        }
+    }
+
+    /// The next parseable JSON record, or `None` at end of input.
+    pub(crate) async fn next(&mut self) -> Result<Option<serde_json::Value>, std::io::Error> {
+        use tokio::io::AsyncReadExt;
+        loop {
+            if let Some(record) = self.queued.pop_front() {
+                match serde_json::from_slice(&record) {
+                    Ok(value) => return Ok(Some(value)),
+                    Err(_) => continue,
+                }
+            }
+            if self.eof {
+                return Ok(None);
+            }
+            let mut chunk = [0u8; 4096];
+            let read = self.source.read(&mut chunk).await?;
+            if read == 0 {
+                self.eof = true;
+                continue;
+            }
+            self.queued.extend(self.framing.push(&chunk[..read])?);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -125,3 +125,31 @@ the next incomplete harness step.
 Framing contract: records are split on LF only; a trailing CR before the LF
 is tolerated; Unicode line separators (U+2028/U+2029) inside a record never
 split it.
+
+## MCP over stdio
+
+`localpilot mcp serve [--model …] [--provider …] [--permission …] [--continue |
+--resume <id-or-name>] [--no-approvals]` serves the same session runtime as an
+[MCP](https://modelcontextprotocol.io) server (protocol revision 2025-06-18),
+so an MCP client — an agent host like Claude Code or Codex — can drive and
+steer a LocalPilot session through ordinary tool calls. Register it like any
+stdio MCP server (`command = "localpilot"`, `args = ["mcp", "serve", …]`).
+
+The tools: `prompt` submits input (starts a turn when idle; while a turn runs,
+`disposition: "steer"` injects guidance at the next safe boundary and
+`"follow_up"` queues the next turn), `cancel` aborts the running turn,
+`status` reports session/model/profile/busy/pending asks, `transcript` returns
+the redacted transcript tail, and `reply_permission` answers a pending
+permission ask.
+
+MCP is request/response, so events are pull-based: every session event gets a
+monotonic sequence number in a bounded feed, and `events` returns the page
+after your cursor — pass `wait_ms` (server-capped at 20000) to wait for the
+first new event instead of busy-polling. The feed reports a `dropped` count
+when a lagging client overflowed it; nothing is ever dropped silently.
+
+Permission semantics are identical to the other adapters: the engine decides,
+the client only answers the asks it is shown, and an unanswered ask is denied.
+`--no-approvals` withholds the `reply_permission` tool entirely — the client
+can watch and steer but every ask denies (watch-and-steer mode). Asks that a
+profile resolves without asking are never surfaced at all.

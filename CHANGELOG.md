@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- New `localpilot mcp serve`: serve the session runtime as an MCP server
+  (protocol 2025-06-18) on stdio, so an MCP client — an agent host like
+  Claude Code or Codex — can drive and steer a session through tools:
+  `prompt` (with mid-turn `steer`/`follow_up` dispositions), `cancel`,
+  `status`, `transcript`, a cursor-paged `events` feed with a bounded wait,
+  and `reply_permission`. Permission decisions stay in the engine; an
+  unanswered ask is denied, and `--no-approvals` withholds the reply tool for
+  watch-and-steer coaching. Supports `--continue`/`--resume` like `rpc`. See
+  [docs/embedding.md](docs/embedding.md#mcp-over-stdio).
 - RPC: `localpilot rpc` accepts `--continue` (most recent session in the
   workspace) and `--resume <id-or-name>`, matching `chat`, so a headless
   driver can pick an earlier session back up across process restarts. The

@@ -8,7 +8,7 @@ use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_harness::{SessionConfig, SessionRuntime};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_rpc::{serve, serve_acp, RpcApprover, ServeContext};
+use localpilot_rpc::{serve, serve_acp, serve_mcp, McpServeOptions, RpcApprover, ServeContext};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile};
 use localpilot_store::Store;
 
@@ -19,6 +19,13 @@ pub enum WireProtocol {
     Native,
     /// The Agent Client Protocol (JSON-RPC 2.0) for editors.
     Acp,
+    /// The Model Context Protocol (JSON-RPC 2.0) for agent hosts. When
+    /// `approvals` is false the permission-reply tool is withheld — the
+    /// client can watch and steer but every ask denies.
+    Mcp {
+        /// Expose the permission-reply tool.
+        approvals: bool,
+    },
 }
 
 /// Serve one client on stdin/stdout until shutdown or end of input.
@@ -147,6 +154,23 @@ pub async fn run(
                 asks,
                 tokio::io::stdin(),
                 tokio::io::stdout(),
+            )
+            .await?;
+        }
+        WireProtocol::Mcp { approvals } => {
+            let options = McpServeOptions {
+                model,
+                profile: profile_label(profile).to_string(),
+                root: Some(cwd),
+                approvals,
+            };
+            serve_mcp(
+                &mut runtime,
+                ask_rx,
+                asks,
+                tokio::io::stdin(),
+                tokio::io::stdout(),
+                &options,
             )
             .await?;
         }

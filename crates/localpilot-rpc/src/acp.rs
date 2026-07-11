@@ -10,16 +10,14 @@
 //! Provenance: implemented from the published protocol documentation and
 //! schema only; no other agent's implementation was consulted.
 
-use std::collections::VecDeque;
-
 use localpilot_harness::{RuntimeEvent, SessionRuntime, StopReason};
 use serde_json::{json, Value};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::approver::{AskRegistry, PendingAsk};
-use crate::framing::LineFraming;
+use crate::framing::JsonRecordReader as Reader;
 use crate::serve::RpcError;
 
 /// The ACP protocol version this adapter implements.
@@ -365,46 +363,4 @@ async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Res
     writer.write_all(&line).await?;
     writer.flush().await?;
     Ok(())
-}
-
-/// LF-framed JSON reader (shared framing contract with the native protocol).
-struct Reader<R> {
-    source: R,
-    framing: LineFraming,
-    queued: VecDeque<Vec<u8>>,
-    eof: bool,
-}
-
-impl<R: AsyncRead + Unpin> Reader<R> {
-    fn new(source: R) -> Self {
-        Self {
-            source,
-            framing: LineFraming::default(),
-            queued: VecDeque::new(),
-            eof: false,
-        }
-    }
-
-    async fn next(&mut self) -> Result<Option<Value>, std::io::Error> {
-        loop {
-            if let Some(record) = self.queued.pop_front() {
-                match serde_json::from_slice(&record) {
-                    Ok(value) => return Ok(Some(value)),
-                    // Malformed JSON-RPC input is skipped; the next record may
-                    // be fine.
-                    Err(_) => continue,
-                }
-            }
-            if self.eof {
-                return Ok(None);
-            }
-            let mut chunk = [0u8; 4096];
-            let read = self.source.read(&mut chunk).await?;
-            if read == 0 {
-                self.eof = true;
-                continue;
-            }
-            self.queued.extend(self.framing.push(&chunk[..read])?);
-        }
-    }
 }

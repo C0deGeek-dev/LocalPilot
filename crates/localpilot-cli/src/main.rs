@@ -212,6 +212,9 @@ enum Command {
         #[arg(long)]
         resume: Option<String>,
     },
+    /// Model Context Protocol surfaces.
+    #[command(subcommand)]
+    Mcp(McpCommand),
     /// Launch the interactive terminal REPL (the TUI). Requires the `tui` build feature.
     #[cfg(feature = "tui")]
     Chat {
@@ -394,6 +397,38 @@ enum ProjectSkillsCommand {
     Show {
         /// The skill name (see `skills list`).
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Serve this workspace's session runtime as an MCP server on
+    /// stdin/stdout, so an MCP client (an agent host) can drive and steer a
+    /// session through tools. Permission decisions stay in the engine; an
+    /// unanswered ask is denied.
+    Serve {
+        /// Model name to request; defaults to the provider's configured model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass | unrestricted).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+        /// Open the most recent session in this workspace instead of a fresh one.
+        #[arg(long = "continue", conflicts_with = "resume")]
+        continue_latest: bool,
+        /// Open the session with this id or name (see `session list`).
+        #[arg(long)]
+        resume: Option<String>,
+        /// Withhold the permission-reply tool: the client can watch and steer
+        /// but never answer an ask, so every ask denies (watch-and-steer mode).
+        #[arg(long)]
+        no_approvals: bool,
     },
 }
 
@@ -1036,6 +1071,28 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 profile,
                 rpc_cmd::WireProtocol::Acp,
                 None,
+            )
+            .await?;
+        }
+        Command::Mcp(McpCommand::Serve {
+            model,
+            provider,
+            permission,
+            bypass,
+            continue_latest,
+            resume,
+            no_approvals,
+        }) => {
+            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
+            rpc_cmd::run(
+                model.as_deref(),
+                provider.as_deref(),
+                profile,
+                rpc_cmd::WireProtocol::Mcp {
+                    approvals: !no_approvals,
+                },
+                resume,
             )
             .await?;
         }
@@ -1724,6 +1781,36 @@ mod tests {
         // The two are mutually exclusive, as on `chat`.
         assert!(
             Cli::try_parse_from(["localpilot", "rpc", "--continue", "--resume", "review-run"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mcp_serve_parses_with_resume_and_approval_flags() {
+        let cli = Cli::try_parse_from(["localpilot", "mcp", "serve"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Mcp(McpCommand::Serve {
+                no_approvals: false,
+                continue_latest: false,
+                resume: None,
+                ..
+            }))
+        ));
+        let cli =
+            Cli::try_parse_from(["localpilot", "mcp", "serve", "--continue", "--no-approvals"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Mcp(McpCommand::Serve {
+                no_approvals: true,
+                continue_latest: true,
+                ..
+            }))
+        ));
+        // Same resume exclusivity as `chat` and `rpc`.
+        assert!(
+            Cli::try_parse_from(["localpilot", "mcp", "serve", "--continue", "--resume", "x"])
                 .is_err()
         );
     }

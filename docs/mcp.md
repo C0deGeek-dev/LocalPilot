@@ -6,6 +6,11 @@ JSON-RPC over stdio. Its tools are registered alongside the builtins and run
 through the **same** permission engine and output redaction — an MCP tool call
 prompts (or is denied) exactly like a builtin, and is never a side channel.
 
+This page covers LocalPilot as an MCP *client*. The reverse direction —
+`localpilot mcp serve`, which lets an MCP client such as another agent host
+drive a LocalPilot session — is part of the headless-drive surface, documented
+in [embedding.md](embedding.md#mcp-over-stdio).
+
 ## Configuration
 
 Declare servers in `.localpilot.toml`:

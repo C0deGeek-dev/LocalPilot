@@ -366,7 +366,7 @@ fn status_event(
 }
 
 /// The next incomplete step from the project's plan file, when one exists.
-fn next_incomplete_step(root: &Path) -> Option<String> {
+pub(crate) fn next_incomplete_step(root: &Path) -> Option<String> {
     let progress = std::fs::read_to_string(root.join("PROGRESS.md")).ok()?;
     progress
         .lines()
@@ -375,7 +375,7 @@ fn next_incomplete_step(root: &Path) -> Option<String> {
         .map(|line| line.trim_start_matches("- [ ]").trim().to_string())
 }
 
-fn map_event(event: RuntimeEvent) -> ServerEvent {
+pub(crate) fn map_event(event: RuntimeEvent) -> ServerEvent {
     match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },
