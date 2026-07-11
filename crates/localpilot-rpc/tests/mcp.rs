@@ -309,6 +309,85 @@ async fn a_denied_ask_becomes_a_model_visible_tool_error() {
 }
 
 #[tokio::test]
+async fn a_second_prompt_queues_or_runs_and_both_turns_complete() {
+    let provider = FakeProvider::new().text("first").text("second");
+    let (dir, mut runtime, ask_rx, registry) = build_full(provider);
+    let opts = options(dir.path(), true);
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client_io);
+    let mut client_reader = BufReader::new(client_read);
+
+    let server = serve_mcp(
+        &mut runtime,
+        ask_rx,
+        registry,
+        server_read,
+        server_write,
+        &opts,
+    );
+
+    let client = async move {
+        // Send both prompts back to back; whether the second lands mid-turn
+        // (follow_up queued) or at idle (runs directly), two turns must
+        // complete in order.
+        client_write
+            .write_all(call(1, "prompt", json!({ "text": "one" })).as_bytes())
+            .await
+            .unwrap();
+        client_write
+            .write_all(
+                call(
+                    2,
+                    "prompt",
+                    json!({ "text": "two", "disposition": "follow_up" }),
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let _first_reply = next_message(&mut client_reader).await.unwrap();
+        let _second_reply = next_message(&mut client_reader).await.unwrap();
+
+        let mut stops = 0;
+        let mut text = String::new();
+        let mut cursor = 0u64;
+        let mut request_id = 3u64;
+        while stops < 2 {
+            client_write
+                .write_all(
+                    call(
+                        request_id,
+                        "events",
+                        json!({ "cursor": cursor, "wait_ms": 5000 }),
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            request_id += 1;
+            let page = next_message(&mut client_reader).await.unwrap();
+            let result = structured(&page);
+            cursor = result["next_cursor"].as_u64().unwrap();
+            for entry in result["events"].as_array().unwrap() {
+                let event = &entry["event"];
+                match event["type"].as_str().unwrap() {
+                    "text_delta" => text.push_str(event["text"].as_str().unwrap()),
+                    "stopped" => stops += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(text, "firstsecond");
+
+        drop(client_write);
+    };
+
+    let (served, ()) = tokio::join!(server, client);
+    served.unwrap();
+}
+
+#[tokio::test]
 async fn no_approvals_mode_withholds_the_reply_tool() {
     let (dir, mut runtime, ask_rx, registry) = build_full(FakeProvider::new());
     let opts = options(dir.path(), false);
