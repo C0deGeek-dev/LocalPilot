@@ -40,16 +40,22 @@ const RETROSPECTIVE_SESSION: &str = "completion-retrospective";
 /// The review session label research-finding candidates are enqueued under.
 const RESEARCH_SESSION: &str = "research";
 
+/// The review session label driver-intervention candidates are enqueued under.
+const DRIVER_SESSION: &str = "driver-intervention";
+
 /// Where an offered lesson came from. The queue entry carries this honestly:
-/// a `/research` finding must never be presented as a completion
-/// retrospective — the reviewer reads the label to judge what they are
-/// looking at.
+/// a `/research` finding or a driver correction must never be presented as a
+/// completion retrospective — the reviewer reads the label to judge what they
+/// are looking at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
     /// The harness completion retrospective (ADR-0035/0037).
     Retrospective,
     /// A supported finding from the research loop (ADR-0060).
     Research,
+    /// A correction from an external driver steering the session (the MCP
+    /// adapter's client).
+    Driver,
 }
 
 impl Origin {
@@ -57,6 +63,7 @@ impl Origin {
         match self {
             Origin::Retrospective => RETROSPECTIVE_SESSION,
             Origin::Research => RESEARCH_SESSION,
+            Origin::Driver => DRIVER_SESSION,
         }
     }
 
@@ -64,6 +71,7 @@ impl Origin {
         match self {
             Origin::Retrospective => "retro",
             Origin::Research => "research",
+            Origin::Driver => "driver",
         }
     }
 
@@ -71,6 +79,7 @@ impl Origin {
         match self {
             Origin::Retrospective => "completion_retrospective",
             Origin::Research => "research_finding",
+            Origin::Driver => "driver_intervention",
         }
     }
 
@@ -78,17 +87,22 @@ impl Origin {
         match self {
             Origin::Retrospective => "harness completion retrospective",
             Origin::Research => "research loop finding",
+            Origin::Driver => "external driver intervention",
         }
     }
 }
 
 /// One advisory lesson ready to offer to review — from a completion
-/// retrospective, or a research finding riding the same review-gated queue.
+/// retrospective, a research finding, or an external driver's correction,
+/// all riding the same review-gated queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrospectiveLesson {
     /// The lesson text as written to `LESSONS.md` (one line, already condensed).
     pub text: String,
     origin: Origin,
+    /// Overrides the origin's generic evidence detail (e.g. names the driving
+    /// client), so the reviewer sees exactly who corrected the session.
+    evidence_note: Option<String>,
 }
 
 impl RetrospectiveLesson {
@@ -98,6 +112,7 @@ impl RetrospectiveLesson {
         Self {
             text: text.into(),
             origin: Origin::Retrospective,
+            evidence_note: None,
         }
     }
 
@@ -109,6 +124,22 @@ impl RetrospectiveLesson {
         Self {
             text: text.into(),
             origin: Origin::Research,
+            evidence_note: None,
+        }
+    }
+
+    /// A correction captured from an external driver steering the session.
+    /// Same review-gated queue; the evidence names the driving client so the
+    /// candidate never masquerades as the session's own retrospective.
+    #[must_use]
+    pub fn driver_intervention(text: impl Into<String>, client: impl AsRef<str>) -> Self {
+        Self {
+            text: text.into(),
+            origin: Origin::Driver,
+            evidence_note: Some(format!(
+                "correction by the driving client {}",
+                client.as_ref()
+            )),
         }
     }
 
@@ -161,7 +192,10 @@ pub fn write_retrospective_lesson(
     .with_evidence(
         EvidenceRef::new(
             EvidenceKind::Other(lesson.origin.evidence_kind().to_string()),
-            lesson.origin.evidence_detail().to_string(),
+            lesson
+                .evidence_note
+                .clone()
+                .unwrap_or_else(|| lesson.origin.evidence_detail().to_string()),
         )
         .redacted(),
     );
@@ -221,6 +255,26 @@ mod tests {
         let items = review_list(root).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].session_id, "research");
+    }
+
+    #[test]
+    fn a_driver_intervention_names_its_client_and_session_label() {
+        // Bug it prevents: a steering client's correction masquerading in the
+        // review queue as the session's own retrospective (the reviewer must
+        // see who actually said it).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let lesson = RetrospectiveLesson::driver_intervention(
+            "Run the failing test before editing; the coach had to redirect a blind fix.",
+            "claude-code 2.1.0",
+        );
+        let id = write_retrospective_lesson(root, &lesson).unwrap().unwrap();
+        assert!(id.starts_with("driver-"), "id carries the origin: {id}");
+
+        let items = review_list(root).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].session_id, "driver-intervention");
     }
 
     #[test]

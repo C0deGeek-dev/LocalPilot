@@ -164,7 +164,7 @@ pub async fn run(
                 root: Some(cwd),
                 approvals,
             };
-            serve_mcp(
+            let report = serve_mcp(
                 &mut runtime,
                 ask_rx,
                 asks,
@@ -173,12 +173,61 @@ pub async fn run(
                 &options,
             )
             .await?;
+            offer_intervention_lessons(&project_root, &report);
         }
     }
     // Learn from the served session on disconnect (best-effort; skips an empty
     // session), so editor/ACP sessions feed LocalMind like the REPL does.
     crate::context_inject::close_out(&project_root, runtime.session_id());
     Ok(())
+}
+
+/// Cap on driver-intervention lesson candidates offered per served session,
+/// so one noisy session cannot flood the review queue.
+const MAX_INTERVENTION_LESSONS: usize = 8;
+
+/// Offer a served session's driver corrections to the review-gated lesson
+/// queue with honest provenance (the queue entry names the driving client).
+/// Advisory best-effort, like the completion-retrospective wire: a failed
+/// enqueue never breaks a finished session, and a candidate reaches memory
+/// only after human review. Approvals are event-log-only — routine consent is
+/// not a lesson; corrections (steers, cancels, denials) are.
+fn offer_intervention_lessons(
+    project_root: &std::path::Path,
+    report: &localpilot_rpc::McpServeReport,
+) {
+    let mut offered = 0usize;
+    for record in report
+        .interventions
+        .iter()
+        .filter(|record| record.action != "allow")
+        .take(MAX_INTERVENTION_LESSONS)
+    {
+        // Lead with the distinct correction and keep the framing minimal:
+        // the review queue folds lexical near-duplicates, so boilerplate-heavy
+        // phrasing would merge different corrections into one candidate. The
+        // full context (activity, client) stays in the event log and the
+        // candidate's evidence.
+        let doing = record
+            .activity
+            .as_deref()
+            .map(|activity| format!(" during {activity}"))
+            .unwrap_or_default();
+        let text = match record.action.as_str() {
+            "steer" => format!("Driver steer: {}", record.detail),
+            "cancel" => format!("Driver cancelled the turn{doing}"),
+            _ => format!("Driver denied {}", record.detail),
+        };
+        if let Ok(Some(_)) = localpilot_localmind::write_retrospective_lesson(
+            project_root,
+            &localpilot_localmind::RetrospectiveLesson::driver_intervention(text, &report.client),
+        ) {
+            offered += 1;
+        }
+    }
+    if offered > 0 {
+        eprintln!("learning: offered {offered} driver-intervention candidate(s) to review");
+    }
 }
 
 fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {
@@ -198,5 +247,62 @@ fn profile_label(profile: Profile) -> &'static str {
         Profile::Relaxed => "relaxed",
         Profile::Bypass => "bypass",
         Profile::Unrestricted => "unrestricted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use localpilot_rpc::{DriverInterventionRecord, McpServeReport};
+
+    fn record(action: &str, detail: &str) -> DriverInterventionRecord {
+        DriverInterventionRecord {
+            action: action.to_string(),
+            detail: detail.to_string(),
+            activity: Some("running run_shell".to_string()),
+        }
+    }
+
+    #[test]
+    fn corrections_become_review_candidates_but_approvals_do_not() {
+        // Bug it prevents: routine approvals flooding the review queue, or
+        // corrections silently never reaching it.
+        let dir = tempfile::tempdir().unwrap();
+        let report = McpServeReport {
+            client: "test-host 1.0".to_string(),
+            interventions: vec![
+                record("steer", "run the failing test first"),
+                record("allow", "run_shell: cargo test"),
+                record("deny", "run_shell: rm -rf build"),
+                record("cancel", "turn cancelled"),
+            ],
+        };
+
+        offer_intervention_lessons(dir.path(), &report);
+
+        let items = localpilot_localmind::review_list(dir.path()).unwrap();
+        assert_eq!(items.len(), 3, "steer + deny + cancel, never allow");
+        assert!(items
+            .iter()
+            .all(|item| item.session_id == "driver-intervention"));
+    }
+
+    #[test]
+    fn a_noisy_session_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let interventions = (0..20)
+            .map(|n| record("steer", &format!("prefer tactic{n:02} in area{n:02}")))
+            .collect();
+        let report = McpServeReport {
+            client: "test-host 1.0".to_string(),
+            interventions,
+        };
+
+        offer_intervention_lessons(dir.path(), &report);
+
+        let items = localpilot_localmind::review_list(dir.path()).unwrap();
+        assert_eq!(items.len(), MAX_INTERVENTION_LESSONS);
     }
 }

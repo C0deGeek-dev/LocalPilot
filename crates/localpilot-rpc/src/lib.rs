@@ -17,7 +17,9 @@ mod serve;
 pub use acp::{serve_acp, ACP_PROTOCOL_VERSION};
 pub use approver::{AskRegistry, PendingAsk, RpcApprover};
 pub use framing::LineFraming;
-pub use mcp::{serve_mcp, McpServeOptions, MCP_PROTOCOL_VERSION};
+pub use mcp::{
+    serve_mcp, DriverInterventionRecord, McpServeOptions, McpServeReport, MCP_PROTOCOL_VERSION,
+};
 pub use protocol::{
     ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent, ServerRecord,
     RPC_PROTOCOL_VERSION,

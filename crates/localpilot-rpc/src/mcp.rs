@@ -22,11 +22,11 @@
 //! Provenance: implemented from the published protocol documentation and
 //! schema only; no other implementation was consulted.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use localpilot_harness::SessionRuntime;
-use localpilot_store::Store;
+use localpilot_store::{SessionEventKind, Store};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
@@ -124,6 +124,29 @@ struct PendingPoll {
     deadline: tokio::time::Instant,
 }
 
+/// One driver intervention captured during a serve, in order: the client
+/// steered the turn, cancelled it, or answered a permission ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverInterventionRecord {
+    /// `steer`, `cancel`, `allow`, or `deny`.
+    pub action: String,
+    /// The steer text, or the ask's tool and detail.
+    pub detail: String,
+    /// What the session was doing at the time, when known.
+    pub activity: Option<String>,
+}
+
+/// What one MCP serve observed: the driving client's self-reported identity
+/// and every intervention it made, so the host can offer corrections to the
+/// review-gated lesson queue with honest provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServeReport {
+    /// The client's `clientInfo` name and version from `initialize`.
+    pub client: String,
+    /// Interventions in the order they happened.
+    pub interventions: Vec<DriverInterventionRecord>,
+}
+
 /// Serve-loop state shared between the idle and in-turn phases.
 struct McpState {
     feed: EventFeed,
@@ -132,6 +155,42 @@ struct McpState {
     session_id: String,
     session: localpilot_core::SessionId,
     store: Store,
+    /// The driving client's self-reported identity (from `initialize`).
+    client: String,
+    /// Interventions captured so far; `recorded` marks how many are already
+    /// in the durable event log (written whenever the runtime is free).
+    interventions: Vec<DriverInterventionRecord>,
+    recorded: usize,
+    /// The most recent activity marker from the event stream (running tool).
+    last_activity: Option<String>,
+    /// Pending-ask context so a permission reply can name what it answered.
+    ask_context: HashMap<String, String>,
+}
+
+impl McpState {
+    fn intervene(&mut self, action: &str, detail: String) {
+        self.interventions.push(DriverInterventionRecord {
+            action: action.to_string(),
+            detail,
+            activity: self.last_activity.clone(),
+        });
+    }
+}
+
+/// Write captured interventions to the durable event log. Callable only while
+/// the runtime is not driving a turn; a failure is logged by the runtime, not
+/// fatal (the log is an audit record, not a gate).
+fn flush_interventions(runtime: &mut SessionRuntime, state: &mut McpState) {
+    while state.recorded < state.interventions.len() {
+        let record = &state.interventions[state.recorded];
+        runtime.record_event(SessionEventKind::DriverIntervention {
+            action: record.action.clone(),
+            detail: record.detail.clone(),
+            activity: record.activity.clone(),
+            client: state.client.clone(),
+        });
+        state.recorded += 1;
+    }
 }
 
 /// Serve one MCP client over `reader`/`writer` until end of input.
@@ -149,7 +208,7 @@ pub async fn serve_mcp<R, W>(
     reader: R,
     mut writer: W,
     options: &McpServeOptions,
-) -> Result<(), RpcError>
+) -> Result<McpServeReport, RpcError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -162,6 +221,11 @@ where
         session_id: runtime.session_id().to_string(),
         session: runtime.session_id(),
         store: runtime.store().clone(),
+        client: "mcp-client".to_string(),
+        interventions: Vec::new(),
+        recorded: 0,
+        last_activity: None,
+        ask_context: HashMap::new(),
     };
 
     loop {
@@ -181,7 +245,10 @@ where
         let method = message["method"].as_str().unwrap_or_default().to_string();
         let id = message.get("id").cloned();
         match method.as_str() {
-            "initialize" => respond(&mut writer, id, initialize_result()).await?,
+            "initialize" => {
+                state.client = client_label(&message["params"]["clientInfo"]);
+                respond(&mut writer, id, initialize_result()).await?;
+            }
             "ping" => respond(&mut writer, id, json!({})).await?,
             "tools/list" => {
                 respond(&mut writer, id, json!({ "tools": tool_catalog(options) })).await?;
@@ -213,8 +280,11 @@ where
                             &text,
                         )
                         .await?;
+                        // The runtime is free between turns: persist any
+                        // interventions the turn captured.
+                        flush_interventions(runtime, &mut state);
                         if client_gone {
-                            return Ok(());
+                            return Ok(report(state));
                         }
                         next = state.follow_ups.pop_front();
                     }
@@ -230,6 +300,9 @@ where
                         false,
                     )
                     .await?;
+                    // An idle-time intervention (e.g. answering a stray ask)
+                    // can persist immediately.
+                    flush_interventions(runtime, &mut state);
                 }
             }
             // Notifications (initialized, cancelled, …) need no reply; a
@@ -249,7 +322,23 @@ where
             }
         }
     }
-    Ok(())
+    Ok(report(state))
+}
+
+fn report(state: McpState) -> McpServeReport {
+    McpServeReport {
+        client: state.client,
+        interventions: state.interventions,
+    }
+}
+
+/// The client's self-reported name and version from `initialize`.
+fn client_label(client_info: &Value) -> String {
+    let name = client_info["name"].as_str().unwrap_or("mcp-client");
+    match client_info["version"].as_str() {
+        Some(version) if !version.is_empty() => format!("{name} {version}"),
+        _ => name.to_string(),
+    }
 }
 
 /// Drive one turn while staying responsive to JSON-RPC traffic. Returns
@@ -301,7 +390,10 @@ where
                         let method = message["method"].as_str().unwrap_or_default().to_string();
                         let id = message.get("id").cloned();
                         match method.as_str() {
-                            "initialize" => respond(writer, id, initialize_result()).await?,
+                            "initialize" => {
+                                state.client = client_label(&message["params"]["clientInfo"]);
+                                respond(writer, id, initialize_result()).await?;
+                            }
                             "ping" => respond(writer, id, json!({})).await?,
                             "tools/list" => {
                                 respond(writer, id, json!({ "tools": tool_catalog(options) }))
@@ -317,6 +409,7 @@ where
                                     }
                                     "cancel" => {
                                         cancel.cancel();
+                                        state.intervene("cancel", "turn cancelled".to_string());
                                         respond(
                                             writer,
                                             id,
@@ -374,6 +467,7 @@ async fn in_turn_prompt<W: AsyncWrite + Unpin>(
     };
     match prompt_disposition(args) {
         InputDisposition::Steer => {
+            state.intervene("steer", text.clone());
             steer.push(text);
             respond(writer, id, tool_ok(json!({ "queued": "steer" }))).await
         }
@@ -459,6 +553,11 @@ async fn dispatch_tool<W: AsyncWrite + Unpin>(
             let ask_id = args["ask_id"].as_str().unwrap_or_default();
             let allow = args["allow"].as_bool().unwrap_or(false);
             if asks.resolve(ask_id, allow) {
+                let context = state
+                    .ask_context
+                    .remove(ask_id)
+                    .unwrap_or_else(|| ask_id.to_string());
+                state.intervene(if allow { "allow" } else { "deny" }, context);
                 respond(
                     writer,
                     id,
@@ -477,12 +576,31 @@ async fn dispatch_tool<W: AsyncWrite + Unpin>(
     }
 }
 
-/// Buffer one event and satisfy a parked poll if one is waiting.
+/// Buffer one event and satisfy a parked poll if one is waiting. Also keeps
+/// the activity marker and pending-ask context current, so an intervention
+/// can say what the session was doing and what an answered ask was about.
 async fn push_event<W: AsyncWrite + Unpin>(
     state: &mut McpState,
     writer: &mut W,
     event: ServerEvent,
 ) -> Result<(), RpcError> {
+    match &event {
+        ServerEvent::ToolStarted { name, .. } => {
+            state.last_activity = Some(format!("running {name}"));
+        }
+        ServerEvent::Stopped { .. } => state.last_activity = None,
+        ServerEvent::PermissionAsk {
+            ask_id,
+            tool,
+            detail,
+            ..
+        } => {
+            state
+                .ask_context
+                .insert(ask_id.clone(), format!("{tool}: {detail}"));
+        }
+        _ => {}
+    }
     state.feed.push(event);
     if let Some(poll) = state.pending_poll.take() {
         let page = state.feed.page_after(poll.cursor);

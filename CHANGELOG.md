@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- A driven session learns from its driver: corrections made over
+  `localpilot mcp serve` — steers, cancellations, permission denials — are
+  recorded as `driver_intervention` events in the session event log (named
+  after the client from the MCP handshake) and offered on disconnect as
+  review-gated lesson candidates labelled `driver-intervention`, so a
+  frontier coach's redirects can become promoted memory after human review.
+  Approvals stay event-log-only; candidates are capped per session. See
+  [docs/localmind-integration.md](docs/localmind-integration.md#driver-interventions-ride-the-same-bridge).
 - New `localpilot mcp serve`: serve the session runtime as an MCP server
   (protocol 2025-06-18) on stdio, so an MCP client — an agent host like
   Claude Code or Codex — can drive and steer a session through tools:

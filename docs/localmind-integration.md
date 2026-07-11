@@ -329,6 +329,25 @@ review instead of living only in an un-gated file (ADR-0037).
   promotion to accepted memory stays a human step (ADR-0011), and a rejected
   candidate never reaches memory.
 
+### Driver interventions ride the same bridge
+
+When an external agent host drives a session over `localpilot mcp serve`
+(see [embedding.md](embedding.md#mcp-over-stdio)), its **corrections** —
+steer texts, turn cancellations, and permission denials — are captured as
+`driver_intervention` events in the session event log and, on disconnect,
+offered to the same review-gated queue through the same host surface
+(`RetrospectiveLesson::driver_intervention`).
+
+- **Honest provenance.** The queue entry is labelled `driver-intervention`
+  (never `completion-retrospective`), and its evidence names the driving
+  client from the MCP handshake — the reviewer always sees who actually said
+  it. Same posture as research findings (see the decision log).
+- **Corrections, not consent.** An *approval* is routine and stays
+  event-log-only; only steers, cancels, and denials become candidates, capped
+  per session so a noisy drive cannot flood review.
+- Same gates as every candidate: quality bar, near-duplicate folding, human
+  review before memory.
+
 ## Argument-Repair Feedback (opt-in)
 
 When `[tools] repair_learning` is on (default off), a closed session's

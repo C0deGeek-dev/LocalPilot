@@ -153,3 +153,11 @@ the client only answers the asks it is shown, and an unanswered ask is denied.
 `--no-approvals` withholds the `reply_permission` tool entirely — the client
 can watch and steer but every ask denies (watch-and-steer mode). Asks that a
 profile resolves without asking are never surfaced at all.
+
+The session also learns from being driven: the client's corrections — steers,
+cancellations, and denials — are recorded as `driver_intervention` events in
+the durable session event log (with the client's self-reported identity from
+`initialize`) and offered on disconnect as review-gated lesson candidates,
+labelled with the driving client so they never masquerade as the session's
+own retrospective. See
+[localmind-integration.md](localmind-integration.md#driver-interventions-ride-the-same-bridge).

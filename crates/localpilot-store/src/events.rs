@@ -16,7 +16,7 @@ use localpilot_core::{EventId, Message, StructuredSummary};
 use serde::{Deserialize, Serialize};
 
 /// The current session event-log format version.
-pub const SESSION_EVENT_FORMAT_VERSION: u32 = 7;
+pub const SESSION_EVENT_FORMAT_VERSION: u32 = 8;
 
 /// One memory surfaced and used to answer a turn, for the local inspector.
 /// Carries only the id, its retrieval score, and which layer surfaced it — never
@@ -247,6 +247,23 @@ pub enum SessionEventKind {
         /// Which trigger drove the resolution (`failure_driven` or `marker`).
         trigger: String,
     },
+    /// An external driver steering this session (e.g. an agent host on the
+    /// MCP adapter) intervened: it steered the turn, cancelled it, or
+    /// answered a permission ask. The durable record of who corrected the
+    /// session and how — the client identity comes from the driver's own
+    /// handshake.
+    DriverIntervention {
+        /// What the driver did: `steer`, `cancel`, `allow`, or `deny`.
+        action: String,
+        /// The steer text, or the ask's tool and detail — redacted upstream
+        /// like every event payload.
+        detail: String,
+        /// What the session was doing at the time (e.g. the running tool),
+        /// when known.
+        activity: Option<String>,
+        /// The driving client's self-reported name/version.
+        client: String,
+    },
 }
 
 impl SessionEvent {
@@ -342,6 +359,15 @@ fn migrate(
             6 => {
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("v".to_string(), serde_json::json!(7));
+                }
+                value
+            }
+            // v7 -> v8: additive only. v8 introduced the `DriverIntervention`
+            // event kind; existing v7 events keep their shape, so the migration
+            // only stamps the current version.
+            7 => {
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.insert("v".to_string(), serde_json::json!(8));
                 }
                 value
             }

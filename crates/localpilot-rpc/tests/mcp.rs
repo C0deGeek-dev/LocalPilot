@@ -227,6 +227,7 @@ async fn a_denied_ask_becomes_a_model_visible_tool_error() {
         )
         .text("could not delete");
     let (dir, mut runtime, ask_rx, registry) = build_full(provider);
+    let session = runtime.session_id();
     let opts = options(dir.path(), true);
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server_io);
@@ -305,7 +306,24 @@ async fn a_denied_ask_becomes_a_model_visible_tool_error() {
     };
 
     let (served, ()) = tokio::join!(server, client);
-    served.unwrap();
+    // The denial is captured as an intervention with the ask's context…
+    let report = served.unwrap();
+    assert_eq!(report.interventions.len(), 1, "{report:?}");
+    assert_eq!(report.interventions[0].action, "deny");
+    assert!(report.interventions[0].detail.contains("run_shell"));
+    // …and durably recorded in the session event log with the client label.
+    let events = Store::open(dir.path()).read_events(session).unwrap();
+    let intervention = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            localpilot_store::SessionEventKind::DriverIntervention { action, client, .. } => {
+                Some((action.clone(), client.clone()))
+            }
+            _ => None,
+        })
+        .expect("a driver_intervention event is in the durable log");
+    assert_eq!(intervention.0, "deny");
+    assert_eq!(intervention.1, "mcp-client");
 }
 
 #[tokio::test]
