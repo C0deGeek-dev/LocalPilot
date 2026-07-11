@@ -2,6 +2,28 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0072: Research Memory Candidates Carry Honest Provenance, And Blob Excerpts Stay Report-Only
+
+Status: accepted. Refines ADR-0060/0067/0037 after a review-queue item proved
+unreadable: a `/research` candidate whose body was a truncated console-log
+excerpt, enqueued under the `completion-retrospective` session label — the
+reviewer could tell neither where it came from nor what it was supposed to
+teach.
+
+1. **Honest provenance on the shared queue.** Research findings keep riding
+   the `write_retrospective_lesson` review-gated path (ADR-0060), but the
+   lesson now carries its origin: a research candidate is enqueued under the
+   `research` session label with a `research-` id prefix and
+   `research_finding` evidence kind; only genuine completion retrospectives
+   are labelled `completion-retrospective`/`retro-`.
+2. **A blob-derived excerpt is not a lesson.** The ADR-0067 sanitize pass is
+   the only writer of `Finding.evidence`, so `evidence.is_some()` identifies a
+   statement that was reduced from a raw source blob. `candidates_from` now
+   excludes those findings: a log/code excerpt is source matter — it stays in
+   the rendered report with its evidence block, and never becomes a
+   review-queue memory candidate.
+3. Pinned by a candidates-filter test and a queue-label test.
+
 ## ADR-0071: Permission Profile Slash Commands Apply Mid-Turn Through A Shared Engine Handle
 
 Status: accepted. Extends ADR-0070 after `/unrestricted` proved to be

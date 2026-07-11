@@ -614,7 +614,7 @@ fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<us
             spec.body,
             provenance_summary(&spec.provenance)
         );
-        let lesson = localpilot_localmind::RetrospectiveLesson::new(
+        let lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
             localpilot_config::redact::redact(&body),
         );
         if localpilot_localmind::write_retrospective_lesson(root, &lesson)?.is_some() {

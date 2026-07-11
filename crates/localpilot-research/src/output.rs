@@ -28,13 +28,20 @@ pub struct CandidateSpec {
 /// Derive review-queue candidate specs from a report.
 ///
 /// Only **supported** findings with at least one provenance become candidates,
-/// so unsupported or unbacked claims never reach the review queue.
+/// so unsupported or unbacked claims never reach the review queue. A finding
+/// whose statement was reduced from a raw source blob (`evidence` is set — the
+/// sanitize pass is its only writer) is also excluded: an excerpt of a log or
+/// code chunk is source matter, not a durable lesson, and offering it to the
+/// memory queue is review noise. It stays in the rendered report, where its
+/// evidence block belongs.
 #[must_use]
 pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<CandidateSpec> {
     report
         .findings
         .iter()
-        .filter(|f| f.status == ClaimStatus::Supported && !f.supporting.is_empty())
+        .filter(|f| {
+            f.status == ClaimStatus::Supported && !f.supporting.is_empty() && f.evidence.is_none()
+        })
         .map(|f| CandidateSpec {
             body: f.statement.clone(),
             provenance: f.supporting.clone(),
@@ -156,6 +163,33 @@ mod tests {
             supporting,
             evidence: None,
         }
+    }
+
+    #[test]
+    fn blob_derived_excerpts_never_become_memory_candidates() {
+        // A finding whose statement was reduced from a raw source blob (the
+        // sanitize pass set `evidence`) is report-only: a log/code excerpt is
+        // source matter, not a durable lesson for the review queue.
+        let mut report = ResearchReport::new("t");
+        let claim = finding(
+            "Caches speed up repeated reads.",
+            ClaimStatus::Supported,
+            vec![Provenance::new("web", None)],
+        );
+        let mut excerpt = finding(
+            "Excerpt from knowledge: TypeError: Cannot read properties of undefined…",
+            ClaimStatus::Supported,
+            vec![Provenance::new(
+                "knowledge",
+                Some("console.log:1-97".to_string()),
+            )],
+        );
+        excerpt.evidence = Some("TypeError: Cannot read properties of undefined".to_string());
+        report.findings = vec![claim, excerpt];
+
+        let candidates = candidates_from(&report, 0.4);
+        assert_eq!(candidates.len(), 1, "only the synthesized claim qualifies");
+        assert_eq!(candidates[0].body, "Caches speed up repeated reads.");
     }
 
     #[test]

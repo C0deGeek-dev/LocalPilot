@@ -37,18 +37,79 @@ const MIN_LESSON_CHARS: usize = 8;
 /// The review session label retrospective candidates are enqueued under.
 const RETROSPECTIVE_SESSION: &str = "completion-retrospective";
 
-/// One advisory lesson from a completion retrospective, ready to offer to review.
+/// The review session label research-finding candidates are enqueued under.
+const RESEARCH_SESSION: &str = "research";
+
+/// Where an offered lesson came from. The queue entry carries this honestly:
+/// a `/research` finding must never be presented as a completion
+/// retrospective — the reviewer reads the label to judge what they are
+/// looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The harness completion retrospective (ADR-0035/0037).
+    Retrospective,
+    /// A supported finding from the research loop (ADR-0060).
+    Research,
+}
+
+impl Origin {
+    fn session(self) -> &'static str {
+        match self {
+            Origin::Retrospective => RETROSPECTIVE_SESSION,
+            Origin::Research => RESEARCH_SESSION,
+        }
+    }
+
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Origin::Retrospective => "retro",
+            Origin::Research => "research",
+        }
+    }
+
+    fn evidence_kind(self) -> &'static str {
+        match self {
+            Origin::Retrospective => "completion_retrospective",
+            Origin::Research => "research_finding",
+        }
+    }
+
+    fn evidence_detail(self) -> &'static str {
+        match self {
+            Origin::Retrospective => "harness completion retrospective",
+            Origin::Research => "research loop finding",
+        }
+    }
+}
+
+/// One advisory lesson ready to offer to review — from a completion
+/// retrospective, or a research finding riding the same review-gated queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrospectiveLesson {
     /// The lesson text as written to `LESSONS.md` (one line, already condensed).
     pub text: String,
+    origin: Origin,
 }
 
 impl RetrospectiveLesson {
-    /// A lesson from its text.
+    /// A completion-retrospective lesson from its text.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: text.into(),
+            origin: Origin::Retrospective,
+        }
+    }
+
+    /// A research-loop finding from its text. Same review-gated queue, honest
+    /// provenance: the queue entry is labelled `research`, not
+    /// `completion-retrospective`.
+    #[must_use]
+    pub fn research_finding(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            origin: Origin::Research,
+        }
     }
 
     /// Whether the lesson clears the quality bar: long enough to be a real statement
@@ -60,7 +121,11 @@ impl RetrospectiveLesson {
     /// A stable, content-addressed candidate id, so re-offering the same lesson does not
     /// mint a second id (the review queue also dedups by canonical summary hash).
     fn id(&self) -> String {
-        format!("retro-{}", fnv_hex(self.text.trim().as_bytes()))
+        format!(
+            "{}-{}",
+            self.origin.id_prefix(),
+            fnv_hex(self.text.trim().as_bytes())
+        )
     }
 }
 
@@ -95,8 +160,8 @@ pub fn write_retrospective_lesson(
     )
     .with_evidence(
         EvidenceRef::new(
-            EvidenceKind::Other("completion_retrospective".to_string()),
-            "harness completion retrospective".to_string(),
+            EvidenceKind::Other(lesson.origin.evidence_kind().to_string()),
+            lesson.origin.evidence_detail().to_string(),
         )
         .redacted(),
     );
@@ -104,7 +169,10 @@ pub fn write_retrospective_lesson(
     let queue = ReviewQueue::open_project(project_root)
         .map_err(|e| LearningError::Review(e.to_string()))?;
     let inserted = queue
-        .enqueue_candidates(&LearningSessionId::new(RETROSPECTIVE_SESSION), &[candidate])
+        .enqueue_candidates(
+            &LearningSessionId::new(lesson.origin.session()),
+            &[candidate],
+        )
         .map_err(|e| LearningError::Review(e.to_string()))?;
     // `inserted == 0` means the queue deduped this lesson against an existing pending
     // candidate (same canonical-hash summary): a no-op, not a second entry.
@@ -134,6 +202,25 @@ mod tests {
         let items = review_list(root).unwrap();
         assert_eq!(items.len(), 1, "exactly one candidate: {items:?}");
         assert!(items[0].summary.contains("Thread a value"));
+    }
+
+    #[test]
+    fn a_research_finding_is_labelled_research_not_completion_retrospective() {
+        // Bug it prevents: a /research memory candidate masquerading in the
+        // review queue as a completion retrospective, leaving the reviewer
+        // unable to tell what they are looking at.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let lesson = RetrospectiveLesson::research_finding(
+            "Prefer virtual scrolling for long lists. (research finding; sources: web)",
+        );
+        let id = write_retrospective_lesson(root, &lesson).unwrap().unwrap();
+        assert!(id.starts_with("research-"), "id carries the origin: {id}");
+
+        let items = review_list(root).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].session_id, "research");
     }
 
     #[test]
