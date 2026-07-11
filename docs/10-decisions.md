@@ -2,6 +2,68 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0074: Driver Corrections Are Captured With Honest Provenance And Ride The Review-Gated Queue
+
+Status: accepted. Extends ADR-0037/0072 to sessions driven by an external
+agent host over the MCP adapter (ADR-0073): the driver's corrections are
+training signal, and they must reach memory the same gated way everything
+else does — no new store, no auto-promotion, no masquerade.
+
+1. **Capture at the adapter, durably.** Steers, cancellations, and permission
+   replies are recorded as `driver_intervention` events in the session event
+   log (format v8, additive), carrying the action, its detail (the steer text
+   or the answered ask's tool+detail), the running activity when known, and
+   the driving client's self-reported identity from the MCP handshake. The
+   log is written whenever the runtime is free — the pinned turn future owns
+   the runtime mid-turn, so mid-turn interventions persist at the next turn
+   boundary.
+2. **Corrections become candidates; consent does not.** On disconnect the
+   session's steers, cancels, and denies are offered to the ADR-0037
+   review-gated queue (capped per session); approvals stay event-log-only —
+   routine consent teaches nothing and would flood review.
+3. **Honest provenance, ADR-0072 pattern.** The candidates are enqueued under
+   the `driver-intervention` session label with a `driver-` id prefix, a
+   `driver_intervention` evidence kind, and evidence naming the driving
+   client — never presented as the session's own retrospective. All existing
+   gates apply: quality bar, near-duplicate folding, human promotion
+   (ADR-0011).
+4. **Candidate text leads with the correction.** The review queue folds
+   lexical near-duplicates, so templated boilerplate would merge distinct
+   corrections into one candidate; the composed text puts the distinct
+   content first and keeps framing minimal. Pinned by capture, provenance,
+   filter, and cap tests across the adapter, bridge, and host layers.
+
+## ADR-0073: An MCP Server Adapter Exposes The Session Runtime To Agent Hosts
+
+Status: accepted. Extends the headless-drive family (native RPC, ACP) with a
+third stdio adapter in `localpilot-rpc`, so an MCP client — an agent host
+such as Claude Code or Codex — can drive and steer a LocalPilot session
+through ordinary tool calls (`localpilot mcp serve`).
+
+1. **Same crate, same runtime, same plumbing.** The adapter lives beside the
+   ACP adapter in `localpilot-rpc` (the crate that owns headless wire
+   adapters over the in-process `SessionRuntime`), reuses the `RpcApprover`
+   halves, the native protocol's event vocabulary, and a shared LF-framed
+   JSON reader. `localpilot-mcp` remains the MCP *client* only. No HTTP
+   server, no SDK dependency: JSON-RPC 2.0 (spec revision 2025-06-18) is
+   hand-rolled, as the ACP adapter proved viable.
+2. **Pull-based events with counted loss.** MCP is request/response, so
+   session events are buffered in a bounded, monotonically numbered feed;
+   the `events` tool pages after a client cursor with a server-capped
+   bounded wait (well under common client tool timeouts). Overflow drops
+   oldest entries and reports the count — a lagging client sees that it
+   lagged, never a silent gap.
+3. **The permission engine stays authoritative.** The client only answers
+   asks it is shown; an unanswered ask denies, exactly as non-interactive
+   mode; `--no-approvals` withholds the reply tool entirely
+   (watch-and-steer: every ask denies, fail-closed). Nothing the adapter
+   exposes can widen an engine verdict.
+4. **A served session is a full session.** `steer`/`follow_up` dispositions,
+   session resume (`--continue`/`--resume`, shared with `rpc`), and the
+   closeout-on-disconnect learning path behave identically to the other
+   interactive hosts. Pinned by a duplex integration suite and CLI parse
+   tests.
+
 ## ADR-0072: Research Memory Candidates Carry Honest Provenance, And Blob Excerpts Stay Report-Only
 
 Status: accepted. Refines ADR-0060/0067/0037 after a review-queue item proved
