@@ -358,6 +358,7 @@ machine; the **web** half is off by default and gated separately.
 | `enabled` | bool | `true` | Whether the research surface is usable at all. Local-only research is read-only and harmless; set `false` to disable the surface entirely. |
 | `max_questions` | integer | `6` | The loop bound — the maximum sub-questions a single run may pursue. |
 | `output_dir` | string | _(unset)_ | Directory for written report artefacts, relative to the project root. Unset → `.localpilot/research/`. |
+| `ingest_report` | bool | `false` | When a report is written, also ingest it into LocalMind's documentation index (`doc_chunk`) so research output is semantically searchable and appears in the LocalMind UI's Docs/dashboard. Off by default — research output stays a local artefact unless you opt in. Ingest is best-effort (a failure warns, never fails the run) and idempotent. `localmind ingest docs .localpilot/research` does the same thing manually. |
 
 #### `[research.web]`
 
@@ -424,6 +425,8 @@ persistence = "save-all"
 [research]
 enabled = true
 max_questions = 6
+# Also index written reports into LocalMind so they show up in its UI (off by default).
+ingest_report = false
 # Web research stays off until you enable it and opt in per run with `--web`.
 [research.web]
 enabled = false

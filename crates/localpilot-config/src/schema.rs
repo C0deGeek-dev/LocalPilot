@@ -101,6 +101,12 @@ pub struct ResearchConfig {
     /// Directory for written research report artefacts, relative to the project
     /// root. `None` lets the host choose its default (`.localpilot/research/`).
     pub output_dir: Option<String>,
+    /// Whether to also ingest the written research report into LocalMind's
+    /// documentation index (`doc_chunk`) so it is semantically searchable and
+    /// shows up in the LocalMind UI. Off by default — research output is a local
+    /// artefact unless you opt in; `localmind ingest docs` remains available to
+    /// do this manually. Only takes effect when a report is written.
+    pub ingest_report: bool,
     /// Outbound web-research controls. Off by default.
     pub web: ResearchWebConfig,
 }
@@ -111,6 +117,7 @@ impl Default for ResearchConfig {
             enabled: true,
             max_questions: 6,
             output_dir: None,
+            ingest_report: false,
             web: ResearchWebConfig::default(),
         }
     }

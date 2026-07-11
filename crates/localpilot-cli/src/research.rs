@@ -144,6 +144,9 @@ pub struct ResearchOptions {
     pub write_report: bool,
     /// Whether to enqueue review-gated memory candidates.
     pub enqueue_memory: bool,
+    /// Whether to also ingest the written report into LocalMind's documentation
+    /// index (`doc_chunk`). Only acts when a report is written.
+    pub ingest_report: bool,
 }
 
 /// Build run options from the `[research]` config. Returns `None` when the
@@ -166,6 +169,7 @@ pub fn options_from_config(
         output_dir,
         write_report,
         enqueue_memory,
+        ingest_report: config.research.ingest_report,
     }))
 }
 
@@ -219,6 +223,17 @@ pub async fn run_research_command(
     if options.write_report {
         let path = write_report(&options.output_dir, topic, &outcome.report)?;
         writeln!(out, "report: {}", path.display())?;
+        if options.ingest_report {
+            // Best-effort: a failure to index must never fail the research run.
+            match localpilot_localmind::ingest_research_docs(root, &options.output_dir) {
+                Ok(summary) => writeln!(
+                    out,
+                    "doc chunks ingested: {} (total in index: {})",
+                    summary.chunks, summary.total_in_index
+                )?,
+                Err(error) => writeln!(out, "note: research report not ingested: {error}")?,
+            }
+        }
     }
     if options.enqueue_memory {
         let enqueued = enqueue_candidates(root, &outcome.report)?;

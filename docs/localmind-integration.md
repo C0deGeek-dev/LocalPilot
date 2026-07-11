@@ -130,6 +130,13 @@ commits).
   `write_retrospective_lesson` queue, ADR-0037) at a low prior confidence — never
   written to accepted memory. Unsupported or unbacked findings never become
   candidates. `--no-memory` skips the enqueue entirely.
+- Optionally, `localpilot research` also ingests the written report into
+  LocalMind's **documentation index** (`doc_chunk`) so it is semantically
+  searchable and appears in the LocalMind UI — reusing the same chunker as
+  `localmind ingest docs` in-process. This is off by default (`[research]
+  ingest_report`), best-effort (a failure warns, never fails the run), and
+  idempotent; it is independent of the review-candidate enqueue above. Doc chunks
+  are source matter, not accepted memory.
 - The agent can list or inspect generated skill drafts read-only with the
   `skill_drafts` tool. Surfacing a draft never enables it; the disabled flag stays
   authoritative and activation stays a deliberate human step.

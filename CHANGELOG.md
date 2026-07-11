@@ -6,6 +6,12 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot research` can index its report into LocalMind. A new opt-in
+  `[research] ingest_report` (default off) also ingests the written report into
+  LocalMind's documentation index (`doc_chunk`), so research output is
+  semantically searchable and shows up in the LocalMind UI — reusing the
+  `localmind ingest docs` chunker in-process. Best-effort and idempotent; the
+  manual `localmind ingest docs .localpilot/research` remains available.
 - `/research` findings reach the review queue again. A recent change made
   research candidates that were reduced to a source excerpt "report-only", but
   because research synthesis is heuristic (every finding is a gathered excerpt)
