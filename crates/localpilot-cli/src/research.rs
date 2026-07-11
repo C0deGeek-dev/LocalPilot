@@ -805,6 +805,43 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_routes_sanitized_excerpt_findings_to_the_review_queue() {
+        // Regression guard: a supported, backed finding that the sanitize pass
+        // reduced to an excerpt (its raw blob moved into `evidence`) must still
+        // reach the review queue, carrying its distilled statement — not be
+        // silently dropped so a whole research run enqueues nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut report = ResearchReport::new("three.js performance");
+        let excerpt = Finding {
+            statement: "Excerpt from knowledge: use InstancedMesh for many identical meshes"
+                .to_string(),
+            status: localpilot_research::ClaimStatus::Supported,
+            supporting: vec![Provenance::new(
+                "knowledge",
+                Some("perf.md:1-20".to_string()),
+            )],
+            evidence: Some("<div>use InstancedMesh for many identical meshes</div>".to_string()),
+        };
+        report.findings = vec![excerpt];
+
+        let enqueued = enqueue_candidates(root, &report).unwrap();
+        assert_eq!(enqueued, 1, "the excerpt finding is enqueued, not dropped");
+
+        let items = localpilot_localmind::review_list(root).unwrap();
+        assert_eq!(items.len(), 1, "one review candidate reaches the queue");
+        assert!(
+            items[0].summary.contains("use InstancedMesh"),
+            "the queue carries the distilled statement: {items:?}"
+        );
+        assert!(
+            !items[0].summary.contains("<div>"),
+            "the raw source blob never reaches the queue: {items:?}"
+        );
+    }
+
+    #[test]
     fn extract_urls_tolerates_bullets_and_prose() {
         let text = "- https://docs.rs/tokio see this\n2. http://example.com/x\nno url here\n";
         assert_eq!(

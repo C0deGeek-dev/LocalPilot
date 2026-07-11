@@ -26,7 +26,7 @@ use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
     Approver, Effect, Interactivity, PermissionEngine, PermissionEngineHandle, PermissionRequest,
-    Profile, Workspace,
+    Profile,
 };
 use localpilot_store::Store;
 use localpilot_tools::BackgroundProcesses;

@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `/research` findings reach the review queue again. A recent change made
+  research candidates that were reduced to a source excerpt "report-only", but
+  because research synthesis is heuristic (every finding is a gathered excerpt)
+  that silently enqueued zero candidates for the common case, so nothing showed
+  up in LocalMind's review UI. A backed research finding is now enqueued as a
+  review-gated candidate carrying its distilled one-line statement (the raw
+  source blob still stays in the written report only). See ADR-0072.
 - Permission prompts describe the actual risk. An in-workspace read or write
   that asks only because the session is untrusted (the default-profile floor)
   now reads "read a file" / "write a file" instead of falsely claiming

@@ -64,9 +64,10 @@ through ordinary tool calls (`localpilot mcp serve`).
    interactive hosts. Pinned by a duplex integration suite and CLI parse
    tests.
 
-## ADR-0072: Research Memory Candidates Carry Honest Provenance, And Blob Excerpts Stay Report-Only
+## ADR-0072: Research Memory Candidates Carry Honest Provenance, And Excerpts Are Distilled, Not Dropped
 
-Status: accepted. Refines ADR-0060/0067/0037 after a review-queue item proved
+Status: accepted; point 2 amended (see below) after the original rule proved to
+zero the pipeline. Refines ADR-0060/0067/0037 after a review-queue item proved
 unreadable: a `/research` candidate whose body was a truncated console-log
 excerpt, enqueued under the `completion-retrospective` session label — the
 reviewer could tell neither where it came from nor what it was supposed to
@@ -78,13 +79,27 @@ teach.
    `research` session label with a `research-` id prefix and
    `research_finding` evidence kind; only genuine completion retrospectives
    are labelled `completion-retrospective`/`retro-`.
-2. **A blob-derived excerpt is not a lesson.** The ADR-0067 sanitize pass is
-   the only writer of `Finding.evidence`, so `evidence.is_some()` identifies a
-   statement that was reduced from a raw source blob. `candidates_from` now
-   excludes those findings: a log/code excerpt is source matter — it stays in
-   the rendered report with its evidence block, and never becomes a
-   review-queue memory candidate.
+2. **A candidate body is the distilled statement, not the raw blob.** The
+   ADR-0067 sanitize pass reduces a finding whose statement was a raw source
+   blob to a readable, single-line, length-capped excerpt titled with its
+   source (`Finding.statement`), and moves the full text to `Finding.evidence`.
+   `candidates_from` uses that already-distilled `statement` as the candidate
+   body; the raw blob in `evidence` stays in the rendered report only. So the
+   reviewer sees a clean claim with provenance, never a pasted log or code
+   chunk — the original readability goal — without discarding the finding.
 3. Pinned by a candidates-filter test and a queue-label test.
+
+**Amendment (regression fix).** Point 2 originally *excluded* every finding with
+`evidence.is_some()` from the review queue (report-only). Because synthesis is
+provenance-preserving and heuristic (the model only decomposes; every finding is
+a gathered source excerpt), the sanitize pass sets `evidence` on essentially all
+findings over code/HTML/long-doc sources — so the exclusion silently enqueued
+*zero* candidates for the common research run, and nothing reached the LocalMind
+review UI. The rule is corrected to distil-not-drop: an excerpt finding stays a
+candidate, carrying its sanitized one-line `statement` (already readable and
+length-capped) as the body, while the raw blob remains report-only. Lesson: a
+candidate filter must be validated against the real producer's output (heuristic
+excerpts), not an idealized clean-claim fixture.
 
 ## ADR-0071: Permission Profile Slash Commands Apply Mid-Turn Through A Shared Engine Handle
 

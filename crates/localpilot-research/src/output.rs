@@ -28,20 +28,20 @@ pub struct CandidateSpec {
 /// Derive review-queue candidate specs from a report.
 ///
 /// Only **supported** findings with at least one provenance become candidates,
-/// so unsupported or unbacked claims never reach the review queue. A finding
-/// whose statement was reduced from a raw source blob (`evidence` is set — the
-/// sanitize pass is its only writer) is also excluded: an excerpt of a log or
-/// code chunk is source matter, not a durable lesson, and offering it to the
-/// memory queue is review noise. It stays in the rendered report, where its
-/// evidence block belongs.
+/// so unsupported or unbacked claims never reach the review queue. The candidate
+/// body is the finding's `statement`, which the sanitize pass has already reduced
+/// to a readable, single-line, length-capped excerpt titled with its source; the
+/// raw source blob is kept separately in `evidence` and stays in the rendered
+/// report only. This keeps the queue readable (the reviewer sees a distilled
+/// claim, never a pasted log or code chunk) without dropping backed findings —
+/// synthesis is provenance-preserving and heuristic, so a finding *being* an
+/// excerpt is the common case, not a reason to discard it.
 #[must_use]
 pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<CandidateSpec> {
     report
         .findings
         .iter()
-        .filter(|f| {
-            f.status == ClaimStatus::Supported && !f.supporting.is_empty() && f.evidence.is_none()
-        })
+        .filter(|f| f.status == ClaimStatus::Supported && !f.supporting.is_empty())
         .map(|f| CandidateSpec {
             body: f.statement.clone(),
             provenance: f.supporting.clone(),
@@ -166,16 +166,20 @@ mod tests {
     }
 
     #[test]
-    fn blob_derived_excerpts_never_become_memory_candidates() {
-        // A finding whose statement was reduced from a raw source blob (the
-        // sanitize pass set `evidence`) is report-only: a log/code excerpt is
-        // source matter, not a durable lesson for the review queue.
+    fn sanitized_excerpt_findings_become_candidates_with_the_distilled_statement() {
+        // A supported, backed finding whose statement was reduced from a raw
+        // source blob (the sanitize pass set `evidence`) is still a candidate:
+        // the body is the already-distilled, readable `statement`, and the raw
+        // blob in `evidence` stays in the rendered report only. Dropping these
+        // would zero the queue, because provenance-preserving heuristic
+        // synthesis makes almost every finding an excerpt.
         let mut report = ResearchReport::new("t");
         let claim = finding(
             "Caches speed up repeated reads.",
             ClaimStatus::Supported,
             vec![Provenance::new("web", None)],
         );
+        let raw_blob = "TypeError: Cannot read properties of undefined";
         let mut excerpt = finding(
             "Excerpt from knowledge: TypeError: Cannot read properties of undefined…",
             ClaimStatus::Supported,
@@ -184,12 +188,21 @@ mod tests {
                 Some("console.log:1-97".to_string()),
             )],
         );
-        excerpt.evidence = Some("TypeError: Cannot read properties of undefined".to_string());
+        excerpt.evidence = Some(raw_blob.to_string());
         report.findings = vec![claim, excerpt];
 
         let candidates = candidates_from(&report, 0.4);
-        assert_eq!(candidates.len(), 1, "only the synthesized claim qualifies");
+        assert_eq!(candidates.len(), 2, "both backed findings qualify");
         assert_eq!(candidates[0].body, "Caches speed up repeated reads.");
+        // The excerpt's body is its distilled statement, never the raw blob.
+        assert_eq!(
+            candidates[1].body,
+            "Excerpt from knowledge: TypeError: Cannot read properties of undefined…"
+        );
+        assert_ne!(
+            candidates[1].body, raw_blob,
+            "raw blob never becomes the body"
+        );
     }
 
     #[test]
