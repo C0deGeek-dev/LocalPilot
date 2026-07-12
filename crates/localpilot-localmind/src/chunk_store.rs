@@ -368,6 +368,15 @@ impl ChunkStore {
     /// eligible — the exact clause accepted-memory `search_lang` uses. The clause
     /// is appended **only** when filtering, so the unfiltered query shape is
     /// stable.
+    ///
+    /// **Coverage floor.** The FTS `MATCH` clause OR-combines every term, so a
+    /// row only needs to hit *one* of them — on a small/sparse index (few
+    /// competing chunks, bm25's IDF treating any matching term as "rare and
+    /// significant") that lets a single incidental word drag in an unrelated
+    /// file. Rows are re-checked in Rust after the FTS pass: a query of 3+
+    /// terms must actually contain at least 2 of them (see
+    /// [`passes_relevance_floor`]) to survive. Queries of 1-2 terms are exempt
+    /// — there's nothing to differentiate a real hit from an incidental one.
     pub(crate) fn search(
         &self,
         terms: &[String],
@@ -417,6 +426,10 @@ impl ChunkStore {
         for row in rows {
             scored.push(row.map_err(|source| self.sqlite_err(source))?);
         }
+        scored.retain(|(chunk, _)| {
+            let matched = matched_term_count(terms, &chunk.path, &prefixed_text(chunk));
+            passes_relevance_floor(terms, matched)
+        });
         Ok(scored)
     }
 
@@ -761,6 +774,40 @@ fn fts_match_expression(terms: &[String]) -> Option<String> {
     Some(clauses.join(" OR "))
 }
 
+/// Distinct query terms actually present in `path`/`text`, using the same
+/// match semantics as [`fts_match_expression`]: a term of [`MIN_PREFIX_LEN`]+
+/// characters counts on a prefix match against any word, a shorter term only
+/// on an exact word match. Used by [`passes_relevance_floor`] — the FTS
+/// `MATCH` clause only guarantees *one* term hit per row, so this re-checks
+/// how many of the query's terms a candidate row actually contains.
+fn matched_term_count(terms: &[String], path: &str, text: &str) -> usize {
+    let haystack = format!("{path} {text}").to_ascii_lowercase();
+    let words: BTreeSet<&str> = haystack
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .filter(|term| {
+            if term.chars().count() >= MIN_PREFIX_LEN {
+                words.iter().any(|word| word.starts_with(term.as_str()))
+            } else {
+                words.contains(term.as_str())
+            }
+        })
+        .count()
+}
+
+/// Whether a row's `matched` term count clears the coverage floor for
+/// `terms`. Queries of 1-2 terms are exempt (nothing to differentiate); a
+/// query of 3+ terms must actually contain at least 2 of them, so a single
+/// incidental word can no longer surface an otherwise-unrelated file.
+fn passes_relevance_floor(terms: &[String], matched: usize) -> bool {
+    let distinct = terms.iter().filter(|term| !term.is_empty()).count();
+    distinct < 3 || matched >= 2
+}
+
 /// Encode an embedding as a little-endian f32 BLOB — the same on-disk layout the
 /// accepted-memory `vector_index` uses, so cosine is computed identically in Rust.
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
@@ -839,6 +886,89 @@ mod tests {
             preview_bytes: text.len() as u64,
             superseded_by: None,
         }
+    }
+
+    #[test]
+    fn a_multi_term_query_filters_out_a_single_incidental_word_match() {
+        // Bug it prevents: an IDE metadata file like `.idea/modules.xml`
+        // surfacing as "evidence" for an unrelated multi-word research topic
+        // purely because one query term ("module") happens to prefix-match a
+        // token like `<modules>`/`<module ...>` in the XML.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        store
+            .upsert_chunks(&[chunk(
+                "c1",
+                ".idea/modules.xml",
+                "h1",
+                r#"<project><component name="ProjectModuleManager"><modules>
+                   <module fileurl="file://$PROJECT_DIR$/app.iml" /></modules>
+                   </component></project>"#,
+            )])
+            .unwrap();
+
+        let terms = [
+            "three",
+            "js",
+            "fundamentals",
+            "scene",
+            "graph",
+            "renderer",
+            "camera",
+            "materials",
+            "module",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let hits = store.search(&terms, None).unwrap();
+        assert!(
+            hits.is_empty(),
+            "a single incidental term match must not survive the coverage floor: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_term_query_keeps_a_row_matching_several_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        store
+            .upsert_chunks(&[chunk(
+                "c1",
+                "docs/threejs.md",
+                "h1",
+                "three.js renders a scene graph with a camera and materials",
+            )])
+            .unwrap();
+
+        let terms = ["three", "scene", "graph", "camera", "materials"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let hits = store.search(&terms, None).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a row matching several distinct terms clears the coverage floor"
+        );
+    }
+
+    #[test]
+    fn a_two_term_query_is_exempt_from_the_coverage_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ChunkStore::open(dir.path()).unwrap();
+        store
+            .upsert_chunks(&[chunk("c1", "a.md", "h1", "alpha parser guide")])
+            .unwrap();
+
+        let hits = store
+            .search(&["parser".to_string(), "zzz".to_string()], None)
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "a query of 2 terms should not require coverage of both"
+        );
     }
 
     #[test]

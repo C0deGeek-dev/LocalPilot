@@ -27,8 +27,10 @@ pub struct CandidateSpec {
     /// the reviewer can read the full source without it breaking queue layout —
     /// the review item shows the same claim + evidence the Markdown report does.
     pub evidence: Option<String>,
-    /// Prior confidence to attach; kept low because research findings are
-    /// machine-derived and unreviewed.
+    /// Confidence to attach: the finding's own relevance-derived
+    /// `confidence`, capped by the caller's `confidence_cap` (never above it,
+    /// however strong the match, because research findings are
+    /// machine-derived and unreviewed).
     pub confidence: f32,
 }
 
@@ -46,8 +48,14 @@ pub struct CandidateSpec {
 /// reviewer needs to judge and reuse the finding — synthesis is
 /// provenance-preserving and heuristic, so a finding *being* an excerpt is the
 /// common case, not a reason to discard it or drop its source.
+///
+/// Each candidate's `confidence` is the finding's own relevance-derived
+/// `confidence`, capped at `confidence_cap` — never a single flat value
+/// applied uniformly, so a strong multi-source match reads as more
+/// trustworthy than a weak, single-incidental-word one, without ever
+/// exceeding the caller's low-trust ceiling for unreviewed candidates.
 #[must_use]
-pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<CandidateSpec> {
+pub fn candidates_from(report: &ResearchReport, confidence_cap: f32) -> Vec<CandidateSpec> {
     report
         .findings
         .iter()
@@ -56,7 +64,7 @@ pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<Candidat
             body: f.statement.clone(),
             provenance: f.supporting.clone(),
             evidence: f.evidence.clone(),
-            confidence,
+            confidence: f.confidence.clamp(0.0, 1.0).min(confidence_cap),
         })
         .collect()
 }
@@ -184,6 +192,7 @@ mod tests {
             status,
             supporting,
             evidence: None,
+            confidence: 1.0,
         }
     }
 
@@ -323,6 +332,34 @@ mod tests {
         assert_eq!(candidates[0].body, "backed");
         assert_eq!(candidates[0].confidence, 0.3);
         assert_eq!(candidates[0].provenance.len(), 1);
+    }
+
+    #[test]
+    fn candidate_confidence_is_capped_but_reflects_the_findings_own_relevance() {
+        // Bug it prevents: every research candidate reading the same flat
+        // confidence regardless of how strong (or weak/incidental) the
+        // underlying match actually was.
+        let mut report = ResearchReport::new("t");
+        let mut weak = finding(
+            "weak match",
+            ClaimStatus::Supported,
+            vec![Provenance::new("knowledge", Some("a.rs:1-3".to_string()))],
+        );
+        weak.confidence = 0.1;
+        let mut strong = finding(
+            "strong match",
+            ClaimStatus::Supported,
+            vec![Provenance::new("knowledge", Some("b.rs:1-3".to_string()))],
+        );
+        strong.confidence = 0.9;
+        report.findings = vec![weak, strong];
+
+        let candidates = candidates_from(&report, 0.4);
+        assert_eq!(candidates[0].confidence, 0.1, "weak match stays low");
+        assert_eq!(
+            candidates[1].confidence, 0.4,
+            "strong match is capped at the ceiling, not let through uncapped"
+        );
     }
 
     #[test]

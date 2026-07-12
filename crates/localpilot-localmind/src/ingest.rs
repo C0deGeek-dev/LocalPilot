@@ -246,7 +246,7 @@ pub struct IngestReviewItem {
 }
 
 /// One search result.
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct KnowledgeHit {
     pub chunk_id: String,
     pub path: String,
@@ -262,10 +262,18 @@ pub struct KnowledgeHit {
     pub inclusion_reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    /// How strongly this hit actually matches the query, normalized to
+    /// `0.0..=1.0` — a keyword hit's bm25 relevance run through a saturating
+    /// curve, or a vector-only hit's cosine similarity. Independent of
+    /// `score` (an opaque ordering value spanning different ranges across the
+    /// keyword-only, hybrid, and vector-only tiers); this field is what
+    /// downstream confidence should read.
+    #[serde(default)]
+    pub relevance: f32,
 }
 
 /// A task-specific context pack.
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct ContextPack {
     pub schema_version: u32,
     pub task: String,
@@ -875,6 +883,26 @@ pub fn exclude_path(project_root: &Path, path: &Path) -> Result<String, IngestEr
 /// no embedding model, or when the endpoint is down, the result is exactly the
 /// keyword-only (bm25) ranking above.
 ///
+/// Common English function words, stripped from query terms before they
+/// reach the FTS match expression or the chunk store's term-coverage floor.
+/// Left in, a stopword both prefix-matches unrelated tokens (`the` ->
+/// `theme`, once long enough to prefix-match) and inflates coverage counts
+/// without discriminating relevance — the same "not discriminating enough"
+/// rationale the chunk store's prefix-length floor applies to short terms.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "do", "does", "for",
+    "from", "had", "has", "have", "how", "in", "into", "is", "it", "its", "of", "on", "or", "our",
+    "so", "than", "that", "the", "their", "them", "then", "there", "these", "this", "those", "to",
+    "was", "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "you",
+    "your",
+];
+
+/// Whether `term` (already lowercased) is a common function word that should
+/// not participate in search-term matching or coverage counting.
+fn is_stopword(term: &str) -> bool {
+    STOPWORDS.contains(&term)
+}
+
 /// # Errors
 /// Returns [`IngestError`] when the chunk store cannot be opened or queried.
 pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, IngestError> {
@@ -883,7 +911,7 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|term| term.to_ascii_lowercase())
-        .filter(|term| !term.is_empty())
+        .filter(|term| !term.is_empty() && !is_stopword(term))
         .collect();
     if terms.is_empty() || !crate::chunk_store::exists(&ingest_dir) {
         return Ok(Vec::new());
@@ -904,6 +932,7 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
             token_estimate: chunk.token_estimate,
             inclusion_reason: "query term match".to_string(),
             skip_reason: None,
+            relevance: bm25_to_unit_relevance(relevance),
         });
     }
     // Hybrid augmentation, gated on chunks actually having been embedded *and* a
@@ -932,6 +961,16 @@ pub fn search(project_root: &Path, query: &str) -> Result<Vec<KnowledgeHit>, Ing
 /// distinguishable from a vector-only hit (score 0) in the hybrid blend.
 fn relevance_to_score(relevance: f64) -> u64 {
     ((relevance.max(0.0) * RELEVANCE_SCALE).round() as u64).max(1)
+}
+
+/// Map a chunk's raw bm25 relevance to `0.0..=1.0` via a saturating curve
+/// (`1 - 1/(1 + bm25)`), so a modest match reads as a modest confidence and an
+/// increasingly strong match approaches, but never reaches, full trust. Unlike
+/// [`relevance_to_score`] (an opaque ordering value scaled for the hybrid
+/// blend), this is meant to be read on its own as "how good is this match."
+fn bm25_to_unit_relevance(relevance: f64) -> f32 {
+    let bm25 = relevance.max(0.0);
+    (1.0 - 1.0 / (1.0 + bm25)) as f32
 }
 
 /// Embed a query string for the vector pass, best-effort: `None` when the
@@ -990,6 +1029,7 @@ fn apply_hybrid_ranking(
         .cloned()
         .collect();
     for chunk in store.fetch_by_ids(&missing)? {
+        let cosine = cosine_by_id.get(&chunk.id).copied().unwrap_or(0.0);
         hits.push(KnowledgeHit {
             chunk_id: chunk.id,
             path: chunk.path,
@@ -1002,6 +1042,7 @@ fn apply_hybrid_ranking(
             token_estimate: chunk.token_estimate,
             inclusion_reason: "semantic match".to_string(),
             skip_reason: None,
+            relevance: cosine.clamp(0.0, 1.0),
         });
     }
 

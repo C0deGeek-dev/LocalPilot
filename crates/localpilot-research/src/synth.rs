@@ -63,6 +63,7 @@ impl Synthesizer for HeuristicSynthesizer {
                 // claim plus separate evidence; the model-free path leaves that
                 // to it rather than guessing a summary here.
                 evidence: None,
+                confidence: e.relevance.clamp(0.0, 1.0),
             })
             .collect())
     }

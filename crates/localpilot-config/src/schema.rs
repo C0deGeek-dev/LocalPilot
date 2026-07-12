@@ -534,6 +534,11 @@ impl Default for IngestConfig {
                 "build",
                 ".venv",
                 ".next",
+                ".idea",
+                ".vscode",
+                ".vs",
+                ".settings",
+                ".fleet",
             ]
             .into_iter()
             .map(str::to_string)

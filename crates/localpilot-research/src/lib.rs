@@ -79,6 +79,7 @@ mod tests {
                         question: question.to_string(),
                         snippet: text.clone(),
                         provenance: Provenance::new(self.label.clone(), Some("loc:1".to_string())),
+                        relevance: 1.0,
                     })
                     .collect()),
             }
@@ -108,6 +109,7 @@ mod tests {
                 status: ClaimStatus::Supported, // deliberately wrong; cross-check fixes it
                 supporting: Vec::new(),
                 evidence: None,
+                confidence: 1.0,
             }])
         }
     }

@@ -181,6 +181,7 @@ mod tests {
             status: ClaimStatus::Supported,
             supporting,
             evidence: None,
+            confidence: 1.0,
         }
     }
 

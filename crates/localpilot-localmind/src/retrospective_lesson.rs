@@ -25,9 +25,11 @@ use localmind_store::ReviewQueue;
 use crate::error::LearningError;
 use crate::loop_lesson::fnv_hex;
 
-/// Advisory confidence for a completion-retrospective candidate. Deliberately below the
-/// loop-outcome `0.75`: a retrospective lesson is an unverified self-observation, not a
-/// human-confirmed patch outcome, so it enters review with lower prior trust.
+/// Advisory confidence for a completion-retrospective or driver-intervention candidate —
+/// origins with no independent match-quality signal to derive one from. Deliberately below
+/// the loop-outcome `0.75`: an unverified self-observation or correction, not a
+/// human-confirmed patch outcome, so it enters review with lower prior trust. A research
+/// finding instead carries its own [`RetrospectiveLesson::research_finding`] confidence.
 const RETROSPECTIVE_CONFIDENCE: f32 = 0.4;
 
 /// Minimum trimmed length for a lesson to be worth a review candidate — filters empty
@@ -95,7 +97,7 @@ impl Origin {
 /// One advisory lesson ready to offer to review — from a completion
 /// retrospective, a research finding, or an external driver's correction,
 /// all riding the same review-gated queue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RetrospectiveLesson {
     /// The lesson text as written to `LESSONS.md` (one line, already condensed).
     pub text: String,
@@ -103,6 +105,11 @@ pub struct RetrospectiveLesson {
     /// Overrides the origin's generic evidence detail (e.g. names the driving
     /// client), so the reviewer sees exactly who corrected the session.
     evidence_note: Option<String>,
+    /// Overrides [`RETROSPECTIVE_CONFIDENCE`] when `Some` — a research finding
+    /// carries its own relevance-derived confidence rather than the flat
+    /// completion-retrospective prior. `None` for origins with no independent
+    /// quality signal (a self-observation, a driver's correction).
+    confidence: Option<f32>,
 }
 
 impl RetrospectiveLesson {
@@ -113,18 +120,23 @@ impl RetrospectiveLesson {
             text: text.into(),
             origin: Origin::Retrospective,
             evidence_note: None,
+            confidence: None,
         }
     }
 
-    /// A research-loop finding from its text. Same review-gated queue, honest
-    /// provenance: the queue entry is labelled `research`, not
-    /// `completion-retrospective`.
+    /// A research-loop finding from its text and its own relevance-derived
+    /// `confidence` (`0.0..=1.0`, already capped by the caller — see
+    /// `localpilot-research`'s `candidates_from`). Same review-gated queue,
+    /// honest provenance: the queue entry is labelled `research`, not
+    /// `completion-retrospective`, and its confidence reflects the finding's
+    /// actual match quality rather than a flat prior.
     #[must_use]
-    pub fn research_finding(text: impl Into<String>) -> Self {
+    pub fn research_finding(text: impl Into<String>, confidence: f32) -> Self {
         Self {
             text: text.into(),
             origin: Origin::Research,
             evidence_note: None,
+            confidence: Some(confidence.clamp(0.0, 1.0)),
         }
     }
 
@@ -140,6 +152,7 @@ impl RetrospectiveLesson {
                 "correction by the driving client {}",
                 client.as_ref()
             )),
+            confidence: None,
         }
     }
 
@@ -179,7 +192,7 @@ pub fn write_retrospective_lesson(
     }
     crate::initialize(project_root).map_err(|e| LearningError::Review(e.to_string()))?;
 
-    let confidence = Confidence::new(RETROSPECTIVE_CONFIDENCE)
+    let confidence = Confidence::new(lesson.confidence.unwrap_or(RETROSPECTIVE_CONFIDENCE))
         .map_err(|e| LearningError::Review(e.to_string()))?;
     let id = lesson.id();
     let candidate = CandidateLesson::new(
@@ -248,6 +261,7 @@ mod tests {
 
         let lesson = RetrospectiveLesson::research_finding(
             "Prefer virtual scrolling for long lists. (research finding; sources: web)",
+            0.4,
         );
         let id = write_retrospective_lesson(root, &lesson).unwrap().unwrap();
         assert!(id.starts_with("research-"), "id carries the origin: {id}");
@@ -255,6 +269,36 @@ mod tests {
         let items = review_list(root).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].session_id, "research");
+    }
+
+    #[test]
+    fn a_research_findings_confidence_reflects_its_own_relevance_not_a_flat_prior() {
+        // Bug it prevents: every research finding reading the same hardcoded
+        // 0.4 in the review queue regardless of how strong (or weak/
+        // incidental) the underlying match actually was.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let weak = RetrospectiveLesson::research_finding("A weak, low-relevance match.", 0.05);
+        let strong = RetrospectiveLesson::research_finding("A strong, well-matched finding.", 0.9);
+        write_retrospective_lesson(root, &weak).unwrap();
+        write_retrospective_lesson(root, &strong).unwrap();
+
+        let items = review_list(root).unwrap();
+        let weak_item = items
+            .iter()
+            .find(|item| item.summary.contains("weak"))
+            .unwrap();
+        let strong_item = items
+            .iter()
+            .find(|item| item.summary.contains("strong"))
+            .unwrap();
+        assert!((weak_item.confidence - 0.05).abs() < f32::EPSILON);
+        assert!((strong_item.confidence - 0.9).abs() < f32::EPSILON);
+        assert_ne!(
+            weak_item.confidence, strong_item.confidence,
+            "confidence must vary with the finding's own relevance"
+        );
     }
 
     #[test]

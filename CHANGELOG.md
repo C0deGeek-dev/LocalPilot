@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- `localpilot research` ranks and scores results honestly. A near-empty
+  project could surface an unrelated file (e.g. `.idea/modules.xml`) as a
+  "finding" purely because one incidental word prefix-matched in a big OR
+  query, labelled with a confidence that was actually a hardcoded flat prior
+  rather than a measure of match quality. Fixed: `.idea`, `.vscode`, `.vs`,
+  `.settings`, and `.fleet` are now excluded from ingestion by default
+  (existing indexes need `localpilot ingest rebuild` to drop stale chunks);
+  a term-coverage floor in LocalMind's shared search path now requires a
+  multi-term query to actually match several of its terms, not just one;
+  and research finding/candidate confidence is now derived from each
+  evidence's own relevance instead of a flat constant. `--web` also now
+  prints an explicit note when it silently contributed no evidence, instead
+  of leaving a spurious local match as the only visible result.
 - `localpilot research` can index its report into LocalMind. A new opt-in
   `[research] ingest_report` (default off) also ingests the written report into
   LocalMind's documentation index (`doc_chunk`), so research output is

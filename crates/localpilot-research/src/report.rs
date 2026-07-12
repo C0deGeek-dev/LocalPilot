@@ -28,7 +28,7 @@ impl Provenance {
 }
 
 /// A raw snippet gathered from a source in answer to a sub-question.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     /// The sub-question this evidence was gathered for.
     pub question: String,
@@ -36,6 +36,12 @@ pub struct Evidence {
     pub snippet: String,
     /// Where it came from.
     pub provenance: Provenance,
+    /// How strongly this evidence actually matches `question`, normalized to
+    /// `0.0..=1.0`. A source-specific signal (e.g. a knowledge hit's bm25
+    /// relevance, a saturating curve — never a flat per-run constant), so a
+    /// weak incidental match reads as less trustworthy than a strong one. The
+    /// `Finding` synthesised from this evidence carries its `confidence`.
+    pub relevance: f32,
 }
 
 /// How well a synthesised finding is backed by gathered evidence.
@@ -49,7 +55,7 @@ pub enum ClaimStatus {
 }
 
 /// A synthesised statement about the topic with its supporting provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     /// The claim itself — a concise, single-line natural-language statement.
     /// Raw source text never lives here; it is carried in `evidence` so a
@@ -65,6 +71,13 @@ pub struct Finding {
     /// the statement already stands on its own.
     #[serde(default)]
     pub evidence: Option<String>,
+    /// How much to trust this finding, normalized to `0.0..=1.0` and derived
+    /// from its evidence's `relevance` — never a flat per-run constant. The
+    /// binding layer clamps this under a low-trust ceiling before it reaches
+    /// the review queue (findings here are machine-derived and unreviewed
+    /// regardless of how strong the underlying match was).
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 /// Collapse all runs of whitespace (including newlines) into single spaces and
@@ -75,7 +88,7 @@ pub fn flatten_whitespace(text: &str) -> String {
 }
 
 /// The full result of a research run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResearchReport {
     /// The topic that was researched.
     pub topic: String,

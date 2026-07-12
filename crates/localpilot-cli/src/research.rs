@@ -22,12 +22,27 @@ use localpilot_research::{
     ResearchReport, Source, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
-/// Confidence attached to research-derived memory candidates: low, because they
-/// are machine-derived and unreviewed — they route to review, never accepted.
-const RESEARCH_CANDIDATE_CONFIDENCE: f32 = 0.3;
+/// Ceiling on the confidence attached to research-derived memory candidates:
+/// low, because they are machine-derived and unreviewed — they route to
+/// review, never accepted. Each candidate's actual confidence is its
+/// finding's own relevance-derived value, capped here — never a single flat
+/// value applied uniformly regardless of match quality.
+const RESEARCH_CANDIDATE_CONFIDENCE_CAP: f32 = 0.3;
 
 /// Evidence snippets to take from each source per sub-question.
 const PER_SOURCE_EVIDENCE: usize = 5;
+
+/// Relevance for accepted-memory evidence: already human-reviewed (ADR-0011),
+/// so a hit is trusted at face value rather than scored — unlike a knowledge
+/// hit, which is unreviewed and carries its own match-quality signal.
+const MEMORY_EVIDENCE_RELEVANCE: f32 = 1.0;
+
+/// Relevance for web evidence: no per-fetch relevance score exists yet (no
+/// real search API — a URL is proposed by the model, then fetched), so a
+/// successful, allowlisted fetch gets a fixed moderate value rather than
+/// full trust. A known limitation, not a final answer to "how relevant is
+/// this page."
+const WEB_EVIDENCE_RELEVANCE: f32 = 0.5;
 
 /// A resolved model the binding layer can call for topic decomposition and, on
 /// the web path, candidate-URL proposal. Wraps the configured default provider
@@ -220,6 +235,18 @@ pub async fn run_research_command(
     for error in &outcome.source_errors {
         writeln!(out, "note: {error}")?;
     }
+    // `WebSource::gather` returns `Ok(vec![])` — not an `Err` — both when web
+    // access isn't active and when no chat model is configured (there's no
+    // real search API; a model proposes candidate URLs). Neither shows up in
+    // `source_errors`, so without this check `--web` can silently contribute
+    // nothing and the run looks identical to "queried but found nothing."
+    if web && !any_web_evidence(&outcome.report) {
+        writeln!(
+            out,
+            "note: --web requested but produced no evidence (check [research.web].enabled \
+             and that a chat model is configured)"
+        )?;
+    }
     if options.write_report {
         let path = write_report(&options.output_dir, topic, &outcome.report)?;
         writeln!(out, "report: {}", path.display())?;
@@ -246,6 +273,18 @@ pub async fn run_research_command(
         outcome.report.open_questions.len()
     )?;
     Ok(())
+}
+
+/// Whether any finding in `report` is backed by the `web` source. Every
+/// evidence-derived finding keeps its originating source's provenance (the
+/// heuristic synthesizer never drops it), so this is a reliable way to tell
+/// "web was queried and found nothing" apart from "web was never actually
+/// consulted."
+fn any_web_evidence(report: &ResearchReport) -> bool {
+    report
+        .findings
+        .iter()
+        .any(|finding| finding.supporting.iter().any(|p| p.source == "web"))
 }
 
 /// Assemble the local source set: ingested knowledge + accepted memory.
@@ -287,6 +326,9 @@ fn map_knowledge_hit(question: &str, hit: &localpilot_localmind::KnowledgeHit) -
             "knowledge",
             Some(format!("{}:{}-{}", hit.path, hit.start_line, hit.end_line)),
         ),
+        // Unreviewed, machine-scored: carries the hit's own bm25/cosine-derived
+        // relevance rather than a flat value, so a weak match reads as weak.
+        relevance: hit.relevance.clamp(0.0, 1.0),
     }
 }
 
@@ -315,6 +357,7 @@ fn map_memory_hit(question: &str, hit: &localpilot_localmind::SearchHit) -> Evid
         question: question.to_string(),
         snippet: hit.snippet.clone(),
         provenance: Provenance::new("memory", Some(hit.memory_id.clone())),
+        relevance: MEMORY_EVIDENCE_RELEVANCE,
     }
 }
 
@@ -490,6 +533,7 @@ impl WebSource {
             question: question.to_string(),
             snippet: bound_body(&body, WEB_MAX_BODY_BYTES),
             provenance: Provenance::new("web", Some(url.to_string())),
+            relevance: WEB_EVIDENCE_RELEVANCE,
         }))
     }
 }
@@ -623,7 +667,7 @@ fn write_report(dir: &Path, topic: &str, report: &ResearchReport) -> anyhow::Res
 /// writes accepted memory directly.
 fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<usize> {
     let mut enqueued = 0;
-    for spec in candidates_from(report, RESEARCH_CANDIDATE_CONFIDENCE) {
+    for spec in candidates_from(report, RESEARCH_CANDIDATE_CONFIDENCE_CAP) {
         let mut body = format!(
             "{}\n\n(research finding; sources: {})",
             spec.body,
@@ -641,6 +685,7 @@ fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<us
         }
         let lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
             localpilot_config::redact::redact(&body),
+            spec.confidence,
         );
         if localpilot_localmind::write_retrospective_lesson(root, &lesson)?.is_some() {
             enqueued += 1;
@@ -712,6 +757,7 @@ mod tests {
             token_estimate: 5,
             inclusion_reason: "match".to_string(),
             skip_reason: None,
+            relevance: 0.8,
         }
     }
 
@@ -752,6 +798,39 @@ mod tests {
     }
 
     #[test]
+    fn any_web_evidence_is_false_when_no_finding_cites_web() {
+        // Bug it prevents: `--web` silently contributing nothing (inactive
+        // access, or no chat model configured) reading identically to "web
+        // was queried and found nothing," leaving the user with only a local
+        // finding and no sign web was ever attempted.
+        let mut report = ResearchReport::new("t");
+        report.findings = vec![Finding {
+            statement: "a local finding".to_string(),
+            status: ClaimStatus::Supported,
+            supporting: vec![Provenance::new("knowledge", Some("a.rs:1-3".to_string()))],
+            evidence: None,
+            confidence: 0.5,
+        }];
+        assert!(!any_web_evidence(&report));
+    }
+
+    #[test]
+    fn any_web_evidence_is_true_when_a_finding_cites_web() {
+        let mut report = ResearchReport::new("t");
+        report.findings = vec![Finding {
+            statement: "a web finding".to_string(),
+            status: ClaimStatus::Supported,
+            supporting: vec![Provenance::new(
+                "web",
+                Some("https://example.com".to_string()),
+            )],
+            evidence: None,
+            confidence: 0.5,
+        }];
+        assert!(any_web_evidence(&report));
+    }
+
+    #[test]
     fn write_report_writes_rendered_markdown() {
         let dir = tempfile::tempdir().unwrap();
         let mut report = ResearchReport::new("caching");
@@ -760,6 +839,7 @@ mod tests {
             status: ClaimStatus::Supported,
             supporting: vec![Provenance::new("memory", Some("mem_1".to_string()))],
             evidence: None,
+            confidence: 1.0,
         }];
         let path = write_report(dir.path(), "caching", &report).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
@@ -821,6 +901,7 @@ mod tests {
             question: "q".to_string(),
             snippet: "caches speed reads".to_string(),
             provenance: Provenance::new("memory", Some("mem_1".to_string())),
+            relevance: 1.0,
         }];
         let findings = synth.synthesize("topic", &evidence).await.unwrap();
         assert_eq!(findings.len(), 1);
@@ -851,6 +932,7 @@ mod tests {
                 Some("perf.md:1-20".to_string()),
             )],
             evidence: Some(raw.to_string()),
+            confidence: 0.6,
         };
         report.findings = vec![excerpt];
 
