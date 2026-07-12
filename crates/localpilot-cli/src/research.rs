@@ -17,9 +17,9 @@ use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_research::{
-    candidates_from, prepare_query, render_markdown, run_research, AuditEntry, Bounds, Evidence,
-    FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError, ResearchReport,
-    Source, SourceError, SourceSet, Synthesizer, WebAccess,
+    candidates_from, evidence_block, prepare_query, render_markdown, run_research, AuditEntry,
+    Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError,
+    ResearchReport, Source, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Confidence attached to research-derived memory candidates: low, because they
@@ -624,11 +624,21 @@ fn write_report(dir: &Path, topic: &str, report: &ResearchReport) -> anyhow::Res
 fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<usize> {
     let mut enqueued = 0;
     for spec in candidates_from(report, RESEARCH_CANDIDATE_CONFIDENCE) {
-        let body = format!(
+        let mut body = format!(
             "{}\n\n(research finding; sources: {})",
             spec.body,
             provenance_summary(&spec.provenance)
         );
+        // When the finding was distilled from a raw source blob, carry the full
+        // source under the claim as a fenced block (the fence escapes inner
+        // backticks so it can't break the review layout). The distilled claim
+        // still leads and `review list` shows only a snippet, but `review show`
+        // now surfaces the full content the reviewer needs to judge and reuse —
+        // not just the one-line excerpt plus a source pointer.
+        if let Some(evidence) = &spec.evidence {
+            body.push_str("\n\n");
+            body.push_str(&evidence_block(evidence));
+        }
         let lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
             localpilot_config::redact::redact(&body),
         );
@@ -822,13 +832,16 @@ mod tests {
     #[test]
     fn enqueue_routes_sanitized_excerpt_findings_to_the_review_queue() {
         // Regression guard: a supported, backed finding that the sanitize pass
-        // reduced to an excerpt (its raw blob moved into `evidence`) must still
-        // reach the review queue, carrying its distilled statement — not be
-        // silently dropped so a whole research run enqueues nothing.
+        // reduced to an excerpt (its raw blob moved into `evidence`) must reach
+        // the review queue carrying BOTH its distilled statement AND the full
+        // source it was distilled from. Dropping the source left the reviewer a
+        // one-line excerpt plus a pointer, unable to judge or reuse the finding
+        // (LocalHub#1): the full content must ride the candidate, fenced.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
         let mut report = ResearchReport::new("three.js performance");
+        let raw = "<div>use InstancedMesh for many identical meshes</div>";
         let excerpt = Finding {
             statement: "Excerpt from knowledge: use InstancedMesh for many identical meshes"
                 .to_string(),
@@ -837,7 +850,7 @@ mod tests {
                 "knowledge",
                 Some("perf.md:1-20".to_string()),
             )],
-            evidence: Some("<div>use InstancedMesh for many identical meshes</div>".to_string()),
+            evidence: Some(raw.to_string()),
         };
         report.findings = vec![excerpt];
 
@@ -846,13 +859,22 @@ mod tests {
 
         let items = localpilot_localmind::review_list(root).unwrap();
         assert_eq!(items.len(), 1, "one review candidate reaches the queue");
+        // The distilled claim leads (so `review list` stays scannable)…
         assert!(
-            items[0].summary.contains("use InstancedMesh"),
+            items[0]
+                .summary
+                .contains("Excerpt from knowledge: use InstancedMesh"),
             "the queue carries the distilled statement: {items:?}"
         );
+        // …and the full raw source rides under it in a fenced evidence block, so
+        // `review show` gives the reviewer the content, not just a pointer.
         assert!(
-            !items[0].summary.contains("<div>"),
-            "the raw source blob never reaches the queue: {items:?}"
+            items[0].summary.contains("Evidence:"),
+            "the candidate carries a fenced evidence block: {items:?}"
+        );
+        assert!(
+            items[0].summary.contains(raw),
+            "the full source content reaches the queue: {items:?}"
         );
     }
 

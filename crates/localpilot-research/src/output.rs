@@ -20,6 +20,13 @@ pub struct CandidateSpec {
     pub body: String,
     /// The evidence backing it, carried so the reviewer sees provenance.
     pub provenance: Vec<Provenance>,
+    /// The full raw source text this claim was distilled from, when the
+    /// sanitize pass reduced a blob/over-long finding to a one-line excerpt.
+    /// `None` for a clean synthesised claim (its body *is* the content). The
+    /// binding layer renders it as a fenced evidence block under the claim, so
+    /// the reviewer can read the full source without it breaking queue layout —
+    /// the review item shows the same claim + evidence the Markdown report does.
+    pub evidence: Option<String>,
     /// Prior confidence to attach; kept low because research findings are
     /// machine-derived and unreviewed.
     pub confidence: f32,
@@ -29,13 +36,16 @@ pub struct CandidateSpec {
 ///
 /// Only **supported** findings with at least one provenance become candidates,
 /// so unsupported or unbacked claims never reach the review queue. The candidate
-/// body is the finding's `statement`, which the sanitize pass has already reduced
-/// to a readable, single-line, length-capped excerpt titled with its source; the
-/// raw source blob is kept separately in `evidence` and stays in the rendered
-/// report only. This keeps the queue readable (the reviewer sees a distilled
-/// claim, never a pasted log or code chunk) without dropping backed findings —
-/// synthesis is provenance-preserving and heuristic, so a finding *being* an
-/// excerpt is the common case, not a reason to discard it.
+/// `body` is the finding's `statement`, which the sanitize pass has already
+/// reduced to a readable, single-line, length-capped excerpt titled with its
+/// source. When that reduction happened, the finding's raw source blob is carried
+/// through in `evidence` so the reviewer can read the full source it was distilled
+/// from — the binding layer renders it as a fenced block under the claim, exactly
+/// as the Markdown report does. This keeps the queue readable (a distilled claim
+/// leads, never a raw log or code chunk) while carrying the full content the
+/// reviewer needs to judge and reuse the finding — synthesis is
+/// provenance-preserving and heuristic, so a finding *being* an excerpt is the
+/// common case, not a reason to discard it or drop its source.
 #[must_use]
 pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<CandidateSpec> {
     report
@@ -45,6 +55,7 @@ pub fn candidates_from(report: &ResearchReport, confidence: f32) -> Vec<Candidat
         .map(|f| CandidateSpec {
             body: f.statement.clone(),
             provenance: f.supporting.clone(),
+            evidence: f.evidence.clone(),
             confidence,
         })
         .collect()
@@ -116,13 +127,18 @@ pub fn render_markdown(report: &ResearchReport) -> String {
     out
 }
 
-/// Append a finding's raw evidence as a fenced block. The fence is chosen longer
-/// than any backtick run in the content, so a snippet that itself contains
-/// ``` ``` ``` can never break out of the block. Over-long evidence is truncated.
-fn push_evidence_block(out: &mut String, evidence: &str) {
+/// Render a finding's raw evidence as a self-contained fenced block titled
+/// `Evidence:`. The fence is chosen longer than any backtick run in the content,
+/// so a snippet that itself contains ``` ``` ``` can never break out of the block.
+/// Over-long evidence is truncated to [`MAX_EVIDENCE_CHARS`]. Shared by the
+/// Markdown report and the review-queue candidate so both show the reviewer the
+/// same full source under the distilled claim.
+#[must_use]
+pub fn evidence_block(evidence: &str) -> String {
     let truncated: String = evidence.chars().take(MAX_EVIDENCE_CHARS).collect();
     let clipped = evidence.chars().count() > MAX_EVIDENCE_CHARS;
     let fence = backtick_fence(&truncated);
+    let mut out = String::with_capacity(truncated.len() + fence.len() * 2 + 16);
     out.push_str("Evidence:\n");
     out.push_str(&fence);
     out.push('\n');
@@ -132,6 +148,12 @@ fn push_evidence_block(out: &mut String, evidence: &str) {
     }
     out.push('\n');
     out.push_str(&fence);
+    out
+}
+
+/// Append a finding's raw evidence as a fenced block to a Markdown report.
+fn push_evidence_block(out: &mut String, evidence: &str) {
+    out.push_str(&evidence_block(evidence));
     out.push_str("\n\n");
 }
 
@@ -194,6 +216,8 @@ mod tests {
         let candidates = candidates_from(&report, 0.4);
         assert_eq!(candidates.len(), 2, "both backed findings qualify");
         assert_eq!(candidates[0].body, "Caches speed up repeated reads.");
+        // A clean claim carries no separate evidence: its body is the content.
+        assert_eq!(candidates[0].evidence, None);
         // The excerpt's body is its distilled statement, never the raw blob.
         assert_eq!(
             candidates[1].body,
@@ -202,6 +226,13 @@ mod tests {
         assert_ne!(
             candidates[1].body, raw_blob,
             "raw blob never becomes the body"
+        );
+        // …but the full raw source is carried through as evidence, so the
+        // reviewer can read what the excerpt was distilled from.
+        assert_eq!(
+            candidates[1].evidence.as_deref(),
+            Some(raw_blob),
+            "the full source rides the candidate as evidence"
         );
     }
 

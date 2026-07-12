@@ -15,7 +15,7 @@ mod synth;
 mod web;
 
 pub use engine::{run_research, Bounds, RunOutcome};
-pub use output::{candidates_from, render_markdown, CandidateSpec};
+pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
 pub use report::{flatten_whitespace, ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
 pub use source::{Source, SourceSet};
 pub use synth::{HeuristicSynthesizer, Synthesizer};
