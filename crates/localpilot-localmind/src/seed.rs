@@ -13,7 +13,7 @@ use std::path::Path;
 
 use localmind_core::{
     AuditEventKind, Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry,
-    MemoryEntryId, MemoryScope, MemoryStatus,
+    MemoryEntryId, MemoryScope, MemoryStatus, SyncMeta,
 };
 use serde::Deserialize;
 
@@ -169,6 +169,9 @@ pub fn seed_memory(
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            // Seeded memory is authored locally with no per-memory sync override:
+            // the default keeps the per-scope disposition (cross-device sync).
+            sync_meta: SyncMeta::default(),
         };
         if let Some(persistence) = &persistence {
             persistence

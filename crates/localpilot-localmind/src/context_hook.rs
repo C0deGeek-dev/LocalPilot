@@ -440,7 +440,7 @@ mod tests {
     fn memories_used_reports_a_relevant_accepted_memory() {
         use localmind_core::{
             Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-            MemoryScope, MemoryStatus,
+            MemoryScope, MemoryStatus, SyncMeta,
         };
         use localmind_store::MemoryPersistence;
 
@@ -463,6 +463,7 @@ mod tests {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
         };
         MemoryPersistence::open_project(root)
             .unwrap()
@@ -707,7 +708,7 @@ mod tests {
     fn seed_memory(root: &Path, id: &str, body: &str) {
         use localmind_core::{
             Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
-            MemoryScope, MemoryStatus,
+            MemoryScope, MemoryStatus, SyncMeta,
         };
         use localmind_store::MemoryPersistence;
         let entry = MemoryEntry {
@@ -726,6 +727,7 @@ mod tests {
             supersedes: Vec::new(),
             contradicts: Vec::new(),
             status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
         };
         MemoryPersistence::open_project(root)
             .unwrap()
