@@ -17,9 +17,9 @@ use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_research::{
-    candidates_from, evidence_block, prepare_query, render_markdown, run_research, AuditEntry,
-    Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError,
-    ResearchReport, Source, SourceError, SourceSet, Synthesizer, WebAccess,
+    candidates_from, evidence_block, html_to_text, prepare_query, render_markdown, run_research,
+    AuditEntry, Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer, Provenance,
+    ResearchError, ResearchReport, Source, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -522,6 +522,14 @@ impl WebSource {
             )?;
             return Ok(None);
         }
+        // Capture the content type before `text()` consumes the response, so a
+        // fetched HTML page can be reduced to readable prose below.
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let body = response
             .text()
             .await
@@ -529,9 +537,19 @@ impl WebSource {
         if !status.is_success() {
             return Ok(None);
         }
+        // An HTML document becomes evidence as readable text, not raw markup:
+        // otherwise script/style bodies and tags leak into the finding and its
+        // evidence block as junk, and the length budget is spent on chrome
+        // rather than content. Non-HTML bodies (plain text, Markdown, JSON) are
+        // kept verbatim.
+        let text = if is_html(&content_type, &body) {
+            html_to_text(&body)
+        } else {
+            body
+        };
         Ok(Some(Evidence {
             question: question.to_string(),
-            snippet: bound_body(&body, WEB_MAX_BODY_BYTES),
+            snippet: bound_body(&text, WEB_MAX_BODY_BYTES),
             provenance: Provenance::new("web", Some(url.to_string())),
             relevance: WEB_EVIDENCE_RELEVANCE,
         }))
@@ -610,6 +628,22 @@ fn extract_url(line: &str) -> Option<String> {
     let rest = &line[start..];
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(rest[..end].to_string())
+}
+
+/// Whether a fetched body should be reduced from HTML to text before it becomes
+/// evidence. True on an HTML-ish `Content-Type`, or — when the server sent none
+/// — on a body that opens with an HTML marker. A declared non-HTML type (plain
+/// text, Markdown, JSON) is kept verbatim so its exact content survives.
+fn is_html(content_type: &str, body: &str) -> bool {
+    if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+        return true;
+    }
+    if content_type.is_empty() {
+        let head: String = body.trim_start().chars().take(512).collect();
+        let head = head.to_ascii_lowercase();
+        return head.starts_with("<!doctype html") || head.contains("<html");
+    }
+    false
 }
 
 /// Truncate a fetched body to at most `max_bytes`, never splitting a UTF-8 char.
@@ -1018,6 +1052,45 @@ mod tests {
         let log = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(log.lines().count(), 1, "one audited request");
         assert!(log.contains("decision=allowed"));
+    }
+
+    #[tokio::test]
+    async fn html_page_evidence_is_reduced_to_readable_text() {
+        // Regression: a fetched HTML page used to become evidence as raw markup,
+        // leaking script/style bodies and tags into the finding and its
+        // evidence block as junk. It must now arrive as readable prose.
+        let html = "<html><head><style>.a{color:red}</style></head><body>\
+             <script>var x = leak();</script><p>Tokio is an async runtime.</p></body></html>";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(html.as_bytes(), "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit);
+
+        let evidence = source.gather("what is tokio", 3).await.unwrap();
+        assert_eq!(evidence.len(), 1);
+        let snippet = &evidence[0].snippet;
+        assert!(
+            snippet.contains("Tokio is an async runtime."),
+            "prose kept: {snippet}"
+        );
+        assert!(
+            !snippet.contains("leak()"),
+            "script body dropped: {snippet}"
+        );
+        assert!(
+            !snippet.contains("color:red"),
+            "style body dropped: {snippet}"
+        );
+        assert!(!snippet.contains('<'), "no markup remains: {snippet}");
     }
 
     #[tokio::test]

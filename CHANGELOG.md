@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Web research findings read as prose, not raw HTML. A fetched page used to
+  become evidence as its raw markup: a naive tag strip left inline
+  `<script>`/`<style>` bodies behind as "junk", and the length budget was
+  spent on chrome, so both the finding and its evidence block showed truncated
+  page source instead of content. Fetched HTML is now reduced to readable text
+  at gather time — whole non-content elements (`script`, `style`, `head`,
+  `nav`, `footer`, …) are dropped body-and-all, block tags become line breaks,
+  remaining tags are stripped, and common entities are decoded. Gated on the
+  response `Content-Type` (with a marker sniff when the server sends none), so
+  plain-text, Markdown, and JSON bodies are still kept verbatim. The same
+  reducer now backs the excerpt/`Sources:` sanitize pass, so a code/HTML blob
+  from any source distils cleanly. Extends ADR-0067.
 - `localpilot research` ranks and scores results honestly. A near-empty
   project could surface an unrelated file (e.g. `.idea/modules.xml`) as a
   "finding" purely because one incidental word prefix-matched in a big OR

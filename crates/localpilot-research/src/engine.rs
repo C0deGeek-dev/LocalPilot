@@ -1,8 +1,8 @@
 //! The bounded research loop: decompose → gather → cross-check → synthesise.
 
 use crate::{
-    flatten_whitespace, ClaimStatus, Finding, Provenance, ResearchError, ResearchReport,
-    SourceError, SourceSet, Synthesizer,
+    flatten_whitespace, html_to_text, ClaimStatus, Finding, Provenance, ResearchError,
+    ResearchReport, SourceError, SourceSet, Synthesizer,
 };
 
 /// Longest a finding statement may be before it is treated as an over-long blob
@@ -155,20 +155,13 @@ fn titled_excerpt(flat: &str, supporting: &[Provenance]) -> String {
     format!("Excerpt from {source}: {excerpt}{ellipsis}")
 }
 
-/// Drop crude HTML tags (`<...>`) and code fences so a claim excerpt reads as
-/// text. Not a real HTML parser — a best-effort strip for display.
+/// Reduce a markup/code blob to a readable one-line excerpt: drop whole
+/// non-content elements and their bodies (so inline script/style text does not
+/// survive as junk), strip the remaining tags and code fences, then flatten to
+/// a single line. Delegates the element reduction to [`html_to_text`] and
+/// flattens its line breaks away for the heading-safe excerpt.
 fn strip_markup(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    flatten_whitespace(&out.replace("```", " "))
+    flatten_whitespace(&html_to_text(text).replace("```", " "))
 }
 
 #[cfg(test)]
