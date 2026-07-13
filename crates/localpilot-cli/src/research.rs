@@ -193,6 +193,31 @@ pub fn options_from_config(
     }))
 }
 
+/// Chat-facing notice for entering persistent research mode. The copy states
+/// the actual egress posture of the current configuration (ADR-0076: web
+/// research is on by default, disclosed on every surface) instead of
+/// asserting a fixed state, so the disclosure requirement of
+/// `docs/07-security-and-privacy.md` holds whichever way the config points.
+/// A config load failure reads as the default posture (web on) — the safe
+/// direction for a disclosure is to over-warn, never to claim "web off"
+/// while requests go out.
+#[cfg(feature = "tui")]
+pub fn research_mode_notice(root: &Path) -> String {
+    let web_enabled =
+        localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
+            .map(|config| config.research.web.enabled)
+            .unwrap_or(true);
+    if web_enabled {
+        "research mode: type a topic to research (local sources + web, disclosed and audited; \
+         [research.web] or --no-web disables). /agent to exit."
+            .to_string()
+    } else {
+        "research mode: type a topic to research (local sources only; web disabled by \
+         [research.web].enabled = false). /agent to exit."
+            .to_string()
+    }
+}
+
 /// Run a research pass for `topic` from the interactive surface. Web research
 /// follows the same config defaults as the subcommand (on unless
 /// `[research.web].enabled = false`), with the egress disclosure written into
@@ -1245,6 +1270,35 @@ mod tests {
         assert!(body.contains("# Research: caching"));
         assert!(body.contains("caches speed reads"));
         assert!(path.ends_with("caching.md"));
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn research_mode_notice_reflects_configured_egress_state() {
+        // The project layer overrides the user layer, so writing an explicit
+        // project config keeps both branches deterministic on any machine.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[research.web]\nenabled = true\n",
+        )
+        .unwrap();
+        let notice = research_mode_notice(dir.path());
+        assert!(
+            notice.contains("local sources + web"),
+            "web-on copy must disclose egress: {notice}"
+        );
+
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[research.web]\nenabled = false\n",
+        )
+        .unwrap();
+        let notice = research_mode_notice(dir.path());
+        assert!(
+            notice.contains("local sources only"),
+            "web-off copy must state the kill switch: {notice}"
+        );
     }
 
     // --- model-assisted synthesizer (decomposition only) ---------------------

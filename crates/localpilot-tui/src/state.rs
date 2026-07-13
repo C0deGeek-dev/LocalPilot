@@ -11,8 +11,9 @@ const MAX_INPUT_HISTORY: usize = 100;
 pub enum Mode {
     Agent,
     Harness,
-    /// Research mode: a bare prompt is treated as a topic to research locally
-    /// rather than a model turn.
+    /// Research mode: a bare prompt is treated as a topic to research —
+    /// local sources plus disclosed, allowlist-gated web per config
+    /// (ADR-0076) — rather than a model turn.
     Research,
 }
 
@@ -699,7 +700,10 @@ impl AppState {
         ("ingest", "Manage workspace ingestion"),
         ("knowledge", "Query the knowledge base"),
         ("context", "Build a context bundle"),
-        ("research", "Research a topic locally (/research [topic])"),
+        (
+            "research",
+            "Research a topic, local + web per config (/research [topic])",
+        ),
         ("bg", "List background processes (/bg stop <id>|all)"),
         ("quit", "Exit LocalPilot"),
     ];
