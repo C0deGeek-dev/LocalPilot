@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0075: Web Evidence Is Reduced To Markdown And Carried In Full, With Truncation As A Loud Safety Net
+
+Status: accepted. Refines ADR-0067/0072 after the third and fourth rounds of
+the same field report (LocalHub#1): evidence still ended in a silent mid-word
+"… (truncated)" — a display budget far below what a source legitimately
+gathers — and the flat-text HTML reduction had discarded the structure
+(headings, links, code blocks) that a reviewer and a model both read.
+
+1. **HTML becomes Markdown at gather time, not flat text.** The
+   dependency-free reducer maps structural tags onto Markdown — headings to
+   `#`, list items to `- `, `<a href>` to `[text](url)`, `<pre>` to a fenced
+   code block whose fence is sized past any inner backtick run, inline
+   `code`/`strong`/`em` to their Markdown forms — while still dropping whole
+   non-content elements (script/style/chrome) body-and-all, decoding entities,
+   and staying total and panic-free on malformed input. The `Content-Type`
+   gate is unchanged: declared non-HTML bodies stay verbatim.
+2. **Content is bounded at gather; render is not a budget.** The only real
+   content bound is the per-fetch cap on already-reduced text. The render
+   ceiling (`MAX_EVIDENCE_CHARS`) sits deliberately *above* every gather
+   bound, so a finding's full source rides the Markdown report and the review
+   candidate intact — a reviewer judges and reuses the whole content, which
+   was the point of carrying evidence at all.
+3. **Any cut is loud and lands on a line boundary.** Both the fetch bound and
+   the render safety net cut on a line boundary (falling back to a plain cut
+   only for one enormous line) and append an explicit note saying a cut
+   happened — the render note quantifies kept-of-total characters, and the
+   finding's provenance URL always points at the full source. A silent
+   mid-word ellipsis is never emitted.
+4. **One-line excerpts flatten Markdown syntax too.** The sanitize pass
+   distils excerpts from the original multi-line text (Markdown markers are
+   positional), stripping fences, heading/list/quote markers, and collapsing
+   `[text](url)` to its text, so a claim line never leaks syntax; an over-long
+   prose statement is titled `Excerpt from <source>: …` like any other blob.
+5. **Still no model rewrite.** Synthesis stays heuristic (ADR-0060): findings
+   are never model-authored, so a finding can never carry an unbacked claim.
+   Readability comes from faithful reduction, not generation.
+
 ## ADR-0074: Driver Corrections Are Captured With Honest Provenance And Ride The Review-Gated Queue
 
 Status: accepted. Extends ADR-0037/0072 to sessions driven by an external
@@ -87,6 +124,10 @@ teach.
    body; the raw blob in `evidence` stays in the rendered report only. So the
    reviewer sees a clean claim with provenance, never a pasted log or code
    chunk — the original readability goal — without discarding the finding.
+   *(Superseded in part: the "report only" clause proved to leave the reviewer
+   a one-line excerpt they could neither judge nor reuse; the full source now
+   rides the review candidate as a fenced evidence block under the distilled
+   claim, and is carried in full per ADR-0075.)*
 3. Pinned by a candidates-filter test and a queue-label test.
 
 **Amendment (regression fix).** Point 2 originally *excluded* every finding with

@@ -7,9 +7,14 @@
 
 use crate::{flatten_whitespace, ClaimStatus, Provenance, ResearchReport};
 
-/// Longest raw evidence shown inline in the Markdown artefact before it is
-/// truncated; the finding still carries the full text.
-const MAX_EVIDENCE_CHARS: usize = 4000;
+/// Ceiling on raw evidence rendered inline in the Markdown artefact and the
+/// review candidate. Deliberately sized *above* the largest snippet a source
+/// can gather (the web fetch bound is 64 KiB of already-reduced text), so a
+/// finding's full source normally rides intact and truncation is a loud
+/// safety net, never a display budget — a reviewer needs the whole content
+/// (LocalHub#1), and a silent mid-word cut kept resurfacing as "knowledge is
+/// cut off."
+const MAX_EVIDENCE_CHARS: usize = 100_000;
 
 /// A host-neutral memory-candidate proposal derived from a finding. The binding
 /// layer maps this onto LocalMind's `CandidateLesson` and routes it through the
@@ -138,25 +143,52 @@ pub fn render_markdown(report: &ResearchReport) -> String {
 /// Render a finding's raw evidence as a self-contained fenced block titled
 /// `Evidence:`. The fence is chosen longer than any backtick run in the content,
 /// so a snippet that itself contains ``` ``` ``` can never break out of the block.
-/// Over-long evidence is truncated to [`MAX_EVIDENCE_CHARS`]. Shared by the
-/// Markdown report and the review-queue candidate so both show the reviewer the
-/// same full source under the distilled claim.
+/// Evidence normally renders in full ([`MAX_EVIDENCE_CHARS`] sits above every
+/// gather bound); should the safety net ever trip, the cut lands on a line
+/// boundary and says exactly how much was kept — never a silent mid-word `…`.
+/// Shared by the Markdown report and the review-queue candidate so both show
+/// the reviewer the same full source under the distilled claim.
 #[must_use]
 pub fn evidence_block(evidence: &str) -> String {
-    let truncated: String = evidence.chars().take(MAX_EVIDENCE_CHARS).collect();
-    let clipped = evidence.chars().count() > MAX_EVIDENCE_CHARS;
-    let fence = backtick_fence(&truncated);
-    let mut out = String::with_capacity(truncated.len() + fence.len() * 2 + 16);
+    let (kept, total) = clip_evidence(evidence);
+    let fence = backtick_fence(kept);
+    let mut out = String::with_capacity(kept.len() + fence.len() * 2 + 16);
     out.push_str("Evidence:\n");
     out.push_str(&fence);
     out.push('\n');
-    out.push_str(&truncated);
-    if clipped {
-        out.push_str("\n… (truncated)");
+    out.push_str(kept);
+    if let Some(total) = total {
+        out.push_str(&format!(
+            "\n… (evidence truncated: first {} of {} characters shown)",
+            kept.chars().count(),
+            total
+        ));
     }
     out.push('\n');
     out.push_str(&fence);
     out
+}
+
+/// Clip evidence to the safety-net ceiling. Returns the kept slice and, when a
+/// cut happened, the original character count. The cut prefers the last line
+/// boundary inside the budget (so it never lands mid-word) unless that would
+/// discard more than half of the budget — a single enormous line — in which
+/// case it falls back to a plain character cut.
+fn clip_evidence(evidence: &str) -> (&str, Option<usize>) {
+    let total = evidence.chars().count();
+    if total <= MAX_EVIDENCE_CHARS {
+        return (evidence, None);
+    }
+    let byte_end = evidence
+        .char_indices()
+        .nth(MAX_EVIDENCE_CHARS)
+        .map_or(evidence.len(), |(index, _)| index);
+    let head = &evidence[..byte_end];
+    let cut = match head.rfind('\n') {
+        Some(newline) if newline >= byte_end / 2 => newline,
+        _ => byte_end,
+    };
+    (&evidence[..cut], Some(total))
 }
 
 /// Append a finding's raw evidence as a fenced block to a Markdown report.
@@ -167,7 +199,7 @@ fn push_evidence_block(out: &mut String, evidence: &str) {
 
 /// A backtick fence at least one longer than the longest backtick run in `text`
 /// (minimum three), so `text` cannot terminate the fenced block early.
-fn backtick_fence(text: &str) -> String {
+pub(crate) fn backtick_fence(text: &str) -> String {
     let mut longest = 0;
     let mut current = 0;
     for ch in text.chars() {
@@ -359,6 +391,54 @@ mod tests {
         assert_eq!(
             candidates[1].confidence, 0.4,
             "strong match is capped at the ceiling, not let through uncapped"
+        );
+    }
+
+    #[test]
+    fn evidence_well_past_the_old_display_budget_renders_in_full() {
+        // LocalHub#1 round 5: a reduced docs page is routinely tens of
+        // kilobytes, and the old 4000-char display budget silently cut it
+        // mid-word ("… (truncated)"). Full content must ride the block.
+        let evidence = "a line of real content\n".repeat(1000); // ~23k chars
+        let block = evidence_block(&evidence);
+        assert!(
+            !block.contains("truncated"),
+            "content under the safety net is never cut"
+        );
+        assert!(block.contains("a line of real content"));
+        assert!(
+            block.chars().count() > 20_000,
+            "the full content is present: {} chars",
+            block.chars().count()
+        );
+    }
+
+    #[test]
+    fn evidence_over_the_safety_net_cuts_on_a_line_boundary_and_says_so() {
+        let line = "x".repeat(99); // 100 chars with the newline
+        let evidence = format!("{}\n", line).repeat(1100); // 110k chars
+        let block = evidence_block(&evidence);
+        let tail: String = block
+            .chars()
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert!(
+            block.contains("evidence truncated: first"),
+            "the cut is loud and quantified: {tail}"
+        );
+        // Every kept line is intact — the cut landed on a boundary, not mid-word.
+        let kept = block
+            .lines()
+            .filter(|l| l.starts_with('x'))
+            .collect::<Vec<_>>();
+        assert!(!kept.is_empty());
+        assert!(
+            kept.iter().all(|l| l.chars().count() == 99),
+            "no mid-line cut"
         );
     }
 

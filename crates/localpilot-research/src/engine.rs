@@ -1,8 +1,8 @@
 //! The bounded research loop: decompose → gather → cross-check → synthesise.
 
 use crate::{
-    flatten_whitespace, html_to_text, ClaimStatus, Finding, Provenance, ResearchError,
-    ResearchReport, SourceError, SourceSet, Synthesizer,
+    flatten_whitespace, html_to_text, markdown_to_text, ClaimStatus, Finding, Provenance,
+    ResearchError, ResearchReport, SourceError, SourceSet, Synthesizer,
 };
 
 /// Longest a finding statement may be before it is treated as an over-long blob
@@ -94,21 +94,22 @@ fn cross_check(findings: &mut [Finding]) {
     }
 }
 
-/// Keep findings readable: a statement that is a code/HTML blob or too long is
-/// no claim — its raw text is preserved as `evidence` and the statement is
-/// replaced with a concise, single-line excerpt. A clean statement is only
-/// flattened to one line. This runs on every finding, so neither the rendered
-/// report nor the enqueued memory candidates can carry a raw source chunk.
+/// Keep findings readable: a statement that is a code/HTML/Markdown blob or
+/// too long is no claim — its raw text is preserved as `evidence` and the
+/// statement is replaced with a concise, single-line excerpt titled with its
+/// source. A clean statement is only flattened to one line. This runs on every
+/// finding, so neither the rendered report nor the enqueued memory candidates
+/// can carry a raw source chunk.
 fn sanitize_findings(findings: &mut [Finding]) {
     for finding in findings.iter_mut() {
         let flat = flatten_whitespace(&finding.statement);
-        if looks_like_markup(&finding.statement) {
+        if looks_like_markup(&finding.statement) || flat.chars().count() > MAX_STATEMENT_CHARS {
             preserve_evidence(finding);
-            finding.statement = titled_excerpt(&flat, &finding.supporting);
-        } else if flat.chars().count() > MAX_STATEMENT_CHARS {
-            preserve_evidence(finding);
-            let excerpt: String = flat.chars().take(MAX_STATEMENT_CHARS).collect();
-            finding.statement = format!("{excerpt}…");
+            // The excerpt is distilled from the *original* multi-line text:
+            // Markdown markers are positional (a `# ` or ``` only means
+            // anything at line start), so flattening first would leave them
+            // unstrippable.
+            finding.statement = titled_excerpt(&finding.statement, &finding.supporting);
         } else {
             finding.statement = flat;
         }
@@ -133,15 +134,15 @@ fn looks_like_markup(text: &str) -> bool {
         .any(|pair| pair[0] == b'<' && (pair[1].is_ascii_alphabetic() || pair[1] == b'!'))
 }
 
-/// Derive a short claim from a flattened blob: strip crude markup, take a
-/// leading excerpt, and title it with its source so the reader knows it is a
-/// source excerpt, not a synthesised conclusion. The full text stays in
-/// `evidence`.
-fn titled_excerpt(flat: &str, supporting: &[Provenance]) -> String {
+/// Derive a short claim from a raw blob: strip crude markup and Markdown
+/// syntax, take a leading excerpt, and title it with its source so the reader
+/// knows it is a source excerpt, not a synthesised conclusion. The full text
+/// stays in `evidence`.
+fn titled_excerpt(raw: &str, supporting: &[Provenance]) -> String {
     let source = supporting
         .first()
         .map_or("source", |provenance| provenance.source.as_str());
-    let stripped = strip_markup(flat);
+    let stripped = strip_markup(raw);
     let body = stripped.trim();
     if body.is_empty() {
         return format!("Excerpt from {source} (see evidence)");
@@ -157,11 +158,13 @@ fn titled_excerpt(flat: &str, supporting: &[Provenance]) -> String {
 
 /// Reduce a markup/code blob to a readable one-line excerpt: drop whole
 /// non-content elements and their bodies (so inline script/style text does not
-/// survive as junk), strip the remaining tags and code fences, then flatten to
-/// a single line. Delegates the element reduction to [`html_to_text`] and
-/// flattens its line breaks away for the heading-safe excerpt.
+/// survive as junk), strip the remaining tags, then flatten Markdown syntax —
+/// web evidence now arrives as Markdown, so fences, heading/list markers, and
+/// `[text](url)` link syntax would otherwise leak into the one-line claim.
+/// Delegates to [`html_to_text`] then [`markdown_to_text`], and flattens the
+/// line breaks away for the heading-safe excerpt.
 fn strip_markup(text: &str) -> String {
-    flatten_whitespace(&html_to_text(text).replace("```", " "))
+    flatten_whitespace(&markdown_to_text(&html_to_text(text)))
 }
 
 #[cfg(test)]
@@ -215,8 +218,34 @@ mod tests {
         let mut findings = vec![finding(&raw, vec![Provenance::new("memory", None)])];
         sanitize_findings(&mut findings);
         assert!(findings[0].statement.ends_with('…'));
-        assert!(findings[0].statement.chars().count() <= MAX_STATEMENT_CHARS + 1);
+        assert!(
+            findings[0].statement.starts_with("Excerpt from memory:"),
+            "an over-long statement is titled as an excerpt like any other blob: {}",
+            findings[0].statement
+        );
+        assert!(findings[0].statement.chars().count() <= MAX_STATEMENT_CHARS + 32);
         assert!(findings[0].evidence.is_some());
+    }
+
+    #[test]
+    fn markdown_evidence_yields_a_prose_excerpt_without_markdown_syntax() {
+        // Web evidence now arrives as Markdown; the one-line claim must not
+        // leak heading markers, link syntax, or fences into the report heading
+        // or the review queue.
+        let raw = "# Tokio guide\n\nUse [the docs](https://docs.rs/tokio) first.\n\n```\nlet rt = Runtime::new();\n```\n"
+            .repeat(4);
+        let mut findings = vec![finding(&raw, vec![Provenance::new("web", None)])];
+        sanitize_findings(&mut findings);
+        let statement = &findings[0].statement;
+        assert!(statement.starts_with("Excerpt from web:"), "{statement}");
+        assert!(!statement.contains('#'), "{statement}");
+        assert!(!statement.contains("```"), "{statement}");
+        assert!(
+            statement.contains("Use the docs first."),
+            "link collapses to its text: {statement}"
+        );
+        assert!(!statement.contains("https://docs.rs"), "{statement}");
+        assert_eq!(findings[0].evidence.as_deref(), Some(raw.as_str()));
     }
 
     #[test]

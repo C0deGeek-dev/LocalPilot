@@ -17,9 +17,10 @@ use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_research::{
-    candidates_from, evidence_block, html_to_text, prepare_query, render_markdown, run_research,
-    AuditEntry, Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer, Provenance,
-    ResearchError, ResearchReport, Source, SourceError, SourceSet, Synthesizer, WebAccess,
+    candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
+    run_research, AuditEntry, Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer,
+    Provenance, ResearchError, ResearchReport, Source, SourceError, SourceSet, Synthesizer,
+    WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -537,13 +538,15 @@ impl WebSource {
         if !status.is_success() {
             return Ok(None);
         }
-        // An HTML document becomes evidence as readable text, not raw markup:
-        // otherwise script/style bodies and tags leak into the finding and its
-        // evidence block as junk, and the length budget is spent on chrome
-        // rather than content. Non-HTML bodies (plain text, Markdown, JSON) are
-        // kept verbatim.
+        // An HTML document becomes evidence as readable Markdown, not raw
+        // markup: otherwise script/style bodies and tags leak into the finding
+        // and its evidence block as junk, and the length budget is spent on
+        // chrome rather than content. Markdown (rather than flat text) keeps
+        // the page's headings, links, lists, and code blocks readable for the
+        // reviewer and the model alike. Non-HTML bodies (plain text, Markdown,
+        // JSON) are kept verbatim.
         let text = if is_html(&content_type, &body) {
-            html_to_text(&body)
+            html_to_markdown(&body)
         } else {
             body
         };
@@ -646,7 +649,10 @@ fn is_html(content_type: &str, body: &str) -> bool {
     false
 }
 
-/// Truncate a fetched body to at most `max_bytes`, never splitting a UTF-8 char.
+/// Truncate a fetched (already-reduced) body to at most `max_bytes`, never
+/// splitting a UTF-8 char, preferring a line boundary, and — when a cut
+/// happens — saying so explicitly rather than ending mid-sentence with no
+/// explanation (the finding's provenance URL points at the full source).
 fn bound_body(body: &str, max_bytes: usize) -> String {
     if body.len() <= max_bytes {
         return body.to_string();
@@ -655,7 +661,17 @@ fn bound_body(body: &str, max_bytes: usize) -> String {
     while end > 0 && !body.is_char_boundary(end) {
         end -= 1;
     }
-    body[..end].to_string()
+    let head = &body[..end];
+    // A line boundary keeps the cut readable; fall back to the plain cut when
+    // the content is one enormous line and a line cut would discard too much.
+    let cut = match head.rfind('\n') {
+        Some(newline) if newline >= end / 2 => newline,
+        _ => end,
+    };
+    format!(
+        "{}\n… (fetched content truncated at the per-fetch bound; full source at the cited URL)",
+        &body[..cut]
+    )
 }
 
 /// One audit record. `question` carries the **redacted** query, never raw text.
@@ -1055,12 +1071,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn html_page_evidence_is_reduced_to_readable_text() {
-        // Regression: a fetched HTML page used to become evidence as raw markup,
-        // leaking script/style bodies and tags into the finding and its
-        // evidence block as junk. It must now arrive as readable prose.
+    async fn html_page_evidence_is_reduced_to_readable_markdown() {
+        // Regression (LocalHub#1): a fetched HTML page used to become evidence
+        // as raw markup, leaking script/style bodies and tags into the finding
+        // and its evidence block as junk; a flat-text reduction then lost all
+        // structure. It must now arrive as readable Markdown — headings,
+        // links, and code preserved, chrome dropped.
         let html = "<html><head><style>.a{color:red}</style></head><body>\
-             <script>var x = leak();</script><p>Tokio is an async runtime.</p></body></html>";
+             <script>var x = leak();</script><h1>Tokio</h1>\
+             <p>Tokio is an async runtime. See <a href=\"https://docs.rs/tokio\">the docs</a>.</p>\
+             <pre>let rt = Runtime::new();</pre></body></html>";
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
@@ -1082,6 +1102,15 @@ mod tests {
             snippet.contains("Tokio is an async runtime."),
             "prose kept: {snippet}"
         );
+        assert!(snippet.contains("# Tokio"), "heading survives: {snippet}");
+        assert!(
+            snippet.contains("[the docs](https://docs.rs/tokio)"),
+            "link survives as Markdown: {snippet}"
+        );
+        assert!(
+            snippet.contains("```\nlet rt = Runtime::new();\n```"),
+            "code block survives fenced: {snippet}"
+        );
         assert!(
             !snippet.contains("leak()"),
             "script body dropped: {snippet}"
@@ -1091,6 +1120,28 @@ mod tests {
             "style body dropped: {snippet}"
         );
         assert!(!snippet.contains('<'), "no markup remains: {snippet}");
+    }
+
+    #[test]
+    fn bound_body_cut_is_loud_and_lands_on_a_line_boundary() {
+        // A silent mid-sentence cut at the fetch bound reads as lost knowledge
+        // (LocalHub#1 round 5); the cut must say what happened.
+        let body = "a content line\n".repeat(200); // 3000 bytes
+        let bounded = bound_body(&body, 1000);
+        assert!(
+            bounded.contains("truncated at the per-fetch bound"),
+            "{bounded}"
+        );
+        assert!(
+            bounded
+                .lines()
+                .take_while(|l| l.starts_with('a'))
+                .all(|l| l == "a content line"),
+            "no mid-line cut: {bounded}"
+        );
+
+        let untouched = bound_body("short", 1000);
+        assert_eq!(untouched, "short", "under the bound nothing changes");
     }
 
     #[tokio::test]
