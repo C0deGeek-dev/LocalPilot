@@ -554,8 +554,8 @@ async fn submit_current_input(
             )));
         }
         if state.mode == Mode::Research {
-            // In research mode a bare prompt is a topic to research locally, not
-            // a model turn.
+            // In research mode a bare prompt is a topic to research (web per
+            // config, ADR-0076), not a model turn.
             run_research_prompt(terminal, state, approval_rx, host, &model_prompt).await
         } else {
             state.busy = true;
@@ -834,13 +834,14 @@ async fn run_slash(
                 state.apply(UiEvent::UserMessage(format!("/research {topic}")));
                 run_research_prompt(terminal, state, approval_rx, host, &topic).await?;
             }
-            // A bare `/research` enters persistent research mode.
+            // A bare `/research` enters persistent research mode. The notice
+            // reflects the configured egress state (ADR-0076) rather than a
+            // fixed claim.
             None => {
                 state.mode = Mode::Research;
-                state.apply(UiEvent::Notice(
-                    "research mode: type a topic to research locally (web off). /agent to exit."
-                        .to_string(),
-                ));
+                state.apply(UiEvent::Notice(crate::research::research_mode_notice(
+                    host.cwd,
+                )));
             }
         },
         SlashAction::Background(command) => {
@@ -1538,17 +1539,26 @@ async fn run_research_prompt(
     let run_stop = std::sync::Arc::clone(&stop);
     let operation = async {
         let mut output = Vec::new();
-        let run =
-            crate::research::run_interactive_research(cwd, topic, &options, run_stop, &mut output);
-        tokio::pin!(run);
-        let result = tokio::select! {
-            result = &mut run => Some(result),
-            () = cancel.cancelled() => {
-                // Ctrl+C asks the loop to stop at its next question boundary
-                // and waits for the partial report — coverage-so-far beats
-                // nothing on a long run.
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                Some(run.await)
+        // The pinned future borrows `output`; the block scopes that borrow so
+        // `output` can move into the return value once the run has finished.
+        let result = {
+            let run = crate::research::run_interactive_research(
+                cwd,
+                topic,
+                &options,
+                run_stop,
+                &mut output,
+            );
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => Some(result),
+                () = cancel.cancelled() => {
+                    // Ctrl+C asks the loop to stop at its next question boundary
+                    // and waits for the partial report — coverage-so-far beats
+                    // nothing on a long run.
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Some(run.await)
+                }
             }
         };
         Ok((output, result))
