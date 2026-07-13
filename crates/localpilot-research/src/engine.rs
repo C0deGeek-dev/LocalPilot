@@ -28,6 +28,14 @@ const COVERED_MIN_ORIGINS: usize = 2;
 const REFORMULATIONS_PER_ROUND: usize = 1;
 /// Ceiling on the per-round retrieval-depth escalation multiplier.
 const ESCALATION_MAX_FACTOR: usize = 3;
+/// Word-shingle Jaccard similarity at or above which two snippets are the
+/// same content (mirrors, syndication, overlapping chunks).
+const NEAR_DUP_JACCARD: f32 = 0.7;
+/// Words per shingle for near-duplicate detection.
+const SHINGLE_WORDS: usize = 3;
+/// Soft cap on snippets one origin may contribute to one question while other
+/// origins are also answering it.
+const DIVERSITY_ORIGIN_CAP: usize = 3;
 
 /// Bounds on a research run. A host maps its resolved rails (ADR-0055) into
 /// these so the loop cannot run unbounded.
@@ -161,6 +169,12 @@ pub async fn run_research_controlled(
     // re-finds old ground reads as saturation.
     let mut seen: HashSet<String> = HashSet::new();
     let mut total_evidence = 0usize;
+    // Loud-cap accounting (never silent): folds, diversity drops, cap hits.
+    let mut near_dup_folds = 0usize;
+    let mut diversity_drops = 0usize;
+    let mut evidence_cap_hit = false;
+    let mut time_budget_hit = false;
+    let mut stopped_early = false;
 
     'rounds: for round in 1..=bounds.max_rounds.max(1) {
         let targets: Vec<usize> = states
@@ -176,18 +190,14 @@ pub async fn run_research_controlled(
         let mut round_new = 0usize;
 
         for index in targets {
-            if control.stop_requested() || over_budget(&bounds, started) {
-                summarize_round(
-                    &mut rounds,
-                    round,
-                    targeted,
-                    round_new,
-                    total_evidence,
-                    &states,
-                );
-                break 'rounds;
+            if control.stop_requested() {
+                stopped_early = true;
+            } else if over_budget(&bounds, started) {
+                time_budget_hit = true;
+            } else if total_evidence >= bounds.max_total_evidence {
+                evidence_cap_hit = true;
             }
-            if total_evidence >= bounds.max_total_evidence {
+            if stopped_early || time_budget_hit || evidence_cap_hit {
                 summarize_round(
                     &mut rounds,
                     round,
@@ -219,17 +229,40 @@ pub async fn run_research_controlled(
                 source_errors.append(&mut errors);
                 for mut item in evidence {
                     if total_evidence >= bounds.max_total_evidence {
+                        evidence_cap_hit = true;
                         break;
                     }
-                    if seen.insert(evidence_key(&item)) {
-                        // Evidence groups under the original question, not the
-                        // reformulated query that happened to retrieve it.
-                        item.question = question.clone();
-                        states[index].evidence.push(item);
-                        round_new += 1;
-                        total_evidence += 1;
+                    if !seen.insert(evidence_key(&item)) {
+                        continue; // exact re-find of known ground
                     }
+                    // Near-duplicate content from a *different* origin folds
+                    // into the snippet it duplicates — its provenance rides
+                    // along (also_from), it just doesn't repeat the content.
+                    if let Some(kept) = find_near_duplicate(&states[index].evidence, &item.snippet)
+                    {
+                        states[index].evidence[kept]
+                            .also_from
+                            .push(item.provenance.clone());
+                        near_dup_folds += 1;
+                        continue;
+                    }
+                    // Evidence groups under the original question, not the
+                    // reformulated query that happened to retrieve it.
+                    item.question = question.clone();
+                    states[index].evidence.push(item);
+                    round_new += 1;
+                    total_evidence += 1;
                 }
+            }
+            // Soft per-origin diversity cap, applied after the question's full
+            // gather so it cannot depend on source order: once more than one
+            // origin is answering, no origin keeps more than its share — but a
+            // lone origin is never capped.
+            let dropped = enforce_diversity(&mut states[index].evidence);
+            if dropped > 0 {
+                diversity_drops += dropped;
+                round_new = round_new.saturating_sub(dropped);
+                total_evidence = total_evidence.saturating_sub(dropped);
             }
         }
 
@@ -247,6 +280,32 @@ pub async fn run_research_controlled(
     }
 
     report.rounds_run = rounds.len();
+    if near_dup_folds > 0 {
+        report.retrieval_notes.push(format!(
+            "folded {near_dup_folds} near-duplicate snippet(s); their provenance is kept on the surviving evidence"
+        ));
+    }
+    if diversity_drops > 0 {
+        report.retrieval_notes.push(format!(
+            "dropped {diversity_drops} snippet(s) beyond the per-origin diversity cap ({DIVERSITY_ORIGIN_CAP} per question per origin)"
+        ));
+    }
+    if evidence_cap_hit {
+        report.retrieval_notes.push(format!(
+            "evidence cap reached ({} snippets) — retrieval stopped before the sources were exhausted",
+            bounds.max_total_evidence
+        ));
+    }
+    if time_budget_hit {
+        report
+            .retrieval_notes
+            .push("time budget reached — retrieval stopped early".to_string());
+    }
+    if stopped_early {
+        report
+            .retrieval_notes
+            .push("stopped by cancellation — results are partial".to_string());
+    }
     report.coverage = states.iter().map(assess).collect();
     report.open_questions = report
         .coverage
@@ -314,8 +373,19 @@ fn assess(state: &QuestionState) -> QuestionCoverage {
         .iter()
         .filter(|item| item.relevance >= COVERAGE_RELEVANCE_FLOOR)
         .collect();
-    let origins: HashSet<String> = strong.iter().map(|item| origin_key(item)).collect();
-    let verdict = if strong.len() >= COVERED_MIN_EVIDENCE && origins.len() >= COVERED_MIN_ORIGINS {
+    // Folded near-duplicates still count — both as independent origins and as
+    // corroborating observations: the same content found on a second origin
+    // is exactly the independence signal the covered bar asks for.
+    let mut origins: HashSet<String> = HashSet::new();
+    let mut observations = 0usize;
+    for item in &strong {
+        origins.insert(origin_key(item));
+        observations += 1 + item.also_from.len();
+        for extra in &item.also_from {
+            origins.insert(provenance_origin(extra));
+        }
+    }
+    let verdict = if observations >= COVERED_MIN_EVIDENCE && origins.len() >= COVERED_MIN_ORIGINS {
         CoverageVerdict::Covered
     } else if state.evidence.is_empty() {
         CoverageVerdict::Open
@@ -326,7 +396,7 @@ fn assess(state: &QuestionState) -> QuestionCoverage {
         question: state.question.clone(),
         verdict,
         evidence_count: state.evidence.len(),
-        strong_evidence: strong.len(),
+        strong_evidence: observations,
         distinct_origins: origins.len(),
     }
 }
@@ -343,17 +413,103 @@ fn evidence_key(item: &Evidence) -> String {
     )
 }
 
+/// Enforce the per-origin diversity cap on one question's evidence: keep at
+/// most [`DIVERSITY_ORIGIN_CAP`] snippets per origin (highest relevance
+/// first), never capping when a single origin is the only one answering.
+/// Returns how many snippets were dropped.
+fn enforce_diversity(evidence: &mut Vec<Evidence>) -> usize {
+    let origins: HashSet<String> = evidence.iter().map(origin_key).collect();
+    if origins.len() <= 1 {
+        return 0;
+    }
+    let mut order: Vec<usize> = (0..evidence.len()).collect();
+    order.sort_by(|&a, &b| {
+        evidence[b]
+            .relevance
+            .partial_cmp(&evidence[a].relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept_per_origin: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut drop_flags = vec![false; evidence.len()];
+    for index in order {
+        let origin = origin_key(&evidence[index]);
+        let count = kept_per_origin.entry(origin).or_default();
+        if *count >= DIVERSITY_ORIGIN_CAP {
+            drop_flags[index] = true;
+        } else {
+            *count += 1;
+        }
+    }
+    let before = evidence.len();
+    let mut flags = drop_flags.into_iter();
+    evidence.retain(|_| !flags.next().unwrap_or(false));
+    before - evidence.len()
+}
+
+/// Index of a kept snippet that `snippet` near-duplicates, if any: word-shingle
+/// Jaccard at or above [`NEAR_DUP_JACCARD`]. Deterministic and std-only.
+fn find_near_duplicate(kept: &[Evidence], snippet: &str) -> Option<usize> {
+    let incoming = shingles(snippet);
+    if incoming.is_empty() {
+        return None;
+    }
+    kept.iter().position(|existing| {
+        let existing = shingles(&existing.snippet);
+        jaccard(&incoming, &existing) >= NEAR_DUP_JACCARD
+    })
+}
+
+/// Hashed word `SHINGLE_WORDS`-grams of whitespace-normalized, lowercased text.
+/// Short texts fall back to single-word shingles so they still compare.
+fn shingles(text: &str) -> HashSet<u64> {
+    use std::hash::{Hash, Hasher};
+    let normalized = flatten_whitespace(text).to_ascii_lowercase();
+    let words: Vec<&str> = normalized.split(' ').filter(|w| !w.is_empty()).collect();
+    let width = if words.len() >= SHINGLE_WORDS {
+        SHINGLE_WORDS
+    } else {
+        1
+    };
+    words
+        .windows(width)
+        .map(|window| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            window.hash(&mut hasher);
+            hasher.finish()
+        })
+        .collect()
+}
+
+fn jaccard(a: &HashSet<u64>, b: &HashSet<u64>) -> f32 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.intersection(b).count();
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let score = intersection as f32 / union as f32;
+    score
+}
+
 /// Origin of one snippet for independence counting: for web evidence the host
 /// of its URL, otherwise the source label plus locator (a file, a memory id).
 fn origin_key(item: &Evidence) -> String {
-    let locator = item.provenance.locator.as_deref().unwrap_or_default();
-    if item.provenance.source == "web" {
+    provenance_origin(&item.provenance)
+}
+
+fn provenance_origin(provenance: &Provenance) -> String {
+    let locator = provenance.locator.as_deref().unwrap_or_default();
+    if provenance.source == "web" {
         if let Some(rest) = locator.split_once("://").map(|(_, rest)| rest) {
             let host = rest.split('/').next().unwrap_or(rest);
             return format!("web|{host}");
         }
     }
-    format!("{}|{locator}", item.provenance.source)
+    format!("{}|{locator}", provenance.source)
 }
 
 /// Adversarial pass: a finding with no supporting provenance is downgraded to

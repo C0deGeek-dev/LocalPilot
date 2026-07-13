@@ -2,6 +2,42 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0079: Research Evidence Is Deduplicated, Diversity-Capped, Relevance-Scored, And Every Cut Is Loud
+
+Status: accepted. At exhaustive scale (ADR-0078 rounds × ADR-0076 open-web
+reach) the evidence pool needs discipline that a single-pass loop never did:
+mirrors repeat content, one domain can flood a question, and web evidence
+carried a flat 0.5 relevance that said nothing about the page.
+
+1. **Near-duplicates fold, provenance survives.** Word-shingle Jaccard
+   (≥ 0.7, std-only hashing) folds a snippet that re-states kept content into
+   the survivor; the duplicate's provenance rides on the surviving evidence
+   (`also_from`) into the finding's `supporting` list and the coverage
+   account — a mirror on a second origin counts as corroboration and as an
+   independent origin, it just doesn't repeat the text.
+2. **No origin saturates a question.** After each question's gather, a soft
+   per-origin cap (3 snippets per question per origin, highest relevance
+   kept) applies whenever more than one origin is answering — order-
+   independent, and a lone origin is never capped.
+3. **Web evidence is scored, not assumed.** A fetched page's relevance is its
+   content-term overlap with the sub-question (the shared search path's
+   ≥ 2-term coverage rule applied to pages: fewer than two matching terms
+   floors at 0.1, under the coverage floor), replacing the flat constant —
+   so an off-topic page can be fetched yet never counts as coverage.
+4. **Every cut is loud.** Folds, diversity drops, the evidence cap, the time
+   budget, and cancellation each append a `Retrieval notes` line to the
+   report and the run output — silent truncation reads as "covered
+   everything" when it didn't (the standing lesson from the evidence-budget
+   saga, ADR-0075).
+5. **Fetching is polite.** Within a run: repeat visits to a host are paced by
+   the host's own last response time (clamped 250 ms–3 s), and a 429/5xx
+   cools the host down for the rest of the run — a host-level signal, not a
+   per-URL one — audited as `host-cooldown`. Rate-limited designated search
+   tools were already classified (ADR-0077); together the run degrades
+   gracefully instead of hammering.
+
+Extends ADR-0075/0076/0077/0078.
+
 ## ADR-0078: The Research Loop Is Multi-Round And Coverage-Driven, With Deterministic Scoring And Stops
 
 Status: accepted. The research loop was single-pass: one gather per

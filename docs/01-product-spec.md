@@ -238,7 +238,11 @@ Retrieval is multi-round and coverage-driven (ADR-0078): per-question coverage
 is scored deterministically, uncovered questions are re-queried across rounds
 with drift-guarded query expansion and escalating depth, and the loop stops on
 full coverage, saturation, or its round/evidence/time budgets. Both surfaces
-report per-round progress and a covered/weak/open summary.
+report per-round progress and a covered/weak/open summary. Evidence is
+deduplicated (near-duplicates fold, provenance kept), diversity-capped per
+origin, and relevance-scored against the sub-question; anything dropped,
+folded, or capped is listed under "Retrieval notes" — never cut silently
+(ADR-0079).
 
 **Web research is on by default** (ADR-0076) — research cannot rely on a small
 local model's parametric memory, so both surfaces reach the web unless told

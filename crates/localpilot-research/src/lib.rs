@@ -25,7 +25,7 @@ pub use report::{
     QuestionCoverage, ResearchReport,
 };
 pub use source::{Source, SourceSet};
-pub use synth::{expansion_queries, HeuristicSynthesizer, Synthesizer};
+pub use synth::{expansion_queries, term_overlap_relevance, HeuristicSynthesizer, Synthesizer};
 pub use web::{host_allowed, host_matches, prepare_query, AuditEntry, FetchDecision, WebAccess};
 
 /// A fatal error in the research loop (decomposition or synthesis).
@@ -87,6 +87,7 @@ mod tests {
                         snippet: text.clone(),
                         provenance: Provenance::new(self.label.clone(), Some("loc:1".to_string())),
                         relevance: 1.0,
+                        also_from: Vec::new(),
                     })
                     .collect()),
             }
@@ -242,12 +243,12 @@ mod tests {
             Ok((0..self.per_call.min(limit))
                 .map(|_| {
                     let n = self.counter.fetch_add(1, Ordering::Relaxed);
-                    Evidence {
-                        question: question.to_string(),
-                        snippet: format!("unique snippet number {n} about topic detail"),
-                        provenance: Provenance::new("endless", Some(format!("origin-{n}"))),
-                        relevance: 1.0,
-                    }
+                    Evidence::new(
+                        question,
+                        format!("unique snippet number {n} entirely distinct words {n}"),
+                        Provenance::new("endless", Some(format!("origin-{n}"))),
+                        1.0,
+                    )
                 })
                 .collect())
         }
@@ -377,6 +378,197 @@ mod tests {
         assert_eq!(
             outcome.report.rounds_run, 1,
             "the interrupted round is accounted"
+        );
+    }
+
+    #[test]
+    fn term_overlap_scores_fraction_with_two_term_floor() {
+        // Three content terms, all present: full score.
+        assert!(
+            (term_overlap_relevance("tokio async runtime", "the tokio async runtime docs") - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+        // One incidental match on a multi-term question floors at 0.1 (the
+        // term-coverage rule applied to fetched pages).
+        assert!(
+            (term_overlap_relevance("animation mixer clips", "a page about animation of cats")
+                - 0.1)
+                .abs()
+                < f32::EPSILON
+        );
+        // Two of three terms: 2/3.
+        let score = term_overlap_relevance("animation mixer clips", "mixer clips workshop");
+        assert!((score - 2.0 / 3.0).abs() < 0.01, "{score}");
+    }
+
+    #[tokio::test]
+    async fn near_duplicates_fold_and_keep_both_origins() {
+        // Two sources return the same content from different origins: one
+        // snippet survives, the duplicate's provenance rides along, coverage
+        // counts both origins, and the fold is loudly noted.
+        struct MirrorSource {
+            label: String,
+            origin: String,
+        }
+        #[async_trait]
+        impl Source for MirrorSource {
+            fn label(&self) -> &str {
+                &self.label
+            }
+            async fn gather(
+                &self,
+                question: &str,
+                _limit: usize,
+            ) -> Result<Vec<Evidence>, SourceError> {
+                Ok(vec![Evidence::new(
+                    question,
+                    "the animation mixer blends clip weights across the skeleton every frame",
+                    Provenance::new("web", Some(self.origin.clone())),
+                    1.0,
+                )])
+            }
+        }
+        let set = SourceSet::new()
+            .with(Box::new(MirrorSource {
+                label: "a".to_string(),
+                origin: "https://a.example/page".to_string(),
+            }))
+            .with(Box::new(MirrorSource {
+                label: "b".to_string(),
+                origin: "https://b.example/mirror".to_string(),
+            }));
+        let synth = WideSynthKeep;
+        let outcome = run_research(
+            "t",
+            &set,
+            &synth,
+            Bounds {
+                max_questions: 1,
+                max_rounds: 1,
+                ..Bounds::default()
+            },
+        )
+        .await
+        .unwrap();
+        // One finding (the fold), carrying both origins.
+        assert_eq!(outcome.report.findings.len(), 1);
+        assert_eq!(
+            outcome.report.findings[0].supporting.len(),
+            2,
+            "the folded duplicate's provenance is kept: {:?}",
+            outcome.report.findings[0].supporting
+        );
+        assert_eq!(
+            outcome.report.coverage[0].distinct_origins, 2,
+            "a mirror on a second origin is an independence signal"
+        );
+        assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Covered);
+        assert!(
+            outcome
+                .report
+                .retrieval_notes
+                .iter()
+                .any(|n| n.contains("near-duplicate")),
+            "the fold is loud: {:?}",
+            outcome.report.retrieval_notes
+        );
+    }
+
+    /// A synthesizer that decomposes to one question and synthesizes via the
+    /// heuristic (so folds show up in findings).
+    struct WideSynthKeep;
+
+    #[async_trait]
+    impl Synthesizer for WideSynthKeep {
+        async fn decompose(&self, topic: &str, _max: usize) -> Result<Vec<String>, ResearchError> {
+            Ok(vec![topic.to_string()])
+        }
+        async fn synthesize(
+            &self,
+            topic: &str,
+            evidence: &[Evidence],
+        ) -> Result<Vec<Finding>, ResearchError> {
+            HeuristicSynthesizer.synthesize(topic, evidence).await
+        }
+    }
+
+    #[tokio::test]
+    async fn one_origin_cannot_saturate_a_question() {
+        // A single origin returning many distinct snippets is soft-capped once
+        // another origin is present; the drop is noted.
+        struct FloodSource {
+            origin: String,
+            counter: AtomicUsize,
+            per_call: usize,
+        }
+        #[async_trait]
+        impl Source for FloodSource {
+            fn label(&self) -> &str {
+                "flood"
+            }
+            async fn gather(
+                &self,
+                question: &str,
+                limit: usize,
+            ) -> Result<Vec<Evidence>, SourceError> {
+                Ok((0..self.per_call.min(limit))
+                    .map(|_| {
+                        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                        Evidence::new(
+                            question,
+                            format!("flood snippet {n} entirely different words here {n}"),
+                            Provenance::new("web", Some(format!("{}/page{n}", self.origin))),
+                            1.0,
+                        )
+                    })
+                    .collect())
+            }
+        }
+        let set = SourceSet::new()
+            .with(Box::new(FloodSource {
+                origin: "https://flood.example".to_string(),
+                counter: AtomicUsize::new(0),
+                per_call: 5,
+            }))
+            .with(Box::new(FakeSource {
+                label: "memory".to_string(),
+                reply: Some("independent memory snippet".to_string()),
+            }));
+        let synth = WideSynthKeep;
+        let outcome = run_research(
+            "t",
+            &set,
+            &synth,
+            Bounds {
+                max_questions: 1,
+                max_rounds: 1,
+                per_source_evidence: 5,
+                ..Bounds::default()
+            },
+        )
+        .await
+        .unwrap();
+        // flood.example may keep at most 3 snippets for the question.
+        let flood_kept = outcome
+            .report
+            .findings
+            .iter()
+            .filter(|f| {
+                f.supporting
+                    .iter()
+                    .any(|p| p.locator.as_deref().unwrap_or("").contains("flood.example"))
+            })
+            .count();
+        assert!(flood_kept <= 3, "diversity cap holds: {flood_kept}");
+        assert!(
+            outcome
+                .report
+                .retrieval_notes
+                .iter()
+                .any(|n| n.contains("diversity cap")),
+            "the drop is loud: {:?}",
+            outcome.report.retrieval_notes
         );
     }
 }

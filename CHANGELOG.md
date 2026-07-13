@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research evidence is deduplicated, diversity-capped, and honestly
+  scored** (ADR-0079). Near-duplicate snippets fold into one (the
+  duplicate's provenance is kept on the survivor and still counts as an
+  independent origin), no single origin can saturate a question once others
+  are answering (soft cap, 3 per question per origin), and web evidence is
+  scored by content-term overlap with the sub-question instead of a flat
+  constant — an off-topic page can no longer read as relevant. Every fold,
+  drop, cap, or early stop is reported in a new "Retrieval notes" section
+  instead of happening silently. Web fetching is also polite now: repeat
+  visits to a host are paced by its own response time, and a 429/5xx cools
+  that host down for the rest of the run (audited as `host-cooldown`).
 - **Research is now multi-round and coverage-driven** (ADR-0078). Instead of
   one gather per sub-question, the loop scores per-question coverage
   deterministically (relevance floor + distinct-origin independence) and

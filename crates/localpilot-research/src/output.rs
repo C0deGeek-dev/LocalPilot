@@ -137,6 +137,14 @@ pub fn render_markdown(report: &ResearchReport) -> String {
         out.push('\n');
     }
 
+    if !report.retrieval_notes.is_empty() {
+        out.push_str("## Retrieval notes\n\n");
+        for note in &report.retrieval_notes {
+            out.push_str(&format!("- {note}\n"));
+        }
+        out.push('\n');
+    }
+
     out
 }
 

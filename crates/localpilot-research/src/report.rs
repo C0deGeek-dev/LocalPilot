@@ -42,6 +42,31 @@ pub struct Evidence {
     /// weak incidental match reads as less trustworthy than a strong one. The
     /// `Finding` synthesised from this evidence carries its `confidence`.
     pub relevance: f32,
+    /// Provenance of near-duplicate snippets folded into this one by the
+    /// loop's dedup pass — the same content found elsewhere. Kept so a folded
+    /// duplicate's origin still reaches the finding's `supporting` list and
+    /// the coverage account, never silently dropped.
+    #[serde(default)]
+    pub also_from: Vec<Provenance>,
+}
+
+impl Evidence {
+    /// Construct evidence with no folded duplicates.
+    #[must_use]
+    pub fn new(
+        question: impl Into<String>,
+        snippet: impl Into<String>,
+        provenance: Provenance,
+        relevance: f32,
+    ) -> Self {
+        Self {
+            question: question.into(),
+            snippet: snippet.into(),
+            provenance,
+            relevance,
+            also_from: Vec::new(),
+        }
+    }
 }
 
 /// How well a synthesised finding is backed by gathered evidence.
@@ -132,6 +157,10 @@ pub struct ResearchReport {
     /// How many retrieval rounds the loop ran.
     #[serde(default)]
     pub rounds_run: usize,
+    /// Loud accounting of anything the loop dropped, folded, or capped —
+    /// silent truncation reads as "covered everything" when it didn't.
+    #[serde(default)]
+    pub retrieval_notes: Vec<String>,
 }
 
 impl ResearchReport {
@@ -145,6 +174,7 @@ impl ResearchReport {
             open_questions: Vec::new(),
             coverage: Vec::new(),
             rounds_run: 0,
+            retrieval_notes: Vec::new(),
         }
     }
 }

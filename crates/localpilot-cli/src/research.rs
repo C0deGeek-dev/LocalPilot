@@ -20,9 +20,9 @@ use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
-    run_research, AuditEntry, Bounds, CoverageVerdict, Evidence, FetchDecision, Finding,
-    HeuristicSynthesizer, Provenance, ResearchError, ResearchReport, Source, SourceError,
-    SourceSet, Synthesizer, WebAccess,
+    run_research, term_overlap_relevance, AuditEntry, Bounds, CoverageVerdict, Evidence,
+    FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError, ResearchReport,
+    Source, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -39,13 +39,6 @@ const PER_SOURCE_EVIDENCE: usize = 5;
 /// so a hit is trusted at face value rather than scored — unlike a knowledge
 /// hit, which is unreviewed and carries its own match-quality signal.
 const MEMORY_EVIDENCE_RELEVANCE: f32 = 1.0;
-
-/// Relevance for web evidence: no per-fetch relevance score exists yet (no
-/// real search API — a URL is proposed by the model, then fetched), so a
-/// successful, allowlisted fetch gets a fixed moderate value rather than
-/// full trust. A known limitation, not a final answer to "how relevant is
-/// this page."
-const WEB_EVIDENCE_RELEVANCE: f32 = 0.5;
 
 /// A resolved model the binding layer can call for topic decomposition and, on
 /// the web path, candidate-URL proposal. Wraps the configured default provider
@@ -259,6 +252,9 @@ pub async fn run_research_command(
             round.open
         )?;
     }
+    for note in &outcome.report.retrieval_notes {
+        writeln!(out, "note: {note}")?;
+    }
     for error in &outcome.source_errors {
         writeln!(out, "note: {error}")?;
     }
@@ -357,17 +353,17 @@ impl Source for KnowledgeSource {
 }
 
 fn map_knowledge_hit(question: &str, hit: &localpilot_localmind::KnowledgeHit) -> Evidence {
-    Evidence {
-        question: question.to_string(),
-        snippet: hit.snippet.clone(),
-        provenance: Provenance::new(
+    // Unreviewed, machine-scored: carries the hit's own bm25/cosine-derived
+    // relevance rather than a flat value, so a weak match reads as weak.
+    Evidence::new(
+        question,
+        hit.snippet.clone(),
+        Provenance::new(
             "knowledge",
             Some(format!("{}:{}-{}", hit.path, hit.start_line, hit.end_line)),
         ),
-        // Unreviewed, machine-scored: carries the hit's own bm25/cosine-derived
-        // relevance rather than a flat value, so a weak match reads as weak.
-        relevance: hit.relevance.clamp(0.0, 1.0),
-    }
+        hit.relevance.clamp(0.0, 1.0),
+    )
 }
 
 struct MemorySource {
@@ -391,12 +387,12 @@ impl Source for MemorySource {
 }
 
 fn map_memory_hit(question: &str, hit: &localpilot_localmind::SearchHit) -> Evidence {
-    Evidence {
-        question: question.to_string(),
-        snippet: hit.snippet.clone(),
-        provenance: Provenance::new("memory", Some(hit.memory_id.clone())),
-        relevance: MEMORY_EVIDENCE_RELEVANCE,
-    }
+    Evidence::new(
+        question,
+        hit.snippet.clone(),
+        Provenance::new("memory", Some(hit.memory_id.clone())),
+        MEMORY_EVIDENCE_RELEVANCE,
+    )
 }
 
 // --- web source (off by default; `policies/remote-egress.md`) ----------------
@@ -404,6 +400,11 @@ fn map_memory_hit(question: &str, hit: &localpilot_localmind::SearchHit) -> Evid
 /// Bound on one designated search-tool call, so a hung MCP server can never
 /// hang the research run (the stdio transport itself has no call timeout).
 const MCP_SEARCH_TIMEOUT_SECS: u64 = 20;
+
+/// Politeness floor between two fetches to the same host within one run.
+const POLITENESS_MIN_DELAY_MS: u64 = 250;
+/// Politeness ceiling: even a slow host is not padded beyond this.
+const POLITENESS_MAX_DELAY_MS: u64 = 3_000;
 
 /// Total request timeout for a web fetch, mirroring the `fetch` builtin's bound.
 const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
@@ -670,6 +671,17 @@ struct WebSource {
     audit_log: PathBuf,
     model: Option<ModelHandle>,
     search: Option<McpSearchProposer>,
+    politeness: std::sync::Mutex<HostPoliteness>,
+}
+
+/// Per-run per-host fetch discipline: serialize-and-pace repeat visits
+/// (adaptive delay derived from the host's own response time), and cool a
+/// host down for the rest of the run after a rate-limit or server error —
+/// 429/5xx are host-level signals, not per-URL ones.
+#[derive(Default)]
+struct HostPoliteness {
+    last: std::collections::HashMap<String, (std::time::Instant, Duration)>,
+    cooled: std::collections::HashSet<String>,
 }
 
 impl WebSource {
@@ -694,7 +706,37 @@ impl WebSource {
             audit_log,
             model,
             search,
+            politeness: std::sync::Mutex::new(HostPoliteness::default()),
         })
+    }
+
+    /// Whether `host` is cooled down for the rest of this run.
+    fn host_cooled(&self, host: &str) -> bool {
+        self.politeness
+            .lock()
+            .map(|p| p.cooled.contains(host))
+            .unwrap_or(false)
+    }
+
+    /// The politeness pause owed before fetching `host` again, if any.
+    fn pause_before(&self, host: &str) -> Option<Duration> {
+        let politeness = self.politeness.lock().ok()?;
+        let (at, took) = politeness.last.get(host)?;
+        let delay = (*took)
+            .max(Duration::from_millis(POLITENESS_MIN_DELAY_MS))
+            .min(Duration::from_millis(POLITENESS_MAX_DELAY_MS));
+        delay.checked_sub(at.elapsed())
+    }
+
+    fn record_fetch(&self, host: &str, took: Duration, cool_down: bool) {
+        if let Ok(mut politeness) = self.politeness.lock() {
+            politeness
+                .last
+                .insert(host.to_string(), (std::time::Instant::now(), took));
+            if cool_down {
+                politeness.cooled.insert(host.to_string());
+            }
+        }
     }
 
     /// Ask the model for candidate URLs answering the redacted `query`.
@@ -722,7 +764,22 @@ impl WebSource {
         question: &str,
         query: &str,
     ) -> Result<Option<Evidence>, SourceError> {
+        // A host that rate-limited or errored earlier in the run stays cooled
+        // down — 429/5xx are host-level signals, not per-URL ones.
+        if self.host_cooled(host) {
+            append_audit(
+                &self.audit_log,
+                &audit_entry(url, host, "host-cooldown", query),
+            )?;
+            return Ok(None);
+        }
+        // Pace repeat visits: the delay adapts to the host's own last
+        // response time, clamped to a sane window.
+        if let Some(pause) = self.pause_before(host) {
+            tokio::time::sleep(pause).await;
+        }
         append_audit(&self.audit_log, &audit_entry(url, host, "allowed", query))?;
+        let fetch_started = std::time::Instant::now();
         let response = self
             .client
             .get(url)
@@ -730,6 +787,11 @@ impl WebSource {
             .await
             .map_err(|error| SourceError::new("web", format!("fetch failed: {error}")))?;
         let status = response.status();
+        let cool_down = status.as_u16() == 429 || status.is_server_error();
+        self.record_fetch(host, fetch_started.elapsed(), cool_down);
+        if cool_down {
+            return Ok(None);
+        }
         // A redirect is never followed (the target host is unvetted); audit and
         // skip it so it can't become an un-allowlisted egress channel.
         if status.is_redirection() {
@@ -766,12 +828,18 @@ impl WebSource {
         } else {
             body
         };
-        Ok(Some(Evidence {
-            question: question.to_string(),
-            snippet: bound_body(&text, WEB_MAX_BODY_BYTES),
-            provenance: Provenance::new("web", Some(url.to_string())),
-            relevance: WEB_EVIDENCE_RELEVANCE,
-        }))
+        let snippet = bound_body(&text, WEB_MAX_BODY_BYTES);
+        // Scored against the kept content, not a flat constant: a page that
+        // barely mentions the question's terms reads as weak evidence and
+        // stays below the coverage floor (the term-coverage rule applied to
+        // fetched pages).
+        let relevance = term_overlap_relevance(question, &snippet);
+        Ok(Some(Evidence::new(
+            question,
+            snippet,
+            Provenance::new("web", Some(url.to_string())),
+            relevance,
+        )))
     }
 }
 
@@ -1174,12 +1242,12 @@ mod tests {
         // heuristic, so each evidence snippet becomes a supported finding that
         // carries its own provenance.
         let synth = CliSynthesizer { model: None };
-        let evidence = vec![Evidence {
-            question: "q".to_string(),
-            snippet: "caches speed reads".to_string(),
-            provenance: Provenance::new("memory", Some("mem_1".to_string())),
-            relevance: 1.0,
-        }];
+        let evidence = vec![Evidence::new(
+            "q",
+            "caches speed reads",
+            Provenance::new("memory", Some("mem_1".to_string())),
+            1.0,
+        )];
         let findings = synth.synthesize("topic", &evidence).await.unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].statement, "caches speed reads");
@@ -1615,6 +1683,52 @@ mod tests {
         assert_eq!(evidence.len(), 1, "the duplicate URL is fetched once");
         let hits = server.received_requests().await.unwrap();
         assert_eq!(hits.len(), 1, "one outbound request for the deduped URL");
+    }
+
+    #[tokio::test]
+    async fn server_error_cools_the_host_for_the_rest_of_the_run() {
+        // A 500 is a host-level signal: the errored URL yields nothing and
+        // every later URL on that host is skipped and audited as cooled-down.
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fine"))
+            .mount(&server)
+            .await;
+        let url_a = format!("{}/a", server.uri());
+        let url_b = format!("{}/b", server.uri());
+        let host = parse_host(&url_a).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec![host], Vec::new());
+        access.grant_session();
+        let fake = Arc::new(FakeProvider::new().text(&format!("{url_a}\n{url_b}")));
+        let source = WebSource::new(
+            access,
+            audit.clone(),
+            Some(model_handle(Arc::clone(&fake))),
+            None,
+        )
+        .unwrap();
+
+        let evidence = source.gather("q", 3).await.unwrap();
+        assert!(
+            evidence.is_empty(),
+            "the 500 yields nothing and the follow-up URL is skipped"
+        );
+        let hits = server.received_requests().await.unwrap();
+        assert_eq!(hits.len(), 1, "only the first URL reached the host");
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=host-cooldown"),
+            "the cooled-down skip is audited: {log}"
+        );
     }
 
     #[tokio::test]
