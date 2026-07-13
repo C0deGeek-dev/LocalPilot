@@ -17,6 +17,7 @@ use futures::StreamExt;
 use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
+use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
     run_research, AuditEntry, Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer,
@@ -230,7 +231,7 @@ pub async fn run_research_command(
     let web = web_override.unwrap_or(true);
     let mut sources = build_local_sources(root);
     if web {
-        let web_source = build_web_source(root, &config, model.clone(), out)?;
+        let web_source = build_web_source(root, &config, model.clone(), out).await?;
         sources.push(Box::new(web_source));
     } else {
         writeln!(out, "web research: skipped for this run (--no-web)")?;
@@ -374,6 +375,10 @@ fn map_memory_hit(question: &str, hit: &localpilot_localmind::SearchHit) -> Evid
 
 // --- web source (off by default; `policies/remote-egress.md`) ----------------
 
+/// Bound on one designated search-tool call, so a hung MCP server can never
+/// hang the research run (the stdio transport itself has no call timeout).
+const MCP_SEARCH_TIMEOUT_SECS: u64 = 20;
+
 /// Total request timeout for a web fetch, mirroring the `fetch` builtin's bound.
 const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
 /// Connect-phase timeout, so a stalled connect fails fast under the total.
@@ -397,7 +402,7 @@ fn default_audit_log(root: &Path) -> PathBuf {
 /// switch. With an explicitly empty allowlist every host needs confirmation,
 /// which in v1 means skipped, so the disclosure warns that nothing will be
 /// fetched.
-fn build_web_source(
+async fn build_web_source(
     root: &Path,
     config: &Config,
     model: Option<ModelHandle>,
@@ -462,22 +467,183 @@ fn build_web_source(
         )?;
     }
 
+    let search = if web_config.enabled {
+        connect_search_tools(config, out).await?
+    } else {
+        None
+    };
+
     access.grant_session();
-    WebSource::new(access, audit_log, model)
+    WebSource::new(access, audit_log, model, search)
+}
+
+/// Connect the `[research.mcp]`-designated search tools and disclose them.
+/// Best-effort: a server that fails to spawn or handshake is reported and
+/// skipped; the run continues with whatever connected. `None` when nothing is
+/// designated or nothing connected.
+async fn connect_search_tools(
+    config: &Config,
+    out: &mut dyn Write,
+) -> anyhow::Result<Option<McpSearchProposer>> {
+    let designated = &config.research.mcp.tools;
+    if designated.is_empty() {
+        return Ok(None);
+    }
+    let mut tools = Vec::new();
+    for pair in designated {
+        let label = format!("{}.{}", pair.server, pair.tool);
+        let Some(server) = config.mcp.servers.get(&pair.server) else {
+            writeln!(
+                out,
+                "  search tool {label}: server '{}' not found under [mcp.servers] — skipped",
+                pair.server
+            )?;
+            continue;
+        };
+        let transport = match localpilot_mcp::StdioTransport::spawn(&server.command, &server.args) {
+            Ok(transport) => Arc::new(transport) as Arc<dyn localpilot_mcp::Transport>,
+            Err(error) => {
+                writeln!(out, "  search tool {label}: failed to start — {error}")?;
+                continue;
+            }
+        };
+        let client = McpClient::new(Arc::clone(&transport));
+        let handshake = tokio::time::timeout(
+            Duration::from_secs(MCP_SEARCH_TIMEOUT_SECS),
+            client.initialize(),
+        )
+        .await;
+        match handshake {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                writeln!(out, "  search tool {label}: handshake failed — {error}")?;
+                continue;
+            }
+            Err(_) => {
+                writeln!(out, "  search tool {label}: handshake timed out")?;
+                continue;
+            }
+        }
+        // Advisory only: a server that lazily advertises still gets the call.
+        if let Ok(Ok(advertised)) = tokio::time::timeout(
+            Duration::from_secs(MCP_SEARCH_TIMEOUT_SECS),
+            client.list_tools(),
+        )
+        .await
+        {
+            if !advertised.iter().any(|t| t.name == pair.tool) {
+                writeln!(
+                    out,
+                    "  search tool {label}: server does not advertise '{}' — calling anyway",
+                    pair.tool
+                )?;
+            }
+        }
+        tools.push(DesignatedSearchTool {
+            label,
+            tool: pair.tool.clone(),
+            transport,
+        });
+    }
+    if tools.is_empty() {
+        writeln!(
+            out,
+            "  no designated search tool connected — the model proposes candidate URLs"
+        )?;
+        return Ok(None);
+    }
+    writeln!(
+        out,
+        "  designated search tools: {} — the redacted sub-question text is sent to these MCP servers",
+        tools
+            .iter()
+            .map(|tool| tool.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )?;
+    Ok(Some(McpSearchProposer { tools }))
+}
+
+/// One designated MCP search tool, connected and ready to propose URLs.
+struct DesignatedSearchTool {
+    /// `server.tool`, for disclosure and audit lines.
+    label: String,
+    /// The exact tool name the server advertises.
+    tool: String,
+    transport: Arc<dyn localpilot_mcp::Transport>,
+}
+
+/// Designated MCP search tools acting as candidate-URL proposers.
+///
+/// Search results are **leads only**: the extracted URLs feed the same
+/// [`WebAccess`]-gated, audited fetch path as model-proposed ones — a search
+/// result never becomes evidence directly. Calls are best-effort and bounded:
+/// a tool that errors, times out, or rate-limits is skipped (audited as
+/// `search-error`) and the run continues.
+struct McpSearchProposer {
+    tools: Vec<DesignatedSearchTool>,
+}
+
+impl McpSearchProposer {
+    /// Ask every designated tool for candidate URLs answering the redacted
+    /// `query`. Returns the merged, order-preserving deduplicated URLs.
+    async fn propose(&self, query: &str, limit: usize, audit_log: &Path) -> Vec<String> {
+        let mut urls = Vec::new();
+        for tool in &self.tools {
+            let client = McpClient::new(Arc::clone(&tool.transport));
+            let call = client.call_tool_raw(&tool.tool, serde_json::json!({ "query": query }));
+            let result =
+                tokio::time::timeout(Duration::from_secs(MCP_SEARCH_TIMEOUT_SECS), call).await;
+            // The search call itself is egress (the redacted query goes to the
+            // server), so it is audited like a fetch — success and failure both.
+            let (decision, proposed) = match result {
+                Ok(Ok(value)) => {
+                    let proposals = extract_candidate_urls(&value);
+                    match proposals.error {
+                        None => ("search", proposals.urls),
+                        Some(SearchCallError::RateLimited(_)) => {
+                            ("search-rate-limited", Vec::new())
+                        }
+                        Some(SearchCallError::Failed(_)) => ("search-error", Vec::new()),
+                    }
+                }
+                Ok(Err(_)) => ("search-error", Vec::new()),
+                Err(_) => ("search-timeout", Vec::new()),
+            };
+            let _ = append_audit(
+                audit_log,
+                &audit_entry(
+                    &format!("mcp://{}", tool.label),
+                    &tool.label,
+                    decision,
+                    query,
+                ),
+            );
+            urls.extend(proposed);
+            if urls.len() >= limit {
+                break;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        urls.retain(|url| seen.insert(url.clone()));
+        urls
+    }
 }
 
 /// A networked evidence source, constructed only when the operator opts in.
 ///
-/// For each sub-question it asks the model to propose candidate URLs, parses
-/// each URL's host with a real parser, and consults the [`WebAccess`] gate:
-/// allowlisted hosts are fetched and audited; every other host is skipped and
-/// logged (v1 is allowlist-only — no interactive per-fetch confirm). Only the
-/// redacted sub-question is ever sent off-machine.
+/// For each sub-question it gathers candidate URLs — from designated MCP
+/// search tools first, then the model's proposals — parses each URL's host
+/// with a real parser, and consults the [`WebAccess`] gate: allowlisted hosts
+/// are fetched and audited; every other host is skipped and logged (v1 is
+/// allowlist-only — no interactive per-fetch confirm). Only the redacted
+/// sub-question is ever sent off-machine.
 struct WebSource {
     client: reqwest::Client,
     access: WebAccess,
     audit_log: PathBuf,
     model: Option<ModelHandle>,
+    search: Option<McpSearchProposer>,
 }
 
 impl WebSource {
@@ -485,6 +651,7 @@ impl WebSource {
         access: WebAccess,
         audit_log: PathBuf,
         model: Option<ModelHandle>,
+        search: Option<McpSearchProposer>,
     ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEB_FETCH_TIMEOUT_SECS))
@@ -500,6 +667,7 @@ impl WebSource {
             access,
             audit_log,
             model,
+            search,
         })
     }
 
@@ -589,16 +757,27 @@ impl Source for WebSource {
 
     async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
         // Fail-closed: with no active consent, do nothing — not even propose
-        // URLs (which would touch the model). This is the `Disabled` path.
+        // URLs (which would touch the model or a search server). This is the
+        // `Disabled` path.
         if !self.access.is_active() {
             return Ok(Vec::new());
         }
-        let Some(model) = &self.model else {
-            return Ok(Vec::new());
-        };
         // Only the redacted sub-question leaves the machine — never evidence.
         let query = prepare_query(localpilot_config::redact::redact, question);
-        let urls = self.propose_urls(model, &query, limit).await?;
+        // Designated search tools propose first (real search results); the
+        // model's proposals fill any remaining budget. Either may be absent —
+        // search works without a model and vice versa.
+        let mut urls = Vec::new();
+        if let Some(search) = &self.search {
+            urls.extend(search.propose(&query, limit, &self.audit_log).await);
+        }
+        if urls.len() < limit {
+            if let Some(model) = &self.model {
+                urls.extend(self.propose_urls(model, &query, limit).await?);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        urls.retain(|url| seen.insert(url.clone()));
 
         let mut evidence = Vec::new();
         for url in urls.into_iter().take(limit) {
@@ -1064,8 +1243,13 @@ mod tests {
         let mut access = WebAccess::new(enabled, allowlist, Vec::new());
         access.grant_session();
         let fake = Arc::new(FakeProvider::new().text(server_url));
-        let source =
-            WebSource::new(access, audit_log, Some(model_handle(Arc::clone(&fake)))).unwrap();
+        let source = WebSource::new(
+            access,
+            audit_log,
+            Some(model_handle(Arc::clone(&fake))),
+            None,
+        )
+        .unwrap();
         (source, fake)
     }
 
@@ -1216,14 +1400,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disclosure_names_default_on_reach_and_off_switches() {
+    #[tokio::test]
+    async fn disclosure_names_default_on_reach_and_off_switches() {
         // Default config: web on with open-web reach. The banner must say so
         // and name both kill switches before any request could be made.
         let dir = tempfile::tempdir().unwrap();
         let config = localpilot_config::Config::default();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let _source = build_web_source(dir.path(), &config, None, &mut out)
+            .await
+            .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("on by default"), "states the posture: {text}");
         assert!(text.contains("--no-web"), "names the run switch: {text}");
@@ -1238,13 +1424,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disclosure_warns_on_explicitly_empty_allowlist() {
+    #[tokio::test]
+    async fn disclosure_warns_on_explicitly_empty_allowlist() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = localpilot_config::Config::default();
         config.research.web.allowlist.clear();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let _source = build_web_source(dir.path(), &config, None, &mut out)
+            .await
+            .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("explicitly empty"),
@@ -1253,18 +1441,154 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disclosure_states_disabled_when_config_off() {
+    #[tokio::test]
+    async fn disclosure_states_disabled_when_config_off() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = localpilot_config::Config::default();
         config.research.web.enabled = false;
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let _source = build_web_source(dir.path(), &config, None, &mut out)
+            .await
+            .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("web research stays disabled"),
             "config-off is disclosed loudly: {text}"
         );
+    }
+
+    /// A proposer over a scripted transport whose `tools/call` returns `text`.
+    fn scripted_proposer(text: &str) -> McpSearchProposer {
+        let transport = Arc::new(localpilot_mcp::ScriptedTransport::new().with(
+            "tools/call",
+            serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+        ));
+        McpSearchProposer {
+            tools: vec![DesignatedSearchTool {
+                label: "fixture.search".to_string(),
+                tool: "search".to_string(),
+                transport,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_proposed_urls_are_fetched_and_audited_without_a_model() {
+        // Real search needs no model: the designated tool proposes, the gated
+        // fetch path does the rest — and both the search call and the fetch
+        // are audited.
+        let server = ok_server("search-found body").await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec![host], Vec::new());
+        access.grant_session();
+        let source = WebSource::new(
+            access,
+            audit.clone(),
+            None,
+            Some(scripted_proposer(&format!("Result\n   URL: {url}\n"))),
+        )
+        .unwrap();
+
+        let evidence = source.gather("how do skin matrices work", 3).await.unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].provenance.source, "web");
+        assert!(evidence[0].snippet.contains("search-found body"));
+
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=search host=fixture.search url=mcp://fixture.search"),
+            "the search call itself is audited egress: {log}"
+        );
+        assert!(
+            log.contains("decision=allowed"),
+            "the fetch is audited: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_proposed_disallowlisted_url_is_skipped() {
+        let server = ok_server("body").await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        // Open web, but the fixture's host is disallowlisted: deny wins even
+        // for a search-proposed URL.
+        let mut access = WebAccess::new(true, vec!["*".to_string()], vec![host]);
+        access.grant_session();
+        let source = WebSource::new(
+            access,
+            audit.clone(),
+            None,
+            Some(scripted_proposer(&format!("URL: {url}"))),
+        )
+        .unwrap();
+
+        let evidence = source.gather("q", 3).await.unwrap();
+        assert!(
+            evidence.is_empty(),
+            "a disallowlisted host is never fetched"
+        );
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "no outbound request reached the disallowlisted host"
+        );
+    }
+
+    #[tokio::test]
+    async fn erroring_search_tool_never_fails_the_run() {
+        // No scripted `tools/call` response: the call errors. The run
+        // continues (empty round) and the failure is audited.
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let transport = Arc::new(localpilot_mcp::ScriptedTransport::new());
+        let proposer = McpSearchProposer {
+            tools: vec![DesignatedSearchTool {
+                label: "broken.search".to_string(),
+                tool: "search".to_string(),
+                transport,
+            }],
+        };
+        let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
+        access.grant_session();
+        let source = WebSource::new(access, audit.clone(), None, Some(proposer)).unwrap();
+
+        let evidence = source.gather("q", 3).await.unwrap();
+        assert!(evidence.is_empty());
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=search-error"),
+            "the failed search call is audited: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_and_model_proposals_merge_and_dedup() {
+        // The search tool and the model propose overlapping URLs; the fetch
+        // loop sees each once, search proposals first.
+        let server = ok_server("body").await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec![host], Vec::new());
+        access.grant_session();
+        let fake = Arc::new(FakeProvider::new().text(&url));
+        let source = WebSource::new(
+            access,
+            audit.clone(),
+            Some(model_handle(Arc::clone(&fake))),
+            Some(scripted_proposer(&format!("URL: {url}"))),
+        )
+        .unwrap();
+
+        let evidence = source.gather("q", 1).await.unwrap();
+        assert_eq!(evidence.len(), 1, "the duplicate URL is fetched once");
+        let hits = server.received_requests().await.unwrap();
+        assert_eq!(hits.len(), 1, "one outbound request for the deduped URL");
     }
 
     #[tokio::test]

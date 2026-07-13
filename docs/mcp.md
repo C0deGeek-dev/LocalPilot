@@ -43,6 +43,35 @@ Only local servers launched over stdio are supported. The connection is used by
 the interactive REPL, `print`, and `harness` runs; harness connects each server
 once and reuses it across steps.
 
+## Research search tools
+
+Web research (see [`docs/configuration.md`](configuration.md) `[research]`)
+can use designated MCP search tools as **candidate-URL proposers** — real
+search instead of model-guessed URLs. Designation is explicit, per
+`(server, tool)` pair; nothing is auto-discovered (search servers share no
+tool-naming convention, and consulting one sends the redacted sub-question
+text to it):
+
+```toml
+[research.mcp]
+tools = [{ server = "search", tool = "search" }]
+```
+
+The named server must exist under `[mcp.servers]`. During a web-active
+research run each designated tool is called once per sub-question with the
+**redacted** query only; the URLs extracted from its results feed the same
+allowlist/disallowlist-gated, audited, no-redirect fetch path as
+model-proposed URLs — a search result is a lead, never evidence. Each search
+call is itself audited (`decision=search…` lines), a tool that errors or
+rate-limits is skipped without failing the run, and the run's egress
+disclosure names every designated tool. The proposer parses the common result
+shapes (plain-text `URL:` lists, JSON-in-text, `structuredContent`,
+`resource_link` items) and treats URL-less prose as an empty round.
+
+Note on provenance: some community search servers scrape engines that offer
+no official API, while vendor servers (and self-hosted SearXNG) speak
+official interfaces — the choice of server, and its provenance, is yours.
+
 ## MCP as the catalog's volatile edge
 
 When the pull-discovery broker is enabled (`[tools] broker`, see

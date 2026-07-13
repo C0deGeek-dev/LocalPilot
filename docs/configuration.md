@@ -383,6 +383,21 @@ an egress disclosure (posture, reach, off-switches, audit path) before any
 request and records a per-session consent that is never persisted. See
 [07-security-and-privacy.md](07-security-and-privacy.md) §Web Research Egress.
 
+#### `[research.mcp]`
+
+Designated MCP search tools that propose candidate URLs during web research
+(ADR-0077). Nothing is auto-discovered: a tool is consulted only when named
+here, as a `(server, tool)` pair referencing `[mcp.servers]`. Results are
+leads only — extracted URLs pass the `[research.web]` gate and audit like any
+other research fetch, and each search call is itself audited with the
+redacted query.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tools` | array of `{ server, tool }` | `[]` | The designated pairs, e.g. `tools = [{ server = "search", tool = "search" }]`. `server` is a key under `[mcp.servers]`; `tool` is the exact advertised tool name. Empty → no MCP server is consulted during research. |
+
+See [mcp.md](mcp.md) §Research search tools.
+
 ## Example
 
 ```toml

@@ -98,14 +98,23 @@ impl McpClient {
     /// # Errors
     /// Returns [`McpError`] if the transport or response is invalid.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String, McpError> {
-        let result = self
-            .transport
+        let result = self.call_tool_raw(name, arguments).await?;
+        Ok(extract_text(&result))
+    }
+
+    /// Call a tool and return the full result value — `content` items,
+    /// `structuredContent`, and `isError` intact — for callers that need more
+    /// than flattened text (e.g. search-result parsing).
+    ///
+    /// # Errors
+    /// Returns [`McpError`] if the transport or response is invalid.
+    pub async fn call_tool_raw(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
+        self.transport
             .call(
                 "tools/call",
                 json!({ "name": name, "arguments": arguments }),
             )
-            .await?;
-        Ok(extract_text(&result))
+            .await
     }
 
     /// Read a resource and return its textual content.

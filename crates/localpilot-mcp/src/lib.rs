@@ -1,4 +1,4 @@
-﻿//! Model Context Protocol integration for LocalPilot.
+//! Model Context Protocol integration for LocalPilot.
 //!
 //! Owns the MCP client: handshake, tool discovery, resource reads, and server
 //! configuration/health. The defining rule is that MCP tools are not a side
@@ -11,10 +11,12 @@
 
 mod client;
 mod error;
+mod results;
 mod transport;
 
 pub use client::{McpClient, McpServerStatus, McpTool, McpToolDescriptor};
 pub use error::McpError;
+pub use results::{extract_candidate_urls, SearchCallError, SearchProposals};
 pub use transport::{ScriptedTransport, StdioTransport, Transport};
 
 /// The MCP protocol version this client speaks.

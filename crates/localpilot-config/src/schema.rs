@@ -111,6 +111,10 @@ pub struct ResearchConfig {
     /// Outbound web-research controls. On by default, disclosed and audited;
     /// `enabled = false` removes the outbound path entirely.
     pub web: ResearchWebConfig,
+    /// Designated MCP search tools that propose candidate URLs during web
+    /// research. Empty by default — no MCP server is consulted unless the user
+    /// explicitly designates a tool.
+    pub mcp: ResearchMcpConfig,
 }
 
 impl Default for ResearchConfig {
@@ -121,6 +125,7 @@ impl Default for ResearchConfig {
             output_dir: None,
             ingest_report: false,
             web: ResearchWebConfig::default(),
+            mcp: ResearchMcpConfig::default(),
         }
     }
 }
@@ -172,6 +177,34 @@ impl Default for ResearchWebConfig {
             audit_log: None,
         }
     }
+}
+
+/// Designated MCP search tools for web research.
+///
+/// Research never auto-discovers search capability: there is no naming
+/// convention across MCP search servers, and consulting a server sends the
+/// (redacted) sub-question to it. A tool is used only when the user names it
+/// here explicitly, as a `(server, tool)` pair referencing a server from
+/// `[mcp.servers]`. The tool's results are treated as candidate-URL
+/// *proposals* only — fetched content still passes the `[research.web]`
+/// allowlist/disallowlist gate and audit like any other research fetch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchMcpConfig {
+    /// The designated tools, e.g.
+    /// `tools = [{ server = "ddg", tool = "search" }]`. Empty (the default)
+    /// means no MCP server is consulted during research.
+    pub tools: Vec<ResearchMcpTool>,
+}
+
+/// One designated `(server, tool)` pair for research URL proposals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchMcpTool {
+    /// Key of the server under `[mcp.servers]`.
+    pub server: String,
+    /// Exact tool name as the server advertises it (e.g. `search`,
+    /// `brave_web_search`, `tavily-search`).
+    pub tool: String,
 }
 
 /// The outward half of the human-gated self-improvement loop (ADR-0034 / ADR-0053):
@@ -1167,6 +1200,19 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn research_mcp_tools_default_empty_and_parse_pairs() {
+        // No designation by default: research consults no MCP server.
+        assert!(ResearchMcpConfig::default().tools.is_empty());
+        let parsed: ResearchMcpConfig = serde_json::from_value(json!({
+            "tools": [{ "server": "ddg", "tool": "search" }]
+        }))
+        .unwrap();
+        assert_eq!(parsed.tools.len(), 1);
+        assert_eq!(parsed.tools[0].server, "ddg");
+        assert_eq!(parsed.tools[0].tool, "search");
     }
 
     #[test]

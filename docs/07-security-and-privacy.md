@@ -444,7 +444,10 @@ construction:
 - **Only the sub-question leaves the machine.** The outbound text is the
   sub-question passed through the shared workspace redactor — never gathered
   evidence, file contents, or memory. The redactor is a second guard over the
-  topic the user typed.
+  topic the user typed. This holds for designated MCP search tools too
+  (ADR-0077): a search call sends the redacted query only, is audited like a
+  fetch, and its results are candidate URLs that still pass this gate — a
+  search result never becomes evidence directly.
 - **Auditable.** When active, every outbound request and every skip appends one
   line to the audit log (`[research.web] audit_log`, default
   `.localpilot/research/egress-audit.log`): the decision, host, URL, and the

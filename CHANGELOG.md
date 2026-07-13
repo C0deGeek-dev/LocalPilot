@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research can use real web search via designated MCP tools** (ADR-0077).
+  Name `(server, tool)` pairs under `[research.mcp] tools` (e.g.
+  `tools = [{ server = "search", tool = "search" }]` referencing
+  `[mcp.servers.search]`) and web research calls them per sub-question as
+  candidate-URL proposers — replacing model-guessed URLs with search results.
+  Proposals are leads only: extracted URLs pass the same
+  allowlist/disallowlist gate, bounded no-redirect fetch, and audit as
+  before, each search call is itself audited with the redacted query, and a
+  tool that errors, times out, or rate-limits is skipped without failing the
+  run. Nothing is consulted unless explicitly designated. Search works with
+  or without a chat model configured.
 - **Web research is now on by default** (ADR-0076). Research cannot rely on a
   small local model's parametric memory, so `[research.web].enabled` defaults
   to `true` with open-web reach (an unset allowlist now means `["*"]`), and

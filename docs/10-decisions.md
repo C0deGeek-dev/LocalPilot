@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0077: Designated MCP Search Tools Propose Research URLs — Leads, Never Evidence
+
+Status: accepted. Research web retrieval had no real search: the model
+proposed URLs from its own parametric memory (a documented limitation of
+ADR-0060's v1), which is exactly the weakness a small local model brings.
+MCP search servers exist and users run them; the question was how research
+uses one without breaking the egress boundary (ADR-0076) or the clean-room
+rule.
+
+1. **Explicit designation, never discovery.** `[research.mcp] tools` names
+   `(server, tool)` pairs referencing `[mcp.servers]` entries; empty means no
+   MCP server is consulted. Auto-detecting "search-capable" tools is both
+   unreliable (no naming convention exists across search servers: `search`,
+   `brave_web_search`, `tavily-search`, `web_search_exa`, …) and
+   policy-hostile (consulting a server egresses the sub-question). The only
+   portable input is `query`; the proposer sends only that.
+2. **Proposals are leads, never evidence.** Extracted URLs join the model's
+   proposals (search first, model filling the remaining budget, exact-dedup)
+   and flow through the unchanged `WebAccess` gate: allowlist/disallowlist,
+   no-redirect bounded fetch, per-request audit. A search result's snippet
+   text never becomes evidence — only a gated fetch does. The audited
+   boundary stays total.
+3. **The search call is audited egress.** Each designated-tool invocation
+   writes an audit line (`decision=search`, or `search-error` /
+   `search-rate-limited` / `search-timeout`) carrying the redacted query —
+   the same redaction contract as every other outbound research byte. The
+   run disclosure names every designated tool before any call.
+4. **Best-effort by construction.** Connection failures are disclosed and
+   skipped; a call is bounded by a fixed timeout (the stdio transport has
+   none of its own); an `isError` result is classified (rate-limit vs
+   failure) and never parsed for URLs; a URL-less result is an empty round,
+   not an error. Research works with search and no model, a model and no
+   search, both, or neither.
+5. **Parsing is spec-grounded and shape-tolerant.** The extractor
+   (`localpilot-mcp`) reads `structuredContent`, JSON-in-text (the
+   spec-sanctioned dominant shape), plain-text scans (`URL:` lines, markdown
+   links, bare URLs), and `resource_link` items, in that order, iterating
+   every content item. Research consumes the MCP **client** crate directly —
+   it does not enter the agentic tool loop, and the designated call rides
+   the research run's own consent + disclosure rather than a per-call
+   permission ask (the run banner is the consent surface; the permission
+   engine still governs MCP tools in normal sessions).
+6. **Clean-room posture.** LocalPilot itself never scrapes a search engine.
+   Reach comes from the user's explicitly designated server; docs disclose
+   that some community servers scrape while vendor/self-hosted ones speak
+   official APIs — that choice and its provenance belong to the user.
+
+Extends ADR-0060/ADR-0076; the ADR-0031 catalog/broker and ADR-0073 server
+adapter are untouched.
+
 ## ADR-0076: Research Web Egress Is On By Default — Disclosed, Audited, Disableable — On Both Surfaces
 
 Status: accepted. Amends ADR-0060 point 5 (web egress off by default,

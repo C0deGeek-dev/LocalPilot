@@ -236,9 +236,12 @@ finding is always backed.
 
 **Web research is on by default** (ADR-0076) — research cannot rely on a small
 local model's parametric memory, so both surfaces reach the web unless told
-not to. Every web-active run prints an egress disclosure first, fetches only
-what the allowlist/disallowlist permits (skips are logged), audits every
-outbound request, and sends only the redacted sub-question off-machine.
+not to. Candidate URLs come from designated MCP search tools when configured
+(`[research.mcp]`, ADR-0077 — real search results as leads), with the model's
+own proposals as the fallback. Every web-active run prints an egress
+disclosure first, fetches only what the allowlist/disallowlist permits (skips
+are logged), audits every outbound request — search calls included — and
+sends only the redacted sub-question off-machine.
 `--no-web` skips web for one run; `[research.web].enabled = false` turns the
 outbound path off entirely and no flag can override it. See the security and
 privacy doc for the egress controls.
