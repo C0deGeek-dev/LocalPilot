@@ -99,6 +99,18 @@ pub struct ResearchConfig {
     /// Maximum sub-questions a single research run may pursue — the loop bound
     /// that keeps a run finite. Default 6.
     pub max_questions: usize,
+    /// Maximum retrieval rounds. Round 1 gathers for every sub-question; later
+    /// rounds re-query only questions that are not yet covered. `1` is the
+    /// single-pass behaviour. Default 3.
+    pub max_rounds: usize,
+    /// Evidence snippets taken from each source per question per query (later
+    /// rounds escalate this for stubborn questions, capped ×3). Default 5.
+    pub per_source_evidence: usize,
+    /// Hard cap on total evidence snippets across a run. Default 120.
+    pub max_total_evidence: usize,
+    /// Optional wall-clock budget for the retrieval phase, in seconds. Unset
+    /// means no time budget (the round/evidence caps still bound the run).
+    pub time_budget_secs: Option<u64>,
     /// Directory for written research report artefacts, relative to the project
     /// root. `None` lets the host choose its default (`.localpilot/research/`).
     pub output_dir: Option<String>,
@@ -122,6 +134,10 @@ impl Default for ResearchConfig {
         Self {
             enabled: true,
             max_questions: 6,
+            max_rounds: 3,
+            per_source_evidence: 5,
+            max_total_evidence: 120,
+            time_budget_secs: None,
             output_dir: None,
             ingest_report: false,
             web: ResearchWebConfig::default(),
@@ -1200,6 +1216,26 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn research_depth_knobs_default_exhaustive_and_parse() {
+        let config = ResearchConfig::default();
+        assert_eq!(config.max_rounds, 3);
+        assert_eq!(config.per_source_evidence, 5);
+        assert_eq!(config.max_total_evidence, 120);
+        assert!(config.time_budget_secs.is_none());
+        let parsed: ResearchConfig = serde_json::from_value(json!({
+            "max_rounds": 1,
+            "per_source_evidence": 2,
+            "max_total_evidence": 40,
+            "time_budget_secs": 90,
+        }))
+        .unwrap();
+        assert_eq!(parsed.max_rounds, 1);
+        assert_eq!(parsed.per_source_evidence, 2);
+        assert_eq!(parsed.max_total_evidence, 40);
+        assert_eq!(parsed.time_budget_secs, Some(90));
     }
 
     #[test]

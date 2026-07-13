@@ -16,7 +16,7 @@ mod synth;
 mod web;
 
 pub use engine::{
-    run_research, run_research_controlled, Bounds, RoundSummary, RunControl, RunOutcome,
+    run_research, run_research_controlled, Bounds, ProgressFn, RoundSummary, RunControl, RunOutcome,
 };
 pub use html::{html_to_markdown, html_to_text, markdown_to_text};
 pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
@@ -353,7 +353,10 @@ mod tests {
         let set = SourceSet::new().with(Box::new(source));
         let synth = WideSynth { questions: 2 };
         let stop = Arc::new(AtomicBool::new(true)); // stop before any gather
-        let control = RunControl { stop: Some(stop) };
+        let control = RunControl {
+            stop: Some(stop),
+            ..RunControl::default()
+        };
         let outcome = run_research_controlled(
             "t",
             &set,

@@ -160,6 +160,22 @@ enum Command {
         /// candidate URL is proposed.
         #[arg(long)]
         no_web: bool,
+        /// Override the maximum retrieval rounds for this run (config:
+        /// `[research].max_rounds`, default 3). `1` is a single pass.
+        #[arg(long, conflicts_with = "quick")]
+        rounds: Option<usize>,
+        /// Override the maximum sub-questions for this run (config:
+        /// `[research].max_questions`, default 6).
+        #[arg(long)]
+        max_questions: Option<usize>,
+        /// Wall-clock budget for the retrieval phase, in seconds (config:
+        /// `[research].time_budget_secs`, unset by default).
+        #[arg(long)]
+        time_budget: Option<u64>,
+        /// Quick mode: a single retrieval round (the pre-multi-round
+        /// behaviour). Equivalent to `--rounds 1`.
+        #[arg(long)]
+        quick: bool,
     },
     /// Export a session transcript as a redacted, inspectable bundle.
     Export {
@@ -1403,6 +1419,10 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             no_report,
             web,
             no_web,
+            rounds,
+            max_questions,
+            time_budget,
+            quick,
         } => {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
@@ -1414,7 +1434,20 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 None
             };
             match research::options_from_config(&cwd, !no_report, !no_memory)? {
-                Some(options) => {
+                Some(mut options) => {
+                    // Per-run flag overrides beat config; config beats defaults.
+                    if quick {
+                        options.max_rounds = 1;
+                    }
+                    if let Some(rounds) = rounds {
+                        options.max_rounds = rounds.max(1);
+                    }
+                    if let Some(max_questions) = max_questions {
+                        options.max_questions = max_questions.max(1);
+                    }
+                    if let Some(seconds) = time_budget {
+                        options.time_budget = Some(std::time::Duration::from_secs(seconds));
+                    }
                     research::run_research_command(
                         &cwd,
                         &topic,

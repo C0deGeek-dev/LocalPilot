@@ -20,9 +20,9 @@ use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
-    run_research, term_overlap_relevance, AuditEntry, Bounds, CoverageVerdict, Evidence,
+    run_research_controlled, term_overlap_relevance, AuditEntry, Bounds, CoverageVerdict, Evidence,
     FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError, ResearchReport,
-    Source, SourceError, SourceSet, Synthesizer, WebAccess,
+    RunControl, Source, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -31,9 +31,6 @@ use localpilot_research::{
 /// finding's own relevance-derived value, capped here — never a single flat
 /// value applied uniformly regardless of match quality.
 const RESEARCH_CANDIDATE_CONFIDENCE_CAP: f32 = 0.3;
-
-/// Evidence snippets to take from each source per sub-question.
-const PER_SOURCE_EVIDENCE: usize = 5;
 
 /// Relevance for accepted-memory evidence: already human-reviewed (ADR-0011),
 /// so a hit is trusted at face value rather than scored — unlike a knowledge
@@ -149,6 +146,14 @@ fn parse_questions(text: &str, max_questions: usize) -> Vec<String> {
 pub struct ResearchOptions {
     /// Maximum sub-questions the run may pursue.
     pub max_questions: usize,
+    /// Maximum retrieval rounds (`1` = single-pass).
+    pub max_rounds: usize,
+    /// Evidence snippets per source per question per query.
+    pub per_source_evidence: usize,
+    /// Hard cap on total evidence snippets across the run.
+    pub max_total_evidence: usize,
+    /// Optional wall-clock budget for the retrieval phase.
+    pub time_budget: Option<Duration>,
     /// Directory the report artefact is written to.
     pub output_dir: PathBuf,
     /// Whether to write the report artefact.
@@ -177,6 +182,10 @@ pub fn options_from_config(
     );
     Ok(Some(ResearchOptions {
         max_questions: config.research.max_questions.max(1),
+        max_rounds: config.research.max_rounds.max(1),
+        per_source_evidence: config.research.per_source_evidence.max(1),
+        max_total_evidence: config.research.max_total_evidence.max(1),
+        time_budget: config.research.time_budget_secs.map(Duration::from_secs),
         output_dir,
         write_report,
         enqueue_memory,
@@ -187,15 +196,17 @@ pub fn options_from_config(
 /// Run a research pass for `topic` from the interactive surface. Web research
 /// follows the same config defaults as the subcommand (on unless
 /// `[research.web].enabled = false`), with the egress disclosure written into
-/// the transcript output.
+/// the transcript output. `stop`, when flipped true (Ctrl+C), ends the run at
+/// the next question boundary with a partial report instead of nothing.
 #[cfg(feature = "tui")]
 pub async fn run_interactive_research(
     root: &Path,
     topic: &str,
     options: &ResearchOptions,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    run_research_command(root, topic, options, None, out).await
+    run_research_command_controlled(root, topic, options, None, Some(stop), out).await
 }
 
 /// Run a research pass for `topic`, gathering across local sources and the
@@ -218,6 +229,19 @@ pub async fn run_research_command(
     web_override: Option<bool>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
+    run_research_command_controlled(root, topic, options, web_override, None, out).await
+}
+
+/// [`run_research_command`] with an optional external stop flag (Ctrl+C →
+/// partial report at the next question boundary).
+pub async fn run_research_command_controlled(
+    root: &Path,
+    topic: &str,
+    options: &ResearchOptions,
+    web_override: Option<bool>,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
     let model = ModelHandle::from_config(&config);
 
@@ -233,25 +257,36 @@ pub async fn run_research_command(
 
     let bounds = Bounds {
         max_questions: options.max_questions,
-        per_source_evidence: PER_SOURCE_EVIDENCE,
-        ..Bounds::default()
+        per_source_evidence: options.per_source_evidence,
+        max_rounds: options.max_rounds,
+        max_total_evidence: options.max_total_evidence,
+        time_budget: options.time_budget,
     };
-    let outcome = run_research(topic, &sources, &synth, bounds).await?;
-
-    for round in &outcome.rounds {
-        writeln!(
-            out,
-            "round {}: targeted {} question(s), {} new evidence ({} total) — \
-             {} covered, {} weak, {} open",
-            round.round,
-            round.targeted,
-            round.new_evidence,
-            round.total_evidence,
-            round.covered,
-            round.weak,
-            round.open
-        )?;
+    // Round summaries stream through a channel so long runs show progress as
+    // it happens, not only at the end.
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<localpilot_research::RoundSummary>();
+    let control = RunControl {
+        stop,
+        progress: Some(Arc::new(
+            move |summary: &localpilot_research::RoundSummary| {
+                let _ = progress_tx.send(summary.clone());
+            },
+        )),
+    };
+    let run = run_research_controlled(topic, &sources, &synth, bounds, control);
+    tokio::pin!(run);
+    let outcome = loop {
+        tokio::select! {
+            result = &mut run => break result?,
+            Some(summary) = progress_rx.recv() => write_round_line(out, &summary)?,
+        }
+    };
+    // The run holds no sender anymore; drain whatever raced the completion.
+    while let Ok(summary) = progress_rx.try_recv() {
+        write_round_line(out, &summary)?;
     }
+
     for note in &outcome.report.retrieval_notes {
         writeln!(out, "note: {note}")?;
     }
@@ -307,6 +342,25 @@ fn count_verdict(report: &ResearchReport, verdict: CoverageVerdict) -> usize {
         .iter()
         .filter(|coverage| coverage.verdict == verdict)
         .count()
+}
+
+fn write_round_line(
+    out: &mut dyn Write,
+    round: &localpilot_research::RoundSummary,
+) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "round {}: targeted {} question(s), {} new evidence ({} total) — \
+         {} covered, {} weak, {} open",
+        round.round,
+        round.targeted,
+        round.new_evidence,
+        round.total_evidence,
+        round.covered,
+        round.weak,
+        round.open
+    )?;
+    Ok(())
 }
 
 /// Whether any finding in `report` is backed by the `web` source. Every

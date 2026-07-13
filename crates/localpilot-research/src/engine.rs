@@ -66,12 +66,27 @@ impl Default for Bounds {
     }
 }
 
+/// A host callback receiving each completed round's summary.
+pub type ProgressFn = dyn Fn(&RoundSummary) + Send + Sync;
+
 /// External control over a running loop.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RunControl {
     /// When set and flipped true, the loop stops at the next question boundary
     /// and returns a partial (but well-formed) outcome.
     pub stop: Option<Arc<AtomicBool>>,
+    /// Called after every completed round with its summary, so a host can show
+    /// live progress on long runs. Must not block.
+    pub progress: Option<Arc<ProgressFn>>,
+}
+
+impl std::fmt::Debug for RunControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunControl")
+            .field("stop", &self.stop)
+            .field("progress", &self.progress.as_ref().map(|_| "Fn"))
+            .finish()
+    }
 }
 
 impl RunControl {
@@ -79,6 +94,12 @@ impl RunControl {
         self.stop
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
+    fn report_progress(&self, summary: Option<&RoundSummary>) {
+        if let (Some(callback), Some(summary)) = (&self.progress, summary) {
+            callback(summary);
+        }
     }
 }
 
@@ -206,6 +227,7 @@ pub async fn run_research_controlled(
                     total_evidence,
                     &states,
                 );
+                control.report_progress(rounds.last());
                 break 'rounds;
             }
             let question = states[index].question.clone();
@@ -274,6 +296,7 @@ pub async fn run_research_controlled(
             total_evidence,
             &states,
         );
+        control.report_progress(rounds.last());
         if round_new == 0 {
             break; // saturation: the round found nothing new anywhere
         }

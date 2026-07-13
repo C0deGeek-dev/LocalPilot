@@ -5,7 +5,7 @@
 //! the candidates into LocalMind's review queue happen in the binding layer
 //! (subject 04): a candidate is never auto-accepted into durable memory.
 
-use crate::{flatten_whitespace, ClaimStatus, Provenance, ResearchReport};
+use crate::{flatten_whitespace, ClaimStatus, CoverageVerdict, Provenance, ResearchReport};
 
 /// Ceiling on raw evidence rendered inline in the Markdown artefact and the
 /// review candidate. Deliberately sized *above* the largest snippet a source
@@ -88,6 +88,31 @@ pub fn render_markdown(report: &ResearchReport) -> String {
     } else {
         for question in &report.questions {
             out.push_str(&format!("- {question}\n"));
+        }
+        out.push('\n');
+    }
+
+    if !report.coverage.is_empty() {
+        out.push_str("## Coverage\n\n");
+        out.push_str(&format!(
+            "_Retrieval ran {} round(s)._\n\n",
+            report.rounds_run
+        ));
+        out.push_str("| Sub-question | Verdict | Evidence | Corroborations | Origins |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for coverage in &report.coverage {
+            let verdict = match coverage.verdict {
+                CoverageVerdict::Covered => "covered",
+                CoverageVerdict::Weak => "weak",
+                CoverageVerdict::Open => "open",
+            };
+            out.push_str(&format!(
+                "| {} | {verdict} | {} | {} | {} |\n",
+                flatten_whitespace(&coverage.question).replace('|', "\\|"),
+                coverage.evidence_count,
+                coverage.strong_evidence,
+                coverage.distinct_origins
+            ));
         }
         out.push('\n');
     }
@@ -455,5 +480,41 @@ mod tests {
         let md = render_markdown(&ResearchReport::new("empty"));
         assert!(md.contains("_None._"));
         assert!(md.contains("_No findings._"));
+    }
+
+    #[test]
+    fn coverage_table_renders_verdicts_and_rounds() {
+        let mut report = ResearchReport::new("t");
+        report.rounds_run = 2;
+        report.coverage = vec![
+            crate::QuestionCoverage {
+                question: "how do bones | joints bind".to_string(),
+                verdict: CoverageVerdict::Covered,
+                evidence_count: 4,
+                strong_evidence: 5,
+                distinct_origins: 3,
+            },
+            crate::QuestionCoverage {
+                question: "gpu skinning cost".to_string(),
+                verdict: CoverageVerdict::Open,
+                evidence_count: 0,
+                strong_evidence: 0,
+                distinct_origins: 0,
+            },
+        ];
+        let rendered = render_markdown(&report);
+        assert!(rendered.contains("## Coverage"), "{rendered}");
+        assert!(
+            rendered.contains("_Retrieval ran 2 round(s)._"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("| how do bones \\| joints bind | covered | 4 | 5 | 3 |"),
+            "pipe in the question is escaped: {rendered}"
+        );
+        assert!(
+            rendered.contains("| gpu skinning cost | open | 0 | 0 | 0 |"),
+            "{rendered}"
+        );
     }
 }

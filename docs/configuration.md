@@ -358,7 +358,11 @@ globally (`[research.web].enabled = false`).
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Whether the research surface is usable at all. Local-only research is read-only and harmless; set `false` to disable the surface entirely. |
-| `max_questions` | integer | `6` | The loop bound — the maximum sub-questions a single run may pursue. |
+| `max_questions` | integer | `6` | The loop bound — the maximum sub-questions a single run may pursue. Per-run override: `--max-questions`. |
+| `max_rounds` | integer | `3` | Maximum retrieval rounds (ADR-0078). Round 1 gathers for every sub-question; later rounds re-query only uncovered ones. `1` is the single-pass behaviour. Per-run overrides: `--rounds N`, `--quick` (= 1). |
+| `per_source_evidence` | integer | `5` | Evidence snippets taken from each source per question per query; later rounds escalate this (×2, capped ×3) for stubborn questions. |
+| `max_total_evidence` | integer | `120` | Hard cap on total evidence snippets across a run; hitting it is reported under "Retrieval notes". |
+| `time_budget_secs` | integer | _(unset)_ | Optional wall-clock budget for the retrieval phase. Unset → no time budget (round/evidence caps still bound the run). Per-run override: `--time-budget SECS`. |
 | `output_dir` | string | _(unset)_ | Directory for written report artefacts, relative to the project root. Unset → `.localpilot/research/`. |
 | `ingest_report` | bool | `false` | When a report is written, also ingest it into LocalMind's documentation index (`doc_chunk`) so research output is semantically searchable and appears in the LocalMind UI's Docs/dashboard. Off by default — research output stays a local artefact unless you opt in. Ingest is best-effort (a failure warns, never fails the run) and idempotent. `localmind ingest docs .localpilot/research` does the same thing manually. |
 

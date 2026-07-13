@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research depth is configurable and progress is visible**. New `[research]`
+  keys — `max_rounds` (default 3), `per_source_evidence` (5),
+  `max_total_evidence` (120), `time_budget_secs` (unset) — feed the retrieval
+  loop's bounds, with per-run flag overrides on the subcommand: `--rounds`,
+  `--max-questions`, `--time-budget`, and `--quick` (single-pass). Round
+  summaries now stream live as each round completes instead of printing at
+  the end, the report gains a per-question **Coverage** table (verdict,
+  evidence, corroborations, origins), and interactive `/research` Ctrl+C now
+  asks the loop to stop at the next boundary and posts the partial report —
+  coverage-so-far instead of nothing.
 - **Research evidence is deduplicated, diversity-capped, and honestly
   scored** (ADR-0079). Near-duplicate snippets fold into one (the
   duplicate's provenance is kept on the survivor and still counts as an

@@ -1534,13 +1534,22 @@ async fn run_research_prompt(
     let cancel = CancellationToken::new();
     let cwd = host.cwd;
     state.busy = true;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_stop = std::sync::Arc::clone(&stop);
     let operation = async {
         let mut output = Vec::new();
+        let run =
+            crate::research::run_interactive_research(cwd, topic, &options, run_stop, &mut output);
+        tokio::pin!(run);
         let result = tokio::select! {
-            result = crate::research::run_interactive_research(cwd, topic, &options, &mut output) => {
-                Some(result)
+            result = &mut run => Some(result),
+            () = cancel.cancelled() => {
+                // Ctrl+C asks the loop to stop at its next question boundary
+                // and waits for the partial report — coverage-so-far beats
+                // nothing on a long run.
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                Some(run.await)
             }
-            () = cancel.cancelled() => None,
         };
         Ok((output, result))
     };
