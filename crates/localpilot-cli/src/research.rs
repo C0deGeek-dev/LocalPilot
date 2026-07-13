@@ -3,8 +3,9 @@
 //! The host-neutral loop lives in `localpilot-research`; this module supplies
 //! the concrete local [`Source`]s over LocalPilot's retrieval primitives and
 //! the run orchestrator that renders a report artefact and enqueues
-//! review-gated memory candidates. Web research is added separately and stays
-//! off by default (`policies/remote-egress.md`).
+//! review-gated memory candidates. Web research is on by default — disclosed,
+//! allowlist-gated, and audited — with `--no-web` and
+//! `[research.web].enabled = false` as kill switches.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -189,41 +190,50 @@ pub fn options_from_config(
     }))
 }
 
-/// Run a **local-only** research pass for `topic`. The interactive surface uses
-/// this: web research is never reached here (it is a headless `--web` opt-in).
+/// Run a research pass for `topic` from the interactive surface. Web research
+/// follows the same config defaults as the subcommand (on unless
+/// `[research.web].enabled = false`), with the egress disclosure written into
+/// the transcript output.
 #[cfg(feature = "tui")]
-pub async fn run_local_research(
+pub async fn run_interactive_research(
     root: &Path,
     topic: &str,
     options: &ResearchOptions,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    run_research_command(root, topic, options, false, out).await
+    run_research_command(root, topic, options, None, out).await
 }
 
-/// Run a research pass for `topic`, gathering across local sources and — only
-/// when `web` is requested *and* `[research.web]` permits it — the consented,
-/// allowlisted web source. Synthesises with the model-assisted (decomposition)
+/// Run a research pass for `topic`, gathering across local sources and the
+/// disclosed, allowlist-gated web source. Web research is **on by default**;
+/// `web_override` carries a per-run override: `Some(false)` (`--no-web`) skips
+/// the web source entirely — zero egress, the URL-proposal model call
+/// included — while `Some(true)` (`--web`, kept for compatibility) behaves
+/// like the default. Synthesises with the model-assisted (decomposition)
 /// synthesizer, then (per options) writes a report artefact and enqueues
 /// review-gated memory candidates. A short human summary is written to `out`.
 ///
-/// With `web` true the egress disclosure is printed and per-session consent is
-/// recorded before any request; the source stays inert when config disables web,
-/// so `--web` can never override `[research.web].enabled = false`.
+/// When the web source is built, the egress disclosure is printed and
+/// per-session consent recorded before any request; the source stays inert
+/// when config disables web, so no flag can override
+/// `[research.web].enabled = false`.
 pub async fn run_research_command(
     root: &Path,
     topic: &str,
     options: &ResearchOptions,
-    web: bool,
+    web_override: Option<bool>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
     let model = ModelHandle::from_config(&config);
 
+    let web = web_override.unwrap_or(true);
     let mut sources = build_local_sources(root);
     if web {
         let web_source = build_web_source(root, &config, model.clone(), out)?;
         sources.push(Box::new(web_source));
+    } else {
+        writeln!(out, "web research: skipped for this run (--no-web)")?;
     }
     let synth = CliSynthesizer { model };
 
@@ -239,12 +249,12 @@ pub async fn run_research_command(
     // `WebSource::gather` returns `Ok(vec![])` — not an `Err` — both when web
     // access isn't active and when no chat model is configured (there's no
     // real search API; a model proposes candidate URLs). Neither shows up in
-    // `source_errors`, so without this check `--web` can silently contribute
-    // nothing and the run looks identical to "queried but found nothing."
+    // `source_errors`, so without this check a default-on web run can silently
+    // contribute nothing and look identical to "queried but found nothing."
     if web && !any_web_evidence(&outcome.report) {
         writeln!(
             out,
-            "note: --web requested but produced no evidence (check [research.web].enabled \
+            "note: web research produced no evidence (check [research.web].enabled \
              and that a chat model is configured)"
         )?;
     }
@@ -383,9 +393,10 @@ fn default_audit_log(root: &Path) -> PathBuf {
 ///
 /// The source is **inert** (every host resolves to [`FetchDecision::Disabled`])
 /// when `[research.web].enabled` is false, because [`WebAccess::grant_session`]
-/// is a no-op against config-off — so `--web` can never override the config
-/// kill switch. With an empty allowlist every host needs confirmation, which in
-/// v1 means skipped, so the disclosure warns that nothing will be fetched.
+/// is a no-op against config-off — so no flag can override the config kill
+/// switch. With an explicitly empty allowlist every host needs confirmation,
+/// which in v1 means skipped, so the disclosure warns that nothing will be
+/// fetched.
 fn build_web_source(
     root: &Path,
     config: &Config,
@@ -403,7 +414,12 @@ fn build_web_source(
         web_config.disallowlist.clone(),
     );
 
-    writeln!(out, "web research opt-in (egress disclosure):")?;
+    writeln!(out, "web research (egress disclosure):")?;
+    writeln!(
+        out,
+        "  web research is on by default — disable with --no-web for one run \
+         or [research.web].enabled = false in config"
+    )?;
     writeln!(
         out,
         "  sent off-machine: only the redacted sub-question text \
@@ -413,8 +429,14 @@ fn build_web_source(
         if web_config.allowlist.is_empty() {
             writeln!(
                 out,
-                "  allowlist: empty — every host requires confirmation, \
+                "  allowlist: explicitly empty — every host requires confirmation, \
                  so nothing will be fetched this run"
+            )?;
+        } else if web_config.allowlist.iter().any(|entry| entry.trim() == "*") {
+            writeln!(
+                out,
+                "  reach: open web — restrict with [research.web].allowlist, \
+                 block hosts with [research.web].disallowlist"
             )?;
         } else {
             writeln!(
@@ -1191,6 +1213,57 @@ mod tests {
         assert!(
             log.contains("decision=redirect-not-followed"),
             "the redirect is audited: {log}"
+        );
+    }
+
+    #[test]
+    fn disclosure_names_default_on_reach_and_off_switches() {
+        // Default config: web on with open-web reach. The banner must say so
+        // and name both kill switches before any request could be made.
+        let dir = tempfile::tempdir().unwrap();
+        let config = localpilot_config::Config::default();
+        let mut out = Vec::new();
+        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("on by default"), "states the posture: {text}");
+        assert!(text.contains("--no-web"), "names the run switch: {text}");
+        assert!(
+            text.contains("[research.web].enabled = false"),
+            "names the config kill switch: {text}"
+        );
+        assert!(text.contains("open web"), "states the reach: {text}");
+        assert!(
+            text.contains("egress-audit.log"),
+            "names the audit destination: {text}"
+        );
+    }
+
+    #[test]
+    fn disclosure_warns_on_explicitly_empty_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = localpilot_config::Config::default();
+        config.research.web.allowlist.clear();
+        let mut out = Vec::new();
+        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("explicitly empty"),
+            "an explicit empty allowlist is a deliberate restriction and the \
+             banner says nothing will be fetched: {text}"
+        );
+    }
+
+    #[test]
+    fn disclosure_states_disabled_when_config_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = localpilot_config::Config::default();
+        config.research.web.enabled = false;
+        let mut out = Vec::new();
+        let _source = build_web_source(dir.path(), &config, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("web research stays disabled"),
+            "config-off is disclosed loudly: {text}"
         );
     }
 

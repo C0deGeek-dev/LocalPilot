@@ -234,11 +234,14 @@ research mode; and a headless `localpilot research <topic>` subcommand
 model decomposes the topic; synthesis stays grounded in gathered evidence, so a
 finding is always backed.
 
-**Web research is off by default.** The loop is local-only unless the operator
-opts in for that run with the headless `localpilot research --web` flag, which
-prints an egress disclosure and fetches only allowlisted domains (others are
-skipped and logged), auditing every outbound request. The interactive surface is
-always local-only. See the security and privacy doc for the egress controls.
+**Web research is on by default** (ADR-0076) — research cannot rely on a small
+local model's parametric memory, so both surfaces reach the web unless told
+not to. Every web-active run prints an egress disclosure first, fetches only
+what the allowlist/disallowlist permits (skips are logged), audits every
+outbound request, and sends only the redacted sub-question off-machine.
+`--no-web` skips web for one run; `[research.web].enabled = false` turns the
+outbound path off entirely and no flag can override it. See the security and
+privacy doc for the egress controls.
 
 ## Interfaces
 
@@ -279,9 +282,10 @@ call without waiting for the model (ADR-0071). The rest:
   the job so a later `/ingest resume` continues from the chunks already written.
 - `/knowledge <query>` searches ingested knowledge; `/context <task>` builds a
   task-specific context bundle from it.
-- `/research <topic>` researches a topic across local sources once;
-  bare `/research` enters a persistent research mode. The interactive surface is
-  local-only — web research is the headless `localpilot research --web` opt-in.
+- `/research <topic>` researches a topic across local sources and the web
+  once; bare `/research` enters a persistent research mode. Web follows the
+  same defaults and disclosure as the subcommand (on unless
+  `[research.web].enabled = false`).
 - `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
   all`).
 

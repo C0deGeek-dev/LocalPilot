@@ -52,7 +52,7 @@ pub async fn discover_models(
 /// cannot produce a token, or the response is not a model listing.
 pub async fn discover_models_with_auth_provider(
     base_url: &str,
-    auth_provider: &(dyn AuthProvider),
+    auth_provider: &dyn AuthProvider,
 ) -> Result<Vec<DiscoveredModel>, ProviderError> {
     discover_models_with_auth(base_url, DiscoveryAuth::Dynamic(auth_provider)).await
 }

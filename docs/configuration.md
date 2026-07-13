@@ -349,9 +349,11 @@ autonomous loop can author a draft but can never publish one. See
 
 ### `[research]`
 
-The `/research` mode and `localpilot research` subcommand (ADR-0060). Local
-research (repo knowledge + accepted memory) is read-only and never leaves the
-machine; the **web** half is off by default and gated separately.
+The `/research` mode and `localpilot research` subcommand (ADR-0060, amended
+by ADR-0076). Local research (repo knowledge + accepted memory) is read-only
+and never leaves the machine; the **web** half is on by default — disclosed,
+allowlist-gated, and audited — and disableable per run (`--no-web`) or
+globally (`[research.web].enabled = false`).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -362,22 +364,23 @@ machine; the **web** half is off by default and gated separately.
 
 #### `[research.web]`
 
-The outbound web-egress gate (`policies/remote-egress.md`). Every key defaults to
-the most restrictive value, and `enabled = false` removes the entire outbound
-path regardless of the others. Per-session consent is enforced at runtime on top
-of this static config (the headless `research --web` opt-in) — config permits, the
-operator still opts in for that run.
+The outbound web-egress gate. Web research is **on by default with open-web
+reach** (ADR-0076 — a ratified, documented exception to the default-off rule
+of `policies/remote-egress.md`; disclosure, audit, and kill switches hold
+unchanged). `enabled = false` removes the entire outbound path regardless of
+the other keys and cannot be overridden by any flag; `--no-web` skips the web
+source for one run.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch for outbound web research. While `false`, no web request is ever made and the loop runs local-only — this is the kill switch a runtime opt-in cannot override. |
-| `allowlist` | array of string | `[]` | Domains that may be fetched (exact host or a subdomain). Empty → every host is skipped, so nothing is fetched. There is no implicit trust. `*` matches every host (allow the open web); `*.example.com` matches `example.com` and any subdomain. |
-| `disallowlist` | array of string | `[]` | Domains that are always blocked, even when the allowlist would permit them. Checked **before** the allowlist, so a match is skipped outright. Same `*` / `*.example.com` patterns as `allowlist`. Empty → blocks nothing. Pair `allowlist = ["*"]` with a `disallowlist` to allow broad access while carving out specific domains. |
+| `enabled` | bool | `true` | Master switch for outbound web research. While `false`, no web request is ever made and the loop runs local-only — this is the kill switch no flag can override. |
+| `allowlist` | array of string | `["*"]` | Domains that may be fetched (exact host or a subdomain). **Unset** takes the open-web default; an **explicitly empty** list (`allowlist = []`) means every host is skipped, so nothing is fetched — unset and empty are different statements. `*` matches every host; `*.example.com` matches `example.com` and any subdomain. |
+| `disallowlist` | array of string | `[]` | Domains that are always blocked, even when the allowlist would permit them (`*` included). Checked **before** the allowlist, so a match is skipped outright. Same `*` / `*.example.com` patterns as `allowlist`. Empty → blocks nothing. Under the open-web default this is the main restriction tool. |
 | `audit_log` | string | _(unset)_ | Path (relative to the project root) of the egress audit log recording every outbound request and skip. Unset → `.localpilot/research/egress-audit.log`. |
 
-Web research is reachable only via the headless `localpilot research --web` flag,
-which prints an egress disclosure and records the per-session opt-in. The
-interactive `/research` surface is always local-only. See
+Every web-active run — subcommand and interactive `/research` alike — prints
+an egress disclosure (posture, reach, off-switches, audit path) before any
+request and records a per-session consent that is never persisted. See
 [07-security-and-privacy.md](07-security-and-privacy.md) §Web Research Egress.
 
 ## Example
@@ -427,8 +430,9 @@ enabled = true
 max_questions = 6
 # Also index written reports into LocalMind so they show up in its UI (off by default).
 ingest_report = false
-# Web research stays off until you enable it and opt in per run with `--web`.
+# Web research is on by default with open-web reach; carve out hosts with the
+# disallowlist, or turn it off here (`--no-web` skips it for a single run).
 [research.web]
-enabled = false
-allowlist = []
+enabled = true
+disallowlist = ["reddit.com", "*.pinterest.com"]
 ```

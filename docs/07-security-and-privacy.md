@@ -410,25 +410,32 @@ as patch promotion:
 
 ## Web Research Egress
 
-Research (ADR-0060) is local-first. The loop gathers from the repo's ingested
-knowledge and accepted memory — read-only, on-machine — and reaches the **web**
-only behind an explicit per-run opt-in. The egress path satisfies the ecosystem
-remote-egress policy (`policies/remote-egress.md`) by construction:
+Research (ADR-0060, amended by ADR-0076) gathers from the repo's ingested
+knowledge and accepted memory — read-only, on-machine — **and the web, on by
+default**: a local model's parametric memory cannot carry a research run, so
+reach is the default and the boundary does the protecting. This is a ratified,
+documented exception to the default-off rule of the ecosystem remote-egress
+policy (`policies/remote-egress.md`); the policy's other four rules hold by
+construction:
 
-- **Default-off, disableable.** `[research.web] enabled` defaults `false`; the
-  unset block leaves the loop local-only. `enabled = false` removes the entire
-  outbound path and is the kill switch — a runtime opt-in can never override it
-  (the consent grant is a no-op against config-off, enforced and tested).
-- **Explicit, loud opt-in.** Web research is reachable only via the headless
-  `localpilot research --web` flag, which first prints an egress disclosure — what
-  is sent (only the redacted sub-question), the allowlisted domains, and the
-  audit-log path — then records a per-session opt-in that is **never persisted**,
-  so every new run starts denied. The interactive `/research` surface is always
-  local-only.
-- **Allowlist-only.** Each candidate URL's host is parsed with a real URL parser
-  and checked against `[research.web] allowlist` (exact host or subdomain). An
-  allowlisted host is fetched (bounded bytes and timeouts); every other host is
-  **skipped and logged**, never fetched. An empty allowlist fetches nothing.
+- **Disableable, twice.** `--no-web` skips the web source for one run — no
+  fetch, and no URL-proposal model call. `[research.web] enabled = false`
+  removes the entire outbound path and is the absolute kill switch — no flag
+  can override it (the consent grant is a no-op against config-off, enforced
+  and tested).
+- **Loud disclosure on every web-active run, both surfaces.** The subcommand
+  and interactive `/research` print the same egress disclosure before any
+  request: the default-on posture and both off-switches, what is sent (only
+  the redacted sub-question), the effective reach, blocked domains, and the
+  audit-log path. The per-session consent is recorded after the disclosure
+  and is **never persisted**.
+- **Allowlist-gated.** Each candidate URL's host is parsed with a real URL
+  parser and checked against `[research.web] allowlist`. Unset means `["*"]`
+  — the open web — while an **explicitly** empty list means every host needs
+  confirmation, so nothing is fetched (unset and empty are different user
+  statements). An allowed host is fetched (bounded bytes and timeouts); every
+  other host is **skipped and logged**, never fetched. `disallowlist` beats
+  the allowlist, `*` included (ADR-0068).
 - **Redirects are never followed.** The fetch client uses a no-redirect policy,
   so an allowlisted host that returns a 3xx cannot bounce the request to a
   non-allowlisted (or internal) host. A redirect is audited
@@ -454,10 +461,11 @@ decision=allowed host=docs.rs url=https://docs.rs/tokio question=how does tokio 
 
 ### Two different network surfaces
 
-Research web egress (above) is the **allowlisted, audited, redacted** surface,
-default-off and reachable only via the loud `research --web` opt-in. It is *not*
-the only way the agent can touch the network, and the others are deliberately
-looser — know the difference:
+Research web egress (above) is the **allowlisted, audited, redacted** surface —
+on by default since ADR-0076, disclosed on every run, and disableable per run
+(`--no-web`) or globally (`enabled = false`). It is *not* the only way the
+agent can touch the network, and the others are deliberately looser — know the
+difference:
 
 - **The builtin `fetch` tool** carries `Effect::Network` and no host allowlist:
   under the `relaxed` permission profile an allowlisted `fetch` reaches **any**

@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0076: Research Web Egress Is On By Default — Disclosed, Audited, Disableable — On Both Surfaces
+
+Status: accepted. Amends ADR-0060 point 5 (web egress off by default,
+subcommand-only) after field evidence that default-off research is
+self-defeating for the product's job: a local model's parametric memory
+cannot carry a research run, and a run that silently stops at whatever the
+local stores contain reads as shallow rather than safe. The product-owner
+ratified flipping the default; the egress *boundary* does not move.
+
+1. **On by default, open reach by default.** `[research.web].enabled`
+   defaults to `true`, and an unset allowlist defaults to `["*"]` (open web).
+   An **explicitly** empty `allowlist = []` keeps the old meaning — every
+   host needs confirmation, so nothing is fetched in v1 — because unset and
+   empty are different user statements: absence takes the product default,
+   a written empty list is a deliberate restriction.
+2. **Both surfaces, same posture.** Interactive `/research` now runs the same
+   web-enabled path as the subcommand (amending the interactive-local-only
+   scoping ADR-0060 inherited from its plan), printing the same disclosure
+   into the transcript. One research surface, one egress posture.
+3. **The kill switches are two, and one is absolute.** `--no-web` skips the
+   web source for a run — no fetch, no URL-proposal model call.
+   `[research.web].enabled = false` removes the outbound path entirely and
+   cannot be overridden by any flag: `WebAccess::grant_session` remains a
+   no-op against config-off, so the guarantee is structural, not
+   conventional. `--web` is kept as a compatibility no-op.
+4. **Everything the 2026-06-30 security review pinned still holds.**
+   Disallowlist beats allowlist including `*` (ADR-0068); only the redacted
+   sub-question ever leaves the machine; every outbound request (and every
+   skipped host and unfollowed redirect) is audited one line each to the
+   egress audit log, whose default path applies whenever web is active;
+   redirects are never followed; fetches stay time- and size-bounded.
+5. **The disclosure is the consent carrier.** Every web-active run prints,
+   before any request: the default-on posture and both off-switches, what
+   egresses, the effective reach ("open web" under `*`, the domain list
+   otherwise, or the explicit-empty warning), disallowlist carve-outs, and
+   the audit-log path. Per-session consent (`grant_session`) is recorded
+   after the disclosure rather than after a `--web` flag.
+
+This is a ratified, documented exception to the default-off rule (rule 1) of
+the ecosystem remote-egress policy; the policy's other four rules —
+explicit control, disclosure, auditability, kill switch — are unchanged and
+load-bearing.
+
 ## ADR-0075: Web Evidence Is Reduced To Markdown And Carried In Full, With Truncation As A Loud Safety Net
 
 Status: accepted. Refines ADR-0067/0072 after the third and fourth rounds of

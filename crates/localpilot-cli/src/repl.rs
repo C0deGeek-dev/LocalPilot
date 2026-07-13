@@ -1507,9 +1507,10 @@ fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::R
     }
 }
 
-/// Run a local research pass for `topic` and post its output to the transcript.
-/// Local-only: web research is reached through the headless `research --web`
-/// path, not the interactive surface. The pass calls the model provider —
+/// Run a research pass for `topic` and post its output to the transcript.
+/// Web research follows the same config defaults as the subcommand (on unless
+/// `[research.web].enabled = false`), with the egress disclosure landing in
+/// the transcript before any request. The pass calls the model provider —
 /// potentially several sequential requests, each bounded only by the provider
 /// timeout — so it is driven through the event pump: the UI stays live and
 /// Ctrl+C cancels (dropping the in-flight research future).
@@ -1536,7 +1537,7 @@ async fn run_research_prompt(
     let operation = async {
         let mut output = Vec::new();
         let result = tokio::select! {
-            result = crate::research::run_local_research(cwd, topic, &options, &mut output) => {
+            result = crate::research::run_interactive_research(cwd, topic, &options, &mut output) => {
                 Some(result)
             }
             () = cancel.cancelled() => None,

@@ -138,8 +138,10 @@ enum Command {
         #[command(subcommand)]
         command: KnowledgeCommand,
     },
-    /// Research a topic across local sources, writing a report and review-gated
-    /// memory candidates. Web research is off unless explicitly enabled.
+    /// Research a topic across local sources and the web, writing a report and
+    /// review-gated memory candidates. Web research is on by default —
+    /// disclosed, allowlist-gated, and audited; disable per run with --no-web
+    /// or globally with `[research.web].enabled = false`.
     Research {
         /// The topic or question to research.
         topic: String,
@@ -149,12 +151,15 @@ enum Command {
         /// Do not write a report artefact to the research output directory.
         #[arg(long)]
         no_report: bool,
-        /// Opt in to web research for this run. Prints an egress disclosure, then
-        /// fetches only allowlisted hosts (others are skipped and logged) and
-        /// audits every outbound request. Off by default; also requires
-        /// `[research.web].enabled = true` in config.
-        #[arg(long)]
+        /// Explicitly request web research. Web is already on by default, so
+        /// this is a no-op kept for compatibility; it still cannot override
+        /// `[research.web].enabled = false`.
+        #[arg(long, conflicts_with = "no_web")]
         web: bool,
+        /// Skip web research for this run: no outbound request is made and no
+        /// candidate URL is proposed.
+        #[arg(long)]
+        no_web: bool,
     },
     /// Export a session transcript as a redacted, inspectable bundle.
     Export {
@@ -1397,13 +1402,27 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             no_memory,
             no_report,
             web,
+            no_web,
         } => {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();
+            let web_override = if no_web {
+                Some(false)
+            } else if web {
+                Some(true)
+            } else {
+                None
+            };
             match research::options_from_config(&cwd, !no_report, !no_memory)? {
                 Some(options) => {
-                    research::run_research_command(&cwd, &topic, &options, web, &mut stdout)
-                        .await?;
+                    research::run_research_command(
+                        &cwd,
+                        &topic,
+                        &options,
+                        web_override,
+                        &mut stdout,
+                    )
+                    .await?;
                 }
                 None => writeln!(stdout, "research is disabled ([research].enabled = false)")?,
             }

@@ -136,7 +136,7 @@ comparison on one model, not a model claim.
 | `localpilot models` | Models reported by configured OpenAI-compatible servers |
 | `localpilot session list` | Find, export, resume, or prune durable sessions |
 | `localpilot harness …` | Rule-enforced intake, planning, feature work, and resume |
-| `localpilot research` | Research a topic across local sources (web off by default); writes a report and review-gated memory candidates |
+| `localpilot research` | Research a topic across local sources and the web (on by default — disclosed, allowlist-gated, audited; `--no-web` skips it); writes a report and review-gated memory candidates |
 | `localpilot doctor` | Diagnose providers, credentials, tools, trust, and configuration |
 
 Additional surfaces include MCP tools, `rpc`, `acp`, project knowledge ingestion,

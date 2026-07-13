@@ -24,7 +24,8 @@ which maps every area to its owning doc.
   (headless) drive one local-first loop that writes a report and review-gated
   memory candidates (ADR-0060). Configure it under `[research]`; see
   [`docs/configuration.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md).
-- **Web egress** — off by default; reachable only via the headless
-  `localpilot research --web` opt-in (disclosed, allowlist-only, audited,
-  disableable). See
+- **Web egress** — on by default with open-web reach (ADR-0076): disclosed on
+  every run, allowlist/disallowlist-gated, audited, and disableable per run
+  (`--no-web`) or globally (`[research.web].enabled = false`). Both surfaces
+  (interactive and headless) share the posture. See
   [`docs/07-security-and-privacy.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md).

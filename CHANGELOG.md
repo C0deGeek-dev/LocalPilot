@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Web research is now on by default** (ADR-0076). Research cannot rely on a
+  small local model's parametric memory, so `[research.web].enabled` defaults
+  to `true` with open-web reach (an unset allowlist now means `["*"]`), and
+  the interactive `/research` surface runs the same web-enabled path as the
+  subcommand. Every web-active run still prints the egress disclosure first,
+  audits every request, sends only the redacted sub-question off-machine,
+  and never follows redirects; `disallowlist` still beats the allowlist.
+  New `--no-web` flag skips web for one run; `[research.web].enabled = false`
+  remains the absolute kill switch no flag can override; `--web` is now a
+  compatibility no-op. **Migration**: an explicitly written `allowlist = []`
+  keeps its old meaning (nothing is fetched); users who relied on the old
+  default-off posture should set `enabled = false` or pass `--no-web`.
 - Web research findings read as prose, not raw HTML. A fetched page used to
   become evidence as its raw markup: a naive tag strip left inline
   `<script>`/`<style>` bodies behind as "junk", and the length budget was

@@ -86,9 +86,10 @@ impl Default for DiscoveryConfig {
 ///
 /// Local research (repo, accepted memory, ingested knowledge) is available by
 /// default — it is read-only and never leaves the machine. The **web** half is
-/// off by default and gated by [`ResearchWebConfig`]: an absent `[research]`
-/// block leaves outbound web research disabled, matching LocalPilot's
-/// local-first, no-telemetry posture (`policies/remote-egress.md`).
+/// also on by default and gated by [`ResearchWebConfig`]: research cannot rely
+/// on a small local model's parametric memory, so reach is the default and the
+/// egress stays disclosed, audited, and disableable (a documented exception to
+/// the default-off rule of `policies/remote-egress.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResearchConfig {
@@ -107,7 +108,8 @@ pub struct ResearchConfig {
     /// artefact unless you opt in; `localmind ingest docs` remains available to
     /// do this manually. Only takes effect when a report is written.
     pub ingest_report: bool,
-    /// Outbound web-research controls. Off by default.
+    /// Outbound web-research controls. On by default, disclosed and audited;
+    /// `enabled = false` removes the outbound path entirely.
     pub web: ResearchWebConfig,
 }
 
@@ -123,24 +125,30 @@ impl Default for ResearchConfig {
     }
 }
 
-/// Outbound web-research controls — the egress gate (`policies/remote-egress.md`).
+/// Outbound web-research controls — the egress gate.
 ///
-/// Every field defaults to the most restrictive value: web research is **off**,
-/// no domain is pre-trusted, and there is no audit path until one is set. The
-/// off-switch (`enabled = false`) removes the entire outbound path regardless of
-/// the other fields. Per-session consent is enforced at runtime on top of this
-/// static config — config permits, the operator still confirms.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Web research is **on by default with open-web reach**: research cannot rely
+/// on a small local model's parametric memory, so an absent `[research.web]`
+/// block means `enabled = true` with an allowlist of `["*"]`. This is a
+/// documented, ratified exception to the default-off rule of
+/// `policies/remote-egress.md`; the other four rules hold unchanged — every
+/// run is disclosed up front, every request is audited, and two kill switches
+/// remain (`enabled = false` here, `--no-web` per run). The off-switch
+/// (`enabled = false`) removes the entire outbound path regardless of the
+/// other fields and cannot be overridden at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResearchWebConfig {
-    /// Master switch for outbound web research. Default `false`. While `false`,
-    /// no web request is ever made and the research loop runs local-only.
+    /// Master switch for outbound web research. Default `true`. While `false`,
+    /// no web request is ever made and the research loop runs local-only —
+    /// no flag can override it.
     pub enabled: bool,
-    /// Domains that may be fetched without a per-fetch confirmation, e.g.
-    /// `docs.rs`. Empty (the default) means **every** domain must be confirmed
-    /// per fetch — there is no implicit trust. An entry of `*` matches every
-    /// host (allow the open web); `*.example.com` matches `example.com` and any
-    /// subdomain.
+    /// Domains that may be fetched without a per-fetch confirmation. Defaults
+    /// to `["*"]` — the open web — when the key is absent. An **explicitly
+    /// empty** list (`allowlist = []`) means every domain must be confirmed
+    /// per fetch — there is no implicit trust. `*` matches every host;
+    /// `*.example.com` matches `example.com` and any subdomain; a bare domain
+    /// matches itself and its subdomains.
     pub allowlist: Vec<String>,
     /// Domains that are always blocked, even when the allowlist would permit
     /// them. Checked **before** the allowlist, so a disallowlisted host is
@@ -153,6 +161,17 @@ pub struct ResearchWebConfig {
     /// every outbound request. `None` lets the host choose its default
     /// (`.localpilot/research/egress-audit.log`).
     pub audit_log: Option<String>,
+}
+
+impl Default for ResearchWebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowlist: vec!["*".to_string()],
+            disallowlist: Vec::new(),
+            audit_log: None,
+        }
+    }
 }
 
 /// The outward half of the human-gated self-improvement loop (ADR-0034 / ADR-0053):
@@ -1148,6 +1167,33 @@ mod tests {
     #[test]
     fn cadence_defaults_to_step() {
         assert_eq!(Cadence::default(), Cadence::Step);
+    }
+
+    #[test]
+    fn research_web_defaults_on_with_open_reach() {
+        let config = ResearchWebConfig::default();
+        assert!(config.enabled, "web research is on by default");
+        assert_eq!(config.allowlist, ["*"], "unset allowlist means open web");
+        assert!(config.disallowlist.is_empty());
+        assert!(config.audit_log.is_none());
+        // An absent `[research.web]` block takes the same defaults.
+        let parsed: ResearchWebConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn research_web_explicit_empty_allowlist_is_preserved() {
+        // An explicitly written `allowlist = []` is a deliberate restriction
+        // and must not be replaced by the open-web default: unset and empty
+        // are different statements.
+        let parsed: ResearchWebConfig = serde_json::from_value(json!({ "allowlist": [] })).unwrap();
+        assert!(parsed.enabled);
+        assert!(parsed.allowlist.is_empty());
+        // The kill switch parses independently of reach.
+        let parsed: ResearchWebConfig =
+            serde_json::from_value(json!({ "enabled": false })).unwrap();
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.allowlist, ["*"]);
     }
 
     #[test]
