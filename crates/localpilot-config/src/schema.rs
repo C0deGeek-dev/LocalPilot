@@ -815,7 +815,9 @@ impl ClaimGate {
 }
 
 /// Harness behavior.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally not derived: `GuidanceConfig` carries an `f32`
+// threshold, and `f32: !Eq` (same reasoning as the root `Config`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HarnessConfig {
     pub mode: Mode,
@@ -879,6 +881,9 @@ pub struct HarnessConfig {
     /// `go test ./...`); set this for a non-standard build/test invocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_command: Option<String>,
+    /// Pre-brief guidance gate for `harness intake`. Off by default (features
+    /// ship off); `--guidance` / `--no-guidance` override it per run.
+    pub guidance: GuidanceConfig,
 }
 
 impl Default for HarnessConfig {
@@ -898,6 +903,39 @@ impl Default for HarnessConfig {
             teardown_sweep: false,
             verify_before_done: false,
             verify_command: None,
+            guidance: GuidanceConfig::default(),
+        }
+    }
+}
+
+/// The pre-brief guidance gate over `harness intake` (`[harness.guidance]`):
+/// before a brief is written, a bounded model call enumerates the idea's
+/// decision axes and a deterministic score (resolved ÷ total) is compared to
+/// `threshold` — below it, intake pauses to ask about the open axes instead
+/// of writing a brief that encodes guesses. The score is an inspectable
+/// signal with a known failure mode (an axis the model never lists cannot
+/// count against it), never proof the idea is fully specified.
+// `Eq` is intentionally not derived: `threshold` is an `f32`, and `f32: !Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuidanceConfig {
+    /// Master switch. Off by default; `--guidance` / `--no-guidance` on
+    /// `harness intake` override it per run.
+    pub enabled: bool,
+    /// Minimum guidance score that proceeds straight to a brief. Clamped to
+    /// `0.0..=1.0` at use. Default `0.7`.
+    pub threshold: f32,
+    /// Cap on clarification questions per intake run (the most consequential
+    /// open axes ask first). Floored at 1 at use. Default `5`.
+    pub max_questions: usize,
+}
+
+impl Default for GuidanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: 0.7,
+            max_questions: 5,
         }
     }
 }

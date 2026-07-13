@@ -640,3 +640,35 @@ proptest! {
         prop_assert_eq!(cfg.provider.default, expected);
     }
 }
+
+#[test]
+fn guidance_gate_defaults_off_and_parses_from_toml() -> TestResult {
+    isolated(|jail| {
+        // Defaults: the gate ships off with a sane threshold and question cap.
+        let empty = write(jail, "empty.toml", "")?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(empty),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(!cfg.harness.guidance.enabled);
+        assert!((cfg.harness.guidance.threshold - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.harness.guidance.max_questions, 5);
+
+        // A project config overrides every field.
+        let project = write(
+            jail,
+            "project.toml",
+            "[harness.guidance]\nenabled = true\nthreshold = 0.5\nmax_questions = 3\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(cfg.harness.guidance.enabled);
+        assert!((cfg.harness.guidance.threshold - 0.5).abs() < f32::EPSILON);
+        assert_eq!(cfg.harness.guidance.max_questions, 3);
+        Ok(())
+    })
+}

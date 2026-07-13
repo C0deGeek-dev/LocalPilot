@@ -821,6 +821,20 @@ enum HarnessCommand {
         /// Provider id; defaults to the configured default provider.
         #[arg(long)]
         provider: Option<String>,
+        /// Run the pre-brief guidance assessment for this run (overrides
+        /// `[harness.guidance] enabled`). The score is an inspectable signal,
+        /// not proof the idea is fully specified.
+        #[arg(long, conflicts_with = "no_guidance")]
+        guidance: bool,
+        /// Skip the pre-brief guidance assessment for this run (overrides
+        /// `[harness.guidance] enabled`).
+        #[arg(long)]
+        no_guidance: bool,
+        /// Below the guidance threshold, proceed to the brief anyway and let
+        /// the model use its judgment for the open decisions (recorded in the
+        /// intake record).
+        #[arg(long)]
+        assume_judgment: bool,
     },
     /// Turn brief.md into a PROGRESS.md plan.
     Plan {
@@ -1138,9 +1152,32 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                     idea,
                     model,
                     provider,
+                    guidance,
+                    no_guidance,
+                    assume_judgment,
                 } => {
-                    harness_cmd::intake(&cwd, &model, provider.as_deref(), &idea).await?;
-                    println!("wrote brief.md");
+                    let guidance_override = match (guidance, no_guidance) {
+                        (true, _) => Some(true),
+                        (_, true) => Some(false),
+                        _ => None,
+                    };
+                    let mut stdout = io::stdout().lock();
+                    let outcome = harness_cmd::intake(
+                        &cwd,
+                        &model,
+                        provider.as_deref(),
+                        &idea,
+                        guidance_override,
+                        assume_judgment,
+                        &mut stdout,
+                    )
+                    .await?;
+                    stdout.flush()?;
+                    drop(stdout);
+                    match outcome {
+                        harness_cmd::IntakeOutcome::BriefWritten => println!("wrote brief.md"),
+                        harness_cmd::IntakeOutcome::NeedsGuidance => {}
+                    }
                 }
                 HarnessCommand::Plan { model, provider } => {
                     harness_cmd::plan(&cwd, &model, provider.as_deref()).await?;

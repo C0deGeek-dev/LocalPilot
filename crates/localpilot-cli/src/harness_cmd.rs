@@ -30,6 +30,13 @@ mode = \"agent\"\n\
 attempts_per_step = 3\n\
 auto_commit = true\n\
 # test_command = \"cargo test\"\n\n\
+# Pre-brief guidance gate for `harness intake`: scores how much load-bearing\n\
+# product guidance the idea contains and pauses to ask below the threshold\n\
+# instead of writing a brief that encodes guesses. Opt-in.\n\
+# [harness.guidance]\n\
+# enabled = true\n\
+# threshold = 0.7\n\
+# max_questions = 5\n\n\
 [context]\n\
 project_analysis = true\n\n\
 [docs]\n\
@@ -252,6 +259,41 @@ fn provider_for(
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))
 }
 
+/// How a below-threshold guidance assessment resolves the open decisions.
+pub enum Clarification<'a> {
+    /// Interactive surface: ask each open question on `out` and read one
+    /// answer per line from the reader; an empty answer delegates that axis
+    /// to the model's judgment.
+    Ask(&'a mut dyn std::io::BufRead),
+    /// Non-interactive surface: emit a structured JSON report naming the open
+    /// axes on `out` and stop without writing a brief.
+    Emit,
+    /// Proceed to the brief anyway, recording that the open decisions were
+    /// delegated to the model's judgment.
+    AssumeJudgment,
+}
+
+/// Guidance-gate parameters for one intake run. `None` in [`intake_flow`]
+/// means the gate is off and intake behaves exactly as before.
+pub struct GuidanceGate<'a> {
+    /// Minimum score that proceeds straight to a brief (clamped to 0..=1).
+    pub threshold: f32,
+    /// Cap on questions asked/reported (floored at 1).
+    pub max_questions: usize,
+    /// What to do below the threshold.
+    pub clarification: Clarification<'a>,
+}
+
+/// The result of a gated intake run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeOutcome {
+    /// `brief.md` was written.
+    BriefWritten,
+    /// The guidance gate paused the run: open questions were reported and no
+    /// brief was written.
+    NeedsGuidance,
+}
+
 /// Run intake: an idea becomes `brief.md`, with an `.localpilot/intake.jsonl`
 /// record.
 ///
@@ -262,14 +304,197 @@ pub async fn intake(
     model: &str,
     provider_id: Option<&str>,
     idea: &str,
-) -> anyhow::Result<()> {
+    guidance_override: Option<bool>,
+    assume_judgment: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<IntakeOutcome> {
+    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
     let provider = provider_for(root, provider_id)?;
-    let brief = run_intake(provider.as_ref(), model, idea).await?;
-    std::fs::write(root.join("brief.md"), brief.render())?;
+    let enabled = guidance_override.unwrap_or(config.harness.guidance.enabled);
+    if !enabled {
+        return intake_flow(root, provider.as_ref(), model, idea, None, out).await;
+    }
+    // Interactive Q&A needs a human on both ends; anything else gets the
+    // structured JSON report (the non-TTY convention) unless the caller
+    // explicitly delegated judgment.
+    let interactive = {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    };
+    let mut stdin_lines;
+    let clarification = if assume_judgment {
+        Clarification::AssumeJudgment
+    } else if interactive {
+        stdin_lines = std::io::BufReader::new(std::io::stdin());
+        Clarification::Ask(&mut stdin_lines)
+    } else {
+        Clarification::Emit
+    };
+    let gate = GuidanceGate {
+        threshold: config.harness.guidance.threshold,
+        max_questions: config.harness.guidance.max_questions,
+        clarification,
+    };
+    intake_flow(root, provider.as_ref(), model, idea, Some(gate), out).await
+}
 
+/// The intake flow with an injectable provider and clarification source, so
+/// every leg is testable offline. With `gate: None` the behaviour (and the
+/// `intake.jsonl` record shape) is identical to pre-gate intake.
+pub(crate) async fn intake_flow(
+    root: &Path,
+    provider: &dyn ModelProvider,
+    model: &str,
+    idea: &str,
+    gate: Option<GuidanceGate<'_>>,
+    out: &mut dyn Write,
+) -> anyhow::Result<IntakeOutcome> {
+    let Some(gate) = gate else {
+        let brief = run_intake(provider, model, idea).await?;
+        std::fs::write(root.join("brief.md"), brief.render())?;
+        append_intake_record(
+            root,
+            serde_json::json!({ "idea": idea, "name": brief.name }),
+        )?;
+        return Ok(IntakeOutcome::BriefWritten);
+    };
+
+    let threshold = gate.threshold.clamp(0.0, 1.0);
+    let assessment = localpilot_harness::assess_guidance(provider, model, idea).await?;
+    let mut guidance = serde_json::json!({
+        "score": assessment.score,
+        "threshold": threshold,
+        "axes": assessment.axes,
+    });
+
+    if assessment.score >= threshold {
+        let brief = run_intake(provider, model, idea).await?;
+        std::fs::write(root.join("brief.md"), brief.render())?;
+        append_intake_record(
+            root,
+            serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
+        )?;
+        return Ok(IntakeOutcome::BriefWritten);
+    }
+
+    let open: Vec<_> = assessment
+        .open_axes()
+        .into_iter()
+        .take(gate.max_questions.max(1))
+        .cloned()
+        .collect();
+    let questions: Vec<String> = open.iter().map(question_for).collect();
+    guidance["questions"] = serde_json::json!(questions);
+
+    match gate.clarification {
+        Clarification::Emit => {
+            let report = serde_json::json!({
+                "status": "needs_guidance",
+                "score": assessment.score,
+                "threshold": threshold,
+                "open": open
+                    .iter()
+                    .zip(&questions)
+                    .map(|(axis, question)| {
+                        serde_json::json!({ "axis": axis.axis, "question": question })
+                    })
+                    .collect::<Vec<_>>(),
+                "axes": assessment.axes,
+                "hint": "answer the questions by re-running intake on a terminal, fold the \
+                         decisions into --idea, or re-run with --assume-judgment to let the \
+                         model decide",
+            });
+            writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
+            append_intake_record(
+                root,
+                serde_json::json!({ "idea": idea, "guidance": guidance }),
+            )?;
+            Ok(IntakeOutcome::NeedsGuidance)
+        }
+        Clarification::AssumeJudgment => {
+            guidance["assumed_judgment"] = serde_json::json!(true);
+            let brief = run_intake(provider, model, idea).await?;
+            std::fs::write(root.join("brief.md"), brief.render())?;
+            append_intake_record(
+                root,
+                serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
+            )?;
+            Ok(IntakeOutcome::BriefWritten)
+        }
+        Clarification::Ask(input) => {
+            writeln!(
+                out,
+                "guidance score {:.2} is below the threshold {threshold:.2}: {} decision(s) \
+                 the idea does not settle. Answer each question, or press Enter to let the \
+                 model use its judgment for that one.",
+                assessment.score,
+                open.len(),
+            )?;
+            let mut answers: Vec<(String, String)> = Vec::new();
+            for (axis, question) in open.iter().zip(&questions) {
+                write!(out, "\n{question}\n> ")?;
+                out.flush()?;
+                let mut answer = String::new();
+                input.read_line(&mut answer)?;
+                let answer = answer.trim().to_string();
+                if !answer.is_empty() {
+                    answers.push((axis.axis.clone(), answer));
+                }
+            }
+            guidance["answers"] = serde_json::json!(answers
+                .iter()
+                .map(|(axis, answer)| serde_json::json!({ "axis": axis, "answer": answer }))
+                .collect::<Vec<_>>());
+
+            let (brief_idea, rescored);
+            if answers.is_empty() {
+                // Every question was delegated — same contract as
+                // --assume-judgment, recorded the same way.
+                guidance["assumed_judgment"] = serde_json::json!(true);
+                brief_idea = idea.to_string();
+                rescored = None;
+            } else {
+                let decisions = answers
+                    .iter()
+                    .map(|(axis, answer)| format!("- {axis}: {answer}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                brief_idea = format!("{idea}\n\nDecisions provided by the user:\n{decisions}");
+                // One bounded re-assessment records whether the answers
+                // settled the open axes; it informs the record, it does not
+                // re-gate (no loop).
+                let second =
+                    localpilot_harness::assess_guidance(provider, model, &brief_idea).await?;
+                rescored = Some(second.score);
+            }
+            if let Some(score) = rescored {
+                guidance["rescore"] = serde_json::json!(score);
+            }
+            let brief = run_intake(provider, model, &brief_idea).await?;
+            std::fs::write(root.join("brief.md"), brief.render())?;
+            append_intake_record(
+                root,
+                serde_json::json!({ "idea": idea, "name": brief.name, "guidance": guidance }),
+            )?;
+            Ok(IntakeOutcome::BriefWritten)
+        }
+    }
+}
+
+/// The question asked for an open axis: the model's own settling question
+/// when it provided one, otherwise a generic prompt naming the axis.
+fn question_for(axis: &localpilot_harness::DecisionAxis) -> String {
+    if axis.question.trim().is_empty() {
+        format!("What should be decided about: {}?", axis.axis)
+    } else {
+        axis.question.clone()
+    }
+}
+
+/// Append one record to the `.localpilot/intake.jsonl` provenance log.
+fn append_intake_record(root: &Path, record: serde_json::Value) -> anyhow::Result<()> {
     let intake_dir = root.join(".localpilot");
     std::fs::create_dir_all(&intake_dir)?;
-    let record = serde_json::json!({ "idea": idea, "name": brief.name });
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
     use std::io::Write as _;
@@ -798,6 +1023,240 @@ fn repo_summary(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use localpilot_llm::FakeProvider;
+
+    const VALID_BRIEF: &str = "# Brief: widget\n\n## Summary\n\nBuild the widget.\n\n\
+## Requirements\n\n- It works\n\n## Constraints\n\n- Small\n\n\
+## Non-Goals\n\n- Everything else\n\n## Acceptance Criteria\n\n- A test passes\n";
+
+    const LOW_GUIDANCE: &str = r#"{"axes":[
+        {"axis":"scope","resolved":true,"evidence":"the widget","question":""},
+        {"axis":"platform","resolved":false,"evidence":"not specified","question":"Which platform must this run on?"},
+        {"axis":"persistence","resolved":false,"evidence":"not specified","question":"Where is widget state stored?"}
+    ]}"#;
+
+    const HIGH_GUIDANCE: &str = r#"{"axes":[
+        {"axis":"scope","resolved":true,"evidence":"the widget","question":""},
+        {"axis":"platform","resolved":true,"evidence":"on Windows","question":""}
+    ]}"#;
+
+    fn last_record(root: &Path) -> serde_json::Value {
+        let log = std::fs::read_to_string(root.join(".localpilot/intake.jsonl")).unwrap();
+        serde_json::from_str(log.lines().last().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn intake_with_gate_off_writes_brief_and_plain_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new().text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let outcome = intake_flow(dir.path(), &provider, "m", "build a widget", None, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+        assert!(dir.path().join("brief.md").exists());
+        let record = last_record(dir.path());
+        assert_eq!(record["idea"], "build a widget");
+        assert_eq!(record["name"], "widget");
+        // The pre-gate record shape is unchanged when the gate is off.
+        assert!(record.get("guidance").is_none());
+        assert!(out.is_empty(), "gate-off intake writes nothing to out");
+    }
+
+    #[tokio::test]
+    async fn above_threshold_proceeds_and_records_the_assessment() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new().text(HIGH_GUIDANCE).text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Emit,
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget on Windows",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+        let record = last_record(dir.path());
+        assert!((record["guidance"]["score"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+        assert!(record["guidance"].get("questions").is_none());
+    }
+
+    #[tokio::test]
+    async fn below_threshold_emit_reports_open_axes_and_writes_no_brief() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new().text(LOW_GUIDANCE);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Emit,
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::NeedsGuidance);
+        assert!(!dir.path().join("brief.md").exists());
+        let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["status"], "needs_guidance");
+        assert_eq!(report["open"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            report["open"][0]["question"],
+            "Which platform must this run on?"
+        );
+        let record = last_record(dir.path());
+        assert!(record.get("name").is_none(), "no brief, no name");
+        assert_eq!(record["guidance"]["questions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn below_threshold_answers_fold_into_the_brief_idea_and_rescore() {
+        let dir = tempfile::tempdir().unwrap();
+        // assess (low) -> re-assess after answers (high) -> brief.
+        let provider = FakeProvider::new()
+            .text(LOW_GUIDANCE)
+            .text(HIGH_GUIDANCE)
+            .text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let mut answers = std::io::Cursor::new(b"Windows desktop\nSQLite file\n".to_vec());
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Ask(&mut answers),
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+
+        let prompts = String::from_utf8(out).unwrap();
+        assert!(prompts.contains("Which platform must this run on?"));
+        assert!(prompts.contains("Where is widget state stored?"));
+
+        // The brief request carries the user's decisions, so the brief stands
+        // without the transcript.
+        let requests = provider.requests();
+        let brief_request = requests.last().unwrap();
+        let user_text = brief_request
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                localpilot_core::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(user_text.contains("Decisions provided by the user"));
+        assert!(user_text.contains("platform: Windows desktop"));
+
+        let record = last_record(dir.path());
+        assert_eq!(record["guidance"]["answers"].as_array().unwrap().len(), 2);
+        assert!((record["guidance"]["rescore"].as_f64().unwrap() - 1.0).abs() < 1e-6);
+        assert!(record["guidance"].get("assumed_judgment").is_none());
+    }
+
+    #[tokio::test]
+    async fn below_threshold_all_empty_answers_delegate_judgment() {
+        let dir = tempfile::tempdir().unwrap();
+        // assess (low) -> brief; no re-assessment when nothing was answered.
+        let provider = FakeProvider::new().text(LOW_GUIDANCE).text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let mut answers = std::io::Cursor::new(b"\n\n".to_vec());
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Ask(&mut answers),
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+        let record = last_record(dir.path());
+        assert_eq!(record["guidance"]["assumed_judgment"], true);
+        assert!(record["guidance"].get("rescore").is_none());
+    }
+
+    #[tokio::test]
+    async fn assume_judgment_proceeds_and_records_the_delegation() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new().text(LOW_GUIDANCE).text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::AssumeJudgment,
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+        assert!(dir.path().join("brief.md").exists());
+        let record = last_record(dir.path());
+        assert_eq!(record["guidance"]["assumed_judgment"], true);
+    }
+
+    #[tokio::test]
+    async fn max_questions_caps_the_ask_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new().text(LOW_GUIDANCE);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 1,
+            clarification: Clarification::Emit,
+        };
+        intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Only the most consequential open axis is asked; the full axis list
+        // stays in the report for inspection.
+        assert_eq!(report["open"].as_array().unwrap().len(), 1);
+        assert_eq!(report["axes"].as_array().unwrap().len(), 3);
+    }
 
     #[test]
     fn status_render_is_stable() {
