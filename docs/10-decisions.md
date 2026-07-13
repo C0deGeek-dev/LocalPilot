@@ -2,6 +2,48 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0081: Intake Carries A Guidance Gate — Model-Proposed Axes, A Deterministic Score, And A Pause Instead Of A Guess
+
+Status: accepted. Builds on ADR-0010 (the model proposes, the runtime
+decides) and ADR-0035 (planning judgment expressed as contracts on the
+documents the flow already produces).
+
+Job 1 happily turned an under-specified idea into a confident `brief.md`:
+nothing checked whether the idea actually contained the product decisions the
+brief was about to encode, so the harness would pick an interpretation and
+build the wrong thing — burning a full plan-and-execute cycle before the user
+found out (LocalHub#15).
+
+1. **The model proposes axes; the runtime scores them.** An off-by-default
+   pre-brief assessment (`[harness.guidance]`, per-run `--guidance` /
+   `--no-guidance`) has the model enumerate the idea's *decision axes* — the
+   small set of product decisions that would change what gets built, invented
+   per idea, never a fixed domain list — marking each resolved (the idea's own
+   words, quoted verbatim) or not specified, with a settling question for open
+   axes. The score is deterministic and runtime-computed: resolved ÷ total,
+   `1.0` on zero axes. The model never reports its own score.
+2. **Below the threshold, intake pauses instead of guessing.** On a terminal:
+   stdin Q&A (empty answer delegates that one axis); answers fold into the
+   idea as an explicit user-decisions block, so the brief still stands without
+   the transcript. On a non-terminal: a structured `needs_guidance` JSON
+   report, no `brief.md`, exit 0 — pausing is a deliberate outcome, not an
+   error. `--assume-judgment` proceeds anyway with the delegation recorded.
+3. **The score is a signal, never a safety claim.** Its recall failure mode is
+   structural: an axis the model never lists cannot count against the score,
+   so a confidently wrong high score is possible. Every surface that shows the
+   number also records the full axis list (`.localpilot/intake.jsonl` carries
+   axes, score, threshold, questions, answers, and any assumed-judgment flag),
+   and an instrument suite gates trust: an authored idea corpus with
+   ground-truth axes, an offline ordering self-test (every under-specified
+   fixture strictly below every well-specified one, violations named —
+   refuse-to-trust, not a softened threshold), and live-gated recall/precision
+   drift checks where a missed ground-truth axis fails its fixture regardless
+   of the score.
+4. **Scope.** v1 gates ground-up `harness intake` only, asks over stdin (no
+   multiple-choice UI machinery exists), scores axes equal-weight, and records
+   the clarified-before-brief signal in LocalPilot's own artifacts rather than
+   the shared scorecard schema.
+
 ## ADR-0080: Provider HTTP Timeouts Bound Silence, Not Duration
 
 Status: accepted. The provider adapters applied `request_timeout_secs`

@@ -209,14 +209,30 @@ Initializes git if requested.
 Inputs:
 
 - `--idea <text>`
-- `--refine`
-- `--continue`
-- `--auto`
+- `--model <name>` / `--provider <id>`
+- `--guidance` / `--no-guidance` — per-run override of
+  `[harness.guidance] enabled`
+- `--assume-judgment` — below the guidance threshold, proceed to the brief
+  anyway and record that the open decisions were delegated to the model
 
 Output:
 
 - `brief.md`
 - `.localpilot/intake.jsonl`
+
+With the guidance gate enabled, a pre-brief assessment scores how much
+load-bearing guidance the idea contains. At or above
+`[harness.guidance] threshold` intake proceeds unchanged. Below it, the open
+decision axes become questions (capped at `max_questions`, most consequential
+first): on a terminal, intake asks each question on stdin — an empty answer
+delegates that one axis to the model — and folds the answers into the idea as
+an explicit user-decisions block before generating the brief; on a
+non-terminal, intake emits a structured JSON report (`"status":
+"needs_guidance"` with the open axes and escape hatches), writes **no**
+`brief.md`, and exits 0 — pausing for guidance is a deliberate outcome, not an
+error; scripts detect it from the JSON status or the missing brief. Every
+gated run appends the axes, score, threshold, questions, answers, and any
+assumed-judgment flag to the `.localpilot/intake.jsonl` record.
 
 ### `localpilot harness plan`
 

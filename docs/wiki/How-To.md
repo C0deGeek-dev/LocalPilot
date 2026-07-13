@@ -128,5 +128,11 @@ localpilot harness plan         # brief.md -> PROGRESS.md
 localpilot harness feature      # worked, committed steps; resume on quota
 ```
 
+Intake can optionally gate on a guidance score (`[harness.guidance]` or
+`--guidance`): when the idea leaves load-bearing product decisions open,
+intake asks about them before writing `brief.md` instead of guessing — see
+[06-harness-spec.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md)
+§`localpilot harness intake`.
+
 The nine harness gates are specified in
 [06-harness-spec.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/06-harness-spec.md).

@@ -6,6 +6,33 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Harness intake can gate on a guidance score** (ADR-0081, opt-in).
+  With `[harness.guidance] enabled = true` (or `--guidance` per run),
+  `localpilot harness intake` first has the model enumerate the idea's
+  decision axes — resolved (quoting the idea) or not specified — and computes
+  a deterministic score (resolved ÷ total). Below the configurable threshold
+  intake pauses instead of writing a brief that encodes guesses: on a
+  terminal it asks the open questions on stdin (empty answer delegates that
+  axis; answers fold into the idea as explicit user decisions), on a
+  non-terminal it emits a structured `needs_guidance` JSON report and writes
+  no brief; `--assume-judgment` proceeds with the delegation recorded. Axes,
+  score, questions, answers, and delegation land in
+  `.localpilot/intake.jsonl`. The score is an inspectable signal — an axis
+  the model never lists cannot count against it — never proof the idea is
+  fully specified.
+- **Provider request timeouts now bound silence, not total duration**
+  (ADR-0080). `request_timeout_secs` is a stall window — the longest
+  tolerated quiet spell while a response is open (to the first byte, then
+  between stream chunks) — so a slow-but-streaming local server is never cut
+  off mid-response at a hard deadline that then read as a server crash. A
+  genuinely silent server now stops the turn immediately with guidance
+  (check GPU offload, or raise `request_timeout_secs`) instead of burning
+  retries that restarted prompt processing from zero. Bound total turn time
+  with `[harness] turn_timeout_secs`.
+- **Chat `/research` copy reports the real egress state**. Entering research
+  mode no longer claims "web off": the notice reflects the configured
+  `[research.web]` state (ADR-0076 disclosure), and the TUI mode/picker
+  descriptions match.
 - **Research depth is configurable and progress is visible**. New `[research]`
   keys — `max_rounds` (default 3), `per_source_evidence` (5),
   `max_total_evidence` (120), `time_budget_secs` (unset) — feed the retrieval

@@ -61,6 +61,19 @@ Output:
 
 The brief must be understandable without the transcript.
 
+An optional, off-by-default **guidance gate** (`[harness.guidance]`) runs
+before the brief is written: a bounded model call enumerates the idea's
+decision axes — the product decisions that would change what gets built —
+marking each one resolved (quoting the idea's own words) or not specified,
+and a deterministic score (resolved ÷ total; 1.0 when no axes are found)
+is compared to a configurable threshold. Below it, intake pauses and asks
+about the open decisions instead of writing a brief that encodes guesses;
+answers are folded into the idea as explicit user decisions so the brief
+still stands without the transcript. The score is an inspectable signal
+with a known failure mode — an axis the model never lists cannot count
+against it — never proof the idea is fully specified; the full axis list
+is always recorded beside it in `.localpilot/intake.jsonl`.
+
 ### Job 2: Convert a Brief into a Plan
 
 Input:
