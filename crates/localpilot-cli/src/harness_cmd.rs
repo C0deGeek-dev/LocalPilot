@@ -1232,6 +1232,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_score_exactly_at_the_threshold_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        // LOW_GUIDANCE resolves 1 of 3 axes; the same fraction as the
+        // threshold must pass (>= semantics, not >).
+        let provider = FakeProvider::new().text(LOW_GUIDANCE).text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 1.0 / 3.0,
+            max_questions: 5,
+            clarification: Clarification::Emit,
+        };
+        let outcome = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build a widget",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, IntakeOutcome::BriefWritten);
+    }
+
+    #[tokio::test]
+    async fn golden_pair_ambiguous_pauses_and_specified_proceeds() {
+        // The pause-and-ask contract, asserted from the run artifacts: an
+        // ambiguous idea leaves no brief and a record whose guidance block
+        // has questions but no brief name; a well-specified idea proceeds
+        // straight to a named brief. The intake record is the
+        // clarified-before-brief signal.
+        let dir = tempfile::tempdir().unwrap();
+        let provider = FakeProvider::new()
+            .text(LOW_GUIDANCE)
+            .text(HIGH_GUIDANCE)
+            .text(VALID_BRIEF);
+        let mut out = Vec::new();
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Emit,
+        };
+        let paused = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "make the widget better",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(paused, IntakeOutcome::NeedsGuidance);
+        assert!(!dir.path().join("brief.md").exists());
+        let paused_record = last_record(dir.path());
+        assert!(paused_record.get("name").is_none());
+        assert!(paused_record["guidance"]["questions"].as_array().is_some());
+
+        let gate = GuidanceGate {
+            threshold: 0.7,
+            max_questions: 5,
+            clarification: Clarification::Emit,
+        };
+        let mut out = Vec::new();
+        let proceeded = intake_flow(
+            dir.path(),
+            &provider,
+            "m",
+            "build the widget on Windows",
+            Some(gate),
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(proceeded, IntakeOutcome::BriefWritten);
+        assert!(dir.path().join("brief.md").exists());
+        let written_record = last_record(dir.path());
+        assert_eq!(written_record["name"], "widget");
+        assert!(written_record["guidance"].get("questions").is_none());
+    }
+
+    #[tokio::test]
     async fn max_questions_caps_the_ask_list() {
         let dir = tempfile::tempdir().unwrap();
         let provider = FakeProvider::new().text(LOW_GUIDANCE);
