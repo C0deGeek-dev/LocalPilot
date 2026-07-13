@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Folder ingest now feeds the LocalMind UI Docs tab** (ADR-0082, LocalHub#18).
+  `localpilot ingest run`/`refresh` (and the session-open background build)
+  bridge the workspace's Markdown files into LocalMind's documentation index
+  (`doc_chunk`), redacted like every persisted chunk, so `localmind ui` can
+  browse and semantically search project docs without a separate
+  `localmind ingest docs` invocation. Unchanged files are a no-op via a hash
+  ledger, vanished files leave the index, and a doc-index failure never fails
+  the run. Opt out with `[ingest] docs_index = false`.
 - **Harness intake can gate on a guidance score** (ADR-0081, opt-in).
   With `[harness.guidance] enabled = true` (or `--guidance` per run),
   `localpilot harness intake` first has the model enumerate the idea's

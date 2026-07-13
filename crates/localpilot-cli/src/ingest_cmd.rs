@@ -70,6 +70,15 @@ pub fn run(project_root: &Path, mode: RunMode, out: &mut dyn Write) -> anyhow::R
             summary.embedded_chunks, summary.chunks_written
         )?;
     }
+    // Only reported when the doc bridge indexed something, so an unchanged run's
+    // output is unchanged.
+    if summary.doc_files_indexed > 0 {
+        writeln!(
+            out,
+            "docs: {} Markdown file(s) indexed for the LocalMind UI Docs tab",
+            summary.doc_files_indexed
+        )?;
+    }
     Ok(())
 }
 

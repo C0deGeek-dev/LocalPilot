@@ -581,6 +581,13 @@ pub struct IngestConfig {
     /// source files have changed and at least this long has passed since the last
     /// run — a debounce so quick successive sessions do not re-walk repeatedly.
     pub refresh_min_interval_secs: u64,
+    /// Index the workspace's Markdown files into LocalMind's documentation index
+    /// (`doc_chunk`) as part of each ingest run, so they are browsable and
+    /// searchable in the `localmind ui` Docs tab. Content is redacted before
+    /// anything is stored, the same as every persisted chunk; unchanged files are
+    /// a no-op and files that vanish are removed from the index. Set to `false`
+    /// to keep folder ingest purely derived-state.
+    pub docs_index: bool,
 }
 
 impl Default for IngestConfig {
@@ -620,6 +627,7 @@ impl Default for IngestConfig {
             contextual_prefix_enrichment: false,
             embed_chunks: true,
             refresh_min_interval_secs: 600,
+            docs_index: true,
         }
     }
 }

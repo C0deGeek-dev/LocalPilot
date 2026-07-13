@@ -34,6 +34,12 @@ const CHUNKS_FILE: &str = "chunks.json";
 const JOB_FILE: &str = "job.json";
 const REVIEW_FILE: &str = "review.json";
 const PACK_FILE: &str = "last-pack.json";
+/// Ledger of Markdown files bridged into LocalMind's documentation index
+/// (`path → content hash`), so an unchanged file is a no-op on later runs and a
+/// vanished file is removed from the index. Only paths this bridge wrote are in
+/// the ledger, so it never touches doc entries other hosts ingested (e.g.
+/// research reports).
+const DOCS_INDEX_FILE: &str = "docs-index.json";
 const CHUNK_BYTES: usize = 8 * 1024;
 /// Bounded window of cosine-nearest chunk vectors pulled into the hybrid blend
 /// per query — caps the vector pass on a large index (the keyword floor is
@@ -231,6 +237,10 @@ pub struct RunSummary {
     /// `[ingest] embed_chunks = false` — i.e. the keyword-only path.
     #[serde(default)]
     pub embedded_chunks: usize,
+    /// How many Markdown files were (re-)indexed into LocalMind's documentation
+    /// index this run. `0` when nothing changed or `[ingest] docs_index = false`.
+    #[serde(default)]
+    pub doc_files_indexed: usize,
 }
 
 /// A generated review candidate backed by ingestion artifacts.
@@ -573,6 +583,18 @@ pub fn run_with_progress(
         store.stale_removed_paths(&candidate_paths)?;
     }
 
+    // Bridge the workspace's Markdown into LocalMind's documentation index
+    // (`doc_chunk`), so the `localmind ui` Docs tab shows what folder ingest
+    // walked instead of staying empty (LocalHub #18). Redacted like every
+    // persisted chunk, hash-ledgered so unchanged files are a no-op, and
+    // best-effort throughout — a doc-index failure never fails the run. Skipped
+    // on a paused run (the operator interrupted; the resume run bridges).
+    let doc_files_indexed = if config.docs_index && job.status == JobStatus::Running {
+        bridge_docs_index(&root, &ingest_dir, &manifest, config.embed_chunks)
+    } else {
+        0
+    };
+
     if job.status == JobStatus::Running {
         job.status = if job.failed_files == 0 {
             JobStatus::Completed
@@ -598,7 +620,88 @@ pub fn run_with_progress(
         manifest,
         chunks_written: chunk_count,
         embedded_chunks,
+        doc_files_indexed,
     })
+}
+
+/// Bridge the manifest's candidate Markdown files into the project's LocalMind
+/// documentation index. Returns how many files were (re-)indexed. Every failure
+/// is swallowed per file: the doc index is a derived convenience surface and
+/// must never fail or fault the ingest run that feeds the primary chunk store.
+/// `embed` follows `[ingest] embed_chunks`, so a project that suppresses
+/// ingest-time embedding cost keeps that promise here too (doc text still
+/// lands; it is browsable, just not semantically searchable).
+fn bridge_docs_index(
+    root: &Path,
+    ingest_dir: &Path,
+    manifest: &PreviewManifest,
+    embed: bool,
+) -> usize {
+    let ledger_path = ingest_dir.join(DOCS_INDEX_FILE);
+    let mut ledger: BTreeMap<String, String> = if ledger_path.exists() {
+        read_json(&ledger_path).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
+    let current: BTreeMap<String, String> = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.status == CandidateStatus::Candidate)
+        .filter(|entry| {
+            Path::new(&entry.path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        })
+        .filter_map(|entry| {
+            entry
+                .content_hash
+                .clone()
+                .map(|hash| (entry.path.clone(), hash))
+        })
+        .collect();
+    let changed: Vec<String> = current
+        .iter()
+        .filter(|(path, hash)| ledger.get(*path) != Some(*hash))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let vanished: Vec<String> = ledger
+        .keys()
+        .filter(|path| !current.contains_key(*path))
+        .cloned()
+        .collect();
+    if changed.is_empty() && vanished.is_empty() {
+        return 0;
+    }
+    // Make sure the project store/config exists before opening it (mirrors the
+    // research-report bridge), so a first-ever ingest run indexes cleanly.
+    if crate::initialize(root).is_err() {
+        return 0;
+    }
+    let Ok(persistence) = localmind_store::MemoryPersistence::open_project(root) else {
+        return 0;
+    };
+    let mut indexed = 0usize;
+    for path in &changed {
+        let absolute = root.join(platform_path(path));
+        let Ok(text) = fs::read_to_string(&absolute) else {
+            continue;
+        };
+        let redacted = redact::redact(&text);
+        if localmind_store::ingest_doc_text(&persistence, path, &redacted, embed).is_ok() {
+            if let Some(hash) = current.get(path) {
+                ledger.insert(path.clone(), hash.clone());
+            }
+            indexed += 1;
+        }
+    }
+    for path in &vanished {
+        if persistence.delete_doc_file(path).is_ok() {
+            ledger.remove(path);
+        }
+    }
+    let _ = write_json(&ledger_path, &ledger);
+    indexed
 }
 
 /// Delete only derived ingestion artifacts.
@@ -2548,6 +2651,72 @@ mod tests {
             .join("project")
             .join("keep.md")
             .exists());
+    }
+
+    #[test]
+    fn run_bridges_markdown_into_the_doc_index_redacted_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("README.md"),
+            "# Guide\n\nProse body here. token = abcdefghijklmnop\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn code() {}\n").unwrap();
+
+        let summary = run(dir.path(), &config(), RunMode::Full).unwrap();
+        assert_eq!(
+            summary.doc_files_indexed, 1,
+            "only the Markdown file bridges"
+        );
+
+        let persistence = localmind_store::MemoryPersistence::open_project(dir.path()).unwrap();
+        let chunks = persistence.doc_chunks_for("README.md").unwrap();
+        assert!(!chunks.is_empty(), "the README landed in doc_chunk");
+        let body: String = chunks.iter().map(|(_, _, body)| body.clone()).collect();
+        assert!(body.contains("Prose body here."));
+        assert!(
+            !body.contains("abcdefghijklmnop"),
+            "doc-index content is redacted like every persisted chunk"
+        );
+        assert!(body.contains(redact::REDACTED));
+
+        // Unchanged files are a ledger no-op on the next run.
+        let again = run(dir.path(), &config(), RunMode::Refresh).unwrap();
+        assert_eq!(again.doc_files_indexed, 0);
+    }
+
+    #[test]
+    fn refresh_removes_vanished_markdown_from_the_doc_index() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("gone.md"), "# Gone\n\nSoon removed.\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        let persistence = localmind_store::MemoryPersistence::open_project(dir.path()).unwrap();
+        assert!(!persistence.doc_chunks_for("gone.md").unwrap().is_empty());
+
+        fs::remove_file(dir.path().join("gone.md")).unwrap();
+        run(dir.path(), &config(), RunMode::Refresh).unwrap();
+        assert!(
+            persistence.doc_chunks_for("gone.md").unwrap().is_empty(),
+            "a vanished file's passages leave the doc index"
+        );
+    }
+
+    #[test]
+    fn docs_index_off_keeps_the_doc_index_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "# Doc\n\nBody.\n").unwrap();
+        let config = IngestConfig {
+            docs_index: false,
+            ..config()
+        };
+
+        let summary = run(dir.path(), &config, RunMode::Full).unwrap();
+        assert_eq!(summary.doc_files_indexed, 0);
+
+        fs::write(dir.path().join(".localmind.toml"), "").unwrap();
+        let persistence = localmind_store::MemoryPersistence::open_project(dir.path()).unwrap();
+        assert_eq!(persistence.doc_chunk_count().unwrap(), 0);
     }
 
     #[test]

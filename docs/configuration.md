@@ -91,6 +91,17 @@ cost, set `[ingest] embed_chunks = false` (default `true`); retrieval then stays
 keyword-only. See [10-decisions.md](10-decisions.md) (ADR-0025) and LocalMind
 D-LM-0022.
 
+**Documentation index.** Each ingest run also bridges the workspace's Markdown
+files into LocalMind's documentation index (`doc_chunk`), so `localmind ui`'s
+Docs tab can browse and semantically search them — without this bridge, only
+`localmind ingest docs` populates that tab. Content is redacted before storage
+(the same scrub every persisted chunk gets), unchanged files are a no-op on
+later runs, and files that vanish are removed from the index. Best-effort
+throughout: a doc-index failure never fails the ingest run. Doc-chunk
+embeddings follow `[ingest] embed_chunks` — with it off, docs stay browsable
+but not semantically searchable. Set `[ingest] docs_index = false` (default
+`true`) to keep folder ingest purely derived-state.
+
 **Store location.** `localpilot learning` and `localpilot memory` find the
 LocalMind store by walking up from the current directory to the nearest ancestor
 holding `.localmind` (git-style), so a subdirectory answers from the project's

@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0082: Folder Ingest Bridges Markdown Into LocalMind's Documentation Index
+
+Status: accepted. Narrows ADR-0013 (ingestion is derived, disposable state
+under `.localmind/ingest/`).
+
+The LocalMind UI presents a Docs tab, but nothing in the product flow
+populated it: folder ingest wrote only its derived chunk store, and the sole
+writer of the documentation index (`doc_chunk`) was a separate CLI command
+(`localmind ingest docs`) users had no reason to know about. The tab read as
+broken (LocalHub#18).
+
+1. **Each ingest run bridges candidate Markdown files into the project's
+   `doc_chunk` index** through `localmind_store::ingest_doc_text`, reusing the
+   walk's own candidate set (include/exclude rules honored) and redacting
+   content with the same scrub every persisted chunk gets.
+2. **This is a deliberate exception to ADR-0013's derived-state-only rule, and
+   it is not a memory write.** `doc_chunk` is a documentation *index* of files
+   already in the workspace — not accepted memory, so the review gate does not
+   apply. The research-report bridge (`[research] ingest_report`) set the
+   precedent; that one stays opt-in because its content is model-generated,
+   while this one is on by default (`[ingest] docs_index = true`) because the
+   content is the user's own files and an empty-by-default Docs tab recreates
+   the bug.
+3. **A hash ledger (`.localmind/ingest/docs-index.json`) keeps the bridge
+   incremental and honest**: unchanged files are a no-op, vanished files are
+   deleted from the index, and the ledger only ever deletes paths the bridge
+   itself wrote — doc entries from other hosts (research reports) are never
+   touched. Best-effort throughout: a doc-index failure never fails the run.
+4. **`[ingest] embed_chunks = false` keeps its promise across the bridge.**
+   Doc-chunk vector writes ride the same suppression as chunk-store
+   embeddings (`ingest_doc_text`'s `embed` flag): text still lands and stays
+   browsable, it just is not semantically searchable until embedded.
+
 ## ADR-0081: Intake Carries A Guidance Gate — Model-Proposed Axes, A Deterministic Score, And A Pause Instead Of A Guess
 
 Status: accepted. Builds on ADR-0010 (the model proposes, the runtime
