@@ -1740,6 +1740,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn designated_search_turns_an_open_question_into_coverage() {
+        // The field scenario that motivated real search: with no model and no
+        // search tool the web source proposes nothing and the question stays
+        // open; the same run with a designated search tool ends covered, with
+        // web-backed findings whose pages actually match the question.
+        // Two distinct hosts (independent origins), each answering the
+        // question with its own content.
+        let page_a = "<html><body><h1>AnimationMixer</h1>\
+             <p>The animation mixer blends clips into weighted actions before \
+             skinning applies them.</p></body></html>";
+        let page_b = "<html><body><h1>Skinning</h1>\
+             <p>Skinning binds mixer-driven clips to bone transforms so the \
+             animation deforms the mesh.</p></body></html>";
+        let server_a = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(page_a.as_bytes(), "text/html"))
+            .mount(&server_a)
+            .await;
+        let server_b = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(page_b.as_bytes(), "text/html"))
+            .mount(&server_b)
+            .await;
+        let url_a = format!("{}/manual/mixer", server_a.uri());
+        let url_b = format!("{}/docs/skinning", server_b.uri());
+        let question = "how does the animation mixer blend clips for skinning";
+
+        async fn run(
+            search: Option<McpSearchProposer>,
+            audit: PathBuf,
+            question: &str,
+        ) -> localpilot_research::RunOutcome {
+            let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
+            access.grant_session();
+            let source = WebSource::new(access, audit, None, search).unwrap();
+            let sources = SourceSet::new().with(Box::new(source));
+            localpilot_research::run_research(
+                question,
+                &sources,
+                &HeuristicSynthesizer,
+                localpilot_research::Bounds::default(),
+            )
+            .await
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = run(None, dir.path().join("a.log"), question).await;
+        assert_eq!(
+            baseline.report.open_questions.len(),
+            1,
+            "no model, no search: the question stays open"
+        );
+
+        let proposer = scripted_proposer(&format!("URL: {url_a}\nURL: {url_b}"));
+        let full = run(Some(proposer), dir.path().join("b.log"), question).await;
+        assert!(
+            full.report.open_questions.is_empty(),
+            "search-proposed pages close the question: {:?}",
+            full.report.coverage
+        );
+        assert_eq!(
+            full.report.coverage[0].verdict,
+            localpilot_research::CoverageVerdict::Covered,
+            "{:?}",
+            full.report.coverage
+        );
+        assert!(full
+            .report
+            .findings
+            .iter()
+            .all(|f| f.supporting.iter().any(|p| p.source == "web")));
+    }
+
+    #[tokio::test]
+    async fn search_tools_receive_only_the_redacted_query() {
+        // The designated-search egress carries the same redaction contract as
+        // every other outbound research byte: a planted secret in the
+        // sub-question must never reach the MCP server or the audit log.
+        struct CapturingTransport {
+            calls: std::sync::Mutex<Vec<serde_json::Value>>,
+        }
+        #[async_trait]
+        impl localpilot_mcp::Transport for CapturingTransport {
+            async fn call(
+                &self,
+                _method: &str,
+                params: serde_json::Value,
+            ) -> Result<serde_json::Value, localpilot_mcp::McpError> {
+                if let Ok(mut calls) = self.calls.lock() {
+                    calls.push(params);
+                }
+                Ok(serde_json::json!({ "content": [] }))
+            }
+        }
+        let transport = Arc::new(CapturingTransport {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let proposer = McpSearchProposer {
+            tools: vec![DesignatedSearchTool {
+                label: "capture.search".to_string(),
+                tool: "search".to_string(),
+                transport: Arc::clone(&transport) as Arc<dyn localpilot_mcp::Transport>,
+            }],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
+        access.grant_session();
+        let source = WebSource::new(access, audit.clone(), None, Some(proposer)).unwrap();
+
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+        let question = format!("how do I rotate {secret} safely");
+        let _ = source.gather(&question, 2).await.unwrap();
+
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the designated tool was consulted");
+        let sent = calls[0].to_string();
+        assert!(
+            !sent.contains(secret),
+            "the secret must never reach the search server: {sent}"
+        );
+        assert!(
+            sent.contains("[REDACTED]"),
+            "the query is redacted before it leaves the machine: {sent}"
+        );
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(!log.contains(secret), "the audit log stays redacted: {log}");
+    }
+
+    #[tokio::test]
     async fn server_error_cools_the_host_for_the_rest_of_the_run() {
         // A 500 is a host-level signal: the errored URL yields nothing and
         // every later URL on that host is skipped and audited as cooled-down.

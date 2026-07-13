@@ -574,4 +574,128 @@ mod tests {
             outcome.report.retrieval_notes
         );
     }
+
+    /// A source shaped like a hard research topic: one question answers
+    /// immediately from two origins; the other yields nothing at the base
+    /// retrieval depth and only surfaces at an escalated depth.
+    struct DepthGatedSource {
+        counter: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Source for DepthGatedSource {
+        fn label(&self) -> &str {
+            "gated"
+        }
+        async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+            let easy = question.contains("q0");
+            if !easy && limit <= 5 {
+                return Ok(Vec::new());
+            }
+            Ok((0..2)
+                .map(|_| {
+                    let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                    Evidence::new(
+                        question,
+                        format!("distinct answer {n} with its own particular words {n}"),
+                        Provenance::new("gated", Some(format!("origin-{n}"))),
+                        1.0,
+                    )
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn uplift_scorecard_multi_round_beats_single_pass() {
+        // The offline uplift measurement: identical sources and questions,
+        // single-pass vs multi-round. Single-pass leaves the depth-gated
+        // question open; the multi-round loop covers it via escalation.
+        async fn run_with(max_rounds: usize) -> (usize, usize, usize) {
+            let set = SourceSet::new().with(Box::new(DepthGatedSource {
+                counter: AtomicUsize::new(0),
+            }));
+            let synth = WideSynth { questions: 2 };
+            let outcome = run_research(
+                "t",
+                &set,
+                &synth,
+                Bounds {
+                    max_questions: 2,
+                    per_source_evidence: 5,
+                    max_rounds,
+                    ..Bounds::default()
+                },
+            )
+            .await
+            .unwrap();
+            let covered = outcome
+                .report
+                .coverage
+                .iter()
+                .filter(|c| c.verdict == CoverageVerdict::Covered)
+                .count();
+            (
+                covered,
+                outcome.report.open_questions.len(),
+                outcome.report.rounds_run,
+            )
+        }
+        let (baseline_covered, baseline_open, baseline_rounds) = run_with(1).await;
+        let (full_covered, full_open, full_rounds) = run_with(3).await;
+        assert_eq!(baseline_rounds, 1);
+        assert_eq!(
+            baseline_open, 1,
+            "single-pass leaves the hard question open"
+        );
+        assert_eq!(full_open, 0, "follow-up rounds close it");
+        assert!(
+            full_covered > baseline_covered,
+            "coverage improves: {baseline_covered} -> {full_covered}"
+        );
+        assert!(full_rounds > 1, "the uplift came from real extra rounds");
+    }
+
+    #[tokio::test]
+    async fn low_relevance_evidence_never_reads_as_coverage() {
+        // Precision guard: a source that only ever returns floor-failing
+        // matches gathers evidence but never covers anything.
+        struct JunkSource;
+        #[async_trait]
+        impl Source for JunkSource {
+            fn label(&self) -> &str {
+                "junk"
+            }
+            async fn gather(
+                &self,
+                question: &str,
+                _limit: usize,
+            ) -> Result<Vec<Evidence>, SourceError> {
+                Ok(vec![Evidence::new(
+                    question,
+                    "incidental one-word overlap",
+                    Provenance::new("junk", Some("junk-file".to_string())),
+                    0.1,
+                )])
+            }
+        }
+        let set = SourceSet::new().with(Box::new(JunkSource));
+        let outcome = run_research(
+            "t",
+            &set,
+            &WideSynth { questions: 1 },
+            Bounds {
+                max_questions: 1,
+                ..Bounds::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.report.coverage[0].verdict,
+            CoverageVerdict::Weak,
+            "gathered but never covered"
+        );
+        assert_eq!(outcome.report.coverage[0].strong_evidence, 0);
+    }
 }

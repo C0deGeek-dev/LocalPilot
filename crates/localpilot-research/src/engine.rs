@@ -17,7 +17,9 @@ use crate::{
 const MAX_STATEMENT_CHARS: usize = 240;
 
 /// Evidence below this relevance does not count toward coverage. Conservative:
-/// the flat web relevance (0.5) and any bm25-derived score above noise pass.
+/// term-overlap-scored web evidence matching at least two question terms and
+/// any bm25-derived score above noise pass; a one-incidental-word match does
+/// not.
 const COVERAGE_RELEVANCE_FLOOR: f32 = 0.25;
 /// A question is covered when at least this many floor-passing snippets…
 const COVERED_MIN_EVIDENCE: usize = 2;
