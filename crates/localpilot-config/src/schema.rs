@@ -742,8 +742,13 @@ pub struct ProviderConfig {
     /// (for example launching the interactive REPL with no `--model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// HTTP request timeout in seconds. Defaults are applied by provider
-    /// adapters; this override is useful for slow local inference.
+    /// Stall window in seconds: the longest silence tolerated while a
+    /// response is open — from sending the request to the first byte, and
+    /// between stream chunks after that. **Not** a total-request deadline: a
+    /// slow server that keeps streaming is never cut off mid-response (bound
+    /// total turn time with `[harness] turn_timeout_secs` instead). Provider
+    /// adapters default this to 600; raise it for local inference whose
+    /// prompt processing outlasts that silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
     /// The model's context window in tokens. When set, the session budget is

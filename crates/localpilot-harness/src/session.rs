@@ -2018,11 +2018,14 @@ impl SessionRuntime {
                             }
                             // A mid-stream truncation (the server dropped the
                             // response before completing it — a local server that
-                            // hung, crashed, or ran out of VRAM) is an
-                            // infrastructure fault, not a bad model turn: it must
-                            // not spend recovery health toward Degraded or trigger
-                            // a "malformed output" repair aimed at a server that
+                            // crashed or ran out of VRAM) is an infrastructure
+                            // fault, not a bad model turn: it must not spend
+                            // recovery health toward Degraded or trigger a
+                            // "malformed output" repair aimed at a server that
                             // already dropped. Retry the whole request instead.
+                            // A *silent* server is a StreamStalled instead: it
+                            // stops the turn below with guidance, because an
+                            // identical retry cannot finish any faster.
                             if matches!(err, ProviderError::StreamTruncated { .. }) {
                                 truncated = true;
                                 break;
@@ -2067,8 +2070,8 @@ impl SessionRuntime {
                     let max = self.config.max_stream_retries;
                     let secs = 1u64 << (stream_truncated_retries - 1).min(5);
                     let _ = events.send(RuntimeEvent::Warning(format!(
-                        "the model server ended the response early (it may have hung, crashed, \
-                         or run out of VRAM); retrying {stream_truncated_retries}/{max} in {secs}s"
+                        "the model server ended the response early (it may have crashed or run \
+                         out of VRAM); retrying {stream_truncated_retries}/{max} in {secs}s"
                     )));
                     tokio::select! {
                         () = cancel.cancelled() => return self.stop(events, StopReason::Cancelled),

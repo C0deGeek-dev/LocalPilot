@@ -65,10 +65,29 @@ pub enum ProviderError {
     /// connection mid-response, or closed the body without a completion marker.
     /// Distinct from [`StreamDecode`](Self::StreamDecode), which is a malformed
     /// but fully-framed event: a truncation is an infrastructure fault (a local
-    /// server that hung, crashed, or ran out of VRAM), so it is retryable and is
-    /// **not** treated as a bad model turn by the recovery ladder.
+    /// server that crashed or ran out of VRAM), so it is retryable and is
+    /// **not** treated as a bad model turn by the recovery ladder. A server
+    /// that goes *silent* without closing is a
+    /// [`StreamStalled`](Self::StreamStalled), not a truncation.
     #[error("the response stream ended early: {detail}")]
     StreamTruncated { detail: String },
+
+    /// No data arrived from the provider for the configured stall window while
+    /// the connection stayed open. Distinct from
+    /// [`StreamTruncated`](Self::StreamTruncated) (the server *closed* the
+    /// response early): a stalled server is most likely still working, just
+    /// slower than the window — on a local server, CPU-fallback inference is
+    /// the usual cause. Not retryable: re-issuing the identical request cannot
+    /// complete any faster (and on models without reusable prompt cache it
+    /// restarts prompt processing from zero, making every retry strictly
+    /// worse), so the turn stops with guidance instead of burning retries.
+    #[error(
+        "no data from the model server for {waited_secs}s (the connection stayed open); the \
+         server may be hung, or working slower than the stall window — for a local model, \
+         check that GPU offload is active (CPU-speed inference is the usual cause), or raise \
+         the provider's `request_timeout_secs` to wait longer"
+    )]
+    StreamStalled { waited_secs: u64 },
 
     /// A tool call's streamed arguments did not parse as JSON. Carries the tool
     /// name and the byte length of the unparseable arguments, so the harness can
@@ -116,6 +135,16 @@ impl ProviderError {
             ProviderError::StreamTruncated { detail: message }
         } else {
             ProviderError::Network(message)
+        }
+    }
+
+    /// Build a [`StreamStalled`](Self::StreamStalled) for a silence that
+    /// exhausted `waited` — shared by the providers so the user-facing
+    /// guidance is written once.
+    #[must_use]
+    pub fn stream_stalled(waited: std::time::Duration) -> Self {
+        ProviderError::StreamStalled {
+            waited_secs: waited.as_secs(),
         }
     }
 
@@ -187,6 +216,20 @@ impl From<reqwest::Error> for ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_stream_is_not_retryable_and_names_the_remedy() {
+        let err = ProviderError::stream_stalled(Duration::from_secs(600));
+        // Retrying an identical request into a stalled-but-working server
+        // cannot finish faster — the turn must stop with guidance instead.
+        assert!(!err.is_retryable());
+        let text = err.to_string();
+        assert!(text.contains("600s"), "waited window missing: {text}");
+        assert!(
+            text.contains("request_timeout_secs") && text.contains("GPU offload"),
+            "guidance missing: {text}"
+        );
+    }
 
     #[test]
     fn classifies_representative_status_codes() {

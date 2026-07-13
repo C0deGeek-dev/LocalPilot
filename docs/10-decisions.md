@@ -2,6 +2,41 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0080: Provider HTTP Timeouts Bound Silence, Not Duration
+
+Status: accepted. The provider adapters applied `request_timeout_secs`
+(default 600) as a whole-request `reqwest` deadline, covering the entire
+streamed response. On a slow local server — CPU-fallback inference is the
+common case — a healthy turn simply outlasts the deadline: the client cuts
+the connection at exactly 600 s, the cut surfaces as a stream truncation,
+and the turn loop retries an identical request into a server that is now
+*slower* (the abort invalidated its prompt cache; SWA/hybrid models
+reprocess the full prompt from zero). Each retry is guaranteed to die the
+same way, and after the retry ceiling the user is told the server "may have
+crashed or run out of VRAM" — blaming the server for a client-imposed
+deadline (LocalHub#17).
+
+1. **The HTTP layer bounds liveness only.** `request_timeout_secs` is now a
+   **stall window**: the longest tolerated silence while a response is open —
+   from sending the request to the first byte (a local server may hold
+   headers back until prompt processing ends), and between stream chunks
+   after that. A server that keeps streaming, however slowly, is never cut
+   off. Total turn duration is the harness's concern
+   (`[harness] turn_timeout_secs`), not the transport's. TCP connect gets
+   its own short budget (30 s) so an unreachable server still fails fast.
+2. **A stall is its own error, and it does not retry.** A tripped stall
+   window surfaces as `ProviderError::StreamStalled` — distinct from
+   `StreamTruncated` (the server *closed* the response early, which stays
+   retryable). A stalled server is most likely still working, just slower
+   than the window; re-issuing the identical request cannot finish faster
+   and restarts prompt processing from zero on models without reusable
+   prompt cache. The turn stops immediately with guidance naming the two
+   real remedies: check GPU offload (CPU-speed inference), or raise
+   `request_timeout_secs`.
+
+Fixes the failure mode where 4 × 10-minute futile retries ended in a
+message that misdirected the user at the server.
+
 ## ADR-0079: Research Evidence Is Deduplicated, Diversity-Capped, Relevance-Scored, And Every Cut Is Loud
 
 Status: accepted. At exhaustive scale (ADR-0078 rounds × ADR-0076 open-web

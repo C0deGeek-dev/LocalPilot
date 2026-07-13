@@ -197,8 +197,14 @@ ADR-0041.
 
 ## Runtime tuning
 
-`request_timeout_secs` can be set on any provider entry. It applies to the HTTP
-client used by that provider and is intended for slower local models or gateways.
+`request_timeout_secs` can be set on any provider entry. It is a **stall
+window**, not a total-request deadline (ADR-0080): the longest silence
+tolerated while a response is open — from sending the request to the first
+byte, and between stream chunks after that. A slow server that keeps
+streaming is never cut off mid-response; bound total turn time with
+`[harness] turn_timeout_secs` instead. Default 600. When the window trips,
+the turn stops with a `no data from the model server` error rather than
+retrying — a stalled server cannot finish faster on an identical retry.
 
 Provider options not modeled by LocalPilot are passed through from the provider
 table into the request body. `suppress_thinking = true` is an LocalPilot-owned

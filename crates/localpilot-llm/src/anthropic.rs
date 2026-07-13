@@ -40,12 +40,23 @@ const DEFAULT_MAX_TOKENS: u64 = 8192;
 pub struct AnthropicProvider {
     declaration: ProviderDeclaration,
     client: reqwest::Client,
+    /// Longest silence tolerated while a response is open — from sending the
+    /// request to the first byte, and between stream chunks after that. A
+    /// liveness bound, not a total-duration bound: a slow server that keeps
+    /// streaming is never cut off mid-response.
+    stall_timeout: Duration,
     base_url: String,
     api_key: Option<Secret>,
     default_options: IndexMap<String, Value>,
 }
 
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Default stall window (`request_timeout_secs`): the longest silence
+/// tolerated on an open response before the request is abandoned.
+const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// TCP connect budget. Separate from the stall window: an unreachable server
+/// should fail in seconds, not minutes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AnthropicProvider {
     /// Build a provider against `base_url` (without a trailing `/messages`).
@@ -90,17 +101,19 @@ impl AnthropicProvider {
                 auth,
                 rate_limit_behavior: None,
             },
-            client: reqwest_client(None),
+            client: reqwest_client(),
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
             base_url: base_url.into(),
             api_key,
             default_options: IndexMap::new(),
         }
     }
 
-    /// Override the HTTP request timeout.
+    /// Override the stall window (`request_timeout_secs`): the longest
+    /// tolerated silence on an open response, not a total request deadline.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.client = reqwest_client(timeout);
+        self.stall_timeout = timeout.unwrap_or(DEFAULT_STALL_TIMEOUT);
         self
     }
 
@@ -165,8 +178,12 @@ impl AnthropicProvider {
     }
 }
 
-fn reqwest_client(timeout: Option<Duration>) -> reqwest::Client {
-    let builder = reqwest::Client::builder().timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+fn reqwest_client() -> reqwest::Client {
+    // No whole-request `.timeout()`: it would put a hard deadline on the total
+    // duration of a streamed response, cutting off a slow-but-healthy server
+    // mid-generation. Liveness is enforced per await instead — the stall
+    // window around opening the response and reading each chunk.
+    let builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
     match builder.build() {
         Ok(client) => client,
         Err(err) => {
@@ -194,14 +211,18 @@ impl ModelProvider for AnthropicProvider {
         }
         tracing::debug!(model = %request.model, "starting provider stream");
 
-        let response = builder.send().await?;
+        // Opening the response (connect, request write, response headers) is
+        // bounded by the stall window, not a total-request deadline.
+        let response = tokio::time::timeout(self.stall_timeout, builder.send())
+            .await
+            .map_err(|_| ProviderError::stream_stalled(self.stall_timeout))??;
         let status = response.status();
         if !status.is_success() {
             return Err(classify_error_response(status.as_u16(), response).await);
         }
 
         let body = response.bytes_stream();
-        Ok(into_event_stream(body))
+        Ok(into_event_stream(body, self.stall_timeout))
     }
 }
 
@@ -377,7 +398,7 @@ fn quota_from_headers(headers: &reqwest::header::HeaderMap) -> QuotaInfo {
     }
 }
 
-fn into_event_stream<S, B>(body: S) -> ModelEventStream
+fn into_event_stream<S, B>(body: S, stall_timeout: Duration) -> ModelEventStream
 where
     S: futures::Stream<Item = reqwest::Result<B>> + Send + 'static,
     B: AsRef<[u8]> + Send + 'static,
@@ -386,25 +407,39 @@ where
         body: std::pin::Pin<Box<S>>,
         decoder: SseDecoder,
         queue: VecDeque<Result<ModelEvent, ProviderError>>,
+        /// Set once the stall window elapsed between chunks; the stream ends
+        /// after the queued stall error is drained instead of polling a body
+        /// that already proved silent.
+        stalled: bool,
     }
 
     let state = StreamState {
         body: Box::pin(body),
         decoder: SseDecoder::default(),
         queue: VecDeque::new(),
+        stalled: false,
     };
 
-    futures::stream::unfold(state, |mut state| async move {
+    futures::stream::unfold(state, move |mut state| async move {
         loop {
             if let Some(item) = state.queue.pop_front() {
                 return Some((item, state));
             }
-            match state.body.next().await {
-                Some(Ok(bytes)) => state.decoder.push(bytes.as_ref(), &mut state.queue),
-                Some(Err(err)) => state
+            if state.stalled {
+                return None;
+            }
+            match tokio::time::timeout(stall_timeout, state.body.next()).await {
+                Err(_elapsed) => {
+                    state.stalled = true;
+                    state
+                        .queue
+                        .push_back(Err(ProviderError::stream_stalled(stall_timeout)));
+                }
+                Ok(Some(Ok(bytes))) => state.decoder.push(bytes.as_ref(), &mut state.queue),
+                Ok(Some(Err(err))) => state
                     .queue
                     .push_back(Err(ProviderError::from_response_body_error(err))),
-                None => {
+                Ok(None) => {
                     state.decoder.finish(&mut state.queue);
                     return state.queue.pop_front().map(|item| (item, state));
                 }
@@ -1010,9 +1045,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_silent_body_stalls_with_guidance_instead_of_hanging() {
+        // A connection that stays open but never delivers a byte must trip the
+        // stall window and end the stream — not hang the turn forever, and not
+        // read as a server-side truncation.
+        let body = futures::stream::pending::<reqwest::Result<Vec<u8>>>();
+        let events: Vec<_> = into_event_stream(body, Duration::from_millis(50))
+            .collect()
+            .await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.first(),
+            Some(Err(ProviderError::StreamStalled { .. }))
+        ));
+    }
+
+    #[tokio::test]
     async fn into_event_stream_rejects_an_empty_body_without_a_completion_marker() {
         let body = futures::stream::iter(Vec::<reqwest::Result<Vec<u8>>>::new());
-        let events: Vec<_> = into_event_stream(body).collect().await;
+        let events: Vec<_> = into_event_stream(body, DEFAULT_STALL_TIMEOUT)
+            .collect()
+            .await;
         assert!(matches!(
             events.last(),
             Some(Err(ProviderError::StreamTruncated { detail }))

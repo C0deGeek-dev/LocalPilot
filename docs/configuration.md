@@ -138,7 +138,7 @@ and `--provider`.
 | `google_location` | string | none | Vertex AI location for `google-vertex-openai` when `base_url` is omitted |
 | `google_adc_path` | string | ADC default | Optional path to a gcloud ADC `authorized_user` file |
 | `model` | string | none | Default model when a command does not pass `--model` |
-| `request_timeout_secs` | int | per adapter | HTTP timeout; useful for slow local inference |
+| `request_timeout_secs` | int | 600 | Stall window: longest tolerated silence on an open response (to first byte, then between stream chunks) — not a total deadline; a server that keeps streaming is never cut off (ADR-0080) |
 | `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
 | `supports_vision` | bool | none | Whether this provider's model accepts image (vision) input. A user assertion that resolves the model's vision capability (config > probe > false, ADR-0061): `true` lifts the image-input gate even for a local server; unset/`false` keeps the text-only default. LocalBox sets this automatically when it loads a multimodal projector. See [04-provider-contract.md](04-provider-contract.md) §Vision. |
 
