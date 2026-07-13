@@ -13,6 +13,7 @@ mod decisions;
 mod dispatch_gate;
 mod error;
 mod evidence;
+mod guidance;
 mod handoff;
 mod hooks;
 mod judge;
@@ -41,6 +42,9 @@ pub use compaction::{
 pub use decisions::{today, Decision, Decisions};
 pub use error::HarnessError;
 pub use evidence::{CallOutcome, CallRecord, EvidenceLedger, PermissionVerdict};
+pub use guidance::{
+    assess_guidance, guidance_score, DecisionAxis, GuidanceAssessment, GUIDANCE_PROMPT,
+};
 pub use handoff::{
     check_handoff, evaluate_resume, write_handoff, Handoff, HandoffHeader, HandoffSummary,
     ResumeEnv, ResumeFinding, ResumeReport, HANDOFF_SCHEMA,

@@ -111,7 +111,7 @@ pub async fn run_plan(
     generate(provider, model, seed, "PROGRESS.md", Progress::parse).await
 }
 
-async fn generate<T>(
+pub(crate) async fn generate<T>(
     provider: &dyn ModelProvider,
     model: &str,
     mut messages: Vec<Message>,
