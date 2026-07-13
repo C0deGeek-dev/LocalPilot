@@ -87,6 +87,34 @@ pub fn flatten_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// How well one sub-question ended up supported by gathered evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoverageVerdict {
+    /// Enough relevant evidence from enough independent origins.
+    Covered,
+    /// Some evidence, but thin — few snippets or a single origin.
+    Weak,
+    /// No evidence at all.
+    Open,
+}
+
+/// Per-sub-question coverage: the deterministic scoring the multi-round loop
+/// steers by, kept on the report so a reader can judge the research, not just
+/// read it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestionCoverage {
+    /// The sub-question.
+    pub question: String,
+    /// The verdict at the end of the run.
+    pub verdict: CoverageVerdict,
+    /// Total evidence snippets gathered for this question.
+    pub evidence_count: usize,
+    /// Snippets at or above the relevance floor.
+    pub strong_evidence: usize,
+    /// Distinct evidence origins (source label + host/locator) above the floor.
+    pub distinct_origins: usize,
+}
+
 /// The full result of a research run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResearchReport {
@@ -98,6 +126,12 @@ pub struct ResearchReport {
     pub findings: Vec<Finding>,
     /// Sub-questions that gathered no evidence.
     pub open_questions: Vec<String>,
+    /// Per-question coverage scoring from the retrieval loop.
+    #[serde(default)]
+    pub coverage: Vec<QuestionCoverage>,
+    /// How many retrieval rounds the loop ran.
+    #[serde(default)]
+    pub rounds_run: usize,
 }
 
 impl ResearchReport {
@@ -109,6 +143,8 @@ impl ResearchReport {
             questions: Vec::new(),
             findings: Vec::new(),
             open_questions: Vec::new(),
+            coverage: Vec::new(),
+            rounds_run: 0,
         }
     }
 }

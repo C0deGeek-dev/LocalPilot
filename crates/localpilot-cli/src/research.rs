@@ -20,9 +20,9 @@ use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
-    run_research, AuditEntry, Bounds, Evidence, FetchDecision, Finding, HeuristicSynthesizer,
-    Provenance, ResearchError, ResearchReport, Source, SourceError, SourceSet, Synthesizer,
-    WebAccess,
+    run_research, AuditEntry, Bounds, CoverageVerdict, Evidence, FetchDecision, Finding,
+    HeuristicSynthesizer, Provenance, ResearchError, ResearchReport, Source, SourceError,
+    SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -241,9 +241,24 @@ pub async fn run_research_command(
     let bounds = Bounds {
         max_questions: options.max_questions,
         per_source_evidence: PER_SOURCE_EVIDENCE,
+        ..Bounds::default()
     };
     let outcome = run_research(topic, &sources, &synth, bounds).await?;
 
+    for round in &outcome.rounds {
+        writeln!(
+            out,
+            "round {}: targeted {} question(s), {} new evidence ({} total) — \
+             {} covered, {} weak, {} open",
+            round.round,
+            round.targeted,
+            round.new_evidence,
+            round.total_evidence,
+            round.covered,
+            round.weak,
+            round.open
+        )?;
+    }
     for error in &outcome.source_errors {
         writeln!(out, "note: {error}")?;
     }
@@ -278,13 +293,24 @@ pub async fn run_research_command(
         let enqueued = enqueue_candidates(root, &outcome.report)?;
         writeln!(out, "memory candidates enqueued for review: {enqueued}")?;
     }
+    let covered = count_verdict(&outcome.report, CoverageVerdict::Covered);
+    let weak = count_verdict(&outcome.report, CoverageVerdict::Weak);
     writeln!(
         out,
-        "findings: {}  open questions: {}",
+        "findings: {}  coverage: {covered} covered, {weak} weak, {} open  rounds: {}",
         outcome.report.findings.len(),
-        outcome.report.open_questions.len()
+        outcome.report.open_questions.len(),
+        outcome.report.rounds_run
     )?;
     Ok(())
+}
+
+fn count_verdict(report: &ResearchReport, verdict: CoverageVerdict) -> usize {
+    report
+        .coverage
+        .iter()
+        .filter(|coverage| coverage.verdict == verdict)
+        .count()
 }
 
 /// Whether any finding in `report` is backed by the `web` source. Every

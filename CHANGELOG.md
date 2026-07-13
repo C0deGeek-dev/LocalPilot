@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research is now multi-round and coverage-driven** (ADR-0078). Instead of
+  one gather per sub-question, the loop scores per-question coverage
+  deterministically (relevance floor + distinct-origin independence) and
+  re-queries uncovered questions across rounds — retrying the original
+  question, adding a drift-guarded pseudo-relevance reformulation, and
+  widening retrieval depth — until everything is covered, a round finds
+  nothing new, or the round/evidence/time budget is hit. Reports and both
+  research surfaces now show per-round progress lines and a coverage summary
+  (covered/weak/open), and "open questions" are only the questions that
+  stayed empty after follow-up retrieval actually tried.
 - **Research can use real web search via designated MCP tools** (ADR-0077).
   Name `(server, tool)` pairs under `[research.mcp] tools` (e.g.
   `tools = [{ server = "search", tool = "search" }]` referencing

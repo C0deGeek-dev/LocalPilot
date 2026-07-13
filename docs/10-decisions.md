@@ -2,6 +2,50 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0078: The Research Loop Is Multi-Round And Coverage-Driven, With Deterministic Scoring And Stops
+
+Status: accepted. The research loop was single-pass: one gather per
+sub-question, and a question whose gather returned nothing was reported as an
+"open question" with no further attempt — the loop stopped exactly where a
+weak local model's first query landed. Field evidence (a 16-source run ending
+with two open questions) showed that reads as shallow, not safe.
+
+1. **Rounds, targeted.** Round 1 gathers for every sub-question; each later
+   round re-queries only the questions not yet covered. `max_rounds = 1`
+   reproduces the old single-pass behaviour exactly.
+2. **Coverage is scored deterministically.** Per question: evidence at or
+   above a relevance floor counts, and independence is measured in distinct
+   origins (web host, or source label + locator). Covered = ≥ 2 floor-passing
+   snippets from ≥ 2 origins; Weak = some evidence; Open = none. No model
+   judges coverage — the scoring is unit-tested arithmetic, so a weak model
+   cannot talk the loop into stopping (or spinning).
+3. **Follow-up queries are retrieval-side and drift-guarded.** A targeted
+   question is re-asked verbatim plus one reformulation from the
+   `Synthesizer` seam. The default (and only shipped) reformulator is
+   deterministic pseudo-relevance expansion: salient terms from the
+   question's own evidence, each required to appear in ≥ 2 distinct origins
+   (one off-topic page cannot steer the query), appended to the original
+   question. The model may later assist through the same seam — retrieval
+   assistance only, never synthesis (the ADR-0060 provenance contract is
+   untouched).
+4. **Depth escalates for stubborn questions.** Later rounds widen the
+   per-source gather depth (×2, capped ×3), so a re-query can reach past the
+   first page of results — still inside the caps.
+5. **Every stop is explicit, all any-of.** All covered · a round with zero
+   previously-unseen evidence (saturation — dedup is against everything
+   *seen*, not kept, so re-finding old ground is not progress) · `max_rounds`
+   · a hard total-evidence cap · an optional wall-clock budget · an external
+   stop flag (`RunControl`), which yields a partial but well-formed outcome
+   for cancellation.
+6. **The report carries the account.** Per-question coverage (verdict,
+   counts, distinct origins) and per-round summaries ship in the outcome;
+   open questions are exactly the questions still `Open` after the final
+   round. Both research surfaces print the round lines and a coverage
+   summary.
+
+Extends ADR-0060; the sanitize/cross-check passes and ADR-0072 candidate
+provenance are unchanged.
+
 ## ADR-0077: Designated MCP Search Tools Propose Research URLs — Leads, Never Evidence
 
 Status: accepted. Research web retrieval had no real search: the model

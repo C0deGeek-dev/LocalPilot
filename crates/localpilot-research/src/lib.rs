@@ -15,12 +15,17 @@ mod source;
 mod synth;
 mod web;
 
-pub use engine::{run_research, Bounds, RunOutcome};
+pub use engine::{
+    run_research, run_research_controlled, Bounds, RoundSummary, RunControl, RunOutcome,
+};
 pub use html::{html_to_markdown, html_to_text, markdown_to_text};
 pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
-pub use report::{flatten_whitespace, ClaimStatus, Evidence, Finding, Provenance, ResearchReport};
+pub use report::{
+    flatten_whitespace, ClaimStatus, CoverageVerdict, Evidence, Finding, Provenance,
+    QuestionCoverage, ResearchReport,
+};
 pub use source::{Source, SourceSet};
-pub use synth::{HeuristicSynthesizer, Synthesizer};
+pub use synth::{expansion_queries, HeuristicSynthesizer, Synthesizer};
 pub use web::{host_allowed, host_matches, prepare_query, AuditEntry, FetchDecision, WebAccess};
 
 /// A fatal error in the research loop (decomposition or synthesis).
@@ -167,6 +172,7 @@ mod tests {
         let bounds = Bounds {
             max_questions: 2,
             per_source_evidence: 3,
+            ..Bounds::default()
         };
         let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
         assert_eq!(
@@ -198,5 +204,179 @@ mod tests {
         );
         assert!(outcome.report.findings.is_empty());
         assert!(outcome.source_errors.is_empty());
+        // The zero-evidence round reads as saturation: exactly one round ran.
+        assert_eq!(outcome.report.rounds_run, 1);
+        assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Open);
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A source whose every call returns `per_call` brand-new snippets from
+    /// brand-new origins, and logs each query it is asked.
+    struct EndlessSource {
+        counter: AtomicUsize,
+        per_call: usize,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl EndlessSource {
+        fn new(per_call: usize) -> Self {
+            Self {
+                counter: AtomicUsize::new(0),
+                per_call,
+                log: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Source for EndlessSource {
+        fn label(&self) -> &str {
+            "endless"
+        }
+        async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+            if let Ok(mut log) = self.log.lock() {
+                log.push(question.to_string());
+            }
+            Ok((0..self.per_call.min(limit))
+                .map(|_| {
+                    let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                    Evidence {
+                        question: question.to_string(),
+                        snippet: format!("unique snippet number {n} about topic detail"),
+                        provenance: Provenance::new("endless", Some(format!("origin-{n}"))),
+                        relevance: 1.0,
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn all_covered_stops_the_loop_early() {
+        // Two fresh origins per call ⇒ every question is covered in round 1,
+        // so the loop stops without spending its round budget.
+        let source = EndlessSource::new(2);
+        let set = SourceSet::new().with(Box::new(source));
+        let synth = WideSynth { questions: 2 };
+        let bounds = Bounds {
+            max_questions: 2,
+            max_rounds: 5,
+            ..Bounds::default()
+        };
+        let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
+        assert_eq!(outcome.report.rounds_run, 1, "no wasted rounds");
+        assert!(outcome
+            .report
+            .coverage
+            .iter()
+            .all(|c| c.verdict == CoverageVerdict::Covered));
+        assert!(outcome.report.open_questions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn saturation_stops_when_a_round_finds_nothing_new() {
+        // The same single snippet every call: round 1 gathers it, round 2
+        // re-finds only known ground ⇒ saturation, well short of max_rounds.
+        let set = SourceSet::new().with(Box::new(FakeSource {
+            label: "static".to_string(),
+            reply: Some("the one snippet".to_string()),
+        }));
+        let synth = WideSynth { questions: 1 };
+        let bounds = Bounds {
+            max_questions: 1,
+            max_rounds: 6,
+            ..Bounds::default()
+        };
+        let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
+        assert_eq!(
+            outcome.report.rounds_run, 2,
+            "one round of no progress ends it"
+        );
+        assert_eq!(outcome.rounds[1].new_evidence, 0);
+        // One origin only ⇒ the question stays weak, honestly.
+        assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Weak);
+    }
+
+    #[tokio::test]
+    async fn later_rounds_requery_only_uncovered_questions() {
+        // One fresh origin per call: a question needs two rounds to reach two
+        // origins. Once covered, the next round targets nothing and the loop
+        // stops — no round is spent on a covered question.
+        let source = EndlessSource::new(1);
+        let set = SourceSet::new().with(Box::new(source));
+        let synth = WideSynth { questions: 1 };
+        let bounds = Bounds {
+            max_questions: 1,
+            max_rounds: 4,
+            ..Bounds::default()
+        };
+        let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
+        assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Covered);
+        assert_eq!(
+            outcome.report.rounds_run, 2,
+            "covered after round 2; round 3 never runs"
+        );
+        assert!(
+            outcome.rounds[1].new_evidence > 0,
+            "round 2's follow-up retrieval made the difference"
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_cap_bounds_the_run() {
+        let source = EndlessSource::new(5);
+        let set = SourceSet::new().with(Box::new(source));
+        let synth = WideSynth { questions: 3 };
+        let bounds = Bounds {
+            max_questions: 3,
+            per_source_evidence: 5,
+            max_rounds: 10,
+            max_total_evidence: 7,
+            ..Bounds::default()
+        };
+        let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
+        let total: usize = outcome
+            .report
+            .coverage
+            .iter()
+            .map(|c| c.evidence_count)
+            .sum();
+        assert!(total <= 7, "the hard evidence cap holds: {total}");
+    }
+
+    #[tokio::test]
+    async fn stop_flag_yields_a_partial_but_well_formed_outcome() {
+        let source = EndlessSource::new(2);
+        let set = SourceSet::new().with(Box::new(source));
+        let synth = WideSynth { questions: 2 };
+        let stop = Arc::new(AtomicBool::new(true)); // stop before any gather
+        let control = RunControl { stop: Some(stop) };
+        let outcome = run_research_controlled(
+            "t",
+            &set,
+            &synth,
+            Bounds {
+                max_questions: 2,
+                ..Bounds::default()
+            },
+            control,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.report.questions.len(), 2, "questions recorded");
+        assert!(
+            outcome
+                .report
+                .coverage
+                .iter()
+                .all(|c| c.verdict == CoverageVerdict::Open),
+            "nothing gathered before the stop"
+        );
+        assert_eq!(
+            outcome.report.rounds_run, 1,
+            "the interrupted round is accounted"
+        );
     }
 }

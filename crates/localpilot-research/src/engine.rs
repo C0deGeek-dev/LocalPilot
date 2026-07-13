@@ -1,13 +1,33 @@
-//! The bounded research loop: decompose → gather → cross-check → synthesise.
+//! The bounded, coverage-driven research loop:
+//! decompose → gather (multi-round) → cross-check → synthesise.
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::{
-    flatten_whitespace, html_to_text, markdown_to_text, ClaimStatus, Finding, Provenance,
-    ResearchError, ResearchReport, SourceError, SourceSet, Synthesizer,
+    flatten_whitespace, html_to_text, markdown_to_text, ClaimStatus, CoverageVerdict, Evidence,
+    Finding, Provenance, QuestionCoverage, ResearchError, ResearchReport, SourceError, SourceSet,
+    Synthesizer,
 };
 
 /// Longest a finding statement may be before it is treated as an over-long blob
 /// and reduced to an excerpt, with the full text preserved as evidence.
 const MAX_STATEMENT_CHARS: usize = 240;
+
+/// Evidence below this relevance does not count toward coverage. Conservative:
+/// the flat web relevance (0.5) and any bm25-derived score above noise pass.
+const COVERAGE_RELEVANCE_FLOOR: f32 = 0.25;
+/// A question is covered when at least this many floor-passing snippets…
+const COVERED_MIN_EVIDENCE: usize = 2;
+/// …come from at least this many distinct origins.
+const COVERED_MIN_ORIGINS: usize = 2;
+/// Follow-up queries asked per targeted question per round (the unmodified
+/// original question is always retried alongside them).
+const REFORMULATIONS_PER_ROUND: usize = 1;
+/// Ceiling on the per-round retrieval-depth escalation multiplier.
+const ESCALATION_MAX_FACTOR: usize = 3;
 
 /// Bounds on a research run. A host maps its resolved rails (ADR-0055) into
 /// these so the loop cannot run unbounded.
@@ -17,6 +37,13 @@ pub struct Bounds {
     pub max_questions: usize,
     /// Maximum evidence snippets to take from each source per question.
     pub per_source_evidence: usize,
+    /// Maximum retrieval rounds. `1` reproduces the single-pass behaviour;
+    /// later rounds re-query only questions that are not yet covered.
+    pub max_rounds: usize,
+    /// Hard cap on total evidence snippets across the whole run.
+    pub max_total_evidence: usize,
+    /// Optional wall-clock budget for the retrieval phase.
+    pub time_budget: Option<Duration>,
 }
 
 impl Default for Bounds {
@@ -24,8 +51,44 @@ impl Default for Bounds {
         Self {
             max_questions: 6,
             per_source_evidence: 5,
+            max_rounds: 3,
+            max_total_evidence: 120,
+            time_budget: None,
         }
     }
+}
+
+/// External control over a running loop.
+#[derive(Debug, Clone, Default)]
+pub struct RunControl {
+    /// When set and flipped true, the loop stops at the next question boundary
+    /// and returns a partial (but well-formed) outcome.
+    pub stop: Option<Arc<AtomicBool>>,
+}
+
+impl RunControl {
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+}
+
+/// One retrieval round's account, for progress display and the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundSummary {
+    /// 1-based round number.
+    pub round: usize,
+    /// Questions this round re-queried.
+    pub targeted: usize,
+    /// Previously-unseen evidence snippets the round produced.
+    pub new_evidence: usize,
+    /// Running total of evidence snippets.
+    pub total_evidence: usize,
+    /// Coverage tallies after the round.
+    pub covered: usize,
+    pub weak: usize,
+    pub open: usize,
 }
 
 /// The outcome of a run: the report plus any non-fatal source errors so the
@@ -36,23 +99,47 @@ pub struct RunOutcome {
     pub report: ResearchReport,
     /// Errors from individual sources that were skipped (best-effort gather).
     pub source_errors: Vec<SourceError>,
+    /// Per-round retrieval account, in order.
+    pub rounds: Vec<RoundSummary>,
 }
 
-/// Run the bounded research loop for `topic`.
-///
-/// Decomposes the topic, gathers evidence across `sources` for each
-/// sub-question (best-effort — a failing source is recorded, not fatal),
-/// synthesises findings, then independently cross-checks support. A
-/// sub-question that gathered nothing becomes an open question.
+/// Per-question retrieval state across rounds.
+struct QuestionState {
+    question: String,
+    evidence: Vec<Evidence>,
+}
+
+/// Run the bounded research loop for `topic` with default control (no external
+/// stop flag).
 pub async fn run_research(
     topic: &str,
     sources: &SourceSet,
     synth: &dyn Synthesizer,
     bounds: Bounds,
 ) -> Result<RunOutcome, ResearchError> {
+    run_research_controlled(topic, sources, synth, bounds, RunControl::default()).await
+}
+
+/// Run the bounded, coverage-driven research loop for `topic`.
+///
+/// Round 1 gathers evidence for every sub-question. Each later round re-queries
+/// only the questions that are not yet covered — retrying the original question
+/// and up to one reformulated query proposed by the synthesizer (deterministic
+/// pseudo-relevance expansion by default). The loop stops when every question
+/// is covered, a round yields no new evidence (saturation), the round cap,
+/// evidence cap, or time budget is reached, or an external stop is requested —
+/// always returning a well-formed outcome with per-question coverage.
+pub async fn run_research_controlled(
+    topic: &str,
+    sources: &SourceSet,
+    synth: &dyn Synthesizer,
+    bounds: Bounds,
+    control: RunControl,
+) -> Result<RunOutcome, ResearchError> {
+    let started = Instant::now();
     let mut report = ResearchReport::new(topic);
-    let mut all_evidence = Vec::new();
     let mut source_errors = Vec::new();
+    let mut rounds = Vec::new();
 
     let questions: Vec<String> = synth
         .decompose(topic, bounds.max_questions)
@@ -60,19 +147,118 @@ pub async fn run_research(
         .into_iter()
         .take(bounds.max_questions)
         .collect();
-
-    for question in &questions {
-        let (evidence, mut errors) = sources
-            .gather_all(question, bounds.per_source_evidence)
-            .await;
-        source_errors.append(&mut errors);
-        if evidence.is_empty() {
-            report.open_questions.push(question.clone());
-        }
-        all_evidence.extend(evidence);
-    }
+    let mut states: Vec<QuestionState> = questions
+        .iter()
+        .map(|question| QuestionState {
+            question: question.clone(),
+            evidence: Vec::new(),
+        })
+        .collect();
     report.questions = questions;
 
+    // One key per evidence snippet ever seen, across rounds and reformulated
+    // queries — dedup is against *seen*, not kept, so a round that only
+    // re-finds old ground reads as saturation.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut total_evidence = 0usize;
+
+    'rounds: for round in 1..=bounds.max_rounds.max(1) {
+        let targets: Vec<usize> = states
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| round == 1 || assess(state).verdict != CoverageVerdict::Covered)
+            .map(|(index, _)| index)
+            .collect();
+        if targets.is_empty() {
+            break; // everything covered
+        }
+        let targeted = targets.len();
+        let mut round_new = 0usize;
+
+        for index in targets {
+            if control.stop_requested() || over_budget(&bounds, started) {
+                summarize_round(
+                    &mut rounds,
+                    round,
+                    targeted,
+                    round_new,
+                    total_evidence,
+                    &states,
+                );
+                break 'rounds;
+            }
+            if total_evidence >= bounds.max_total_evidence {
+                summarize_round(
+                    &mut rounds,
+                    round,
+                    targeted,
+                    round_new,
+                    total_evidence,
+                    &states,
+                );
+                break 'rounds;
+            }
+            let question = states[index].question.clone();
+            let mut queries = vec![question.clone()];
+            if round > 1 {
+                let follow_ups = synth
+                    .reformulate(&question, &states[index].evidence, REFORMULATIONS_PER_ROUND)
+                    .await
+                    .unwrap_or_default();
+                queries.extend(follow_ups);
+            }
+            // Escalate retrieval depth for questions that keep coming back:
+            // round 1 gathers at the configured per-source depth, later rounds
+            // widen it (a re-queried source can surface hits past the first
+            // page of results), still inside the total-evidence cap.
+            let depth = bounds
+                .per_source_evidence
+                .saturating_mul(round.min(ESCALATION_MAX_FACTOR));
+            for query in queries {
+                let (evidence, mut errors) = sources.gather_all(&query, depth).await;
+                source_errors.append(&mut errors);
+                for mut item in evidence {
+                    if total_evidence >= bounds.max_total_evidence {
+                        break;
+                    }
+                    if seen.insert(evidence_key(&item)) {
+                        // Evidence groups under the original question, not the
+                        // reformulated query that happened to retrieve it.
+                        item.question = question.clone();
+                        states[index].evidence.push(item);
+                        round_new += 1;
+                        total_evidence += 1;
+                    }
+                }
+            }
+        }
+
+        summarize_round(
+            &mut rounds,
+            round,
+            targeted,
+            round_new,
+            total_evidence,
+            &states,
+        );
+        if round_new == 0 {
+            break; // saturation: the round found nothing new anywhere
+        }
+    }
+
+    report.rounds_run = rounds.len();
+    report.coverage = states.iter().map(assess).collect();
+    report.open_questions = report
+        .coverage
+        .iter()
+        .filter(|coverage| coverage.verdict == CoverageVerdict::Open)
+        .map(|coverage| coverage.question.clone())
+        .collect();
+
+    let all_evidence: Vec<Evidence> = states
+        .into_iter()
+        .flat_map(|state| state.evidence)
+        .collect();
     let mut findings = synth.synthesize(topic, &all_evidence).await?;
     sanitize_findings(&mut findings);
     cross_check(&mut findings);
@@ -81,7 +267,93 @@ pub async fn run_research(
     Ok(RunOutcome {
         report,
         source_errors,
+        rounds,
     })
+}
+
+fn over_budget(bounds: &Bounds, started: Instant) -> bool {
+    bounds
+        .time_budget
+        .is_some_and(|budget| started.elapsed() >= budget)
+}
+
+fn summarize_round(
+    rounds: &mut Vec<RoundSummary>,
+    round: usize,
+    targeted: usize,
+    new_evidence: usize,
+    total_evidence: usize,
+    states: &[QuestionState],
+) {
+    let mut covered = 0;
+    let mut weak = 0;
+    let mut open = 0;
+    for state in states {
+        match assess(state).verdict {
+            CoverageVerdict::Covered => covered += 1,
+            CoverageVerdict::Weak => weak += 1,
+            CoverageVerdict::Open => open += 1,
+        }
+    }
+    rounds.push(RoundSummary {
+        round,
+        targeted,
+        new_evidence,
+        total_evidence,
+        covered,
+        weak,
+        open,
+    });
+}
+
+/// Deterministic per-question coverage scoring: floor-passing evidence counts,
+/// and independence is measured in distinct origins.
+fn assess(state: &QuestionState) -> QuestionCoverage {
+    let strong: Vec<&Evidence> = state
+        .evidence
+        .iter()
+        .filter(|item| item.relevance >= COVERAGE_RELEVANCE_FLOOR)
+        .collect();
+    let origins: HashSet<String> = strong.iter().map(|item| origin_key(item)).collect();
+    let verdict = if strong.len() >= COVERED_MIN_EVIDENCE && origins.len() >= COVERED_MIN_ORIGINS {
+        CoverageVerdict::Covered
+    } else if state.evidence.is_empty() {
+        CoverageVerdict::Open
+    } else {
+        CoverageVerdict::Weak
+    };
+    QuestionCoverage {
+        question: state.question.clone(),
+        verdict,
+        evidence_count: state.evidence.len(),
+        strong_evidence: strong.len(),
+        distinct_origins: origins.len(),
+    }
+}
+
+/// Identity of one evidence snippet for cross-round dedup: origin plus a
+/// snippet prefix (whitespace-normalized), so re-fetching the same content via
+/// a reformulated query does not count as progress.
+fn evidence_key(item: &Evidence) -> String {
+    let prefix: String = flatten_whitespace(&item.snippet).chars().take(80).collect();
+    format!(
+        "{}|{}|{prefix}",
+        item.provenance.source,
+        item.provenance.locator.as_deref().unwrap_or_default(),
+    )
+}
+
+/// Origin of one snippet for independence counting: for web evidence the host
+/// of its URL, otherwise the source label plus locator (a file, a memory id).
+fn origin_key(item: &Evidence) -> String {
+    let locator = item.provenance.locator.as_deref().unwrap_or_default();
+    if item.provenance.source == "web" {
+        if let Some(rest) = locator.split_once("://").map(|(_, rest)| rest) {
+            let host = rest.split('/').next().unwrap_or(rest);
+            return format!("web|{host}");
+        }
+    }
+    format!("{}|{locator}", item.provenance.source)
 }
 
 /// Adversarial pass: a finding with no supporting provenance is downgraded to

@@ -234,6 +234,12 @@ research mode; and a headless `localpilot research <topic>` subcommand
 model decomposes the topic; synthesis stays grounded in gathered evidence, so a
 finding is always backed.
 
+Retrieval is multi-round and coverage-driven (ADR-0078): per-question coverage
+is scored deterministically, uncovered questions are re-queried across rounds
+with drift-guarded query expansion and escalating depth, and the loop stops on
+full coverage, saturation, or its round/evidence/time budgets. Both surfaces
+report per-round progress and a covered/weak/open summary.
+
 **Web research is on by default** (ADR-0076) — research cannot rely on a small
 local model's parametric memory, so both surfaces reach the web unless told
 not to. Candidate URLs come from designated MCP search tools when configured
