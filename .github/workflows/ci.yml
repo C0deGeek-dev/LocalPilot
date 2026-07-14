@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci-ubuntu24-probe]
   pull_request:
 
 # Full debuginfo across 74 test binaries makes the target dir outgrow the
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04]
 
     steps:
       - uses: actions/checkout@v6
@@ -67,7 +67,7 @@ jobs:
 
   coverage:
     name: coverage (line floor)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
