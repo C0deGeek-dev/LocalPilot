@@ -19,13 +19,23 @@ are not a side channel.
 - **bypass** — a launch mode that approves everything with no prompts. It must be
   set explicitly, is never the default, and is always shown in the footer/status.
   Bypass does **not** disable redaction, logging, or the workspace boundary.
+- **unrestricted** — approves everything, out-of-workspace paths included, with
+  no prompts. Never the default; it must be chosen explicitly and is surfaced in
+  the footer in the strongest warning style. Redaction and logging stay on.
 
 ## The workspace boundary
 
 File tools are confined to the workspace. The boundary is enforced by
 canonicalizing paths and checking containment (handling `..`, symlinks, Windows
-verbatim/8.3/case forms), not by string prefix matching. Reads or writes outside
-the workspace require explicit approval and are denied non-interactively.
+verbatim/8.3/case forms), not by string prefix matching. Writes outside the
+workspace require explicit approval and are denied non-interactively.
+
+Out-of-workspace **reads** are promptable rather than a dead end: every profile
+(including `bypass`) can ask interactively, and `[permissions]
+extra_read_roots` grants standing read-only access to the listed directories in
+every profile, non-interactive runs included. Writes keep the workspace
+boundary and secret-like reads keep their gate. The full model is in
+[07-security-and-privacy.md](07-security-and-privacy.md).
 
 ## Secret redaction
 

@@ -211,6 +211,18 @@ Notable rule key:
 | `inject_instructions` | bool | `true` | Inject the project's instruction files (`Navigator.md`/`CLAUDE.md`/`AGENTS.md`/`.github/copilot-instructions.md`, merged in precedence order) directly into the turn context every turn — ungated and independent of the review-gated learning store, so a fresh project's instructions reach the model even with learning off. Redacted before injection and bounded by `instruction_char_budget`. Set `false` to opt out (the ingest path still surfaces them via retrieval). See [06-harness-spec.md](06-harness-spec.md) and ADR-0056. |
 | `instruction_char_budget` | int | `8000` | Maximum characters of merged instruction text injected per turn. Over the budget the text is truncated with a visible marker rather than dropped silently, so a large instruction set cannot crowd out the per-turn token budget. |
 
+### `[ingest]`
+
+Folder ingestion (`localpilot ingest run` / `refresh`, and the session-open
+background build). The two retrieval-facing switches are below; both behaviours
+are best-effort and never fail an ingest run. The full semantics are under
+§Project context files above.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `embed_chunks` | bool | `true` | Embed each ingested chunk into the chunk vector index when an embedding model is configured (the `[inference]` embedding endpoint accepted memory uses, in `.localmind.toml`), making `knowledge_search` hybrid keyword+vector. Only ever active with an embedding model configured — otherwise a no-op and ingest stays keyword-only. Set `false` to keep accepted-memory embeddings while skipping the per-chunk ingest embedding cost; retrieval then stays keyword-only. Doc-chunk embeddings follow this flag too. |
+| `docs_index` | bool | `true` | Bridge the workspace's Markdown files into LocalMind's documentation index (`doc_chunk`) on each ingest run, so `localmind ui`'s Docs tab can browse and semantically search them. Content is redacted before storage (the same scrub every persisted chunk gets); unchanged files are a no-op on later runs and files that vanish are removed from the index. Set `false` to keep folder ingest purely derived-state. |
+
 ### `[memory]`
 
 Tunes always-on accepted-memory injection. Every keyword-path default preserves

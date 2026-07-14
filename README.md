@@ -33,7 +33,7 @@ risky parts stay behind explicit permission boundaries.
 |---|---|
 | **Use it when** | You want a coding agent you can run against your own model or provider |
 | **Connects to** | OpenAI-compatible local servers and supported official provider APIs |
-| **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, or ACP adapter |
+| **Works as** | Interactive terminal agent, one-shot command, rule-enforced harness, RPC service, ACP adapter, or MCP server (`localpilot mcp serve` — an MCP client/agent host drives and steers a session) |
 | **Remembers through** | Embedded [LocalMind](https://github.com/C0deGeek-dev/LocalMind), with review before durable memory |
 | **Status** | `2.3.0` stable; public CLI, config, and provider contract follow SemVer |
 
@@ -134,22 +134,35 @@ comparison on one model, not a model claim.
 | `localpilot print` | A non-interactive agent run for scripts and pipelines |
 | `localpilot init` | Project-local configuration and ignore rules |
 | `localpilot models` | Models reported by configured OpenAI-compatible servers |
-| `localpilot session list` | Find, export, resume, or prune durable sessions |
+| `localpilot session list` | Find, export, name (`session name`, or `/name` in chat), resume — by id or name — or prune durable sessions |
 | `localpilot harness …` | Rule-enforced intake, planning, feature work, and resume |
-| `localpilot research` | Research a topic across local sources and the web (on by default — disclosed, allowlist-gated, audited; `--no-web` skips it); writes a report and review-gated memory candidates |
+| `localpilot research` | Research a topic across local sources and the web (on by default — disclosed, allowlist-gated, audited; `--no-web` skips it) with multi-round, coverage-driven retrieval, optional MCP search proposers, and depth knobs (`--rounds`, `--quick`); writes a report and review-gated memory candidates |
 | `localpilot doctor` | Diagnose providers, credentials, tools, trust, and configuration |
 
-Additional surfaces include MCP tools, `rpc`, `acp`, project knowledge ingestion,
-memory search, skill inspection, handoffs, self-review, and redacted session
-exports. Run `localpilot --help` for the complete command tree.
+Additional surfaces include MCP tools, `rpc`, `acp`, `mcp serve`, project
+knowledge ingestion, memory search, skill inspection, handoffs, self-review,
+and redacted session exports. `localpilot mcp serve` turns the session runtime
+itself into an MCP server another agent host drives: `prompt` (with mid-turn
+`steer`/`follow_up` dispositions), `cancel`, `status`, `transcript`, a
+cursor-paged `events` feed, and `reply_permission`, with
+`--continue`/`--resume` to pick an earlier session back up and
+`--no-approvals` for watch-and-steer coaching (the reply tool is withheld, so
+every ask denies). Corrections the driver makes become review-gated lesson
+candidates. Run `localpilot --help` for the complete command tree.
 
 ### Terminal controls
 
 - `Enter` sends; `Alt+Enter`, `Ctrl+J`, or a trailing `\` inserts a newline.
 - `↑` / `↓` recalls project-scoped prompt history.
-- `Ctrl-C` cancels the current turn or ingest run.
+- `Ctrl-C` cancels the current turn or ingest run. At the prompt it is staged
+  like a shell: with text typed (or an autocomplete overlay open), the first
+  press clears the composer and dismisses the overlay; on an empty composer it
+  quits.
 - `/` opens slash-command completion; `@` mentions a workspace file.
 - `/model` changes provider or model without losing the conversation.
+- `/name` names the session so it can be resumed by name.
+- `/default`, `/relaxed`, `/bypass`, and `/unrestricted` switch the permission
+  profile mid-turn, taking effect from the running turn's next tool call.
 
 The REPL uses the terminal's normal screen buffer, so native scrollback,
 selection, and copy/paste continue to work.
