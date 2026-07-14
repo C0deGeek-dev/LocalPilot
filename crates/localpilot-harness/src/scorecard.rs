@@ -230,6 +230,13 @@ pub fn extract_process(events: &[SessionEvent], ledger: &EvidenceLedger) -> Proc
         None => false,
     };
 
+    // Interventions: external-driver corrections (steers, cancellations,
+    // permission replies) recorded on the durable event log by `mcp serve`.
+    let interventions = events
+        .iter()
+        .filter(|e| matches!(e.kind, SessionEventKind::DriverIntervention { .. }))
+        .count() as u32;
+
     // Exit reason: the last recorded turn stop label.
     let exit_reason = events
         .iter()
@@ -249,6 +256,7 @@ pub fn extract_process(events: &[SessionEvent], ledger: &EvidenceLedger) -> Proc
         retrieval_count,
         exit_reason,
         recovered_after_failure,
+        interventions,
         discipline: None,
     }
 }
@@ -365,6 +373,31 @@ mod tests {
         );
         assert!(process.reproduce_before_fix, "a read preceded the write");
         assert_eq!(process.exit_reason, "Done");
+        assert_eq!(process.interventions, 0, "an undriven run reports zero");
+    }
+
+    #[test]
+    fn process_extractor_counts_driver_interventions() {
+        let events = vec![
+            event(SessionEventKind::DriverIntervention {
+                action: "steer".to_string(),
+                detail: "prefer the existing helper".to_string(),
+                activity: None,
+                client: "coach".to_string(),
+            }),
+            event(SessionEventKind::DriverIntervention {
+                action: "deny".to_string(),
+                detail: "run_command: rm".to_string(),
+                activity: Some("run_command".to_string()),
+                client: "coach".to_string(),
+            }),
+            event(SessionEventKind::TurnEnded {
+                stop: "Done".to_string(),
+            }),
+        ];
+        let ledger = EvidenceLedger::project(&events);
+        let process = extract_process(&events, &ledger);
+        assert_eq!(process.interventions, 2);
     }
 
     #[test]

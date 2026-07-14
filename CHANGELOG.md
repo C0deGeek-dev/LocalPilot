@@ -133,6 +133,28 @@ is SemVer-stable; the configuration schema stability policy is in
   up in LocalMind's review UI. A backed research finding is now enqueued as a
   review-gated candidate carrying its distilled one-line statement (the raw
   source blob still stays in the written report only). See ADR-0072.
+- **Out-of-workspace reads are grantable instead of a dead end** (ADR-0070).
+  The `bypass` profile now asks for an out-of-workspace path interactively
+  instead of hard-denying (it was weaker than `default`); a new
+  `[permissions] extra_read_roots` gives standing read-only grants honored in
+  every profile and non-interactively (writes keep the hard workspace
+  boundary, secret-like reads keep their gate, bad entries are reported and
+  skipped); and a new `unrestricted` profile (`--permission unrestricted`,
+  `/unrestricted`, or config) approves everything with no prompts — never the
+  default, surfaced in the footer in the strongest warning style, redaction
+  and logging stay on. An out-of-workspace denial now names the target and
+  all three remedies in the model-visible error.
+- Permission profile slash commands (`/default`, `/relaxed`, `/bypass`,
+  `/unrestricted`) now apply mid-turn (ADR-0071). The permission engine sits
+  behind a shared, swappable handle snapshotted per tool call, so a switch
+  takes effect from the running turn's next tool call instead of waiting for
+  the turn to finish; the idle path writes through the same handle so the two
+  paths cannot diverge.
+- Quitting no longer looks like a hang: each slow close-out learning stage
+  (model-backed lesson extraction, then the bounded code-graph reindex) runs
+  under a progress line on stderr — spinner-animated on a TTY and cleared so
+  the stage summary prints on a clean row, printed once on a non-TTY so
+  captured logs stay clean — instead of silence until it finishes.
 - Permission prompts describe the actual risk. An in-workspace read or write
   that asks only because the session is untrusted (the default-profile floor)
   now reads "read a file" / "write a file" instead of falsely claiming
@@ -146,6 +168,10 @@ is SemVer-stable; the configuration schema stability policy is in
   frontier coach's redirects can become promoted memory after human review.
   Approvals stay event-log-only; candidates are capped per session. See
   [docs/localmind-integration.md](docs/localmind-integration.md#driver-interventions-ride-the-same-bridge).
+- Harness scorecards carry the shared contract's new `interventions` field:
+  the process block counts the `driver_intervention` events an `mcp serve`
+  coach recorded on the session log, so a coached run's scorecard reports how
+  much external steering it took (an undriven run reports zero).
 - New `localpilot mcp serve`: serve the session runtime as an MCP server
   (protocol 2025-06-18) on stdio, so an MCP client — an agent host like
   Claude Code or Codex — can drive and steer a session through tools:
@@ -209,6 +235,13 @@ is SemVer-stable; the configuration schema stability policy is in
 - Chat: Ctrl+C exits the app even while a slash command is being typed; the
   autocomplete overlay no longer captures the global quit key (the `@`-mention
   picker is fixed the same way).
+- The embedded LocalMind engine advanced to current main, bringing the
+  documentation index and semantic doc search, the cross-device sync
+  foundation (`sync_meta`), the store-level embed flag the folder-ingest
+  bridge relies on, and the UI/store walk-up resolution into the bundled
+  copy.
+- Fixed a `--features tui` build break (a borrow conflict in the research
+  prompt output capture) that plain `cargo check` missed.
 
 ## v2.3.0 - 2026-07-07
 
