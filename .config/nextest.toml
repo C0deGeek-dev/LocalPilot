@@ -1,0 +1,10 @@
+# Workspace nextest configuration.
+#
+# A stalled test on a 4-core hosted CI runner starves it until GitHub kills
+# the whole job ("the hosted runner lost communication with the server") and
+# the logs vanish with it — the failure is unattributable. Flag a test as
+# slow after 60 seconds and terminate it after 5 minutes so a hang fails
+# loudly, by name, in the report instead. The slowest test in the suite
+# finishes in single-digit seconds; anything near the ceiling is a bug.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
