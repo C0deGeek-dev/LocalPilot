@@ -89,17 +89,39 @@ impl McpTools {
             registry.register(Box::new(localpilot_skills::SkillLoad));
         }
         for (server, descriptor, transport) in &self.entries {
-            registry.register_from(
-                Box::new(McpTool::new(
-                    descriptor,
-                    vec![Effect::Network],
-                    Arc::clone(transport),
-                )),
-                ToolSource::Mcp(server.clone()),
-            );
+            let mut tool = McpTool::new(descriptor, vec![Effect::Network], Arc::clone(transport));
+            if registry.get(&descriptor.name).is_some() {
+                let server_prefix = sanitize_server_name(server);
+                let advertised = format!("{server_prefix}_{}", descriptor.name);
+                if registry.get(&advertised).is_some() {
+                    eprintln!(
+                        "mcp: skipping tool '{}' from server '{}': advertised name '{}' collides with an existing tool",
+                        descriptor.name, server, advertised
+                    );
+                    continue;
+                }
+                eprintln!(
+                    "mcp: tool '{}' from server '{}' collides with an existing tool; advertised as '{}'",
+                    descriptor.name, server, advertised
+                );
+                tool = tool.advertised_as(advertised);
+            }
+            registry.register_from(Box::new(tool), ToolSource::Mcp(server.clone()));
         }
         registry
     }
+}
+
+fn sanitize_server_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Map the user-facing `[tools]` config into the broker's tuning, falling back to
@@ -153,6 +175,29 @@ async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use localpilot_mcp::ScriptedTransport;
+    use serde_json::json;
+
+    fn mcp_entry(server: &str, name: &str) -> (String, McpToolDescriptor, Arc<dyn Transport>) {
+        (
+            server.to_string(),
+            McpToolDescriptor {
+                name: name.to_string(),
+                description: "an MCP tool".to_string(),
+                input_schema: json!({ "type": "object" }),
+            },
+            Arc::new(ScriptedTransport::new()),
+        )
+    }
+
+    fn assert_unique_spec_names(registry: &ToolRegistry) {
+        let specs = registry.specs();
+        let unique = specs
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), specs.len(), "duplicate specs: {specs:?}");
+    }
 
     #[test]
     fn the_localmind_tools_are_registered_on_every_session_path() {
@@ -192,5 +237,57 @@ mod tests {
         let on_names = on.names();
         assert!(on_names.contains(&"skill_search"), "got: {on_names:?}");
         assert!(on_names.contains(&"skill_load"), "got: {on_names:?}");
+    }
+
+    #[test]
+    fn colliding_mcp_tool_is_prefixed_and_builtin_remains_reachable() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("duckduckgo", "fetch")],
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("fetch").is_some());
+        assert!(!registry.is_mcp("fetch"));
+        assert!(registry.get("duckduckgo_fetch").is_some());
+        assert!(registry.is_mcp("duckduckgo_fetch"));
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn tool_is_skipped_when_sanitized_prefixed_name_is_already_taken() {
+        let registry = McpTools {
+            entries: vec![
+                mcp_entry("duck.duckgo", "fetch"),
+                mcp_entry("duck/duckgo", "fetch"),
+            ],
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.is_mcp("duck_duckgo_fetch"));
+        assert_eq!(
+            registry
+                .names()
+                .iter()
+                .filter(|name| **name == "duck_duckgo_fetch")
+                .count(),
+            1
+        );
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn non_colliding_mcp_tool_keeps_its_remote_name() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("search", "lookup")],
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("lookup").is_some());
+        assert!(registry.is_mcp("lookup"));
+        assert!(registry.get("search_lookup").is_none());
+        assert_unique_spec_names(&registry);
     }
 }

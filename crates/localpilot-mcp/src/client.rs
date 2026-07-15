@@ -147,6 +147,7 @@ fn extract_text(result: &Value) -> String {
 /// redacted by the same registry dispatch — MCP is never a side channel.
 pub struct McpTool {
     name: String,
+    remote_name: String,
     description: String,
     schema: Value,
     effects: Vec<Effect>,
@@ -163,6 +164,7 @@ impl McpTool {
     ) -> Self {
         Self {
             name: descriptor.name.clone(),
+            remote_name: descriptor.name.clone(),
             description: if descriptor.description.is_empty() {
                 "MCP tool".to_string()
             } else {
@@ -172,6 +174,14 @@ impl McpTool {
             effects,
             transport,
         }
+    }
+
+    /// Override the name exposed to the model without changing the name sent
+    /// back to the MCP server.
+    #[must_use]
+    pub fn advertised_as(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
     }
 }
 
@@ -196,7 +206,7 @@ impl Tool for McpTool {
     async fn invoke(&self, input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let client = McpClient::new(Arc::clone(&self.transport));
         let text = client
-            .call_tool(&self.name, input)
+            .call_tool(&self.remote_name, input)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
         Ok(ToolOutput::ok(text))
@@ -243,5 +253,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "hello from mcp");
+    }
+
+    #[tokio::test]
+    async fn renamed_tool_advertises_alias_but_calls_remote_name() {
+        let transport = Arc::new(ScriptedTransport::new().with(
+            "tools/call",
+            json!({ "content": [{ "type": "text", "text": "remote result" }] }),
+        ));
+        let descriptor = McpToolDescriptor {
+            name: "fetch".to_string(),
+            description: "fetch a remote resource".to_string(),
+            input_schema: json!({ "type": "object" }),
+        };
+        let tool = McpTool::new(&descriptor, vec![Effect::Network], transport.clone())
+            .advertised_as("duckduckgo_fetch");
+
+        assert_eq!(tool.name(), "duckduckgo_fetch");
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = localpilot_sandbox::Workspace::new(dir.path()).unwrap();
+        let context = ToolContext {
+            workspace: &workspace,
+            interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+        };
+        let input = json!({ "url": "https://example.test" });
+        let output = tool.invoke(input.clone(), &context).await.unwrap();
+
+        assert_eq!(output.text, "remote result");
+        assert_eq!(
+            transport.calls(),
+            vec![(
+                "tools/call".to_string(),
+                json!({ "name": "fetch", "arguments": input }),
+            )]
+        );
     }
 }

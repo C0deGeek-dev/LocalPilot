@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Colliding MCP tool names remain usable without invalid provider requests.**
+  Builtins and earlier registrations keep their names; a colliding MCP tool is
+  advertised as `<server>_<tool>` while calls to its server retain the original
+  remote name. If that prefixed name is also occupied, the later tool is skipped
+  with a warning so duplicate function declarations never reach a provider.
 - **Folder ingest now feeds the LocalMind UI Docs tab** (ADR-0082, LocalHub#18).
   `localpilot ingest run`/`refresh` (and the session-open background build)
   bridge the workspace's Markdown files into LocalMind's documentation index

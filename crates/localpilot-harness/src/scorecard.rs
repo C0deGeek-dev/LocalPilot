@@ -242,7 +242,7 @@ pub fn extract_process(events: &[SessionEvent], ledger: &EvidenceLedger) -> Proc
         .iter()
         .rev()
         .find_map(|e| match &e.kind {
-            SessionEventKind::TurnEnded { stop } => Some(stop.clone()),
+            SessionEventKind::TurnEnded { stop, .. } => Some(stop.clone()),
             _ => None,
         })
         .unwrap_or_else(|| "unknown".to_string());
@@ -362,6 +362,7 @@ mod tests {
             tool_result("c3", "ok", false),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),
+                detail: None,
             }),
         ];
         let ledger = EvidenceLedger::project(&events);
@@ -393,6 +394,7 @@ mod tests {
             }),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),
+                detail: None,
             }),
         ];
         let ledger = EvidenceLedger::project(&events);
@@ -430,6 +432,7 @@ mod tests {
             )]),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),
+                detail: None,
             }),
         ];
         let ledger = EvidenceLedger::project(&events);
@@ -457,6 +460,7 @@ mod tests {
             }),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),
+                detail: None,
             }),
         ];
         let diff = "diff --git a/a.rs b/a.rs\n+++ b/a.rs\n+fn a() {}\n";
@@ -510,6 +514,7 @@ mod tests {
             tool_result("c2", "invalid input: missing field `path`", true),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),
+                detail: None,
             }),
         ];
         // A toy validator: write_file requires `path` and `content`.

@@ -1585,13 +1585,14 @@ impl SessionRuntime {
                             });
                             self.record_event(SessionEventKind::QuotaPaused { reset });
                         }
-                        let _ = events.send(RuntimeEvent::Warning(err.to_string()));
+                        let detail = err.to_string();
+                        let _ = events.send(RuntimeEvent::Warning(detail.clone()));
                         // A context-length rejection at open time is a missed
                         // local estimate; the turn loop shrinks and retries once.
                         if err.is_context_length_error() {
                             return Err(StreamOpen::Overflow);
                         }
-                        return Err(StreamOpen::Failed);
+                        return Err(StreamOpen::Failed(detail));
                     }
                 }
             }
@@ -1914,7 +1915,9 @@ impl SessionRuntime {
             let mut stream = match self.open_stream(&request, events, cancel).await {
                 Ok(stream) => stream,
                 Err(StreamOpen::Cancelled) => return self.stop(events, StopReason::Cancelled),
-                Err(StreamOpen::Failed) => return self.stop(events, StopReason::ProviderError),
+                Err(StreamOpen::Failed(detail)) => {
+                    return self.stop_with_detail(events, StopReason::ProviderError, Some(detail))
+                }
                 Err(StreamOpen::Overflow) => {
                     if self
                         .try_overflow_retry(&mut overflow_retried, events, cancel)
@@ -1922,7 +1925,14 @@ impl SessionRuntime {
                     {
                         continue;
                     }
-                    return self.stop(events, StopReason::ProviderError);
+                    return self.stop_with_detail(
+                        events,
+                        StopReason::ProviderError,
+                        Some(
+                            "provider rejected the request as too large again; stopping the turn"
+                                .to_string(),
+                        ),
+                    );
                 }
             };
 
@@ -2040,7 +2050,11 @@ impl SessionRuntime {
                                 break;
                             }
                             if stream_error_stops_turn(&err) {
-                                return self.stop(events, StopReason::ProviderError);
+                                return self.stop_with_detail(
+                                    events,
+                                    StopReason::ProviderError,
+                                    Some(err.to_string()),
+                                );
                             }
                             if let ProviderError::MalformedToolArguments { tool, .. } = &err {
                                 failed_tool = Some(tool.clone());
@@ -2079,12 +2093,12 @@ impl SessionRuntime {
                     }
                     continue;
                 }
-                let _ = events.send(RuntimeEvent::Warning(
+                let message =
                     "the model server kept ending responses early; stopping this turn — check the \
                      local server (it may have crashed or run out of VRAM)"
-                        .to_string(),
-                ));
-                return self.stop(events, StopReason::ProviderError);
+                        .to_string();
+                let _ = events.send(RuntimeEvent::Warning(message.clone()));
+                return self.stop_with_detail(events, StopReason::ProviderError, Some(message));
             }
 
             if overflow {
@@ -2096,13 +2110,20 @@ impl SessionRuntime {
                 {
                     continue;
                 }
-                return self.stop(events, StopReason::ProviderError);
+                return self.stop_with_detail(
+                    events,
+                    StopReason::ProviderError,
+                    Some(
+                        "provider rejected the request as too large again; stopping the turn"
+                            .to_string(),
+                    ),
+                );
             }
 
             if output_limited {
                 let message = "discarding partial response because the provider hit the output token limit; increase provider max_tokens or ask for a shorter answer".to_string();
-                let _ = events.send(RuntimeEvent::Warning(message));
-                return self.stop(events, StopReason::ProviderError);
+                let _ = events.send(RuntimeEvent::Warning(message.clone()));
+                return self.stop_with_detail(events, StopReason::ProviderError, Some(message));
             }
 
             // Bad-output detection and recovery.
@@ -2741,6 +2762,19 @@ impl SessionRuntime {
     }
 
     fn stop(&mut self, events: &broadcast::Sender<RuntimeEvent>, reason: StopReason) -> StopReason {
+        self.stop_with_detail(events, reason, None)
+    }
+
+    /// Stop the turn, persisting `detail` (when present) alongside the coarse
+    /// `StopReason` tag in the durable session log — e.g. the provider's
+    /// rejection message for `ProviderError`, so the log carries the actual
+    /// failure reason instead of just the tag. `stop` is the detail-less case.
+    fn stop_with_detail(
+        &mut self,
+        events: &broadcast::Sender<RuntimeEvent>,
+        reason: StopReason,
+        detail: Option<String>,
+    ) -> StopReason {
         // The turn has ended: a switch is allowed again at this boundary.
         self.turn_in_flight = false;
         // Build the per-turn handoff from the state tracked across the turn, so a
@@ -2757,6 +2791,7 @@ impl SessionRuntime {
         }
         self.record_event(SessionEventKind::TurnEnded {
             stop: format!("{reason:?}"),
+            detail,
         });
         // Best-effort, post-turn usage tracking: bump the hit count of every
         // memory this turn injected. Delivered once here at the single turn-exit
@@ -2919,8 +2954,10 @@ impl localpilot_tools::OutputRetention for StoreRetention<'_> {
 enum StreamOpen {
     /// The user cancelled during a retry backoff.
     Cancelled,
-    /// The error was non-transient or retries were exhausted.
-    Failed,
+    /// The error was non-transient or retries were exhausted. Carries the
+    /// provider error's display text so the caller can persist it, not just the
+    /// coarse `StopReason` tag.
+    Failed(String),
     /// The provider rejected the request as too large (a missed local estimate);
     /// the turn loop shrinks active history and retries once.
     Overflow,

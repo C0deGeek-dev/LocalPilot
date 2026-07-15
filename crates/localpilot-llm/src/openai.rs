@@ -622,11 +622,35 @@ async fn classify_error_response(status: u16, response: reqwest::Response) -> Pr
         .unwrap_or((None, None));
     let mut err = ProviderError::from_http(status, code.as_deref(), request_id, quota);
     if matches!(err, ProviderError::InvalidRequest { .. }) {
-        if let Some(message) = message {
+        // Structured `{"error": {"message": ...}}` extraction failed — the body
+        // wasn't JSON, or didn't carry a string `.error.message` (a proxy/gateway
+        // error, or a differently-shaped provider error). Surface the raw body
+        // instead of the bare "bad request" literal, so the provider's real
+        // rejection reason is still visible instead of a dead-end message.
+        let detail = message.or_else(|| truncated_error_detail(&body));
+        if let Some(message) = detail {
             err = ProviderError::InvalidRequest { message };
         }
     }
     err
+}
+
+/// The `InvalidRequest` fallback message when no structured `error.message`
+/// could be extracted: the raw response body, trimmed and bounded so an
+/// HTML/plain-text error page can't flood the UI. `None` for an empty body,
+/// which leaves the generic "bad request" literal from `ProviderError::from_http`.
+fn truncated_error_detail(body: &str) -> Option<String> {
+    const MAX_ERROR_BODY_CHARS: usize = 500;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return Some(trimmed.to_string());
+    }
+    let mut truncated: String = trimmed.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    truncated.push_str(" …(truncated)");
+    Some(truncated)
 }
 
 fn quota_from_headers(headers: &reqwest::header::HeaderMap) -> QuotaInfo {

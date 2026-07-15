@@ -30,6 +30,18 @@ spawns the process, performs the MCP handshake, and discovers its tools. A serve
 that fails to start is skipped with a note on stderr — it never aborts the
 session.
 
+### Tool name collisions
+
+Builtin and earlier-registered tools keep their names. When an MCP tool has the
+same name, LocalPilot advertises it as `<server>_<tool>` and prints the rename
+on stderr. Characters outside ASCII letters, digits, `_`, and `-` in the server
+key become `_` in that prefix. The MCP server still receives `tools/call` with
+the tool's original name.
+
+If the prefixed name is already registered, LocalPilot skips the later tool and
+prints a warning rather than advertising a duplicate function name. MCP tools
+that do not collide keep their original names.
+
 ## Permissions
 
 MCP tools are gated as a **network** effect: in an interactive session the REPL

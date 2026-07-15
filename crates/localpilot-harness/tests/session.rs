@@ -390,6 +390,30 @@ async fn output_limit_stop_discards_partial_reply() {
 }
 
 #[tokio::test]
+async fn provider_error_detail_reaches_the_durable_session_log() {
+    // A mid-stream ProviderError (e.g. Gemini/Vertex rejecting the request)
+    // must not collapse to the bare `StopReason::ProviderError` tag in the
+    // persisted log — the provider's own message has to survive alongside it.
+    let provider = FakeProvider::new().script(vec![Err(ProviderError::InvalidRequest {
+        message: "Invalid value at 'contents[0].role'".to_string(),
+    })]);
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("go", &h.events, &h.cancel).await;
+
+    assert_eq!(reason, StopReason::ProviderError);
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    let detail = events.iter().find_map(|e| match &e.kind {
+        localpilot_store::SessionEventKind::TurnEnded { detail, .. } => detail.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        detail.as_deref(),
+        Some("invalid request: Invalid value at 'contents[0].role'")
+    );
+}
+
+#[tokio::test]
 async fn update_plan_tool_emits_a_plan_event() {
     let provider = FakeProvider::new()
         .tool_call(

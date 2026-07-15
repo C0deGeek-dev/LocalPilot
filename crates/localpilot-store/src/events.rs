@@ -98,6 +98,13 @@ pub enum SessionEventKind {
     },
     TurnEnded {
         stop: String,
+        /// The underlying failure detail when `stop` names an error condition
+        /// (e.g. the provider's rejection message for `ProviderError`) — `None`
+        /// for a normal stop (`Done`, `Cancelled`, ...) or when no further detail
+        /// was available. Additive: absent on any log line written before this
+        /// field existed, which deserializes as `None`.
+        #[serde(default)]
+        detail: Option<String>,
     },
     UsageReported {
         input_tokens: u64,
@@ -449,6 +456,7 @@ mod tests {
             },
             SessionEventKind::TurnEnded {
                 stop: "done".to_string(),
+                detail: Some("provider rejected the request: bad schema".to_string()),
             },
             SessionEventKind::UsageReported {
                 input_tokens: 3,
@@ -599,6 +607,31 @@ mod tests {
         let line = serde_json::to_string(&original).unwrap();
         let back = SessionEvent::from_line(&line).unwrap();
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn a_turn_ended_line_without_detail_loads_as_none() {
+        // A log line written before `detail` existed on `TurnEnded` — the field
+        // is additive, so it must still deserialize, as `None`.
+        let mut value = serde_json::to_value(event(
+            SessionEventKind::TurnEnded {
+                stop: "ProviderError".to_string(),
+                detail: Some("will be removed".to_string()),
+            },
+            None,
+        ))
+        .unwrap();
+        value["kind"].as_object_mut().unwrap().remove("detail");
+        let line = serde_json::to_string(&value).unwrap();
+
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(
+            loaded.kind,
+            SessionEventKind::TurnEnded {
+                stop: "ProviderError".to_string(),
+                detail: None,
+            }
+        );
     }
 
     #[test]

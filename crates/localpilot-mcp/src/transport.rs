@@ -193,6 +193,7 @@ impl Transport for StdioTransport {
 #[derive(Default)]
 pub struct ScriptedTransport {
     responses: Mutex<HashMap<String, Value>>,
+    calls: Mutex<Vec<(String, Value)>>,
 }
 
 impl ScriptedTransport {
@@ -210,11 +211,23 @@ impl ScriptedTransport {
         }
         self
     }
+
+    /// Calls received so far, in order, with their JSON parameters.
+    #[must_use]
+    pub fn calls(&self) -> Vec<(String, Value)> {
+        self.calls
+            .lock()
+            .map(|calls| calls.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
 impl Transport for ScriptedTransport {
-    async fn call(&self, method: &str, _params: Value) -> Result<Value, McpError> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push((method.to_string(), params));
+        }
         self.responses
             .lock()
             .ok()

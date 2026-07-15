@@ -176,6 +176,53 @@ async fn invalid_request_preserves_provider_message() {
 }
 
 #[tokio::test]
+async fn invalid_request_extracts_message_from_a_google_shaped_envelope() {
+    // Google/Vertex error envelopes nest `code` as an integer, not a string
+    // (unlike OpenAI's). The `message` extraction must still succeed so the
+    // Gemini/Vertex provider surfaces its real rejection reason.
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":400,"message":"Invalid value at 'contents'","status":"INVALID_ARGUMENT"}}"#,
+        ),
+    )
+    .await;
+
+    let err = into_err(provider(server.uri()).stream(request()).await);
+    match err {
+        ProviderError::InvalidRequest { message } => {
+            assert!(message.contains("Invalid value at 'contents'"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invalid_request_falls_back_to_the_raw_body_when_unstructured() {
+    // A proxy/gateway-level 400 (or any body that isn't the expected
+    // `{"error": {"message": ...}}` shape) must not collapse to the bare
+    // "bad request" literal — the raw body is the only diagnostic left.
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        ResponseTemplate::new(400)
+            .insert_header("content-type", "text/plain")
+            .set_body_string("upstream rejected the request: quota exceeded for project"),
+    )
+    .await;
+
+    let err = into_err(provider(server.uri()).stream(request()).await);
+    match err {
+        ProviderError::InvalidRequest { message } => {
+            assert!(message.contains("quota exceeded for project"));
+            assert_ne!(message, "bad request");
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn auth_failure_is_classified() {
     let server = MockServer::start().await;
     mock(
