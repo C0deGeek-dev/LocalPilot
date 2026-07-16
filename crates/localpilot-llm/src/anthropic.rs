@@ -766,6 +766,35 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_normalized_prism_proxy_lifecycle() {
+        // Prism's llama.cpp fork omits content_block_start. LocalBox's shared
+        // proxy normalizes that server output and flushes its held text before
+        // content_block_stop; LocalPilot remains strict and accepts the result.
+        let events = collect_sse(&[
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ModelEvent::TextDelta(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(text, "OK");
+        assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Err(ProviderError::StreamTruncated { .. }))));
+    }
+
+    #[test]
     fn assembles_incremental_tool_use() {
         let events = collect_sse(&[
             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n",
