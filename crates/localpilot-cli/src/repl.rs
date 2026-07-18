@@ -2277,6 +2277,11 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
         RuntimeEvent::ToolStuck { name, count } => Some(UiEvent::Notice(format!(
             "tool `{name}` stuck after {count} failures — stopping and trying another way"
         ))),
+        // A clean completion settles the plan panel: whatever the model left
+        // non-done is no longer live work (LocalHub#20). Abnormal stops
+        // (cancel, timeout, degraded, budget) keep the truthful unfinished
+        // view untouched.
+        RuntimeEvent::Stopped(localpilot_harness::StopReason::Done) => Some(UiEvent::PlanSettled),
         _ => None,
     }
 }

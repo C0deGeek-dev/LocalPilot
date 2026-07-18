@@ -375,17 +375,33 @@ fn activity_lines(state: &AppState) -> Vec<Line<'static>> {
 
     if !state.plan.is_empty() {
         let done = state.plan.iter().filter(|i| i.status == "done").count();
+        // A settled plan belongs to a turn that already completed: render it
+        // ended and inactive so leftover non-done steps never read as live
+        // work (LocalHub#20). Statuses stay truthful — only the styling and
+        // header change.
+        let header = if state.plan_settled {
+            format!("plan ({done}/{}) — turn ended", state.plan.len())
+        } else {
+            format!("plan ({done}/{})", state.plan.len())
+        };
+        let header_color = if state.plan_settled {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
         lines.push(Line::styled(
-            format!("plan ({done}/{})", state.plan.len()),
+            header,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         ));
         for item in &state.plan {
-            let (marker, style) = match item.status.as_str() {
-                "done" => ("[x]", Style::default().fg(Color::Green)),
-                "in_progress" => ("[~]", Style::default().fg(Color::Yellow)),
-                _ => ("[ ]", Style::default()),
+            let (marker, style) = match (state.plan_settled, item.status.as_str()) {
+                (_, "done") => ("[x]", Style::default().fg(Color::Green)),
+                (false, "in_progress") => ("[~]", Style::default().fg(Color::Yellow)),
+                (false, _) => ("[ ]", Style::default()),
+                (true, "in_progress") => ("[~]", Style::default().fg(Color::DarkGray)),
+                (true, _) => ("[ ]", Style::default().fg(Color::DarkGray)),
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{marker} "), style),

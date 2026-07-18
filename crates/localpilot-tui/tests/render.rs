@@ -341,3 +341,46 @@ fn slash_autocomplete_enter_fills_the_highlighted_command() {
     assert!(state.slash_picker.is_none());
     assert_eq!(state.input, "/clear");
 }
+
+#[test]
+fn a_settled_plan_renders_as_ended_not_active() {
+    // LocalHub#20: a turn that completes normally must not leave the
+    // checklist looking like live work.
+    let mut state = base();
+    state.apply(UiEvent::PlanUpdated(vec![
+        localpilot_tui::PlanItem {
+            title: "step one".to_string(),
+            status: "done".to_string(),
+        },
+        localpilot_tui::PlanItem {
+            title: "step two".to_string(),
+            status: "in_progress".to_string(),
+        },
+    ]));
+    let live = render_natural(&state, 90);
+    assert!(live.contains("plan (1/2)"));
+    assert!(!live.contains("turn ended"));
+
+    state.apply(UiEvent::PlanSettled);
+    let settled = render_natural(&state, 90);
+    assert!(settled.contains("plan (1/2) — turn ended"));
+    // Statuses stay truthful: the unfinished step is still listed.
+    assert!(settled.contains("step two"));
+
+    // The next turn's update makes the panel live again.
+    state.apply(UiEvent::PlanUpdated(vec![localpilot_tui::PlanItem {
+        title: "fresh".to_string(),
+        status: "pending".to_string(),
+    }]));
+    let fresh = render_natural(&state, 90);
+    assert!(!fresh.contains("turn ended"));
+    assert!(fresh.contains("plan (0/1)"));
+}
+
+#[test]
+fn settling_without_a_plan_is_a_no_op() {
+    let mut state = base();
+    state.apply(UiEvent::PlanSettled);
+    assert!(!state.plan_settled);
+    assert!(!render_natural(&state, 90).contains("turn ended"));
+}

@@ -2,6 +2,28 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0085: A Clean Stop Settles The Plan Panel — Truthful Statuses, Ended Presentation
+
+Status: accepted.
+
+The task checklist is a pure mirror of the model's most recent `update_plan`
+call, and nothing reconciled it when a turn stopped: if the model finished
+without a final all-`done` update (common — the tool relies on the model
+remembering), steps lingered as `in_progress`/`pending` until the next
+prompt's plan replaced them (LocalHub#20).
+
+1. **A normal completion (`StopReason::Done`) settles the panel** via a
+   dedicated `PlanSettled` UI event: the header becomes `plan (d/n) — turn
+   ended` and non-`done` steps render inactive (dimmed). Statuses are never
+   rewritten — a step the model left unfinished still says so; only the
+   liveness presentation changes. Any later `update_plan` makes the panel
+   live again.
+2. **Abnormal stops (cancelled, timed out, degraded, provider error, budget,
+   no-progress) never settle** — there the dangling `in_progress` view is
+   the truth, and the UI must not dress an interrupted turn as an ended one.
+3. The UI does not depend on the model remembering a final `update_plan`;
+   no prompt-nudge change rides along.
+
 ## ADR-0084: Recalled Prompts Carry Their Pastes — Placeholders Rehydrate Instead Of Replaying Verbatim
 
 Status: accepted. Extends ADR-0040 (durable prompt history) additively; the

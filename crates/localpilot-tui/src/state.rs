@@ -293,6 +293,10 @@ pub struct AppState {
     workspace_files: Vec<String>,
     /// The model's current task checklist (empty until it calls `update_plan`).
     pub plan: Vec<PlanItem>,
+    /// Whether the checklist belongs to a turn that has completed normally.
+    /// A settled plan renders as ended instead of active; any new
+    /// `PlanUpdated` makes the panel live again.
+    pub plan_settled: bool,
     /// Tools currently running, shown as transient live indicators.
     pub active_tools: Vec<ActiveTool>,
     /// Background processes started this session, shown in the status line and
@@ -345,6 +349,7 @@ impl AppState {
             file_picker: None,
             workspace_files: Vec::new(),
             plan: Vec::new(),
+            plan_settled: false,
             active_tools: Vec::new(),
             background: Vec::new(),
             should_quit: false,
@@ -719,6 +724,7 @@ impl AppState {
         self.reasoning_escape_carry.clear();
         self.thinking.text.clear();
         self.plan.clear();
+        self.plan_settled = false;
         self.active_tools.clear();
         self.approval = None;
         self.busy = false;
@@ -1089,7 +1095,15 @@ impl AppState {
                     text,
                 });
             }
-            UiEvent::PlanUpdated(plan) => self.plan = plan,
+            UiEvent::PlanUpdated(plan) => {
+                self.plan = plan;
+                self.plan_settled = false;
+            }
+            UiEvent::PlanSettled => {
+                if !self.plan.is_empty() {
+                    self.plan_settled = true;
+                }
+            }
             UiEvent::ToolStarted { id, name } => {
                 // A running tool is a transient live indicator; only its finished
                 // result line is committed to scrollback.
@@ -1213,6 +1227,12 @@ pub enum UiEvent {
     RecoveryNotice(String),
     /// The model's task checklist changed.
     PlanUpdated(Vec<PlanItem>),
+    /// The turn completed normally: the checklist is no longer active work.
+    /// Steps the model left non-`done` keep their truthful status but the
+    /// panel renders as ended rather than in flight (LocalHub#20). Abnormal
+    /// stops (cancel, timeout, provider error) never send this — there the
+    /// unfinished view is the truth.
+    PlanSettled,
     ToolStarted {
         id: String,
         name: String,
@@ -1439,6 +1459,7 @@ fn scrub_event(event: UiEvent) -> UiEvent {
         | UiEvent::Usage { .. }
         | UiEvent::ContextUsage { .. }
         | UiEvent::TurnComplete
+        | UiEvent::PlanSettled
         | UiEvent::ApprovalResolved
         | UiEvent::ToggleThinking
         | UiEvent::ToggleMemoryPanel
