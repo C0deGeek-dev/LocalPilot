@@ -443,7 +443,8 @@ fn handle_key(state: &mut AppState, key: Key) {
 }
 
 fn submit_input(state: &mut AppState) {
-    let (shown, expanded) = state.take_input_for_submit();
+    let submitted = state.take_input_for_submit();
+    let (shown, expanded) = (submitted.shown, submitted.prompt);
     if expanded.trim().is_empty() {
         return;
     }
@@ -712,8 +713,11 @@ mod tests {
         let mut state = state();
         state.trust = None;
         state.seed_input_history(
-            vec!["project-only".to_string()],
-            vec!["project-only".to_string(), "another-project".to_string()],
+            vec![crate::state::RecallEntry::text_only("project-only")],
+            vec![
+                crate::state::RecallEntry::text_only("project-only"),
+                crate::state::RecallEntry::text_only("another-project"),
+            ],
         );
 
         // Default scope: recall sees only this project's prompt.

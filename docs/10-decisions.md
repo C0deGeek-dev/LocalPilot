@@ -2,6 +2,43 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0084: Recalled Prompts Carry Their Pastes — Placeholders Rehydrate Instead Of Replaying Verbatim
+
+Status: accepted. Extends ADR-0040 (durable prompt history) additively; the
+history file format version stays 1.
+
+A prompt containing a large paste is collapsed to a placeholder (`[10 pasted
+rows #1]`) in the composer, and only the placeholder form was recorded into
+recall — in-session (the placeholder→content map was cleared on submit) and
+durable (only the visible text was persisted). Recalling such a prompt and
+submitting it sent the literal placeholder string to the model; the pasted
+content was unrecoverable (LocalHub#19).
+
+1. **A recall entry is text plus its paste mappings.** The composer's three
+   recall lists and the durable `HistoryEntry` each carry the
+   placeholder→content pairs the prompt's visible form depends on (only the
+   mappings whose placeholder actually occurs in the submitted text).
+   Recalling an entry restores its mappings into the active paste set, so the
+   input line stays compact and submit expands exactly as the original did —
+   in-session and across restarts.
+2. **Placeholder numbers are session-monotonic.** The paste counter no longer
+   restarts after each submit, so two pastes in one session can never share a
+   placeholder string; on the residual cross-session collision (same row
+   count, same number) expansion prefers the newest mapping.
+3. **Paste content in history stays raw, like the prompt text around it** —
+   the module's founding rule (recall must be verbatim; redaction would
+   corrupt what the user resubmits) applies unchanged, and the same privacy
+   controls cover it: the `[history] persistence` opt-out (mappings ride the
+   same entry and the same no-op), the 0600/per-user file, the entry cap.
+4. **A per-entry budget (64 KiB of paste content) bounds the file.** The
+   global history is re-read and rewritten every submit, so a monster paste
+   would tax every future submission. Over budget, the entry is kept without
+   its mappings — recall then replays the placeholder, exactly the old
+   behaviour, for that entry only.
+5. **Old history lines load unchanged** (`pastes` defaults to empty; entries
+   without pastes serialize in their old shape), and old builds reading a new
+   file ignore the extra field.
+
 ## ADR-0083: Session Logs Append And Recover — One Damaged Line Never Loses A Session
 
 Status: accepted. Refines the store's write discipline (crate docs previously

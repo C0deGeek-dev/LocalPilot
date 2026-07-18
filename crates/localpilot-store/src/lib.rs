@@ -30,7 +30,10 @@ pub use events::{
     origin_for, transcript_from_events, MemoryUsed, MessageOrigin, OpenReason, SessionEvent,
     SessionEventKind, SESSION_EVENT_FORMAT_VERSION,
 };
-pub use history::{all_texts, project_texts, HistoryEntry, PromptHistory, HISTORY_FORMAT_VERSION};
+pub use history::{
+    all_texts, project_entries, project_texts, HistoryEntry, HistoryPaste, PromptHistory,
+    HISTORY_FORMAT_VERSION,
+};
 
 const SESSIONS_DIR: &str = "sessions";
 const CACHE_DIR: &str = "cache";

@@ -348,8 +348,8 @@ pub async fn run_chat(
     let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
     let history_entries = history.load();
     state.seed_input_history(
-        localpilot_store::project_texts(&history_entries, &cwd),
-        localpilot_store::all_texts(&history_entries),
+        recall_entries(localpilot_store::project_entries(&history_entries, &cwd)),
+        recall_entries(history_entries),
     );
     timer.mark("prompt history load");
 
@@ -513,6 +513,27 @@ async fn event_loop(
     }
 }
 
+/// Convert persisted history entries into the TUI's recall shape, carrying
+/// each prompt's paste mappings so a recalled placeholder can expand again.
+fn recall_entries(
+    entries: Vec<localpilot_store::HistoryEntry>,
+) -> Vec<localpilot_tui::RecallEntry> {
+    entries
+        .into_iter()
+        .map(|entry| localpilot_tui::RecallEntry {
+            text: entry.text,
+            pastes: entry
+                .pastes
+                .into_iter()
+                .map(|paste| localpilot_tui::Paste {
+                    placeholder: paste.placeholder,
+                    content: paste.content,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 async fn submit_current_input(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
@@ -522,15 +543,26 @@ async fn submit_current_input(
 ) -> anyhow::Result<()> {
     // Expand collapsed pastes for the model, but keep the compact form in the
     // transcript.
-    let (shown, prompt) = state.take_input_for_submit();
+    let submitted = state.take_input_for_submit();
     let images = state.take_images();
+    let (shown, prompt) = (submitted.shown, submitted.prompt);
     if prompt.trim().is_empty() && images.is_empty() {
         return Ok(());
     }
-    // Persist the visible prompt to the durable history, mirroring the in-session
-    // recall record. Best-effort: a write failure surfaces as a notice and never
-    // blocks the turn or breaks the session; the no-op opt-out is honoured inside.
-    if let Err(error) = host.history.append(&shown, host.cwd) {
+    // Persist the visible prompt to the durable history — with its paste
+    // mappings, so a recalled prompt can restore the pasted content instead of
+    // replaying placeholder text (LocalHub#19). Best-effort: a write failure
+    // surfaces as a notice and never blocks the turn or breaks the session;
+    // the no-op opt-out is honoured inside.
+    let history_pastes: Vec<localpilot_store::HistoryPaste> = submitted
+        .pastes
+        .iter()
+        .map(|paste| localpilot_store::HistoryPaste {
+            placeholder: paste.placeholder.clone(),
+            content: paste.content.clone(),
+        })
+        .collect();
+    if let Err(error) = host.history.append(&shown, &history_pastes, host.cwd) {
         state.apply(UiEvent::Notice(format!(
             "could not save prompt history: {error}"
         )));
@@ -1891,9 +1923,9 @@ fn resolve_event(
                     // admitted at the next safe provider-turn boundary.
                     if let Some(steer) = steer {
                         if !state.input.trim().is_empty() {
-                            let (shown, prompt) = state.take_input_for_submit();
-                            steer.push(prompt);
-                            state.apply(UiEvent::UserMessage(shown));
+                            let submitted = state.take_input_for_submit();
+                            steer.push(submitted.prompt);
+                            state.apply(UiEvent::UserMessage(submitted.shown));
                             state.apply(UiEvent::Notice(
                                 "steering queued for the next safe boundary".to_string(),
                             ));

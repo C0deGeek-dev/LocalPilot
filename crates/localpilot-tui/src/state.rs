@@ -112,10 +112,46 @@ pub struct ApprovalRequest {
 
 /// A large pasted block collapsed to a short placeholder in the input line. The
 /// full content is restored before the prompt is sent to the model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paste {
     pub placeholder: String,
     pub content: String,
+}
+
+/// One recallable prompt: the visible text plus the paste mappings needed to
+/// restore any collapsed placeholders when the prompt is submitted again.
+/// Without the mappings a recalled prompt would send the literal placeholder
+/// text (e.g. `[10 pasted rows #1]`) to the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecallEntry {
+    /// The visible prompt text, placeholders intact.
+    pub text: String,
+    /// The placeholder→content mappings the prompt was submitted with.
+    pub pastes: Vec<Paste>,
+}
+
+impl RecallEntry {
+    /// An entry with no paste mappings.
+    #[must_use]
+    pub fn text_only(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            pastes: Vec::new(),
+        }
+    }
+}
+
+/// A submitted prompt taken from the composer: the visible form for the
+/// transcript and history, the expanded form for the model, and the paste
+/// mappings the visible form depends on (for faithful recall later).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmittedInput {
+    /// The input as typed, placeholders intact.
+    pub shown: String,
+    /// The input with pastes expanded — what the model receives.
+    pub prompt: String,
+    /// The mappings for placeholders that occur in `shown`.
+    pub pastes: Vec<Paste>,
 }
 
 /// An image attached from the clipboard, shown as a short placeholder in the
@@ -215,15 +251,17 @@ pub struct AppState {
     pub input: String,
     /// UTF-8 byte offset where the next input edit occurs.
     pub input_cursor: usize,
-    input_history: Vec<String>,
+    input_history: Vec<RecallEntry>,
     history_cursor: Option<usize>,
     history_draft: String,
+    /// The paste mappings the draft depends on, saved and restored with it.
+    history_draft_pastes: Vec<Paste>,
     /// Persisted prompts submitted in the current project, oldest-first; the seed
     /// for project-scoped recall.
-    project_history: Vec<String>,
+    project_history: Vec<RecallEntry>,
     /// Persisted prompts submitted in every project, oldest-first; the seed for
     /// the view-all-projects recall scope.
-    all_history: Vec<String>,
+    all_history: Vec<RecallEntry>,
     /// Whether recall currently draws from `all_history` rather than
     /// `project_history` (toggled by the view-all key).
     viewing_all_history: bool,
@@ -240,6 +278,10 @@ pub struct AppState {
     pub trusted: bool,
     /// Large pastes collapsed to placeholders, expanded back on submit.
     pub pastes: Vec<Paste>,
+    /// Session-monotonic paste counter: placeholder numbers never restart
+    /// after a submit, so two different pastes in one session can never share
+    /// a placeholder string.
+    paste_seq: usize,
     /// Clipboard images attached to the next prompt, shown as placeholders.
     pub images: Vec<ImageAttachment>,
     /// Active slash-command autocomplete picker.
@@ -284,6 +326,7 @@ impl AppState {
             input_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
+            history_draft_pastes: Vec::new(),
             project_history: Vec::new(),
             all_history: Vec::new(),
             viewing_all_history: false,
@@ -296,6 +339,7 @@ impl AppState {
             trust: None,
             trusted: false,
             pastes: Vec::new(),
+            paste_seq: 0,
             images: Vec::new(),
             slash_picker: None,
             file_picker: None,
@@ -316,7 +360,8 @@ impl AppState {
     /// be restored on submit. Returns the placeholder to insert into the input.
     pub fn register_paste(&mut self, content: String) -> String {
         let rows = content.split('\n').count().max(1);
-        let placeholder = format!("[{rows} pasted rows #{}]", self.pastes.len() + 1);
+        self.paste_seq += 1;
+        let placeholder = format!("[{rows} pasted rows #{}]", self.paste_seq);
         self.pastes.push(Paste {
             placeholder: placeholder.clone(),
             content,
@@ -507,11 +552,14 @@ impl AppState {
         self.input_cursor = self.normalized_input_cursor();
     }
 
-    /// Restore any collapsed pastes in `text` to their full content.
+    /// Restore any collapsed pastes in `text` to their full content. Newest
+    /// mapping wins if two pastes ever share a placeholder string (possible
+    /// only across a recall of an old prompt, and then only when row count and
+    /// number coincide).
     #[must_use]
     pub fn expand_pastes(&self, text: &str) -> String {
         let mut out = text.to_string();
-        for paste in &self.pastes {
+        for paste in self.pastes.iter().rev() {
             out = out.replace(&paste.placeholder, &paste.content);
         }
         out
@@ -519,18 +567,29 @@ impl AppState {
 
     /// Take the current input, restoring collapsed pastes, and clear the set.
     pub fn take_input_expanded(&mut self) -> String {
-        self.take_input_for_submit().1
+        self.take_input_for_submit().prompt
     }
 
-    /// Take the visible and expanded input for submission, recording the visible
-    /// form in prompt history.
-    pub fn take_input_for_submit(&mut self) -> (String, String) {
+    /// Take the composer input for submission, recording the visible form and
+    /// its paste mappings in prompt history so a later recall can restore the
+    /// pasted content instead of replaying placeholder text.
+    pub fn take_input_for_submit(&mut self) -> SubmittedInput {
         let raw = std::mem::take(&mut self.input);
         self.input_cursor = 0;
         let expanded = self.expand_pastes(&raw);
-        self.pastes.clear();
-        self.record_input_history(&raw);
-        (raw, expanded)
+        // Keep only the mappings this prompt actually uses; a mapping left
+        // over from an abandoned recall would otherwise ride along forever.
+        let pastes: Vec<Paste> = self
+            .pastes
+            .drain(..)
+            .filter(|paste| raw.contains(&paste.placeholder))
+            .collect();
+        self.record_input_history(&raw, &pastes);
+        SubmittedInput {
+            shown: raw,
+            prompt: expanded,
+            pastes,
+        }
     }
 
     /// Whether the cursor is on the first logical input line.
@@ -556,6 +615,7 @@ impl AppState {
             Some(index) => index.saturating_sub(1),
             None => {
                 self.history_draft = self.input.clone();
+                self.history_draft_pastes = self.pastes.clone();
                 self.input_history.len() - 1
             }
         };
@@ -573,6 +633,7 @@ impl AppState {
             self.set_history_input(index + 1);
         } else {
             self.input = std::mem::take(&mut self.history_draft);
+            self.pastes = std::mem::take(&mut self.history_draft_pastes);
             self.input_cursor = self.input.len();
             self.history_cursor = None;
         }
@@ -585,13 +646,14 @@ impl AppState {
     /// This is the UI-only seam — the host loads and filters the store, this never
     /// touches the filesystem. Replaces any prior seed and resets the recall
     /// cursor; the in-session recall semantics are unchanged.
-    pub fn seed_input_history(&mut self, project: Vec<String>, all: Vec<String>) {
+    pub fn seed_input_history(&mut self, project: Vec<RecallEntry>, all: Vec<RecallEntry>) {
         self.project_history = cap_history(project);
         self.all_history = cap_history(all);
         self.viewing_all_history = false;
         self.input_history = self.project_history.clone();
         self.history_cursor = None;
         self.history_draft.clear();
+        self.history_draft_pastes.clear();
     }
 
     /// Toggle recall between this project's history and every project's. Returns
@@ -606,34 +668,45 @@ impl AppState {
         };
         self.history_cursor = None;
         self.history_draft.clear();
+        self.history_draft_pastes.clear();
         self.viewing_all_history
     }
 
-    fn record_input_history(&mut self, input: &str) {
+    fn record_input_history(&mut self, input: &str, pastes: &[Paste]) {
         self.history_cursor = None;
         self.history_draft.clear();
+        self.history_draft_pastes.clear();
         if input.trim().is_empty() {
             return;
         }
         // Record into the active recall list and both scope seeds, so a later
         // view-all toggle still sees prompts submitted this session. Every
         // submission belongs to the current project, hence both seeds.
-        push_capped(&mut self.input_history, input);
-        push_capped(&mut self.project_history, input);
-        push_capped(&mut self.all_history, input);
+        let entry = RecallEntry {
+            text: input.to_string(),
+            pastes: pastes.to_vec(),
+        };
+        push_capped(&mut self.input_history, &entry);
+        push_capped(&mut self.project_history, &entry);
+        push_capped(&mut self.all_history, &entry);
     }
 
     fn set_history_input(&mut self, index: usize) {
-        self.input = self.input_history[index].clone();
+        let entry = self.input_history[index].clone();
+        self.input = entry.text;
         self.input_cursor = self.input.len();
         self.history_cursor = Some(index);
-        self.pastes.clear();
+        // Restore the recalled prompt's paste mappings so its placeholders
+        // expand to the original content on submit instead of being sent
+        // verbatim (LocalHub#19).
+        self.pastes = entry.pastes;
     }
 
     fn leave_history_navigation(&mut self) {
         if self.history_cursor.is_some() {
             self.history_cursor = None;
             self.history_draft.clear();
+            self.history_draft_pastes.clear();
         }
     }
 
@@ -1089,18 +1162,18 @@ fn human_byte_size(bytes: usize) -> String {
     }
 }
 
-fn push_capped(history: &mut Vec<String>, input: &str) {
-    if history.last().is_some_and(|last| last == input) {
+fn push_capped(history: &mut Vec<RecallEntry>, entry: &RecallEntry) {
+    if history.last().is_some_and(|last| last.text == entry.text) {
         return;
     }
-    history.push(input.to_string());
+    history.push(entry.clone());
     if history.len() > MAX_INPUT_HISTORY {
         history.remove(0);
     }
 }
 
 /// Keep at most the most recent [`MAX_INPUT_HISTORY`] entries of a seed list.
-fn cap_history(mut history: Vec<String>) -> Vec<String> {
+fn cap_history(mut history: Vec<RecallEntry>) -> Vec<RecallEntry> {
     let start = history.len().saturating_sub(MAX_INPUT_HISTORY);
     if start > 0 {
         history.drain(0..start);
@@ -1413,11 +1486,14 @@ mod tests {
     fn seeding_scopes_recall_to_the_project_and_the_toggle_exposes_all() {
         let mut s = state();
         s.seed_input_history(
-            vec!["proj-a".to_string(), "proj-b".to_string()],
             vec![
-                "proj-a".to_string(),
-                "other-1".to_string(),
-                "proj-b".to_string(),
+                RecallEntry::text_only("proj-a"),
+                RecallEntry::text_only("proj-b"),
+            ],
+            vec![
+                RecallEntry::text_only("proj-a"),
+                RecallEntry::text_only("other-1"),
+                RecallEntry::text_only("proj-b"),
             ],
         );
 
@@ -1450,7 +1526,10 @@ mod tests {
     #[test]
     fn session_submissions_survive_a_view_all_toggle() {
         let mut s = state();
-        s.seed_input_history(vec!["seeded".to_string()], vec!["seeded".to_string()]);
+        s.seed_input_history(
+            vec![RecallEntry::text_only("seeded")],
+            vec![RecallEntry::text_only("seeded")],
+        );
         s.input = "typed this session".to_string();
         s.input_cursor = s.input.len();
         let _ = s.take_input_for_submit();
@@ -1623,6 +1702,80 @@ mod tests {
         // The set is cleared once consumed, and the input is taken.
         assert!(state.pastes.is_empty());
         assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn a_recalled_prompt_expands_its_paste_again_instead_of_the_placeholder() {
+        // LocalHub#19: recalling a prompt containing a collapsed paste used to
+        // send the literal placeholder text to the model.
+        let mut state = state();
+        let body = "row 1\nrow 2\nrow 3".to_string();
+        let placeholder = state.register_paste(body.clone());
+        state.input = format!("check {placeholder}");
+        let first = state.take_input_for_submit();
+        assert_eq!(first.prompt, format!("check {body}"));
+        assert_eq!(first.pastes.len(), 1);
+
+        // Recall the submitted prompt: the visible form stays compact...
+        assert!(state.recall_previous_input());
+        assert_eq!(state.input, format!("check {placeholder}"));
+        // ...and submitting it again sends the pasted content, not the tag.
+        let again = state.take_input_for_submit();
+        assert_eq!(again.prompt, format!("check {body}"));
+    }
+
+    #[test]
+    fn a_seeded_recall_entry_expands_its_persisted_paste() {
+        // The cross-session path: the durable history carries the mapping and
+        // the seed rehydrates it.
+        let mut state = state();
+        let entry = RecallEntry {
+            text: "explain [2 pasted rows #1]".to_string(),
+            pastes: vec![Paste {
+                placeholder: "[2 pasted rows #1]".to_string(),
+                content: "alpha\nbeta".to_string(),
+            }],
+        };
+        state.seed_input_history(vec![entry.clone()], vec![entry]);
+
+        assert!(state.recall_previous_input());
+        assert_eq!(state.input, "explain [2 pasted rows #1]");
+        let submitted = state.take_input_for_submit();
+        assert_eq!(submitted.prompt, "explain alpha\nbeta");
+    }
+
+    #[test]
+    fn paste_numbering_never_restarts_within_a_session() {
+        // Placeholder numbers are session-monotonic so a recalled prompt's
+        // placeholder can never collide with a fresh paste's.
+        let mut state = state();
+        let first = state.register_paste("a\nb".to_string());
+        state.input = first.clone();
+        let _ = state.take_input_for_submit();
+
+        let second = state.register_paste("c\nd".to_string());
+        assert!(first.contains("#1"));
+        assert!(second.contains("#2"), "numbering continues: {second}");
+    }
+
+    #[test]
+    fn browsing_history_and_returning_to_the_draft_keeps_its_pastes() {
+        let mut state = state();
+        // A submitted prompt to browse to.
+        state.input = "earlier".to_string();
+        let _ = state.take_input_for_submit();
+
+        // A draft with a live paste, interrupted by history browsing.
+        let placeholder = state.register_paste("x\ny".to_string());
+        state.input = format!("draft {placeholder}");
+        assert!(state.recall_previous_input());
+        assert_eq!(state.input, "earlier");
+        assert!(state.recall_next_input());
+
+        // Back on the draft, the paste still expands.
+        assert_eq!(state.input, format!("draft {placeholder}"));
+        let submitted = state.take_input_for_submit();
+        assert_eq!(submitted.prompt, "draft x\ny");
     }
 
     #[test]

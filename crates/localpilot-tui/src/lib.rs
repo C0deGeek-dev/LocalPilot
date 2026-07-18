@@ -22,8 +22,8 @@ pub use render::{
 };
 pub use state::{
     scrub_text, ActiveTool, AppState, ApprovalRequest, BackgroundProcess, FooterStats, Header,
-    ImageAttachment, Mode, Paste, PlanItem, Profile, ThinkingPanel, TranscriptLine, TrustPrompt,
-    UiEvent,
+    ImageAttachment, Mode, Paste, PlanItem, Profile, RecallEntry, SubmittedInput, ThinkingPanel,
+    TranscriptLine, TrustPrompt, UiEvent,
 };
 
 /// The product name shown in the UI.

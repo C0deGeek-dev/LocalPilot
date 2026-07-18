@@ -30,6 +30,24 @@ pub const HISTORY_FORMAT_VERSION: u32 = 1;
 /// in-session recall cap so several projects' histories survive together.
 const MAX_HISTORY_ENTRIES: usize = 1_000;
 
+/// A collapsed paste carried with a history entry: the placeholder shown in
+/// the prompt text and the content it stands for. Persisted so a recalled
+/// prompt can be re-expanded instead of sending the placeholder verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPaste {
+    /// The placeholder as it appears in the entry's `text`.
+    pub placeholder: String,
+    /// The pasted content the placeholder stands for.
+    pub content: String,
+}
+
+/// The most paste content (total bytes across one entry's pastes) persisted
+/// with a history entry. Beyond this the entry is stored without its mappings
+/// — recall then replays the placeholder, exactly the pre-mapping behaviour —
+/// so a single monster paste cannot balloon the global history file, which is
+/// re-read and rewritten on every submit.
+const PASTE_PERSIST_BUDGET: usize = 64 * 1024;
+
 /// One persisted prompt: the visible text, the directory it was submitted in, and
 /// when. Stored raw (no redaction) so recall is faithful.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,15 +60,21 @@ pub struct HistoryEntry {
     pub cwd: String,
     /// Unix submission time, seconds since the epoch.
     pub at_unix: u64,
+    /// Paste mappings for placeholders in `text`. `#[serde(default)]` so lines
+    /// written before pastes were carried still load; omitted when empty so
+    /// paste-free entries keep their old shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pastes: Vec<HistoryPaste>,
 }
 
 impl HistoryEntry {
-    fn new(text: String, cwd: &Path) -> Self {
+    fn new(text: String, pastes: Vec<HistoryPaste>, cwd: &Path) -> Self {
         Self {
             v: HISTORY_FORMAT_VERSION,
             text,
             cwd: cwd_key(cwd),
             at_unix: crate::now_unix(),
+            pastes,
         }
     }
 }
@@ -108,14 +132,21 @@ impl PromptHistory {
         }
     }
 
-    /// Append one prompt, tagged with `cwd` and the current time, trimming the
-    /// on-disk file to the cap and applying the restrictive mode. A no-op when
-    /// disabled or when the prompt is blank or repeats the last entry.
+    /// Append one prompt with the paste mappings its placeholders depend on,
+    /// tagged with `cwd` and the current time, trimming the on-disk file to
+    /// the cap and applying the restrictive mode. A no-op when disabled or
+    /// when the prompt is blank or repeats the last entry. Mappings beyond
+    /// [`PASTE_PERSIST_BUDGET`] are dropped (the entry itself is still kept).
     ///
     /// # Errors
     /// Returns [`StoreError::NoUserDir`] when persistence is enabled but the
     /// per-user directory cannot be resolved, or an io/serde error on write.
-    pub fn append(&self, text: &str, cwd: &Path) -> Result<(), StoreError> {
+    pub fn append(
+        &self,
+        text: &str,
+        pastes: &[HistoryPaste],
+        cwd: &Path,
+    ) -> Result<(), StoreError> {
         if !self.enabled || text.trim().is_empty() {
             return Ok(());
         }
@@ -127,7 +158,13 @@ impl PromptHistory {
         if entries.last().is_some_and(|last| last.text == text) {
             return Ok(());
         }
-        entries.push(HistoryEntry::new(text.to_string(), cwd));
+        let paste_bytes: usize = pastes.iter().map(|paste| paste.content.len()).sum();
+        let kept_pastes = if paste_bytes <= PASTE_PERSIST_BUDGET {
+            pastes.to_vec()
+        } else {
+            Vec::new()
+        };
+        entries.push(HistoryEntry::new(text.to_string(), kept_pastes, cwd));
 
         let start = entries.len().saturating_sub(MAX_HISTORY_ENTRIES);
         let mut body = String::new();
@@ -144,11 +181,9 @@ impl PromptHistory {
 /// seeding of the composer's history.
 #[must_use]
 pub fn project_texts(entries: &[HistoryEntry], cwd: &Path) -> Vec<String> {
-    let key = cwd_key(cwd);
-    entries
-        .iter()
-        .filter(|entry| entry.cwd == key)
-        .map(|entry| entry.text.clone())
+    project_entries(entries, cwd)
+        .into_iter()
+        .map(|entry| entry.text)
         .collect()
 }
 
@@ -157,6 +192,18 @@ pub fn project_texts(entries: &[HistoryEntry], cwd: &Path) -> Vec<String> {
 #[must_use]
 pub fn all_texts(entries: &[HistoryEntry]) -> Vec<String> {
     entries.iter().map(|entry| entry.text.clone()).collect()
+}
+
+/// The full entries submitted in `cwd` (oldest first) — text plus paste
+/// mappings — for hosts that rehydrate pastes on recall.
+#[must_use]
+pub fn project_entries(entries: &[HistoryEntry], cwd: &Path) -> Vec<HistoryEntry> {
+    let key = cwd_key(cwd);
+    entries
+        .iter()
+        .filter(|entry| entry.cwd == key)
+        .cloned()
+        .collect()
 }
 
 /// The directory tag for a path: its lossy string form. Write and filter use the
@@ -212,8 +259,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
         let cwd = Path::new("/work/project-a");
-        store.append("first", cwd).unwrap();
-        store.append("second", cwd).unwrap();
+        store.append("first", &[], cwd).unwrap();
+        store.append("second", &[], cwd).unwrap();
 
         let entries = store.load();
         assert_eq!(all_texts(&entries), vec!["first", "second"]);
@@ -227,9 +274,9 @@ mod tests {
         let store = store_at(&dir);
         let a = Path::new("/work/project-a");
         let b = Path::new("/work/project-b");
-        store.append("a-one", a).unwrap();
-        store.append("b-one", b).unwrap();
-        store.append("a-two", a).unwrap();
+        store.append("a-one", &[], a).unwrap();
+        store.append("b-one", &[], b).unwrap();
+        store.append("a-two", &[], a).unwrap();
 
         let entries = store.load();
         // Project recall sees only its own cwd's prompts, in order.
@@ -244,10 +291,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
         let cwd = Path::new("/work/p");
-        store.append("same", cwd).unwrap();
-        store.append("same", cwd).unwrap();
-        store.append("other", cwd).unwrap();
-        store.append("same", cwd).unwrap();
+        store.append("same", &[], cwd).unwrap();
+        store.append("same", &[], cwd).unwrap();
+        store.append("other", &[], cwd).unwrap();
+        store.append("same", &[], cwd).unwrap();
         // The immediate repeat is dropped; a later non-adjacent repeat is kept.
         assert_eq!(all_texts(&store.load()), vec!["same", "other", "same"]);
     }
@@ -257,7 +304,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
         let cwd = Path::new("/work/p");
-        store.append("   \n  ", cwd).unwrap();
+        store.append("   \n  ", &[], cwd).unwrap();
         assert!(store.load().is_empty());
         assert!(!dir.path().join("prompt-history.jsonl").exists());
     }
@@ -268,7 +315,7 @@ mod tests {
         let store = store_at(&dir);
         let cwd = Path::new("/work/p");
         for i in 0..(MAX_HISTORY_ENTRIES + 50) {
-            store.append(&format!("prompt-{i}"), cwd).unwrap();
+            store.append(&format!("prompt-{i}"), &[], cwd).unwrap();
         }
         let entries = store.load();
         assert_eq!(entries.len(), MAX_HISTORY_ENTRIES);
@@ -284,8 +331,12 @@ mod tests {
     fn a_truncated_or_corrupt_line_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prompt-history.jsonl");
-        let good =
-            serde_json::to_string(&HistoryEntry::new("kept".to_string(), Path::new("/p"))).unwrap();
+        let good = serde_json::to_string(&HistoryEntry::new(
+            "kept".to_string(),
+            Vec::new(),
+            Path::new("/p"),
+        ))
+        .unwrap();
         // A valid line, a partial JSON line (crash mid-append), and junk.
         fs::write(
             &path,
@@ -297,18 +348,92 @@ mod tests {
     }
 
     #[test]
+    fn paste_mappings_round_trip_with_their_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        let cwd = Path::new("/work/p");
+        let pastes = vec![HistoryPaste {
+            placeholder: "[3 pasted rows #1]".to_string(),
+            content: "a\nb\nc".to_string(),
+        }];
+        store
+            .append("check this: [3 pasted rows #1]", &pastes, cwd)
+            .unwrap();
+
+        let entries = store.load();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pastes, pastes);
+    }
+
+    #[test]
+    fn an_over_budget_paste_keeps_the_entry_but_drops_the_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        let cwd = Path::new("/work/p");
+        let huge = vec![HistoryPaste {
+            placeholder: "[1 pasted rows #1]".to_string(),
+            content: "x".repeat(PASTE_PERSIST_BUDGET + 1),
+        }];
+        store.append("[1 pasted rows #1]", &huge, cwd).unwrap();
+
+        let entries = store.load();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "[1 pasted rows #1]");
+        assert!(entries[0].pastes.is_empty(), "mappings beyond budget drop");
+    }
+
+    #[test]
+    fn a_line_written_before_pastes_were_carried_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt-history.jsonl");
+        // The exact pre-paste on-disk shape: no `pastes` field at all.
+        fs::write(
+            &path,
+            "{\"v\":1,\"text\":\"old prompt\",\"cwd\":\"/p\",\"at_unix\":1}\n",
+        )
+        .unwrap();
+        let store = PromptHistory::with_store(Some(path));
+        let entries = store.load();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "old prompt");
+        assert!(entries[0].pastes.is_empty());
+    }
+
+    #[test]
+    fn project_entries_keeps_mappings_and_scopes_by_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        let a = Path::new("/work/a");
+        let b = Path::new("/work/b");
+        let paste = vec![HistoryPaste {
+            placeholder: "[2 pasted rows #1]".to_string(),
+            content: "x\ny".to_string(),
+        }];
+        store.append("[2 pasted rows #1]", &paste, a).unwrap();
+        store.append("plain", &[], b).unwrap();
+
+        let entries = store.load();
+        let scoped = project_entries(&entries, a);
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].pastes, paste);
+    }
+
+    #[test]
     fn the_opt_out_neither_reads_nor_writes() {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("prompt-history.jsonl");
         // Seed a file the disabled store must not read.
-        let seeded =
-            serde_json::to_string(&HistoryEntry::new("secret".to_string(), Path::new("/p")))
-                .unwrap();
+        let seeded = serde_json::to_string(&HistoryEntry::new(
+            "secret".to_string(),
+            Vec::new(),
+            Path::new("/p"),
+        ))
+        .unwrap();
         fs::write(&candidate, format!("{seeded}\n")).unwrap();
 
         let off = PromptHistory::with_store(None);
         assert!(!off.is_enabled());
-        off.append("nothing", Path::new("/p")).unwrap();
+        off.append("nothing", &[], Path::new("/p")).unwrap();
         assert!(off.load().is_empty());
 
         // `none` constructed the production way also no-ops and reads nothing.
@@ -316,7 +441,7 @@ mod tests {
             enabled: false,
             path: Some(candidate.clone()),
         };
-        off2.append("still nothing", Path::new("/p")).unwrap();
+        off2.append("still nothing", &[], Path::new("/p")).unwrap();
         assert!(off2.load().is_empty());
         // The disabled store never touched the seeded file.
         assert_eq!(
@@ -331,7 +456,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let store = store_at(&dir);
-        store.append("x", Path::new("/p")).unwrap();
+        store.append("x", &[], Path::new("/p")).unwrap();
         let mode = fs::metadata(dir.path().join("prompt-history.jsonl"))
             .unwrap()
             .permissions()
