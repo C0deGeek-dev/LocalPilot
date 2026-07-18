@@ -3,9 +3,11 @@
 //! The store owns the project-local `.localpilot/` directory: transcripts (one
 //! JSON message per line), a session index, a file-backed cache, tool-output
 //! snapshots, and persisted provider metadata. Everything is an inspectable
-//! plain file, written atomically (temp-then-rename), and redacted *before* it
-//! touches disk using the workspace's shared secret detector. Export bundles are
-//! redacted again on the way out.
+//! plain file and redacted *before* it touches disk using the workspace's
+//! shared secret detector. Whole-file state is written atomically
+//! (temp-then-rename); line-delimited logs grow by guarded appends and are read
+//! with per-line recovery, so one damaged line never costs a session its intact
+//! records. Export bundles are redacted again on the way out.
 #![forbid(unsafe_code)]
 
 mod atomic;
@@ -60,6 +62,17 @@ pub struct SessionIndexEntry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SessionIndex {
     sessions: Vec<SessionIndexEntry>,
+}
+
+/// Events recovered from a session log, with a count of damaged lines skipped
+/// along the way. Produced by [`Store::read_events_recovering`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RecoveredEvents {
+    /// Every intact event, in log order.
+    pub events: Vec<SessionEvent>,
+    /// Physical lines that were not parseable event records (e.g. truncated by
+    /// a crash or torn write) and were skipped. The log file is left untouched.
+    pub skipped_lines: usize,
 }
 
 /// An exported, inspectable session bundle.
@@ -132,33 +145,34 @@ impl Store {
     /// Returns [`StoreError`] on serialization or filesystem failure.
     pub fn append_message(&self, session: SessionId, message: &Message) -> Result<(), StoreError> {
         let path = self.session_path(session);
-        let mut content = read_to_string_opt(&path)?.unwrap_or_default();
-
         let line = redact(&serde_json::to_string(message)?);
-        content.push_str(&line);
-        content.push('\n');
-        atomic_write(&path, content.as_bytes())?;
+        atomic::append_line(&path, &line)?;
 
-        let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+        let count = read_to_string_opt(&path)?
+            .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
         self.touch_index(session, count)?;
         Ok(())
     }
 
-    /// Read a session transcript back into messages.
+    /// Read a session transcript back into messages. A line damaged on disk
+    /// (e.g. truncated by a crash) is skipped rather than failing the whole
+    /// transcript — the event log, not the transcript file, is the durable
+    /// source of truth for resume.
     ///
     /// # Errors
-    /// Returns [`StoreError`] if a line is not valid JSON or the file cannot be
-    /// read. A missing session yields an empty transcript.
+    /// Returns [`StoreError`] if the file cannot be read. A missing session
+    /// yields an empty transcript.
     pub fn read_transcript(&self, session: SessionId) -> Result<Vec<Message>, StoreError> {
         let path = self.session_path(session);
         let Some(content) = read_to_string_opt(&path)? else {
             return Ok(Vec::new());
         };
-        let mut messages = Vec::new();
-        for line in content.lines().filter(|l| !l.trim().is_empty()) {
-            messages.push(serde_json::from_str(line)?);
-        }
-        Ok(messages)
+        Ok(content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect())
     }
 
     // --- session event log ---------------------------------------------------
@@ -188,28 +202,54 @@ impl Store {
             kind,
         };
         let path = self.events_path(session);
-        let mut content = read_to_string_opt(&path)?.unwrap_or_default();
-        content.push_str(&redact(&serde_json::to_string(&event)?));
-        content.push('\n');
-        atomic_write(&path, content.as_bytes())?;
+        let line = redact(&serde_json::to_string(&event)?);
+        atomic::append_line(&path, &line)?;
         Ok(event.id)
     }
 
     /// Read a session's event log in order, migrating older format versions on
-    /// load. A missing log yields an empty sequence.
+    /// load. A missing log yields an empty sequence; a line damaged on disk is
+    /// skipped (see [`Store::read_events_recovering`] for the skip count).
     ///
     /// # Errors
-    /// Returns [`StoreError`] if a line is unreadable or written by a newer
-    /// format version than this build supports.
+    /// Returns [`StoreError`] if the file cannot be read or contains a record
+    /// written by a newer format version than this build supports.
     pub fn read_events(&self, session: SessionId) -> Result<Vec<SessionEvent>, StoreError> {
+        Ok(self.read_events_recovering(session)?.events)
+    }
+
+    /// Read a session's event log, recovering around damaged lines.
+    ///
+    /// A line that is not a parseable event record (truncated by a crash or a
+    /// torn write) is skipped and counted instead of poisoning the whole log —
+    /// one damaged line must never cost the session its 1,900 intact events.
+    /// The file itself is left untouched: recovery happens on read, and because
+    /// appends never rewrite existing content the damage is never propagated.
+    ///
+    /// A record with a *newer* format version than this build understands is
+    /// still a hard error, not a skip — that is a build/version fence, not disk
+    /// damage, and silently dropping records a newer build wrote would be a
+    /// silent misparse.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the file cannot be read or contains a record
+    /// from a newer format version.
+    pub fn read_events_recovering(
+        &self,
+        session: SessionId,
+    ) -> Result<RecoveredEvents, StoreError> {
         let Some(content) = read_to_string_opt(&self.events_path(session))? else {
-            return Ok(Vec::new());
+            return Ok(RecoveredEvents::default());
         };
-        content
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(SessionEvent::from_line)
-            .collect()
+        let mut recovered = RecoveredEvents::default();
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            match SessionEvent::from_line(line) {
+                Ok(event) => recovered.events.push(event),
+                Err(err @ StoreError::UnsupportedFormat { .. }) => return Err(err),
+                Err(_) => recovered.skipped_lines += 1,
+            }
+        }
+        Ok(recovered)
     }
 
     // --- index -------------------------------------------------------------
@@ -984,5 +1024,111 @@ mod tests {
         assert!(store.session_path(doomed).exists());
         assert!(store.get_tool_output("orphan").unwrap().is_some());
         assert_eq!(store.list_sessions().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_damaged_event_line_is_skipped_and_the_intact_events_survive() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        let first = store
+            .append_event(
+                session,
+                None,
+                SessionEventKind::SessionOpened {
+                    reason: OpenReason::New,
+                },
+            )
+            .unwrap();
+        store
+            .append_event(session, Some(first), SessionEventKind::SessionClosed)
+            .unwrap();
+
+        // Truncate the first record mid-line, as the torn write in the field did.
+        let path = store.events_path(session);
+        let content = fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        let cut = lines[0].len() / 2;
+        lines[0].truncate(cut);
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let recovered = store.read_events_recovering(session).unwrap();
+        assert_eq!(recovered.skipped_lines, 1);
+        assert_eq!(recovered.events.len(), 1);
+        assert_eq!(recovered.events[0].kind, SessionEventKind::SessionClosed);
+        // The plain reader agrees instead of failing the whole log.
+        assert_eq!(store.read_events(session).unwrap().len(), 1);
+        // Recovery is read-side only: the file still holds the damaged line.
+        assert!(fs::read_to_string(&path).unwrap().lines().count() == 2);
+    }
+
+    #[test]
+    fn a_torn_tail_never_swallows_the_next_event() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        store
+            .append_event(
+                session,
+                None,
+                SessionEventKind::SessionOpened {
+                    reason: OpenReason::New,
+                },
+            )
+            .unwrap();
+
+        // Simulate a crash mid-append: an unterminated half-record at the tail.
+        let path = store.events_path(session);
+        let mut content = fs::read_to_string(&path).unwrap();
+        content.push_str("{\"v\":8,\"id\":\"cut-off-mid-rec");
+        fs::write(&path, content).unwrap();
+
+        store
+            .append_event(session, None, SessionEventKind::SessionClosed)
+            .unwrap();
+
+        let recovered = store.read_events_recovering(session).unwrap();
+        assert_eq!(recovered.skipped_lines, 1);
+        assert_eq!(recovered.events.len(), 2);
+        assert_eq!(recovered.events[1].kind, SessionEventKind::SessionClosed);
+    }
+
+    #[test]
+    fn a_newer_format_version_is_still_a_hard_error_not_a_skip() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        store
+            .append_event(session, None, SessionEventKind::SessionClosed)
+            .unwrap();
+
+        let path = store.events_path(session);
+        let mut content = fs::read_to_string(&path).unwrap();
+        content.push_str(&format!("{{\"v\":{}}}\n", SESSION_EVENT_FORMAT_VERSION + 1));
+        fs::write(&path, content).unwrap();
+
+        assert!(matches!(
+            store.read_events(session),
+            Err(StoreError::UnsupportedFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn a_damaged_transcript_line_is_skipped_on_read() {
+        let (_dir, store) = store();
+        let session = SessionId::new();
+        store
+            .append_message(session, &Message::text(Role::User, "first"))
+            .unwrap();
+        store
+            .append_message(session, &Message::text(Role::Assistant, "second"))
+            .unwrap();
+
+        let path = store.session_path(session);
+        let content = fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        let cut = lines[0].len() / 2;
+        lines[0].truncate(cut);
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let read = store.read_transcript(session).unwrap();
+        assert_eq!(read, vec![Message::text(Role::Assistant, "second")]);
     }
 }

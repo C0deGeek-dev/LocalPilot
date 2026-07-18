@@ -2,6 +2,46 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0083: Session Logs Append And Recover — One Damaged Line Never Loses A Session
+
+Status: accepted. Refines the store's write discipline (crate docs previously
+promised temp-then-rename for *everything*); resume, replay, and audit stay
+one mechanism.
+
+A session's `<id>.events.jsonl` reached the field with one physically
+truncated line (LocalHub#21): the record was cut mid-`[REDACTED]` marker —
+after serialization and redaction, so the damage was byte-level, most likely
+a torn write during a crash or power loss (`fs::write` never syncs data
+blocks, so a rename can survive a crash whose data does not). The reader
+(`read_events` → `collect::<Result<…>>`) was all-or-nothing, so that single
+line poisoned all 1,923 intact events and resume refused the session
+entirely. Worse, every append re-read and rewrote the whole file, faithfully
+carrying the damaged line forward forever — O(n) per append and structurally
+unable to self-limit corruption.
+
+1. **Line-delimited session logs (events and transcripts) grow by guarded
+   append (`append_line`), not read-modify-rewrite.** Appending one record
+   touches only the tail: existing damage is never re-written, re-serialized,
+   or propagated, and each append is O(1). If the current tail is an
+   unterminated line (a torn write), the append first seals it with a newline
+   so the damaged bytes stay quarantined on their own physical line and can
+   never swallow the new record.
+2. **Reads recover around damage instead of dying of it.**
+   `read_events_recovering` skips a line that is not a parseable record and
+   counts it; `read_events` and `read_transcript` share the behavior. Resume
+   (`load_session`) returns the skip count as a `SessionRecovery`, and every
+   resume surface (REPL notice, `print --resume`, `rpc serve`) tells the user
+   when lines were skipped. The file itself is left untouched — recovery is
+   read-side, and the log remains inspectable evidence.
+3. **The version fence stays fatal.** A line whose `v` is newer than the
+   build understands is still a typed `UnsupportedFormat` error, never a
+   skip: that is a build/downgrade incompatibility, not disk damage, and
+   silently dropping records a newer build wrote would be a silent misparse
+   (unchanged from the events module's founding rule).
+4. **Appends still do not fsync.** Durability of the final pre-crash record
+   is not the goal — bounded blast radius is. With appends the worst a crash
+   can leave is one torn tail line, which (1) and (2) contain and recover.
+
 ## ADR-0082: Folder Ingest Bridges Markdown Into LocalMind's Documentation Index
 
 Status: accepted. Narrows ADR-0013 (ingestion is derived, disposable state

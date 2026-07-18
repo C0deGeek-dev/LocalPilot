@@ -86,7 +86,13 @@ pub async fn print_mode(
     if let Some(session) = resume {
         // Resume rebuilds the conversation from the durable event log; the
         // profile and trust just configured stay in force.
-        runtime.load_session(session)?;
+        let report = runtime.load_session(session)?;
+        if report.skipped_lines > 0 {
+            eprintln!(
+                "resume: skipped {} damaged event line(s); continuing with the intact log",
+                report.skipped_lines
+            );
+        }
     }
 
     let outcome = run_and_print(runtime, prompt).await?;

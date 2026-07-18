@@ -124,7 +124,14 @@ pub async fn run(
     // Resume before serving so the handshake reports the resumed session's id;
     // the current profile and trust stay in force, exactly as the REPL's resume.
     if let Some(session) = resume {
-        runtime.load_session(session)?;
+        let report = runtime.load_session(session)?;
+        if report.skipped_lines > 0 {
+            // stdout carries the protocol; the recovery note goes to stderr.
+            eprintln!(
+                "resume: skipped {} damaged event line(s); continuing with the intact log",
+                report.skipped_lines
+            );
+        }
     }
 
     // The Native serve path moves `cwd` into the serve context; keep a copy so

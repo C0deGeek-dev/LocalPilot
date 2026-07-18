@@ -1171,8 +1171,14 @@ fn load_session_id(
     session: localpilot_core::SessionId,
 ) {
     match runtime.load_session(session) {
-        Ok(()) => {
+        Ok(report) => {
             state.clear_conversation_view();
+            if report.skipped_lines > 0 {
+                state.apply(UiEvent::Notice(format!(
+                    "recovered session log: skipped {} damaged event line(s); the remaining events are intact",
+                    report.skipped_lines
+                )));
+            }
             state.header.session_id = session.to_string();
             // Surface the conversation's name (if any) in the header on resume.
             state.header.session_name = runtime

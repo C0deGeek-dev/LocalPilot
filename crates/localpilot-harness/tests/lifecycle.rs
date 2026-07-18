@@ -112,6 +112,70 @@ async fn resume_rebuilds_the_conversation_from_the_event_log() {
 }
 
 #[tokio::test]
+async fn resume_survives_a_truncated_event_line_and_reports_it() {
+    // LocalHub issue #21: one torn line in <id>.events.jsonl used to poison the
+    // whole log — resume failed even though every other event was intact.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+    let store = Store::open(dir.path());
+    let (events, _rx) = broadcast::channel(256);
+    let cancel = CancellationToken::new();
+
+    let mut first = runtime_in(
+        dir.path(),
+        FakeProvider::new()
+            .tool_call("c1", "read_file", json!({ "path": "a.txt" }))
+            .text("read it"),
+        Profile::Default,
+        Interactivity::Interactive,
+    );
+    let session = first.session_id();
+    assert_eq!(
+        first.run_turn("read a.txt", &events, &cancel).await,
+        StopReason::Done
+    );
+    drop(first);
+
+    // Truncate one mid-log line, as the torn write in the field did.
+    let log_path = dir
+        .path()
+        .join(".localpilot")
+        .join("sessions")
+        .join(format!("{session}.events.jsonl"));
+    let content = std::fs::read_to_string(&log_path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+    assert!(lines.len() >= 3, "expected a multi-event log");
+    let victim = lines.len() / 2;
+    let cut = lines[victim].len() / 2;
+    lines[victim].truncate(cut);
+    std::fs::write(&log_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    // A fresh runtime resumes the damaged session instead of refusing it.
+    let mut resumed = runtime_in(
+        dir.path(),
+        FakeProvider::new().text("welcome back"),
+        Profile::Default,
+        Interactivity::Interactive,
+    );
+    let report = resumed.load_session(session).unwrap();
+    assert_eq!(report.skipped_lines, 1);
+    assert_eq!(resumed.session_id(), session);
+
+    // The session keeps working: the resume was recorded and new turns run.
+    assert_eq!(
+        resumed.run_turn("continue", &events, &cancel).await,
+        StopReason::Done
+    );
+    let log = store.read_events(session).unwrap();
+    assert!(log.iter().any(|event| matches!(
+        event.kind,
+        SessionEventKind::SessionOpened {
+            reason: OpenReason::Resumed
+        }
+    )));
+}
+
+#[tokio::test]
 async fn resume_applies_the_current_profile_never_the_logged_one() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path());

@@ -527,6 +527,14 @@ fn no_progress_hint() -> String {
         .to_string()
 }
 
+/// What a session resume recovered from the durable event log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionRecovery {
+    /// Damaged event-log lines (truncated by a crash or torn write) skipped
+    /// while rebuilding the conversation. Zero on a healthy log.
+    pub skipped_lines: usize,
+}
+
 /// The result of re-pointing a live session at a different provider/model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchOutcome {
@@ -976,10 +984,18 @@ impl SessionRuntime {
     /// profile and trust state stay in force — nothing from the resumed log
     /// can carry over stale elevated permissions.
     ///
+    /// A log line damaged on disk (truncated by a crash or torn write) is
+    /// skipped rather than failing the resume; the returned [`SessionRecovery`]
+    /// carries the skip count so the caller can tell the user.
+    ///
     /// # Errors
     /// Returns the store error if the session's event log cannot be read.
-    pub fn load_session(&mut self, session: SessionId) -> Result<(), localpilot_store::StoreError> {
-        let events = self.store.read_events(session)?;
+    pub fn load_session(
+        &mut self,
+        session: SessionId,
+    ) -> Result<SessionRecovery, localpilot_store::StoreError> {
+        let recovered = self.store.read_events_recovering(session)?;
+        let events = recovered.events;
         let transcript = transcript_from_events(&events);
         // Keep the current setup prompt; the transcript never contains it.
         let setup = self
@@ -996,7 +1012,9 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::Resumed,
         });
-        Ok(())
+        Ok(SessionRecovery {
+            skipped_lines: recovered.skipped_lines,
+        })
     }
 
     /// Branch the current conversation into a new session. The new session's
