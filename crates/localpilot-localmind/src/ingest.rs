@@ -1363,7 +1363,21 @@ pub fn compute_pack(
     }
 
     normalize_lexical_relevance(&mut candidates);
-    let allocation = allocate(candidates, token_budget);
+    let mut allocation = allocate(candidates, token_budget);
+    // Back-fill file coordinates on ingest entries so a pack entry is a full
+    // locator (the allocator itself has no file knowledge).
+    for entry in allocation
+        .selected
+        .iter_mut()
+        .chain(allocation.skipped.iter_mut())
+    {
+        if entry.source == PackSource::Ingest {
+            if let Some(hit) = hit_by_id.get(&entry.id) {
+                entry.start_line = Some(hit.start_line);
+                entry.end_line = Some(hit.end_line);
+            }
+        }
+    }
 
     // Back-compat ingest view: rebuild the `KnowledgeHit` chunks the allocator
     // selected from the ingest source, carrying its inclusion reason.

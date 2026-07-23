@@ -38,6 +38,34 @@ fn capped_ids(input: Value) -> Result<Vec<String>, ToolError> {
     Ok(input.ids.into_iter().take(MAX_IDS).collect())
 }
 
+/// The non-ingest id namespaces `knowledge_search` can emit. Only ingest chunk
+/// ids are fetchable; these ids name content that lives elsewhere, and the
+/// follow-up tools say so explicitly instead of returning a silent miss.
+fn non_fetchable_reason(id: &str) -> Option<&'static str> {
+    if id.starts_with("memory:") {
+        Some("an accepted-memory entry — read it through the memory surfaces (memory search / the review UI), not the chunk fetch layer")
+    } else if id.starts_with("graph:") {
+        Some("a code-graph row — inspect the symbol through the code-graph surfaces, not the chunk fetch layer")
+    } else if id.starts_with("session:") {
+        Some("a recent-session fact — its snippet is already its full content")
+    } else {
+        None
+    }
+}
+
+/// Split requested ids into fetchable chunk ids and explained rejections.
+fn partition_fetchable(ids: Vec<String>) -> (Vec<String>, Vec<(String, &'static str)>) {
+    let mut fetchable = Vec::new();
+    let mut rejected = Vec::new();
+    for id in ids {
+        match non_fetchable_reason(&id) {
+            Some(reason) => rejected.push((id, reason)),
+            None => fetchable.push(id),
+        }
+    }
+    (fetchable, rejected)
+}
+
 /// Expand chosen ids into their document neighbours (layer 2). Read-only.
 pub struct KnowledgeExpand;
 
@@ -66,8 +94,9 @@ impl Tool for KnowledgeExpand {
         if ids.is_empty() {
             return Ok(ToolOutput::ok("no ids given to expand"));
         }
+        let (fetchable, rejected) = partition_fetchable(ids);
         let root = ctx.workspace.root();
-        let expansions = crate::layered::expand_layer(root, &ids)
+        let expansions = crate::layered::expand_layer(root, &fetchable)
             .map_err(|e| ToolError::Failed(e.to_string()))?;
         let total_cost: u64 = expansions
             .iter()
@@ -84,6 +113,9 @@ impl Tool for KnowledgeExpand {
                     expansion.neighbor_ids.join(", ")
                 ));
             }
+        }
+        for (id, reason) in rejected {
+            out.push_str(&format!("- {id}: not fetchable — {reason}\n"));
         }
         Ok(ToolOutput::ok(out))
     }
@@ -117,10 +149,11 @@ impl Tool for KnowledgeFetch {
         if ids.is_empty() {
             return Ok(ToolOutput::ok("no ids given to fetch"));
         }
+        let (fetchable, rejected) = partition_fetchable(ids);
         let root = ctx.workspace.root();
-        let bodies = crate::layered::fetch_layer(root, &ids)
+        let bodies = crate::layered::fetch_layer(root, &fetchable)
             .map_err(|e| ToolError::Failed(e.to_string()))?;
-        if bodies.is_empty() {
+        if bodies.is_empty() && rejected.is_empty() {
             return Ok(ToolOutput::ok("no chunks matched the requested ids"));
         }
         let total_cost: u64 = bodies.iter().map(|body| body.token_cost).sum();
@@ -131,6 +164,9 @@ impl Tool for KnowledgeFetch {
                 "\n## {}:{}-{} [{}]\n{}\n",
                 body.path, body.start_line, body.end_line, body.id, text
             ));
+        }
+        for (id, reason) in rejected {
+            out.push_str(&format!("\n## {id}\nnot fetchable — {reason}\n"));
         }
         Ok(ToolOutput::ok(out))
     }
@@ -211,5 +247,83 @@ mod tests {
             .unwrap();
         assert!(!out.is_error);
         assert!(out.text.contains("expand layer"));
+    }
+
+    #[tokio::test]
+    async fn a_search_emitted_id_round_trips_into_fetch() {
+        let dir = ingested();
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        // The first layer emits the locator; the id printed there is the very
+        // string the fetch layer accepts — the contract the tools document.
+        let search = crate::KnowledgeSearch
+            .invoke(json!({ "query": "marker_widget" }), &context(&ws))
+            .await
+            .unwrap();
+        assert!(!search.is_error);
+        let id_start = search
+            .text
+            .find("(id ")
+            .expect("search output carries an id locator")
+            + 4;
+        let id_end = id_start
+            + search.text[id_start..]
+                .find(',')
+                .expect("locator fields are comma-separated");
+        let id = search.text[id_start..id_end].to_string();
+        assert!(
+            search.text.contains("fetchable"),
+            "locator must state fetchability: {}",
+            search.text
+        );
+
+        let fetched = KnowledgeFetch
+            .invoke(json!({ "ids": [id] }), &context(&ws))
+            .await
+            .unwrap();
+        assert!(!fetched.is_error);
+        assert!(
+            fetched.text.contains("marker_widget"),
+            "the emitted id must fetch its full body: {}",
+            fetched.text
+        );
+    }
+
+    #[tokio::test]
+    async fn non_ingest_ids_are_rejected_with_an_explanation() {
+        let dir = ingested();
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let fetched = KnowledgeFetch
+            .invoke(
+                json!({ "ids": ["memory:abc123", "session:0"] }),
+                &context(&ws),
+            )
+            .await
+            .unwrap();
+        assert!(!fetched.is_error);
+        assert!(
+            fetched.text.contains("memory:abc123")
+                && fetched.text.contains("not fetchable")
+                && fetched.text.contains("accepted-memory"),
+            "a memory id must be rejected with its reason: {}",
+            fetched.text
+        );
+        assert!(
+            fetched.text.contains("session:0") && fetched.text.contains("already its full content"),
+            "a session id must be rejected with its reason: {}",
+            fetched.text
+        );
+
+        let expanded = KnowledgeExpand
+            .invoke(json!({ "ids": ["graph:Symbol"] }), &context(&ws))
+            .await
+            .unwrap();
+        assert!(!expanded.is_error);
+        assert!(
+            expanded.text.contains("graph:Symbol") && expanded.text.contains("not fetchable"),
+            "a graph id must be rejected with its reason: {}",
+            expanded.text
+        );
     }
 }

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`knowledge_search` results are structured locators the follow-up tools
+  accept** (LocalHub#23). Every result now carries its id, source kind, path
+  (with line range for file chunks), normalized relevance, snippet,
+  approximate token cost, and an explicit fetchability marker — closing the
+  layered-retrieval gap where `knowledge_expand`/`knowledge_fetch` demanded
+  ids the search never emitted. Only ingest chunk ids are fetchable;
+  accepted-memory, recent-session, and code-graph results say `not
+  fetchable`, and passing one to the follow-up tools returns the reason
+  instead of a silent miss.
 - **The context pack ranks on one normalized relevance scale** (ADR-0086,
   LocalHub#22/#25/#26). Cross-source ranking no longer sums raw scores from
   incompatible scales: every candidate carries a bounded unit relevance

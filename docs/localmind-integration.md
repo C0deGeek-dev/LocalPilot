@@ -549,12 +549,19 @@ returns "not indexed yet"; a present-but-unreadable one is reported distinctly
 Retrieval is staged so a turn spends a small, bounded number of tokens to
 *locate* the right knowledge before paying for any body:
 
-- **Index** (`knowledge_search`) — the cheap layer: ranked locators (id +
-  one-line summary + score).
+- **Index** (`knowledge_search`) — the cheap layer: ranked structured locators.
+  Each result carries the source kind, path (with a line range for file
+  chunks), the id, its normalized relevance, a snippet, its approximate token
+  cost, and whether the id is **fetchable**. Only ingest chunk ids are
+  fetchable; accepted-memory, recent-session, and code-graph results are
+  explicitly marked `not fetchable` (their content lives behind the memory,
+  session, and graph surfaces respectively).
 - **Expand** (`knowledge_expand`) — cheap: the document neighbours (other chunks
-  of the same file) around chosen ids, ids only.
+  of the same file) around chosen fetchable ids, ids only. A non-fetchable id
+  is rejected with the reason, never a silent miss.
 - **Fetch** (`knowledge_fetch`) — the only expensive layer: full bodies for an
-  explicit set of ids, and only those ids.
+  explicit set of fetchable ids, and only those ids. A non-fetchable id is
+  rejected with the reason, never a silent miss.
 
 Each layer reports the token cost it spent, so the budget stays visible. The
 budgeted packing path lays down cheap index summaries first and upgrades the

@@ -60,9 +60,12 @@ impl Tool for KnowledgeSearch {
 
     fn description(&self) -> &str {
         "Search the project's knowledge base for text relevant to a query, returning ranked \
-         snippets across ingested files, accepted project memory, recent-session facts, and code \
-         structure. Read-only. Use it to pull project facts on demand instead of relying on \
-         always-on context."
+         locators across ingested files, accepted project memory, recent-session facts, and code \
+         structure. Each result carries its id, path (with line range for file chunks), \
+         normalized relevance, approximate token cost, and whether the id is fetchable — pass a \
+         fetchable id to knowledge_expand/knowledge_fetch for neighbours or the full body. \
+         Read-only. Use it to pull project facts on demand instead of relying on always-on \
+         context."
     }
 
     fn schema(&self) -> Value {
@@ -161,14 +164,38 @@ impl Tool for KnowledgeSearch {
             )));
         }
 
+        // Every result is a structured locator: source, path (+ line range for
+        // ingest chunks), the id the follow-up tools take, normalized
+        // relevance, approximate token cost, and whether the id is fetchable —
+        // only ingest chunk ids round-trip into `knowledge_expand`/
+        // `knowledge_fetch`; other sources say so instead of presenting an
+        // impossible uniform contract.
         let mut out = format!("Knowledge-base matches for \"{}\":\n", input.query);
         for entry in visible.iter().take(limit) {
             let source = source_label(entry.source);
             let path = entry.path.as_deref().unwrap_or("(no path)");
+            let lines = match (entry.start_line, entry.end_line) {
+                (Some(start), Some(end)) => format!(":{start}-{end}"),
+                _ => String::new(),
+            };
             let stale = if entry.stale { " (stale)" } else { "" };
+            #[allow(clippy::cast_precision_loss)]
+            let relevance = entry.signals.relevance as f32 / crate::pack::RELEVANCE_POINTS;
+            let fetch = if entry.source == PackSource::Ingest {
+                "fetchable"
+            } else {
+                "not fetchable"
+            };
             let snippet: String = entry.snippet.chars().take(SNIPPET_CHARS).collect();
-            out.push_str(&format!("- [{source}] {path}{stale} — {snippet}\n"));
+            out.push_str(&format!(
+                "- [{source}] {path}{lines}{stale} (id {}, rel {relevance:.2}, ~{} tok, {fetch}) — {snippet}\n",
+                entry.id, entry.token_estimate
+            ));
         }
+        out.push_str(
+            "\nPass a fetchable id to knowledge_expand for its document neighbours or to \
+             knowledge_fetch for its full body.\n",
+        );
         Ok(ToolOutput::ok(out))
     }
 }

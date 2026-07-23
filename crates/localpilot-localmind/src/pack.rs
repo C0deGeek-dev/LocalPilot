@@ -175,6 +175,12 @@ pub struct PackEntry {
     /// The rank-signal breakdown that decided this entry's competition.
     #[serde(default)]
     pub signals: RankSignals,
+    /// Source line range for an ingest chunk (`None` for sources without file
+    /// coordinates), so a locator can say *where* without a fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
 }
 
 impl PackCandidate {
@@ -189,6 +195,10 @@ impl PackCandidate {
             stale: self.stale,
             reason,
             signals,
+            // File coordinates are known to the ingest layer, not the
+            // allocator; `compute_pack` back-fills them for ingest entries.
+            start_line: None,
+            end_line: None,
         }
     }
 
@@ -381,7 +391,7 @@ const GRAPH_PROXIMITY_REACH: i64 = 3;
 /// proximity ≤9) stay measurable: a strong bonus stack can lift a candidate
 /// past a modestly-more-relevant one, but never past a decisively more
 /// relevant one.
-const RELEVANCE_POINTS: f32 = 200.0;
+pub(crate) const RELEVANCE_POINTS: f32 = 200.0;
 
 /// The order-independent part of a candidate's rank. Relevance enters as the
 /// candidate's normalized unit value scaled to [`RELEVANCE_POINTS`]; the raw
