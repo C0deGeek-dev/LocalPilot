@@ -45,7 +45,23 @@ jobs:
         shell: bash
       # Unit + integration tests via nextest. Fallback without nextest installed:
       # `cargo test --workspace`. nextest does not run doctests, so run those too.
-      - run: cargo nextest run --workspace
+      #
+      # On hosted ubuntu this step has wedged to the job ceiling — with its log
+      # lost — on every run since the 2026-07-08 runner-agent rollout
+      # (2.335.1 → 2.336.0), while windows/macos and a local Linux run of the
+      # same commit pass in minutes. Contain it on Linux: output goes to a
+      # file (a leaked child can hold a file handle without holding the
+      # step's output pipe open, so the step can end) and a hard timeout kills
+      # a wedged nextest with its progress preserved; the tail step then names
+      # exactly what was running.
+      - if: runner.os != 'Linux'
+        run: cargo nextest run --workspace
+      - if: runner.os == 'Linux'
+        shell: bash
+        run: timeout -k 30s 30m cargo nextest run --workspace > nextest-run.log 2>&1
+      - if: runner.os == 'Linux' && always()
+        shell: bash
+        run: tail -n 300 nextest-run.log && ps -ef --sort=start_time | tail -n 25
       - run: df -h .
         shell: bash
       - run: cargo test --doc --workspace
@@ -85,7 +101,14 @@ jobs:
       # Line-coverage floor over the workspace. The floor is a ratchet: set
       # from the measured baseline, raised deliberately, never lowered to
       # admit a regression.
-      - run: cargo llvm-cov nextest --workspace --fail-under-lines 75
+      #
+      # Same containment as the ubuntu test job (see its nextest step): the
+      # step has wedged log-less on every hosted-ubuntu run since the
+      # 2026-07-08 runner-agent rollout. File-redirect + hard timeout keep
+      # the step able to end and the log able to name the wedge.
+      - run: timeout -k 30s 35m cargo llvm-cov nextest --workspace --fail-under-lines 75 > coverage-run.log 2>&1
+      - if: always()
+        run: tail -n 300 coverage-run.log && ps -ef --sort=start_time | tail -n 25
       - run: df -h .
       - run: cargo llvm-cov report --lcov --output-path coverage.lcov
       - uses: actions/upload-artifact@v4
