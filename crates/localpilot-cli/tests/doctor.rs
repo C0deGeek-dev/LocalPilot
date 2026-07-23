@@ -192,6 +192,7 @@ fn report() -> DoctorReport {
         ],
         mcp_servers: Vec::new(),
         memory_root: Some("<memory-root>".to_string()),
+        research_docs: None,
         capabilities: vec![
             "doctor-json".to_string(),
             "models-json".to_string(),

@@ -29,6 +29,18 @@ pub fn ingest_research_docs(
     ingest_docs(docs_dir, project_root).map_err(|e| LearningError::Review(e.to_string()))
 }
 
+/// The documentation-index counts a host diagnostic needs to tell "report
+/// ingestion never ran" apart from "indexed without embeddings": how many doc
+/// passages the project store holds and how many of them carry a vector.
+/// Best-effort — `None` when no usable store exists at `project_root`.
+#[must_use]
+pub fn doc_index_counts(project_root: &Path) -> Option<(i64, i64)> {
+    let persistence = localmind_store::MemoryPersistence::open_project(project_root).ok()?;
+    let chunks = persistence.doc_chunk_count().ok()?;
+    let vectors = persistence.doc_vector_count().ok()?;
+    Some((chunks, vectors))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`doctor` and `memory status` explain the research-docs pipeline**
+  (LocalHub#28). `localpilot doctor` gains a `research docs` line (and a
+  `research_docs` JSON object) reporting how many research reports sit on
+  disk, whether `[research] ingest_report` is enabled, and the LocalMind doc
+  index's chunk/vector counts — so "report exists but ingestion is disabled",
+  "ingestion enabled but nothing indexed", and "indexed without embeddings"
+  are distinguishable states instead of one silent empty search.
+  `localpilot memory status` reports the same doc chunk/vector counts beside
+  the memory entry count.
 - **Colliding MCP tool names remain usable without invalid provider requests.**
   Builtins and earlier registrations keep their names; a colliding MCP tool is
   advertised as `<server>_<tool>` while calls to its server retain the original

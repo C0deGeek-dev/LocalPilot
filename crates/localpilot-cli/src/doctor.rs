@@ -35,10 +35,29 @@ pub struct DoctorReport {
     pub mcp_servers: Vec<McpServerStatus>,
     /// The resolved LocalMind store root (walked up from the cwd), when one exists.
     pub memory_root: Option<String>,
+    /// Research-report → documentation-index state, when there is anything to
+    /// report. Distinguishes "reports exist but report ingestion is disabled"
+    /// from "ingestion enabled but nothing indexed" and "indexed without
+    /// embeddings" — three states a bare empty doc search cannot explain.
+    pub research_docs: Option<ResearchDocsStatus>,
     /// Stable capability tokens this build advertises, so a wrapper can
     /// feature-detect against an older binary rather than guess from the version.
     pub capabilities: Vec<String>,
     pub workspace_trust: TrustState,
+}
+
+/// The state of the research-report → doc-index bridge for the cwd project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResearchDocsStatus {
+    /// Markdown research reports found under the research output directory.
+    pub reports_found: usize,
+    /// Whether `[research] ingest_report` is enabled.
+    pub report_ingestion_enabled: bool,
+    /// Documentation passages in the project's LocalMind doc index, when a
+    /// usable store exists.
+    pub doc_chunks: Option<i64>,
+    /// How many of those passages carry an embedding vector.
+    pub doc_vectors: Option<i64>,
 }
 
 /// A candidate configuration file location and whether it currently exists.
@@ -143,9 +162,40 @@ pub fn report() -> DoctorReport {
         tools: tools(),
         mcp_servers: Vec::new(),
         memory_root: memory_root(),
+        research_docs: research_docs(),
         capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
     }
+}
+
+/// The research-report → doc-index state for the cwd project, or `None` when
+/// there is nothing to report (no reports on disk, ingestion off, and no doc
+/// index). Best-effort and read-only, like the rest of `doctor`.
+fn research_docs() -> Option<ResearchDocsStatus> {
+    let cwd = std::env::current_dir().ok()?;
+    let reports_dir = cwd.join(".localpilot").join("research");
+    let reports_found = std::fs::read_dir(&reports_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+                .count()
+        })
+        .unwrap_or(0);
+    let report_ingestion_enabled =
+        localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
+            .map(|config| config.research.ingest_report)
+            .unwrap_or(false);
+    let counts = localpilot_localmind::doc_index_counts(&cwd);
+    if reports_found == 0 && !report_ingestion_enabled && counts.is_none() {
+        return None;
+    }
+    Some(ResearchDocsStatus {
+        reports_found,
+        report_ingestion_enabled,
+        doc_chunks: counts.map(|(chunks, _)| chunks),
+        doc_vectors: counts.map(|(_, vectors)| vectors),
+    })
 }
 
 /// Gather a diagnostics report including a bounded live MCP probe.
@@ -331,6 +381,24 @@ pub fn render(report: &DoctorReport) -> String {
 
     let memory = report.memory_root.as_deref().unwrap_or("(none resolved)");
     let _ = writeln!(s, "memory store: {memory}");
+    if let Some(research) = &report.research_docs {
+        let ingestion = if research.report_ingestion_enabled {
+            "enabled"
+        } else {
+            "disabled ([research] ingest_report = false)"
+        };
+        let index = match (research.doc_chunks, research.doc_vectors) {
+            (Some(chunks), Some(vectors)) => {
+                format!("{chunks} chunk(s), {vectors} with embeddings")
+            }
+            _ => "(no usable doc index)".to_string(),
+        };
+        let _ = writeln!(
+            s,
+            "research docs: {} report(s) on disk; report ingestion {ingestion}; doc index: {index}",
+            research.reports_found
+        );
+    }
     let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
     let _ = writeln!(s);
 
@@ -678,6 +746,12 @@ mod tests {
                 },
             ],
             memory_root: Some("/work/.localmind".to_string()),
+            research_docs: Some(ResearchDocsStatus {
+                reports_found: 2,
+                report_ingestion_enabled: false,
+                doc_chunks: Some(0),
+                doc_vectors: Some(0),
+            }),
             capabilities: vec!["doctor-json".to_string(), "models-json".to_string()],
             tools: vec![
                 ToolStatus {

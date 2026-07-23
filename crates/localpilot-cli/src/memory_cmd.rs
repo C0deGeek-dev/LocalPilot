@@ -5,7 +5,10 @@ use std::path::Path;
 
 use crate::output::OutputFormat;
 
-/// Print a one-line status: entry count and whether injection is enabled.
+/// Print the store status: accepted-memory entry count, whether injection is
+/// enabled, and the documentation-index counts (chunks and how many carry an
+/// embedding) — the split that tells "nothing ingested" apart from "ingested
+/// without embeddings" without opening the database by hand.
 ///
 /// # Errors
 /// Returns an error if the store cannot be read or output written.
@@ -17,6 +20,9 @@ pub fn status(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
         "disabled"
     };
     writeln!(out, "memory: {count} entries ({state})")?;
+    if let Some((chunks, vectors)) = localpilot_localmind::doc_index_counts(root) {
+        writeln!(out, "docs:   {chunks} chunk(s), {vectors} with embeddings")?;
+    }
     Ok(())
 }
 

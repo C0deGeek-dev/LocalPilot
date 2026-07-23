@@ -85,7 +85,7 @@ pub use remember_tool::Remember;
 pub use repair_signal::{
     enqueue_repair_signals, repair_lesson_candidate, repair_signals_from_events, RepairSignal,
 };
-pub use research_ingest::{ingest_research_docs, DocIngestSummary};
+pub use research_ingest::{doc_index_counts, ingest_research_docs, DocIngestSummary};
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;
 pub use rule_cue::{register_rule_cues, rule_cue_ids, RULE_CUE_TAG};

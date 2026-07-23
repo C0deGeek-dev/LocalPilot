@@ -1,6 +1,5 @@
 ---
 source: crates/localpilot-cli/src/doctor.rs
-assertion_line: 724
 expression: render_json(&fixture())
 ---
 {
@@ -78,6 +77,12 @@ expression: render_json(&fixture())
     }
   ],
   "memory_root": "/work/.localmind",
+  "research_docs": {
+    "reports_found": 2,
+    "report_ingestion_enabled": false,
+    "doc_chunks": 0,
+    "doc_vectors": 0
+  },
   "capabilities": [
     "doctor-json",
     "models-json"

@@ -26,6 +26,7 @@ mcp servers:
   context7 (npx): connected; protocol 2025-06-18; 1 tool(s): get-library-docs (args: 2; command available)
 
 memory store: /work/.localmind
+research docs: 2 report(s) on disk; report ingestion disabled ([research] ingest_report = false); doc index: 0 chunk(s), 0 with embeddings
 capabilities: doctor-json, models-json
 
 workspace trust: unknown (evaluated when a session starts)
