@@ -423,17 +423,37 @@ impl Source for KnowledgeSource {
     async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
         let hits = localpilot_localmind::knowledge_search(&self.root, question)
             .map_err(|error| SourceError::new("knowledge", error.to_string()))?;
+        // Normalize relative to this query's best hit: raw bm25-derived units
+        // are corpus-dependent (IDF collapses on a degenerate corpus), so the
+        // absolute values cannot meet the engine's admission floor honestly —
+        // the strongest local hit of a query reads as fully relevant and the
+        // rest proportionally, preserving the index's internal order.
+        let max_relevance = hits
+            .iter()
+            .take(limit)
+            .map(|hit| hit.relevance)
+            .fold(0.0_f32, f32::max);
         Ok(hits
             .into_iter()
             .take(limit)
-            .map(|hit| map_knowledge_hit(question, &hit))
+            .map(|hit| map_knowledge_hit(question, &hit, max_relevance))
             .collect())
     }
 }
 
-fn map_knowledge_hit(question: &str, hit: &localpilot_localmind::KnowledgeHit) -> Evidence {
-    // Unreviewed, machine-scored: carries the hit's own bm25/cosine-derived
-    // relevance rather than a flat value, so a weak match reads as weak.
+fn map_knowledge_hit(
+    question: &str,
+    hit: &localpilot_localmind::KnowledgeHit,
+    max_relevance: f32,
+) -> Evidence {
+    // Unreviewed, machine-scored: carries the hit's relevance relative to the
+    // query's best hit, so a weak match reads as weak without the raw scale's
+    // corpus dependence.
+    let relevance = if max_relevance > 0.0 {
+        (hit.relevance / max_relevance).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     Evidence::new(
         question,
         hit.snippet.clone(),
@@ -441,7 +461,7 @@ fn map_knowledge_hit(question: &str, hit: &localpilot_localmind::KnowledgeHit) -
             "knowledge",
             Some(format!("{}:{}-{}", hit.path, hit.start_line, hit.end_line)),
         ),
-        hit.relevance.clamp(0.0, 1.0),
+        relevance,
     )
 }
 
@@ -580,7 +600,18 @@ async fn build_web_source(
     };
 
     access.grant_session();
-    WebSource::new(access, audit_log, model, search)
+    // Model-backed relevance admission over fetched pages: reuse-only model
+    // resolution (LocalMind [inference] chat first, the host's default
+    // provider second). Absent both, the deterministic term-overlap path and
+    // the engine's admission floor govern.
+    let admission = AdmissionJudge::resolve(root, model.as_ref());
+    if admission.is_none() {
+        writeln!(
+            out,
+            "  no model available for relevance admission — deterministic term-overlap              scoring with the admission floor applies"
+        )?;
+    }
+    WebSource::new(access, audit_log, model, search, admission)
 }
 
 /// Connect the `[research.mcp]`-designated search tools and disclose them.
@@ -751,6 +782,95 @@ struct WebSource {
     model: Option<ModelHandle>,
     search: Option<McpSearchProposer>,
     politeness: std::sync::Mutex<HostPoliteness>,
+    /// Model-backed relevance admission for fetched pages, when any already-
+    /// configured model resolves (LocalMind `[inference]` chat first, the
+    /// host's default provider as fallback). `None` degrades to the
+    /// deterministic term-overlap score plus the engine's admission floor.
+    admission: Option<AdmissionJudge>,
+}
+
+/// Bound on page content sent to the admission classifier — enough to judge
+/// relevance, far below the full evidence bound.
+const ADMISSION_CONTENT_CHARS: usize = 4_000;
+
+/// The model score a page must reach to enter the evidence pool — the same
+/// bar the engine applies deterministically, so the model path and the
+/// fallback share one threshold.
+const ADMISSION_MIN_SCORE: f32 = localpilot_research::COVERAGE_RELEVANCE_FLOOR;
+
+/// The strict-JSON classification a fetched page must clear to enter the
+/// evidence pool when a model judge is available.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AdmissionVerdict {
+    relevant: bool,
+    score: f32,
+}
+
+/// The model that classifies fetched web content against a sub-question. It
+/// judges relevance only — it never authors, rewrites, or summarizes the
+/// finding. Reuses existing configuration exclusively (no research-specific
+/// model setting): LocalMind's `[inference]` chat model when configured with
+/// the research feature enabled, else the host's resolved default provider.
+enum AdmissionJudge {
+    LocalMind(std::sync::Arc<localpilot_localmind::ResearchChat>),
+    Host(ModelHandle),
+}
+
+impl AdmissionJudge {
+    fn resolve(root: &Path, host_model: Option<&ModelHandle>) -> Option<Self> {
+        if let Some(chat) = localpilot_localmind::ResearchChat::resolve(root) {
+            return Some(Self::LocalMind(std::sync::Arc::new(chat)));
+        }
+        host_model.cloned().map(Self::Host)
+    }
+
+    /// Classify bounded page content against the sub-question. `None` when
+    /// the model is unavailable or its output is not the agreed strict JSON —
+    /// the caller keeps the deterministic path rather than guessing.
+    async fn classify(&self, question: &str, content: &str) -> Option<AdmissionVerdict> {
+        let bounded: String = content.chars().take(ADMISSION_CONTENT_CHARS).collect();
+        let instruction = format!(
+            "Classify whether the fetched web content below actually helps answer the \
+             research sub-question. Judge relevance only; do not rewrite or summarize the \
+             content. Return ONLY this JSON object and nothing else: \
+             {{\"relevant\": true|false, \"score\": <0.0-1.0>, \"reason\": \"<short>\"}}\n\n\
+             Sub-question: {question}\n\nContent:\n{bounded}"
+        );
+        let reply = match self {
+            Self::LocalMind(chat) => {
+                let chat = std::sync::Arc::clone(chat);
+                let system = "You classify research evidence as strict JSON. Return only the \
+                              JSON object, no prose."
+                    .to_string();
+                tokio::task::spawn_blocking(move || chat.complete(&system, &instruction))
+                    .await
+                    .ok()?
+                    .ok()?
+            }
+            Self::Host(model) => model.complete(&instruction).await.ok()?,
+        };
+        parse_admission(&reply)
+    }
+}
+
+/// Parse the strict admission JSON out of a model reply. Tolerates prose
+/// around exactly one JSON object; anything else is unusable (`None`).
+fn parse_admission(reply: &str) -> Option<AdmissionVerdict> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        relevant: bool,
+        score: f32,
+    }
+    let start = reply.find('{')?;
+    let end = reply.rfind('}')?;
+    let raw: Raw = serde_json::from_str(reply.get(start..=end)?).ok()?;
+    if !raw.score.is_finite() {
+        return None;
+    }
+    Some(AdmissionVerdict {
+        relevant: raw.relevant,
+        score: raw.score.clamp(0.0, 1.0),
+    })
 }
 
 /// Per-run per-host fetch discipline: serialize-and-pace repeat visits
@@ -769,6 +889,7 @@ impl WebSource {
         audit_log: PathBuf,
         model: Option<ModelHandle>,
         search: Option<McpSearchProposer>,
+        admission: Option<AdmissionJudge>,
     ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEB_FETCH_TIMEOUT_SECS))
@@ -786,7 +907,39 @@ impl WebSource {
             model,
             search,
             politeness: std::sync::Mutex::new(HostPoliteness::default()),
+            admission,
         })
+    }
+
+    /// Run the model-backed relevance admission over one fetched page, right
+    /// after reduction and bounding and before the evidence enters coverage,
+    /// synthesis, or the memory-candidate path. With a usable verdict the
+    /// model's score becomes the evidence relevance (admitted) or the page is
+    /// rejected with an audit record (inspectable, never a silent drop). With
+    /// no judge, or an unusable reply, the deterministic term-overlap score
+    /// stands and the engine's admission floor governs.
+    async fn admit(
+        &self,
+        url: &str,
+        host: &str,
+        query: &str,
+        mut found: Evidence,
+    ) -> Result<Option<Evidence>, SourceError> {
+        let Some(judge) = &self.admission else {
+            return Ok(Some(found));
+        };
+        let Some(verdict) = judge.classify(&found.question, &found.snippet).await else {
+            return Ok(Some(found));
+        };
+        if !verdict.relevant || verdict.score < ADMISSION_MIN_SCORE {
+            append_audit(
+                &self.audit_log,
+                &audit_entry(url, host, "rejected-low-relevance", query),
+            )?;
+            return Ok(None);
+        }
+        found.relevance = verdict.score;
+        Ok(Some(found))
     }
 
     /// Whether `host` is cooled down for the rest of this run.
@@ -960,7 +1113,9 @@ impl Source for WebSource {
             match self.access.decide_host(&host) {
                 FetchDecision::Allowed => {
                     if let Some(found) = self.fetch(&url, &host, question, &query).await? {
-                        evidence.push(found);
+                        if let Some(admitted) = self.admit(&url, &host, &query, found).await? {
+                            evidence.push(admitted);
+                        }
                     }
                 }
                 FetchDecision::NeedsConfirmation => {
@@ -1089,33 +1244,56 @@ fn write_report(dir: &Path, topic: &str, report: &ResearchReport) -> anyhow::Res
 /// Map supported, backed findings to review-queue candidates and enqueue them
 /// through the existing review-gated path. Returns the number enqueued. Never
 /// writes accepted memory directly.
+///
+/// The candidate's lesson text is the finding's concise statement plus its
+/// source line; a finding distilled from a raw source blob carries the full
+/// bounded source **separately** (the candidate's evidence field, rendered by
+/// review surfaces under the lesson), and is marked as an excerpt a reviewer
+/// must distil before promotion — so the review experience keeps the complete
+/// evidence (per the accepted full-evidence review contract) while promotion
+/// can only ever write a standalone lesson into searchable memory.
 fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<usize> {
     let mut enqueued = 0;
     for spec in candidates_from(report, RESEARCH_CANDIDATE_CONFIDENCE_CAP) {
-        let mut body = format!(
+        let body = format!(
             "{}\n\n(research finding; sources: {})",
             spec.body,
             provenance_summary(&spec.provenance)
         );
-        // When the finding was distilled from a raw source blob, carry the full
-        // source under the claim as a fenced block (the fence escapes inner
-        // backticks so it can't break the review layout). The distilled claim
-        // still leads and `review list` shows only a snippet, but `review show`
-        // now surfaces the full content the reviewer needs to judge and reuse —
-        // not just the one-line excerpt plus a source pointer.
-        if let Some(evidence) = &spec.evidence {
-            body.push_str("\n\n");
-            body.push_str(&evidence_block(evidence));
-        }
-        let lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
+        let mut lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
             localpilot_config::redact::redact(&body),
             spec.confidence,
         );
+        if let Some(evidence) = &spec.evidence {
+            // Distilled excerpt: full source rides the candidate's own
+            // evidence field (review-only), and the excerpt must be edited
+            // into a standalone lesson before it can promote.
+            lesson = lesson
+                .with_evidence_text(localpilot_config::redact::redact(&evidence_block(evidence)))
+                .requiring_edit();
+        } else if looks_like_boilerplate(&spec.body) {
+            // A clean-looking statement that is actually navigation chrome /
+            // menu text: route it to review with the same edit requirement —
+            // never auto-delete it.
+            lesson = lesson.requiring_edit();
+        }
         if localpilot_localmind::write_retrospective_lesson(root, &lesson)?.is_some() {
             enqueued += 1;
         }
     }
     Ok(enqueued)
+}
+
+/// Whether a statement reads as web boilerplate rather than prose: dozens of
+/// words with almost no sentence structure is a navigation menu, banner, or
+/// link farm — provenance-backed, but not a reusable lesson as-is.
+fn looks_like_boilerplate(text: &str) -> bool {
+    let words = text.split_whitespace().count();
+    if words < 12 {
+        return false;
+    }
+    let sentence_marks = text.matches(['.', '!', '?']).count();
+    sentence_marks * 20 < words
 }
 
 fn provenance_summary(provenance: &[Provenance]) -> String {
@@ -1198,7 +1376,7 @@ mod tests {
 
     #[test]
     fn knowledge_hit_maps_to_path_line_provenance() {
-        let evidence = map_knowledge_hit("how", &knowledge_hit());
+        let evidence = map_knowledge_hit("how", &knowledge_hit(), 1.0);
         assert_eq!(evidence.snippet, "fn foo() {}");
         assert_eq!(evidence.provenance.source, "knowledge");
         assert_eq!(
@@ -1365,12 +1543,14 @@ mod tests {
 
     #[test]
     fn enqueue_routes_sanitized_excerpt_findings_to_the_review_queue() {
-        // Regression guard: a supported, backed finding that the sanitize pass
-        // reduced to an excerpt (its raw blob moved into `evidence`) must reach
-        // the review queue carrying BOTH its distilled statement AND the full
-        // source it was distilled from. Dropping the source left the reviewer a
-        // one-line excerpt plus a pointer, unable to judge or reuse the finding
-        // (LocalHub#1): the full content must ride the candidate, fenced.
+        // A supported, backed finding the sanitize pass reduced to an excerpt
+        // (its raw blob moved into `evidence`) must reach the review queue
+        // carrying BOTH its distilled statement AND the full source it was
+        // distilled from (LocalHub#1) — but as *separate* candidate fields:
+        // the full source rides the candidate's review-only evidence, never
+        // the lesson text, so a later promotion cannot turn the raw dump into
+        // searchable memory (LocalHub#24). The excerpt is also marked as
+        // needing a reviewer's edit before promotion.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
@@ -1401,15 +1581,81 @@ mod tests {
                 .contains("Excerpt from knowledge: use InstancedMesh"),
             "the queue carries the distilled statement: {items:?}"
         );
-        // …and the full raw source rides under it in a fenced evidence block, so
-        // `review show` gives the reviewer the content, not just a pointer.
+        // …the lesson text itself no longer tows the raw dump…
         assert!(
-            items[0].summary.contains("Evidence:"),
-            "the candidate carries a fenced evidence block: {items:?}"
+            !items[0].summary.contains(raw),
+            "the raw source must not ride the promotable lesson text: {items:?}"
         );
+        // …the full source rides the candidate's review-only evidence field…
         assert!(
-            items[0].summary.contains(raw),
-            "the full source content reaches the queue: {items:?}"
+            items[0]
+                .evidence_text
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains(raw)),
+            "the full source content reaches the reviewer: {items:?}"
+        );
+        // …and the excerpt demands a reviewer's edit before promotion.
+        assert!(
+            items[0].requires_edit,
+            "an excerpt is not memory-ready as-is: {items:?}"
+        );
+    }
+
+    #[test]
+    fn boilerplate_statements_are_marked_for_edit_before_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let mut report = ResearchReport::new("frameworks");
+        let chrome = Finding {
+            statement: "Home Pricing Docs Blog Careers Contact Sign in Get started Products \
+                        Solutions Enterprise Resources"
+                .to_string(),
+            status: localpilot_research::ClaimStatus::Supported,
+            supporting: vec![Provenance::new(
+                "web",
+                Some("https://example.com/".to_string()),
+            )],
+            evidence: None,
+            confidence: 0.3,
+        };
+        report.findings = vec![chrome];
+
+        assert_eq!(enqueue_candidates(root, &report).unwrap(), 1);
+        let items = localpilot_localmind::review_list(root).unwrap();
+        assert!(
+            items[0].requires_edit,
+            "navigation chrome must be routed to review, not promoted verbatim: {items:?}"
+        );
+    }
+
+    #[test]
+    fn admission_json_is_parsed_strictly() {
+        assert_eq!(
+            parse_admission(r#"{"relevant": true, "score": 0.8, "reason": "on-topic"}"#),
+            Some(AdmissionVerdict {
+                relevant: true,
+                score: 0.8
+            })
+        );
+        // Prose around one JSON object is tolerated…
+        assert_eq!(
+            parse_admission("Sure: {\"relevant\": false, \"score\": 0.1} done"),
+            Some(AdmissionVerdict {
+                relevant: false,
+                score: 0.1
+            })
+        );
+        // …anything else is unusable, so the deterministic path stands.
+        assert_eq!(parse_admission("not json"), None);
+        assert_eq!(parse_admission(r#"{"relevant": "yes"}"#), None);
+        // Out-of-range scores are clamped, non-finite rejected.
+        assert_eq!(
+            parse_admission(r#"{"relevant": true, "score": 7.0}"#),
+            Some(AdmissionVerdict {
+                relevant: true,
+                score: 1.0
+            })
         );
     }
 
@@ -1449,6 +1695,7 @@ mod tests {
             access,
             audit_log,
             Some(model_handle(Arc::clone(&fake))),
+            None,
             None,
         )
         .unwrap();
@@ -1691,6 +1938,7 @@ mod tests {
             audit.clone(),
             None,
             Some(scripted_proposer(&format!("Result\n   URL: {url}\n"))),
+            None,
         )
         .unwrap();
 
@@ -1726,6 +1974,7 @@ mod tests {
             audit.clone(),
             None,
             Some(scripted_proposer(&format!("URL: {url}"))),
+            None,
         )
         .unwrap();
 
@@ -1756,7 +2005,7 @@ mod tests {
         };
         let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
         access.grant_session();
-        let source = WebSource::new(access, audit.clone(), None, Some(proposer)).unwrap();
+        let source = WebSource::new(access, audit.clone(), None, Some(proposer), None).unwrap();
 
         let evidence = source.gather("q", 3).await.unwrap();
         assert!(evidence.is_empty());
@@ -1784,6 +2033,7 @@ mod tests {
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),
             Some(scripted_proposer(&format!("URL: {url}"))),
+            None,
         )
         .unwrap();
 
@@ -1828,7 +2078,7 @@ mod tests {
         ) -> localpilot_research::RunOutcome {
             let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
             access.grant_session();
-            let source = WebSource::new(access, audit, None, search).unwrap();
+            let source = WebSource::new(access, audit, None, search, None).unwrap();
             let sources = SourceSet::new().with(Box::new(source));
             localpilot_research::run_research(
                 question,
@@ -1903,7 +2153,7 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
         access.grant_session();
-        let source = WebSource::new(access, audit.clone(), None, Some(proposer)).unwrap();
+        let source = WebSource::new(access, audit.clone(), None, Some(proposer), None).unwrap();
 
         let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
         let question = format!("how do I rotate {secret} safely");
@@ -1952,6 +2202,7 @@ mod tests {
             access,
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),
+            None,
             None,
         )
         .unwrap();

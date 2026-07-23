@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research evidence passes an admission gate, and promotion can no longer
+  write source dumps into memory** (ADR-0087, LocalHub#30/#24). Fetched web
+  content is classified for relevance by an already-configured model
+  (LocalMind `[inference]` chat first, the default provider second — no new
+  model setting) right after reduction; a rejected page is recorded in the
+  egress audit and never becomes a finding. Without a usable model, the
+  coverage floor now also gates findings and candidates (withheld counts are
+  disclosed as a retrieval note), and local knowledge hits are normalized
+  relative to their query's best hit. Research candidates carry their
+  concise statement and their full bounded source as separate fields: review
+  still shows the complete evidence, but promotion writes only a
+  reviewer-approved standalone lesson — an unedited excerpt (or a
+  navigation-chrome statement) is refused with an actionable error until
+  distilled. Legacy fused-body candidates promote unchanged.
 - **`knowledge_search` results are structured locators the follow-up tools
   accept** (LocalHub#23). Every result now carries its id, source kind, path
   (with line range for file chunks), normalized relevance, snippet,

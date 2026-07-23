@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0087: Research Evidence Passes An Admission Gate; Promotion Writes Lessons, Never Source Dumps
+
+Status: accepted. Amends ADR-0060 (which scoped the model to decomposition
+only) and refines ADR-0067/0072/0075's evidence contract at the promotion
+boundary; the review experience keeps the complete bounded evidence.
+
+Two coupled defects (LocalHub#30, #24): every fetched page above zero term
+overlap became a `Supported` finding and a low-confidence memory candidate
+regardless of whether it answered anything, and the candidate fused its
+statement with the full fenced source — so a later promotion wrote entire web
+pages (navigation chrome included) into searchable accepted memory with the
+trust bonuses of curated knowledge.
+
+1. **Model-backed relevance admission for fetched web content**, immediately
+   after reduction and bounding, before coverage, synthesis, findings, or
+   candidates. Strict-JSON classification only (`relevant`, `score`,
+   `reason`) against the sub-question — the model judges, it never authors
+   or rewrites a finding. Model resolution is **reuse-only**: LocalMind's
+   `[inference]` chat model first (when configured with its research feature
+   enabled), the host's already-resolved default provider second; no third
+   provider or research-specific model setting exists. A rejected page is
+   recorded in the egress audit (`rejected-low-relevance`) — inspectable,
+   never a silent drop — and its content never becomes a finding. An
+   unavailable model or unusable reply degrades to the deterministic path.
+   This deliberately amends ADR-0060: bounded fetched content may now be
+   sent to the (local/consented) model for classification; the synthesis
+   contract is unchanged (provenance-preserving heuristic, D010).
+2. **The coverage floor is an admission floor.** Deterministically, evidence
+   below the floor (`0.25`, one shared constant) neither counts toward
+   coverage nor enters synthesis/findings/candidates; the count of withheld
+   items is disclosed as a retrieval note. Local knowledge hits are
+   normalized relative to their query's best hit before the floor (bm25
+   magnitudes are corpus-dependent — same rationale as ADR-0086).
+3. **Statement and evidence ride the candidate separately** (LocalMind
+   D-LM-0029). The candidate's lesson text is the concise statement plus its
+   source line; a distilled excerpt carries its full bounded source in the
+   candidate's review-only evidence field and is marked as requiring a
+   reviewer's edit before promotion — promotion of an unedited excerpt is
+   refused with an actionable error. Sentence-free boilerplate statements
+   (navigation chrome) get the same edit requirement, and are never
+   auto-deleted. The report and review surfaces keep the full evidence
+   (ADR-0067/0072/0075 hold); only the promotion projection narrowed.
+4. **Legacy items are untouched**: candidates without the new fields promote
+   exactly as before, and LocalMind's quality classifier retroactively flags
+   existing raw-dump accepted memories for manual review (flag-only).
+
 ## ADR-0086: The Context Pack Ranks On Normalized Relevance — Reserve Floors, Task-Scored Session Facts, A Relevance-Ordered Window
 
 Status: accepted. Amends ADR-0015: the composite rank's relevance component

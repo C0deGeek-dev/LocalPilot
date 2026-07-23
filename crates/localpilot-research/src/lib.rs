@@ -16,7 +16,8 @@ mod synth;
 mod web;
 
 pub use engine::{
-    run_research, run_research_controlled, Bounds, ProgressFn, RoundSummary, RunControl, RunOutcome,
+    run_research, run_research_controlled, Bounds, ProgressFn, RoundSummary, RunControl,
+    RunOutcome, COVERAGE_RELEVANCE_FLOOR,
 };
 pub use html::{html_to_markdown, html_to_text, markdown_to_text};
 pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
@@ -697,5 +698,76 @@ mod tests {
             "gathered but never covered"
         );
         assert_eq!(outcome.report.coverage[0].strong_evidence, 0);
+        // The withholding is disclosed as a retrieval note.
+        assert!(
+            outcome
+                .report
+                .retrieval_notes
+                .iter()
+                .any(|note| note.contains("admission floor")),
+            "the withheld evidence is disclosed: {:?}",
+            outcome.report.retrieval_notes
+        );
+    }
+
+    #[tokio::test]
+    async fn the_admission_floor_gates_findings_not_only_coverage() {
+        // One below-floor and one floor-passing snippet through the
+        // provenance-preserving heuristic synthesizer: only the passing one
+        // becomes a finding (and therefore a possible memory candidate); the
+        // withheld one is disclosed, never silently dropped.
+        struct MixedSource;
+        #[async_trait]
+        impl Source for MixedSource {
+            fn label(&self) -> &str {
+                "mixed"
+            }
+            async fn gather(
+                &self,
+                question: &str,
+                _limit: usize,
+            ) -> Result<Vec<Evidence>, SourceError> {
+                Ok(vec![
+                    Evidence::new(
+                        question,
+                        "incidental one-word overlap",
+                        Provenance::new("mixed", Some("junk-page".to_string())),
+                        0.1,
+                    ),
+                    Evidence::new(
+                        question,
+                        "a directly relevant, on-topic answer",
+                        Provenance::new("mixed", Some("doc.md".to_string())),
+                        0.9,
+                    ),
+                ])
+            }
+        }
+        let set = SourceSet::new().with(Box::new(MixedSource));
+        let outcome = run_research(
+            "t",
+            &set,
+            &crate::HeuristicSynthesizer,
+            Bounds {
+                max_questions: 1,
+                ..Bounds::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.report.findings.len(),
+            1,
+            "only floor-passing evidence becomes a finding: {:?}",
+            outcome.report.findings
+        );
+        assert!(outcome.report.findings[0]
+            .statement
+            .contains("directly relevant"));
+        assert!(outcome
+            .report
+            .retrieval_notes
+            .iter()
+            .any(|note| note.contains("admission floor")));
     }
 }

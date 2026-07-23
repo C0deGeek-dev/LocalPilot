@@ -27,6 +27,7 @@ mod pack;
 mod primer;
 mod remember_tool;
 mod repair_signal;
+mod research_chat;
 mod research_ingest;
 mod retrospective_lesson;
 mod review_list_tool;
@@ -85,6 +86,7 @@ pub use remember_tool::Remember;
 pub use repair_signal::{
     enqueue_repair_signals, repair_lesson_candidate, repair_signals_from_events, RepairSignal,
 };
+pub use research_chat::ResearchChat;
 pub use research_ingest::{doc_index_counts, ingest_research_docs, DocIngestSummary};
 pub use retrospective_lesson::{write_retrospective_lesson, RetrospectiveLesson};
 pub use review_list_tool::ReviewList;

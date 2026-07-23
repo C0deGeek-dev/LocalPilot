@@ -16,11 +16,14 @@ use crate::{
 /// and reduced to an excerpt, with the full text preserved as evidence.
 const MAX_STATEMENT_CHARS: usize = 240;
 
-/// Evidence below this relevance does not count toward coverage. Conservative:
-/// term-overlap-scored web evidence matching at least two question terms and
-/// any bm25-derived score above noise pass; a one-incidental-word match does
-/// not.
-const COVERAGE_RELEVANCE_FLOOR: f32 = 0.25;
+/// Evidence below this relevance neither counts toward coverage nor enters
+/// synthesis/findings/candidates — one admission bar, not merely a coverage
+/// counter. Conservative: term-overlap-scored web evidence matching at least
+/// two question terms, a model-admitted page, and a relatively-strong local
+/// hit all pass; a one-incidental-word match does not. Public so a binding
+/// layer's own admission step (e.g. the model-backed web classifier) uses the
+/// same bar instead of inventing a second threshold.
+pub const COVERAGE_RELEVANCE_FLOOR: f32 = 0.25;
 /// A question is covered when at least this many floor-passing snippets…
 const COVERED_MIN_EVIDENCE: usize = 2;
 /// …come from at least this many distinct origins.
@@ -343,7 +346,22 @@ pub async fn run_research_controlled(
         .into_iter()
         .flat_map(|state| state.evidence)
         .collect();
-    let mut findings = synth.synthesize(topic, &all_evidence).await?;
+    // Admission floor: evidence that does not count toward coverage does not
+    // become findings or memory candidates either — the floor is one bar, not
+    // merely a coverage counter. Withheld items stay visible as a retrieval
+    // note (and in the sources' own audit records); they are never silently
+    // dropped without a trace.
+    let (admitted, withheld): (Vec<Evidence>, Vec<Evidence>) = all_evidence
+        .into_iter()
+        .partition(|item| item.relevance >= COVERAGE_RELEVANCE_FLOOR);
+    if !withheld.is_empty() {
+        report.retrieval_notes.push(format!(
+            "{} low-relevance evidence item(s) below the admission floor were withheld from \
+             findings (recorded in the gather audit, not turned into claims)",
+            withheld.len()
+        ));
+    }
+    let mut findings = synth.synthesize(topic, &admitted).await?;
     sanitize_findings(&mut findings);
     cross_check(&mut findings);
     report.findings = findings;

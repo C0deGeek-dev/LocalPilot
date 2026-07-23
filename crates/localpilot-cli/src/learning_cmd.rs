@@ -266,6 +266,19 @@ pub fn review_show(cwd: &std::path::Path, id: &str, out: &mut dyn Write) -> anyh
             if let Some(note) = item.note {
                 writeln!(out, "note: {note}")?;
             }
+            if item.requires_edit {
+                writeln!(
+                    out,
+                    "requires edit: source excerpt — distil into a standalone lesson before promoting"
+                )?;
+            }
+            if let Some(evidence) = item.evidence_text {
+                writeln!(
+                    out,
+                    "evidence (review-only, never promoted):
+{evidence}"
+                )?;
+            }
         }
         None => writeln!(out, "review item not found")?,
     }

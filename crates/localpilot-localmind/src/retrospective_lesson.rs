@@ -110,6 +110,14 @@ pub struct RetrospectiveLesson {
     /// completion-retrospective prior. `None` for origins with no independent
     /// quality signal (a self-observation, a driver's correction).
     confidence: Option<f32>,
+    /// Full carried source evidence (a research finding's bounded page text),
+    /// offered to review **separately** from the lesson text so the reviewer
+    /// sees the complete source while promotion writes only the lesson.
+    evidence_text: Option<String>,
+    /// The lesson text is a provenance-backed excerpt, not a standalone
+    /// reusable statement: the queue entry demands a reviewer edit before
+    /// promotion.
+    requires_edit: bool,
 }
 
 impl RetrospectiveLesson {
@@ -121,6 +129,8 @@ impl RetrospectiveLesson {
             origin: Origin::Retrospective,
             evidence_note: None,
             confidence: None,
+            evidence_text: None,
+            requires_edit: false,
         }
     }
 
@@ -137,6 +147,8 @@ impl RetrospectiveLesson {
             origin: Origin::Research,
             evidence_note: None,
             confidence: Some(confidence.clamp(0.0, 1.0)),
+            evidence_text: None,
+            requires_edit: false,
         }
     }
 
@@ -153,7 +165,25 @@ impl RetrospectiveLesson {
                 client.as_ref()
             )),
             confidence: None,
+            evidence_text: None,
+            requires_edit: false,
         }
+    }
+
+    /// Attach the finding's full bounded source evidence — carried to review
+    /// separately from the lesson text, never into a promoted memory body.
+    #[must_use]
+    pub fn with_evidence_text(mut self, evidence_text: impl Into<String>) -> Self {
+        self.evidence_text = Some(evidence_text.into());
+        self
+    }
+
+    /// Mark the lesson text as a source excerpt that a reviewer must distil
+    /// into a standalone statement before promotion.
+    #[must_use]
+    pub fn requiring_edit(mut self) -> Self {
+        self.requires_edit = true;
+        self
     }
 
     /// Whether the lesson clears the quality bar: long enough to be a real statement
@@ -212,6 +242,18 @@ pub fn write_retrospective_lesson(
         )
         .redacted(),
     );
+    // Carried source evidence rides its own candidate field: review surfaces
+    // show it under the lesson, promotion writes only the lesson text
+    // (LocalMind D-LM-0029) — the source dump never becomes searchable memory.
+    let candidate = match &lesson.evidence_text {
+        Some(evidence_text) => candidate.with_evidence_text(evidence_text.clone()),
+        None => candidate,
+    };
+    let candidate = if lesson.requires_edit {
+        candidate.requiring_edit_before_promotion()
+    } else {
+        candidate
+    };
 
     let queue = ReviewQueue::open_project(project_root)
         .map_err(|e| LearningError::Review(e.to_string()))?;

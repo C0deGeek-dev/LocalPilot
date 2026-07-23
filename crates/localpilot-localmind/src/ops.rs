@@ -27,6 +27,12 @@ pub struct ReviewSummary {
     /// How many times this candidate (or a near-duplicate) was proposed; dedup at
     /// enqueue bumps this instead of stacking rows.
     pub seen_count: i64,
+    /// Full carried source evidence (shown by review surfaces under the
+    /// summary; never written into a promoted memory body).
+    pub evidence_text: Option<String>,
+    /// The summary is a source excerpt a reviewer must edit into a standalone
+    /// lesson before promotion.
+    pub requires_edit: bool,
 }
 
 /// A reviewer's verdict on a queue item.
@@ -112,6 +118,8 @@ fn summarize(item: &ReviewQueueItem) -> ReviewSummary {
         note: item.note.clone(),
         replacement: item.replacement_summary.clone(),
         seen_count: item.seen_count,
+        evidence_text: item.candidate.evidence_text.clone(),
+        requires_edit: item.candidate.requires_edit_before_promotion,
     }
 }
 
