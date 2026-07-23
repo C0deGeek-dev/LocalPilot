@@ -23,6 +23,10 @@ const MAX_HITS: usize = 20;
 const SNIPPET_CHARS: usize = 240;
 /// Token budget for the ranked pack a single call computes.
 const PACK_TOKEN_BUDGET: u64 = 2_048;
+/// Minimum normalized relevance points an entry needs to appear in the
+/// rendered window (unit relevance 0.05 on the pack's 200-point scale).
+/// Manual pins are exempt — the user chose them.
+const VISIBLE_RELEVANCE_FLOOR: i64 = 10;
 
 /// A short, stable label for each pack source.
 fn source_label(source: PackSource) -> &'static str {
@@ -126,8 +130,39 @@ impl Tool for KnowledgeSearch {
             )));
         }
 
+        // The visible window is relevance-ordered over the *already-selected*
+        // pack — allocation order is reserve/source order, so rendering the
+        // first N entries verbatim would let a full reserve hide every
+        // relevant hit from another source. Entries below the relevance floor
+        // are not shown merely to fill `max_hits` (manual pins are user-chosen
+        // and always shown); fewer than `max_hits` results — including zero —
+        // is an honest answer. This reorders and filters the rendering only;
+        // the pack's protected selection is untouched.
+        let mut visible: Vec<_> = pack
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.source == PackSource::ManualPin
+                    || entry.signals.relevance >= VISIBLE_RELEVANCE_FLOOR
+            })
+            .collect();
+        visible.sort_by(|a, b| {
+            b.signals
+                .final_score
+                .cmp(&a.signals.final_score)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if visible.is_empty() {
+            return Ok(ToolOutput::ok(format!(
+                "no knowledge-base matches for \"{}\" cleared the relevance floor \
+                 ({} weaker candidates withheld)",
+                input.query,
+                pack.entries.len()
+            )));
+        }
+
         let mut out = format!("Knowledge-base matches for \"{}\":\n", input.query);
-        for entry in pack.entries.iter().take(limit) {
+        for entry in visible.iter().take(limit) {
             let source = source_label(entry.source);
             let path = entry.path.as_deref().unwrap_or("(no path)");
             let stale = if entry.stale { " (stale)" } else { "" };
@@ -261,6 +296,108 @@ mod tests {
         assert_eq!(
             lines, 2,
             "result must respect the max_hits cap, got: {}",
+            out.text
+        );
+    }
+
+    fn seed_memory(root: &std::path::Path, id: &str, body: &str) {
+        use localmind_core::{
+            Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
+            MemoryScope, MemoryStatus, SyncMeta,
+        };
+        use localmind_store::MemoryPersistence;
+        let entry = MemoryEntry {
+            id: MemoryEntryId::new(id),
+            scope: MemoryScope::Project,
+            body: body.to_string(),
+            category: LessonCategory::ProjectConvention,
+            confidence: Confidence::new(0.9).unwrap(),
+            source_session: None,
+            evidence: vec![EvidenceRef::new(EvidenceKind::ManualNote, "seeded")],
+            tags: Vec::new(),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
+        };
+        MemoryPersistence::open_project(root)
+            .unwrap()
+            .persist_memory_entry(&entry)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn relevant_sources_stay_visible_while_weak_reserved_noise_is_withheld() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A strong ingest hit for the query.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/registry.rs"),
+            "// the quokka registry mirror is pinned before publishing\n\
+             pub fn quokka_registry_mirror() {}\n",
+        )
+        .unwrap();
+        crate::ingest::run(root, &IngestConfig::default(), crate::ingest::RunMode::Full).unwrap();
+        // Accepted memory: one relevant lesson plus a flood of weak
+        // boilerplate dumps that technically match query terms but bury them
+        // in chrome — the shape that used to fill the visible window.
+        std::fs::write(
+            root.join(".localmind.toml"),
+            "[learning]\nenabled = true\nallowed_scopes = [\"project\"]\n",
+        )
+        .unwrap();
+        seed_memory(
+            root,
+            "relevant-lesson",
+            "Pin the quokka registry mirror before publishing packages.",
+        );
+        let chrome = "home pricing docs blog careers contact sign in get started ".repeat(60);
+        for index in 0..6 {
+            seed_memory(
+                root,
+                &format!("junk-{index}"),
+                &format!("{chrome} registry {chrome} mirror {chrome} item {index}"),
+            );
+        }
+        // An unrelated recent session that must contribute nothing.
+        let session_dir = root.join(".localmind").join("sessions").join("s-old");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("summary.json"),
+            r#"{"key_points":["load tailwind through a cdn link"]}"#,
+        )
+        .unwrap();
+
+        let ws = Workspace::new(root).unwrap();
+        let out = KnowledgeSearch
+            .invoke(json!({ "query": "quokka registry mirror" }), &context(&ws))
+            .await
+            .unwrap();
+
+        assert!(
+            out.text.contains("src/registry.rs"),
+            "the strong ingest hit must be visible: {}",
+            out.text
+        );
+        assert!(
+            out.text
+                .contains("quokka registry mirror before publishing"),
+            "the relevant accepted memory must be visible: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("home pricing docs blog"),
+            "weak boilerplate memories must not fill the visible window: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("tailwind"),
+            "an unrelated session fact must not appear: {}",
             out.text
         );
     }

@@ -75,6 +75,23 @@ impl PackSource {
         }
     }
 
+    /// Minimum unit relevance a candidate needs before it may *fill this
+    /// source's reserve*. A guaranteed budget share is for content that shows
+    /// some relationship to the task — an ineligible candidate still competes
+    /// in the shared pool (where stronger candidates outrank it), so recall is
+    /// not lost, but its source's reserve stays unused for the pool instead of
+    /// being stuffed with noise. Manual pins are user-chosen and code-graph
+    /// rows are already derived from task symbols, so neither is floored.
+    fn reserve_floor(self) -> f32 {
+        match self {
+            PackSource::ManualPin => 0.0,
+            PackSource::AcceptedMemory => 0.05,
+            PackSource::RecentSession => 0.25,
+            PackSource::Ingest => 0.05,
+            PackSource::CodeGraph => 0.0,
+        }
+    }
+
     /// Every source, for reserve accounting and reporting.
     pub(crate) fn all() -> [PackSource; 5] {
         [
@@ -93,8 +110,16 @@ pub struct PackCandidate {
     pub source: PackSource,
     pub id: String,
     pub path: Option<String>,
-    /// Raw relevance score from the originating search/index.
+    /// Raw relevance score from the originating search/index. Kept for
+    /// diagnostics only — raw scores from different sources are on different
+    /// scales and are never compared across sources (see `relevance`).
     pub score: u64,
+    /// Cross-source relevance in `0.0..=1.0` — each source maps its own raw
+    /// scale onto this one bounded range (bm25 through a saturating curve,
+    /// cosine as-is, lexical task overlap for session facts, fixed moderate
+    /// values for graph rows, `1.0` for a user pin), preserving the source's
+    /// internal order. This, not `score`, is what competes across sources.
+    pub relevance: f32,
     pub token_estimate: u64,
     pub snippet: String,
     pub stale: bool,
@@ -115,7 +140,15 @@ pub struct PackCandidate {
 /// a reader can see exactly why one entry outranked another.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RankSignals {
+    /// Normalized cross-source relevance points (`0..=RELEVANCE_POINTS`),
+    /// derived from the candidate's unit relevance — the only relevance value
+    /// compared across sources.
     pub relevance: i64,
+    /// The source's raw score, carried for diagnostics only. Raw scales
+    /// differ per source (bm25 fixed-point, FTS integers, fixed graph
+    /// values); never compare this across sources.
+    #[serde(default)]
+    pub raw_relevance: i64,
     pub source_quality: i64,
     pub recency: i64,
     pub file_match: i64,
@@ -228,7 +261,11 @@ pub(crate) fn allocate(candidates: Vec<PackCandidate>, budget: u64) -> Allocatio
     let mut selected = BTreeSet::new();
     let mut duplicate = BTreeSet::new();
 
-    // Phase 1: reserves. Fill each source up to its guaranteed share.
+    // Phase 1: reserves. Fill each source up to its guaranteed share — but
+    // only with candidates clearing the source's relevance floor: a reserve
+    // guarantees room for *relevant* trusted content, it is not a quota to be
+    // stuffed with noise. Below-floor candidates fall through to the shared
+    // pool, leaving the unused reserve to global competition.
     for &idx in &by_reserve {
         let candidate = &candidates[idx];
         if !seen.insert(candidate.dedup_key()) {
@@ -238,6 +275,9 @@ pub(crate) fn allocate(candidates: Vec<PackCandidate>, budget: u64) -> Allocatio
                     .clone()
                     .into_entry("duplicate content".to_string(), signals[idx]),
             );
+            continue;
+        }
+        if candidate.relevance < candidate.source.reserve_floor() {
             continue;
         }
         let reserve = reserves.get(&candidate.source).copied().unwrap_or(0);
@@ -334,10 +374,22 @@ fn rank_all(candidates: &[PackCandidate]) -> Vec<RankSignals> {
 const FILE_MATCH_BONUS: i64 = 20;
 /// Distance at which a code-graph neighbor stops contributing proximity.
 const GRAPH_PROXIMITY_REACH: i64 = 3;
+/// Points a full-relevance candidate contributes — the one documented range
+/// every source's relevance is mapped onto before the cross-source
+/// comparison. Sized so relevance leads the rank while the bounded bonuses
+/// (source quality 5..40, recency ≤50, file match 20, confidence ≤15,
+/// proximity ≤9) stay measurable: a strong bonus stack can lift a candidate
+/// past a modestly-more-relevant one, but never past a decisively more
+/// relevant one.
+const RELEVANCE_POINTS: f32 = 200.0;
 
-/// The order-independent part of a candidate's rank.
+/// The order-independent part of a candidate's rank. Relevance enters as the
+/// candidate's normalized unit value scaled to [`RELEVANCE_POINTS`]; the raw
+/// source score rides along for diagnostics only.
 fn base_signals(candidate: &PackCandidate) -> RankSignals {
-    let relevance = i64::try_from(candidate.score).unwrap_or(i64::MAX);
+    #[allow(clippy::cast_possible_truncation)]
+    let relevance = (candidate.relevance.clamp(0.0, 1.0) * RELEVANCE_POINTS) as i64;
+    let raw_relevance = i64::try_from(candidate.score).unwrap_or(i64::MAX);
     let source_quality = candidate.source.quality_weight();
     let recency = i64::try_from(candidate.recency).unwrap_or(i64::MAX).min(50);
     let file_match = if candidate.file_match {
@@ -355,6 +407,7 @@ fn base_signals(candidate: &PackCandidate) -> RankSignals {
     let stale_penalty = if candidate.stale { -STALE_PENALTY } else { 0 };
     RankSignals {
         relevance,
+        raw_relevance,
         source_quality,
         recency,
         file_match,
@@ -392,6 +445,10 @@ mod tests {
             id: id.to_string(),
             path: Some(format!("{id}.rs")),
             score,
+            // Fixture mapping: raw score 0..100 reads as unit relevance
+            // 0.0..=1.0, so tests state relevance directly through `score`.
+            #[allow(clippy::cast_precision_loss)]
+            relevance: (score as f32 / 100.0).clamp(0.0, 1.0),
             token_estimate: tokens,
             snippet: format!("snippet {id}"),
             stale: false,
@@ -424,9 +481,10 @@ mod tests {
 
     #[test]
     fn a_reserve_protects_a_high_value_anchor_from_an_ingest_flood() {
-        // Many cheap ingest hits plus one accepted-memory anchor; the anchor
-        // must survive on its reserve even though ingest has far more hits.
-        let mut candidates = vec![candidate(PackSource::AcceptedMemory, "anchor", 1, 20)];
+        // Many cheap ingest hits plus one *relevant* accepted-memory anchor;
+        // the anchor must survive on its reserve even though ingest has far
+        // more hits.
+        let mut candidates = vec![candidate(PackSource::AcceptedMemory, "anchor", 30, 20)];
         for i in 0..50 {
             candidates.push(candidate(PackSource::Ingest, &format!("i{i}"), 100, 20));
         }
@@ -437,6 +495,48 @@ mod tests {
                 .any(|e| e.source == PackSource::AcceptedMemory),
             "the anchor must be protected by its reserve"
         );
+    }
+
+    #[test]
+    fn a_below_floor_candidate_cannot_claim_its_reserve() {
+        // The same flood, but the anchor shows essentially no relationship to
+        // the task: the reserve is for relevant trusted content, so the weak
+        // anchor gets no guaranteed slot and the budget goes to relevant hits.
+        let mut candidates = vec![candidate(PackSource::AcceptedMemory, "anchor", 1, 20)];
+        for i in 0..50 {
+            candidates.push(candidate(PackSource::Ingest, &format!("i{i}"), 100, 20));
+        }
+        let out = allocate(candidates, 100);
+        assert!(
+            out.selected.iter().all(|e| e.source == PackSource::Ingest),
+            "a below-floor anchor must not consume reserve or beat relevant hits: {:?}",
+            out.selected
+                .iter()
+                .map(|e| (&e.id, e.source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_irrelevant_session_flood_leaves_its_reserve_to_the_pool() {
+        // Recent-session candidates below their floor never fill the session
+        // reserve; the freed budget goes to relevant candidates in the pool.
+        let mut candidates = Vec::new();
+        for i in 0..3 {
+            // Unit relevance 0.10 — below the session floor of 0.25.
+            candidates.push(candidate(
+                PackSource::RecentSession,
+                &format!("s{i}"),
+                10,
+                20,
+            ));
+        }
+        for i in 0..5 {
+            candidates.push(candidate(PackSource::Ingest, &format!("i{i}"), 90, 20));
+        }
+        let out = allocate(candidates, 100);
+        assert_eq!(out.selected.len(), 5);
+        assert!(out.selected.iter().all(|e| e.source == PackSource::Ingest));
     }
 
     #[test]
@@ -484,16 +584,30 @@ mod tests {
 
     #[test]
     fn accepted_memory_quality_can_outrank_a_higher_raw_ingest_score() {
-        // Tight shared budget for one slot: an accepted memory with a modest raw
-        // score still beats an ingest hit because of its source-quality weight.
-        let memory = candidate(PackSource::AcceptedMemory, "m", 5, 40); // 5 + 30 = 35
-        let ingest = candidate(PackSource::Ingest, "i", 20, 40); // 20 + 10 = 30
-                                                                 // Budget 40 leaves no reserve room (reserves are < 40 each here at 60),
-                                                                 // so they compete in the shared pool by final score.
+        // Tight shared budget for one slot: an accepted memory that is
+        // modestly less relevant still beats an ingest hit because of its
+        // source-quality weight — the bonus is bounded, so it closes small
+        // relevance gaps, never large ones.
+        let memory = candidate(PackSource::AcceptedMemory, "m", 15, 40); // 30 rel + 30 quality
+        let ingest = candidate(PackSource::Ingest, "i", 20, 40); // 40 rel + 10 quality
         let out = allocate(vec![ingest, memory], 40);
         assert_eq!(out.selected.len(), 1);
         assert_eq!(out.selected[0].id, "m");
         assert!(out.selected[0].signals.source_quality >= 30);
+    }
+
+    #[test]
+    fn relevance_dominates_a_full_bonus_stack_across_sources() {
+        // A decisively more relevant candidate cannot be overturned by the
+        // combined bounded bonuses of a weaker one — normalization keeps
+        // relevance the lead signal.
+        let strong = candidate(PackSource::Ingest, "strong", 90, 40); // 180 rel + 10 + 15
+        let mut weak = candidate(PackSource::AcceptedMemory, "weak", 20, 40); // 40 rel + 30 + 15
+        weak.file_match = true; // +20
+        weak.recency = 50; // +50
+        let out = allocate(vec![weak, strong], 40);
+        assert_eq!(out.selected.len(), 1);
+        assert_eq!(out.selected[0].id, "strong");
     }
 
     #[test]
@@ -524,9 +638,12 @@ mod tests {
 
     #[test]
     fn an_exact_file_match_lifts_an_otherwise_lower_candidate() {
-        let mut named = candidate(PackSource::Ingest, "named", 10, 40); // 10+10+20 = 40
+        // The file-match bonus (20 points) flips a near-tie (a 10-point
+        // relevance gap here), and only a near-tie — a measurable, bounded
+        // effect on the normalized scale.
+        let mut named = candidate(PackSource::Ingest, "named", 20, 40); // 40 rel +10 +20 file
         named.file_match = true;
-        let other = candidate(PackSource::Ingest, "other", 25, 40); // 25+10 = 35
+        let other = candidate(PackSource::Ingest, "other", 25, 40); // 50 rel +10
         let out = allocate(vec![other, named], 40);
         assert_eq!(out.selected.len(), 1);
         assert_eq!(out.selected[0].id, "named");

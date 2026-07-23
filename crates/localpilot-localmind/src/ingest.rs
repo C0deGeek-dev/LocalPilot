@@ -1076,6 +1076,43 @@ fn bm25_to_unit_relevance(relevance: f64) -> f32 {
     (1.0 - 1.0 / (1.0 + bm25)) as f32
 }
 
+/// Map an accepted-memory search score onto the cross-source `0.0..=1.0`
+/// relevance range. The engine's integer score is its bm25 magnitude at a
+/// fixed-point scale of 100, so dividing recovers the bm25 value and the same
+/// saturating curve as [`bm25_to_unit_relevance`] applies — the two lexical
+/// sources read on one scale while each keeps its internal order.
+/// Give the two lexical sources their cross-source unit relevance: each
+/// candidate's raw score relative to the *best hit of its own source in this
+/// candidate set*. Raw lexical scores cannot be compared across sources (the
+/// ingest index and the memory index use different fixed-point scales) and
+/// cannot carry an absolute meaning either — bm25 magnitudes are
+/// corpus-dependent, collapsing toward zero on a degenerate corpus where
+/// every document matches (IDF ≈ 0). Relative-to-own-best is bounded,
+/// corpus-independent, and preserves each source's internal order; within
+/// ingest, the hybrid tiering already keeps keyword hits' scores above
+/// vector-only hits, so the tier ordering survives the division.
+fn normalize_lexical_relevance(candidates: &mut [PackCandidate]) {
+    for source in [PackSource::Ingest, PackSource::AcceptedMemory] {
+        let max = candidates
+            .iter()
+            .filter(|candidate| candidate.source == source)
+            .map(|candidate| candidate.score)
+            .max()
+            .unwrap_or(0);
+        if max == 0 {
+            continue;
+        }
+        for candidate in candidates
+            .iter_mut()
+            .filter(|candidate| candidate.source == source)
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let unit = candidate.score as f32 / max as f32;
+            candidate.relevance = unit.clamp(0.0, 1.0);
+        }
+    }
+}
+
 /// Embed a query string for the vector pass, best-effort: `None` when the
 /// endpoint errors (e.g. unreachable), so the caller falls back to the
 /// keyword-only ranking. The single embedding-path query embed reuses the same
@@ -1210,6 +1247,9 @@ pub fn compute_pack(
             id: hit.chunk_id.clone(),
             path: Some(hit.path.clone()),
             score: hit.score,
+            // Normalized relative to the best ingest hit of this query just
+            // before allocation (see `normalize_lexical_relevance`).
+            relevance: 0.0,
             token_estimate: hit.token_estimate,
             snippet: hit.snippet.clone(),
             stale: hit.stale,
@@ -1224,11 +1264,15 @@ pub fn compute_pack(
         for anchor in crate::ops::search(&root, task).unwrap_or_default() {
             let token_estimate = (anchor.snippet.chars().count() as u64 / 4).max(1);
             let file_match = task_names_path(&task_lower, &anchor.path);
+            let score = u64::try_from(anchor.score.max(0)).unwrap_or(0);
             candidates.push(PackCandidate {
                 source: PackSource::AcceptedMemory,
                 id: format!("memory:{}", anchor.memory_id),
                 path: Some(anchor.path),
-                score: u64::try_from(anchor.score.max(0)).unwrap_or(0),
+                score,
+                // Normalized relative to the best memory hit of this query
+                // just before allocation (see `normalize_lexical_relevance`).
+                relevance: 0.0,
                 token_estimate,
                 snippet: anchor.snippet,
                 stale: false,
@@ -1256,6 +1300,9 @@ pub fn compute_pack(
             id: format!("graph:{symbol}"),
             path: path.clone(),
             score: 8,
+            // Graph rows are derived from task symbols, so they carry fixed
+            // moderate relevance: the symbol itself above its neighbors.
+            relevance: 0.5,
             token_estimate: (report.qualified_name.chars().count() as u64 / 4).max(1),
             snippet: format!("{} {}", report.kind, report.qualified_name),
             stale: false,
@@ -1270,6 +1317,7 @@ pub fn compute_pack(
                 id: format!("graph:{symbol}:{index}"),
                 path: path.clone(),
                 score: 5,
+                relevance: 0.4,
                 token_estimate: (neighbor.chars().count() as u64 / 4).max(1),
                 snippet: neighbor.clone(),
                 stale: false,
@@ -1283,16 +1331,26 @@ pub fn compute_pack(
 
     // Recent session facts come from the most recent LocalMind session summary,
     // excluding the live/in-progress session so the current conversation is not
-    // served back to itself as "knowledge".
+    // served back to itself as "knowledge". Each fact is scored against the
+    // *current task* — carryover from the previous conversation is only
+    // knowledge when it relates to what is being asked now, so an unrelated
+    // fact contributes nothing (recency is a boost for relevant facts, never a
+    // substitute for relevance).
+    let task_terms = task_terms(&task_lower);
     for (index, fact) in recent_session_facts(&root, exclude_session)
         .into_iter()
         .enumerate()
     {
+        let relevance = fact_task_relevance(&task_terms, &fact);
+        if relevance < SESSION_FACT_RELEVANCE_FLOOR {
+            continue;
+        }
         candidates.push(PackCandidate {
             source: PackSource::RecentSession,
             id: format!("session:{index}"),
             path: None,
             score: 8,
+            relevance,
             token_estimate: (fact.chars().count() as u64 / 4).max(1),
             snippet: fact,
             stale: false,
@@ -1304,6 +1362,7 @@ pub fn compute_pack(
         });
     }
 
+    normalize_lexical_relevance(&mut candidates);
     let allocation = allocate(candidates, token_budget);
 
     // Back-compat ingest view: rebuild the `KnowledgeHit` chunks the allocator
@@ -1391,6 +1450,14 @@ pub fn build_pack(
 /// Common English words are dropped; at most three are probed so a pack build
 /// never fans out into the graph.
 fn task_symbols(task: &str) -> Vec<String> {
+    task_terms(task).into_iter().take(3).collect()
+}
+
+/// Every significant term of the task: identifier-ish tokens with stopwords
+/// and short fragments dropped, deduplicated case-insensitively, in task
+/// order. `task_symbols` takes the leading three for graph lookups; the
+/// session-fact relevance check uses the full set.
+fn task_terms(task: &str) -> Vec<String> {
     const STOP: &[&str] = &[
         "the", "and", "for", "with", "fix", "add", "use", "run", "this", "that", "into", "from",
         "make", "test", "code", "file", "files", "function", "please", "update", "change",
@@ -1400,9 +1467,38 @@ fn task_symbols(task: &str) -> Vec<String> {
         .filter(|token| token.len() >= 3 && token.chars().any(|c| c.is_ascii_alphabetic()))
         .filter(|token| !STOP.contains(&token.to_ascii_lowercase().as_str()))
         .filter(|token| seen.insert(token.to_ascii_lowercase()))
-        .take(3)
         .map(str::to_string)
         .collect()
+}
+
+/// Minimum unit relevance a recent-session fact needs to become a pack
+/// candidate at all — carryover below this is the previous conversation, not
+/// knowledge about the current task.
+const SESSION_FACT_RELEVANCE_FLOOR: f32 = 0.25;
+
+/// Unit relevance of a recent-session fact to the current task, from lexical
+/// term overlap. No shared significant term is zero; one shared term on a
+/// three-plus-term task is an incidental match and scores below the floor
+/// (mirroring the accepted-memory coverage gate); otherwise the matched
+/// fraction, floored at `0.25` so a qualifying fact is reserve-eligible.
+fn fact_task_relevance(task_terms: &[String], fact: &str) -> f32 {
+    if task_terms.is_empty() {
+        return 0.0;
+    }
+    let fact_lower = fact.to_ascii_lowercase();
+    let matched = task_terms
+        .iter()
+        .filter(|term| fact_lower.contains(&term.to_ascii_lowercase()))
+        .count();
+    if matched == 0 {
+        return 0.0;
+    }
+    if task_terms.len() >= 3 && matched == 1 {
+        return 0.1;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let fraction = matched as f32 / task_terms.len() as f32;
+    fraction.clamp(SESSION_FACT_RELEVANCE_FLOOR, 1.0)
 }
 
 /// Key points from the most recent LocalMind session summary, used as
@@ -3476,6 +3572,59 @@ mod tests {
                     && entry.snippet.contains("changelog")),
             "recent-session fact missing from {:?}",
             pack.entries
+        );
+    }
+
+    #[test]
+    fn an_unrelated_recent_session_contributes_no_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "retrieval ranking guide\n").unwrap();
+        run(dir.path(), &config(), RunMode::Full).unwrap();
+
+        // The newest session is about a completely different task: none of its
+        // facts share a significant term with the query, so none may enter the
+        // pack — recency is not relevance.
+        write_session_summary(
+            dir.path(),
+            "session-unrelated",
+            &[
+                "split the javascript css and html into separate bundles",
+                "load tailwind through a cdn link",
+            ],
+        );
+
+        let pack = compute_pack(dir.path(), "retrieval ranking", 1_000, None).unwrap();
+        assert!(
+            pack.entries
+                .iter()
+                .all(|entry| entry.source != PackSource::RecentSession),
+            "unrelated session facts must contribute zero entries: {:?}",
+            pack.entries
+                .iter()
+                .filter(|e| e.source == PackSource::RecentSession)
+                .map(|e| &e.snippet)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fact_relevance_requires_real_task_overlap() {
+        let terms = task_terms("improve retrieval ranking quality");
+        assert!(terms.len() >= 3);
+        // No shared term: zero.
+        assert_eq!(
+            fact_task_relevance(&terms, "load tailwind through a cdn"),
+            0.0
+        );
+        // One incidental term on a 3+-term task: below the floor.
+        assert!(
+            fact_task_relevance(&terms, "the ranking of css classes")
+                < SESSION_FACT_RELEVANCE_FLOOR
+        );
+        // Real overlap clears the floor.
+        assert!(
+            fact_task_relevance(&terms, "retrieval ranking prefers keyword floors")
+                >= SESSION_FACT_RELEVANCE_FLOOR
         );
     }
 

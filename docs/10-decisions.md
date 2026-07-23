@@ -2,6 +2,57 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0086: The Context Pack Ranks On Normalized Relevance — Reserve Floors, Task-Scored Session Facts, A Relevance-Ordered Window
+
+Status: accepted. Amends ADR-0015: the composite rank's relevance component
+is no longer the raw source score; everything else that ADR guarantees —
+deterministic two-phase allocation, per-source reserves, the inspectable
+signal breakdown, and manual-pin/accepted-memory protection — stands.
+
+Three field failures shared one root (LocalHub#22, #25, #26): the allocator
+summed raw scores from incompatible scales (ingest bm25 at a 10⁶ fixed
+point, memory FTS at 10², fixed single digits for graph and session rows),
+so the bounded bonuses were noise for one source and decisive for another;
+reserves filled in source-priority order with no relevance requirement; and
+the model-visible window rendered the pack in allocation order, letting one
+source's reserve hide every relevant hit from the rest.
+
+1. **One bounded relevance range.** Every candidate carries a unit relevance
+   in `0.0..=1.0`, scaled to 200 rank points — the only relevance compared
+   across sources. The two lexical sources (ingest, accepted memory) are
+   normalized **relative to their own best hit of the query**: bm25
+   magnitudes are corpus-dependent (IDF collapses toward zero on a
+   degenerate corpus where every document matches — observed on the
+   single-file test fixture), so no absolute bm25 curve can hold; relative-
+   to-own-best is bounded, corpus-independent, and preserves each source's
+   internal order, including the hybrid keyword-above-vector tiering inside
+   ingest. Session facts score by lexical task overlap; graph rows carry
+   fixed moderate values; a manual pin is `1.0`. Raw scores remain in the
+   signal breakdown (`raw_relevance`) for diagnostics and are never compared
+   across sources. On the 200-point scale the bonuses (source quality 5..40,
+   recency ≤50, file match 20, confidence ≤15, proximity ≤9) close small
+   relevance gaps and cannot overturn decisive ones — measurable and
+   bounded, pinned by tests.
+2. **Reserves demand relevance.** A candidate below its source's reserve
+   floor (session facts 0.25; lexical sources 0.05; pins and graph rows
+   unfloored — user-chosen and task-derived respectively) cannot consume its
+   source's reserve. It still competes in the shared pool, so recall is not
+   lost; the unused reserve falls to the pool. Reserve *protection* now
+   means: relevant trusted content survives a flood — not: any content with
+   the right source label gets a guaranteed slot.
+3. **Session facts are scored against the current task** by term overlap
+   before they become candidates at all; a fact sharing no significant term
+   with the task contributes nothing, and one incidental term on a
+   three-plus-term task reads as below-floor (mirroring the accepted-memory
+   engine's coverage gate). Recency stays a boost for relevant facts, never
+   a substitute for relevance.
+4. **The visible window is relevance-ordered.** `knowledge_search` renders
+   the selected pack sorted by final score, withholding entries below a
+   small relevance floor (manual pins always render), and honestly returns
+   fewer than `max_hits` — including zero — when nothing clears it. This
+   filters and orders the *rendering only*; it never re-allocates or removes
+   protected entries from the pack.
+
 ## ADR-0085: A Clean Stop Settles The Plan Panel — Truthful Statuses, Ended Presentation
 
 Status: accepted.

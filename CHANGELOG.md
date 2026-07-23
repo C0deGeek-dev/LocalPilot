@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The context pack ranks on one normalized relevance scale** (ADR-0086,
+  LocalHub#22/#25/#26). Cross-source ranking no longer sums raw scores from
+  incompatible scales: every candidate carries a bounded unit relevance
+  (lexical sources normalized relative to their query's best hit, session
+  facts scored by task overlap, fixed moderate values for graph rows), so
+  source-quality/file-match/recency/confidence bonuses have measurable,
+  bounded effects for every source. Reserves now require relevance — a
+  below-floor candidate cannot claim its source's guaranteed budget (it
+  still competes in the shared pool), and an unrelated recent session
+  contributes zero entries instead of consuming 15% of the budget. The
+  `knowledge_search` window is relevance-ordered over the selected pack and
+  withholds below-floor entries rather than padding to `max_hits` (manual
+  pins always render; zero results is an honest answer). Raw scores stay in
+  the per-entry signal breakdown as diagnostics.
 - **`doctor` and `memory status` explain the research-docs pipeline**
   (LocalHub#28). `localpilot doctor` gains a `research docs` line (and a
   `research_docs` JSON object) reporting how many research reports sit on
