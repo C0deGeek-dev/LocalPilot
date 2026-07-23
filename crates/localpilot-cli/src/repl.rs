@@ -2732,7 +2732,7 @@ mod tests {
         use localpilot_config::HistoryPersistence;
         let off = localpilot_store::PromptHistory::new(HistoryPersistence::None.is_enabled());
         assert!(!off.is_enabled());
-        off.append("a prompt with a secret", std::path::Path::new("."))
+        off.append("a prompt with a secret", &[], std::path::Path::new("."))
             .expect("disabled append never errors");
         assert!(off.load().is_empty());
     }
