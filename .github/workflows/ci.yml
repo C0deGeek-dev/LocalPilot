@@ -56,12 +56,37 @@ jobs:
       # exactly what was running.
       - if: runner.os != 'Linux'
         run: cargo nextest run --workspace
-      - if: runner.os == 'Linux'
+      # The bash `timeout -k` in the first containment attempt never fired —
+      # the wedged process survives SIGKILL, which points at an uninterruptible
+      # (D-state) kernel I/O stall on the hosted runner's disk. A step-level
+      # timeout makes the *runner* abandon the step, so the job completes
+      # instead of dying log-less at the job ceiling; the follow-ups then
+      # capture nextest's progress, the process table, and the kernel's
+      # hung-task traces, and the last step keeps the job honestly red until
+      # the wedge is actually fixed.
+      - id: nextest-linux
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 20
         shell: bash
-        run: timeout -k 30s 30m cargo nextest run --workspace > nextest-run.log 2>&1
+        run: timeout -k 30s 18m cargo nextest run --workspace > nextest-run.log 2>&1
       - if: runner.os == 'Linux' && always()
         shell: bash
-        run: tail -n 300 nextest-run.log && ps -ef --sort=start_time | tail -n 25
+        run: |
+          tail -n 300 nextest-run.log || true
+          echo "=== process table (oldest last) ==="
+          ps -ef --sort=start_time | tail -n 30 || true
+          echo "=== kernel hung-task / I/O traces ==="
+          sudo dmesg | tail -n 150 || true
+      - if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-wedge-log
+          path: nextest-run.log
+          retention-days: 7
+      - if: runner.os == 'Linux' && steps.nextest-linux.outcome != 'success'
+        shell: bash
+        run: echo "::error::linux nextest step did not succeed (wedge or failures — see nextest-wedge-log)"; exit 1
       - run: df -h .
         shell: bash
       - run: cargo test --doc --workspace
@@ -102,13 +127,28 @@ jobs:
       # from the measured baseline, raised deliberately, never lowered to
       # admit a regression.
       #
-      # Same containment as the ubuntu test job (see its nextest step): the
-      # step has wedged log-less on every hosted-ubuntu run since the
-      # 2026-07-08 runner-agent rollout. File-redirect + hard timeout keep
-      # the step able to end and the log able to name the wedge.
-      - run: timeout -k 30s 35m cargo llvm-cov nextest --workspace --fail-under-lines 75 > coverage-run.log 2>&1
+      # Same containment as the ubuntu test job (see its nextest step): a
+      # step-level timeout completes the job so the logs survive, and the
+      # follow-ups capture progress, processes, and kernel hung-task traces.
+      - id: cov-nextest
+        continue-on-error: true
+        timeout-minutes: 25
+        run: timeout -k 30s 23m cargo llvm-cov nextest --workspace --fail-under-lines 75 > coverage-run.log 2>&1
       - if: always()
-        run: tail -n 300 coverage-run.log && ps -ef --sort=start_time | tail -n 25
+        run: |
+          tail -n 300 coverage-run.log || true
+          echo "=== process table (oldest last) ==="
+          ps -ef --sort=start_time | tail -n 30 || true
+          echo "=== kernel hung-task / I/O traces ==="
+          sudo dmesg | tail -n 150 || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-wedge-log
+          path: coverage-run.log
+          retention-days: 7
+      - if: steps.cov-nextest.outcome != 'success'
+        run: echo "::error::coverage nextest step did not succeed (wedge or failures — see coverage-wedge-log)"; exit 1
       - run: df -h .
       - run: cargo llvm-cov report --lcov --output-path coverage.lcov
       - uses: actions/upload-artifact@v4
