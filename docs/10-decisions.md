@@ -2,6 +2,108 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0090: Local Research Evidence Carries The Full Bounded Chunk; A Snippet Never Poses As Full Source
+
+Status: accepted. Completes ADR-0087's full-evidence review contract for the
+local source (LocalHub#34).
+
+The research adapter used to map a local hit into evidence as only its
+`KnowledgeHit::snippet` — an ~320-character match window — while the review
+surface labelled that field "Full source evidence." For web evidence the same
+field holds the complete bounded fetched page; the cross-source label was not
+truthful, and the fetchable `chunk_id` was discarded before candidate
+creation.
+
+1. **After a local hit passes admission, its complete bounded chunk is
+   fetched** through the existing read-only fetch layer (`fetch_layer`, one
+   batch call per gather) and carried as the evidence's `full_source`. The
+   compact match-centred snippet stays as the finding preview/claim; the full
+   chunk becomes the finding's review-only `evidence` — the same
+   statement-vs-evidence split fetched pages get, so promotion still writes
+   only the reviewer-distilled lesson (D-LM-0029), never the expanded source.
+2. **Local evidence is explicitly bounded** (64 KiB, matching the web fetch
+   bound and sitting under the renderer's 100 k safety net) and any cut is
+   disclosed in place — never a silent truncation.
+3. **Unavailable or stale is an explicit state.** A chunk id the index no
+   longer holds renders a loud `[full source unavailable: …]` marker around
+   the snippet; a stale chunk is prefixed with a `[stale: …]` warning that
+   the content reflects the ingested version. A search snippet must never
+   silently pose as full source.
+4. **The chunk id survives** as `Provenance::fetch_id` next to the
+   human-readable `path:start-end` locator, so review/diagnostic surfaces can
+   re-fetch exactly what the locator points at.
+
+## ADR-0089: Coverage Counts Source Families; The Report Accounts Retrieval Per Question
+
+Status: accepted. Refines ADR-0078's coverage scoring and ADR-0079's loud
+accounting (LocalHub#33).
+
+Coverage used to treat every locator as an independent origin, so two chunks
+from two files of one repository marked a question `covered`, ended its
+follow-up rounds, and — with zero admitted web evidence — produced a fully
+covered report that never said why web contributed nothing.
+
+1. **Independence is measured in origins *and* source families.** An origin
+   stays `source label + locator` (each web host one origin). A *family* is
+   each web host for web evidence and the source label for everything else:
+   files of one repository are one family. Full `Covered` requires ≥ 2
+   floor-passing observations from ≥ 2 origins **and** ≥ 2 families; the same
+   counts inside one family yield the new verdict `CoveredSingleSource`,
+   rendered "covered (single source — not independently corroborated)".
+   Local-only research stays legitimate — it is reported as locally
+   supported, never as cross-validated.
+2. **A single-family question keeps earning bounded follow-up rounds** while
+   the source set could still supply a second family (another source label,
+   or a web source — hosts are families); rounds stay bounded by the round
+   budget and saturation. With only one family reachable, single-family
+   coverage is the honest ceiling and is not re-targeted.
+3. **Per-question, per-source retrieval accounting rides the report.** Every
+   source call returns an account (proposed, admitted, rejected-low-relevance,
+   policy-skipped, redirects, failures) that the engine merges per question,
+   adds the engine-side below-floor count to, and publishes on
+   `QuestionCoverage`; the Markdown report renders it with the admission
+   diagnostics of ADR-0088. Counts and reasons only — no source content, no
+   unredacted queries (those stay in the egress audit). With web enabled, a
+   question with zero admitted web evidence carries an explicit source-gap
+   line.
+4. **A failing URL is a counted outcome, not a source abort.** A transport
+   error or unreadable body on one web fetch is audited (`fetch-error`),
+   counted as failed, and the gather continues — it no longer discards the
+   evidence the same call already gathered.
+
+## ADR-0088: Local Research Evidence Is Admitted At Question Level, Never By Within-Source Rank
+
+Status: accepted. Amends ADR-0087 §2 (and the ADR-0086-rationale relative
+normalization it referenced) for the local research source (LocalHub#32).
+
+Relative-to-best normalization pinned every query's best non-zero local hit
+to relevance `1.0`, so a corpus whose least-bad match shared only generic
+terms with the question still cleared the `0.25` admission floor and could
+become a supported finding. Rank answers "how does this hit compare with its
+corpus siblings," not "does this answer the question" — the floor needs the
+latter.
+
+1. **Within-source rank and question-level admission are separate values.**
+   The bm25-derived rank (relative to the query's best hit) is kept for
+   ordering and diagnostics only. The relevance the engine's floor sees is a
+   question-level admission signal.
+2. **The admission judge is shared with web evidence.** When a model resolves
+   (ADR-0087's reuse-only resolution), each candidate local chunk is
+   classified against the sub-question with the same strict-JSON contract as
+   a fetched page; a rejection is a counted outcome. Without a model, the
+   deterministic fallback is `term_overlap_relevance` — significant-term
+   coverage of the question against the chunk content — never the rank.
+3. **Zero admitted local evidence is an honest outcome.** No hit is promoted
+   merely for being its corpus's best; adding one genuinely answering chunk
+   admits that chunk without lifting its corpus siblings, and unrelated
+   chunks cannot change an admitted hit's relevance.
+4. **The score contract is explicit.** `KnowledgeHit::relevance` (raw
+   engine signal), the within-source rank, and the final admission relevance
+   plus reason travel on the evidence as an `AdmissionTrail`, rendered
+   content-free in the report's retrieval accounting (ADR-0089). Accepted
+   memory keeps its reviewed-at-face-value relevance (ADR-0011), with its
+   own trail reason.
+
 ## ADR-0087: Research Evidence Passes An Admission Gate; Promotion Writes Lessons, Never Source Dumps
 
 Status: accepted. Amends ADR-0060 (which scoped the model to decomposition

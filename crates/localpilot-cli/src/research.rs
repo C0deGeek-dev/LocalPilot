@@ -20,9 +20,10 @@ use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
-    run_research_controlled, term_overlap_relevance, AuditEntry, Bounds, CoverageVerdict, Evidence,
-    FetchDecision, Finding, HeuristicSynthesizer, Provenance, ResearchError, ResearchReport,
-    RunControl, Source, SourceError, SourceSet, Synthesizer, WebAccess,
+    run_research_controlled, term_overlap_relevance, AdmissionTrail, AuditEntry, Bounds,
+    CoverageVerdict, Evidence, FetchDecision, Finding, Gathered, HeuristicSynthesizer, Provenance,
+    ResearchError, ResearchReport, RunControl, Source, SourceAccount, SourceError, SourceSet,
+    Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -270,10 +271,22 @@ pub async fn run_research_command_controlled(
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
     let model = ModelHandle::from_config(&config);
 
+    // One shared relevance-admission judge for local and web evidence, so
+    // both are judged against the sub-question on the same basis
+    // (LocalHub#32): reuse-only model resolution, deterministic term-overlap
+    // fallback when no model resolves.
+    let admission = AdmissionJudge::resolve(root, model.as_ref()).map(Arc::new);
+    if admission.is_none() {
+        writeln!(
+            out,
+            "note: no model available for relevance admission — deterministic \
+             term-overlap scoring with the admission floor applies"
+        )?;
+    }
     let web = web_override.unwrap_or(true);
-    let mut sources = build_local_sources(root);
+    let mut sources = build_local_sources(root, admission.clone());
     if web {
-        let web_source = build_web_source(root, &config, model.clone(), out).await?;
+        let web_source = build_web_source(root, &config, model.clone(), admission, out).await?;
         sources.push(Box::new(web_source));
     } else {
         writeln!(out, "web research: skipped for this run (--no-web)")?;
@@ -301,7 +314,7 @@ pub async fn run_research_command_controlled(
     };
     let run = run_research_controlled(topic, &sources, &synth, bounds, control);
     tokio::pin!(run);
-    let outcome = loop {
+    let mut outcome = loop {
         tokio::select! {
             result = &mut run => break result?,
             Some(summary) = progress_rx.recv() => write_round_line(out, &summary)?,
@@ -311,6 +324,9 @@ pub async fn run_research_command_controlled(
     while let Ok(summary) = progress_rx.try_recv() {
         write_round_line(out, &summary)?;
     }
+    // Stamp the run's web posture on the report, so the renderer can mark a
+    // question web contributed nothing to as an explicit source gap.
+    outcome.report.web_enabled = Some(web);
 
     for note in &outcome.report.retrieval_notes {
         writeln!(out, "note: {note}")?;
@@ -350,10 +366,12 @@ pub async fn run_research_command_controlled(
         writeln!(out, "memory candidates enqueued for review: {enqueued}")?;
     }
     let covered = count_verdict(&outcome.report, CoverageVerdict::Covered);
+    let single_source = count_verdict(&outcome.report, CoverageVerdict::CoveredSingleSource);
     let weak = count_verdict(&outcome.report, CoverageVerdict::Weak);
     writeln!(
         out,
-        "findings: {}  coverage: {covered} covered, {weak} weak, {} open  rounds: {}",
+        "findings: {}  coverage: {covered} covered, {single_source} single-source, \
+         {weak} weak, {} open  rounds: {}",
         outcome.report.findings.len(),
         outcome.report.open_questions.len(),
         outcome.report.rounds_run
@@ -400,11 +418,20 @@ fn any_web_evidence(report: &ResearchReport) -> bool {
         .any(|finding| finding.supporting.iter().any(|p| p.source == "web"))
 }
 
-/// Assemble the local source set: ingested knowledge + accepted memory.
-fn build_local_sources(root: &Path) -> SourceSet {
+/// Cap on the full bounded chunk text carried as review-only evidence for one
+/// local hit — mirrors the web fetch bound, and sits below the renderer's
+/// safety net so local evidence normally rides intact with any cut disclosed
+/// here, loudly.
+const LOCAL_EVIDENCE_MAX_CHARS: usize = 64 * 1024;
+
+/// Assemble the local source set: ingested knowledge + accepted memory. The
+/// shared admission judge (when a model resolves) gives local hits the same
+/// question-level relevance admission as fetched web pages (LocalHub#32).
+fn build_local_sources(root: &Path, admission: Option<Arc<AdmissionJudge>>) -> SourceSet {
     SourceSet::new()
         .with(Box::new(KnowledgeSource {
             root: root.to_path_buf(),
+            admission,
         }))
         .with(Box::new(MemorySource {
             root: root.to_path_buf(),
@@ -413,6 +440,10 @@ fn build_local_sources(root: &Path) -> SourceSet {
 
 struct KnowledgeSource {
     root: PathBuf,
+    /// Model-backed question-level admission, shared with the web source.
+    /// `None` degrades to deterministic term-overlap scoring — never to the
+    /// within-source rank, which orders hits but must not admit them.
+    admission: Option<Arc<AdmissionJudge>>,
 }
 
 #[async_trait]
@@ -420,49 +451,126 @@ impl Source for KnowledgeSource {
     fn label(&self) -> &str {
         "knowledge"
     }
-    async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+    async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
         let hits = localpilot_localmind::knowledge_search(&self.root, question)
             .map_err(|error| SourceError::new("knowledge", error.to_string()))?;
-        // Normalize relative to this query's best hit: raw bm25-derived units
-        // are corpus-dependent (IDF collapses on a degenerate corpus), so the
-        // absolute values cannot meet the engine's admission floor honestly —
-        // the strongest local hit of a query reads as fully relevant and the
-        // rest proportionally, preserving the index's internal order.
-        let max_relevance = hits
+        let candidates: Vec<localpilot_localmind::KnowledgeHit> =
+            hits.into_iter().take(limit).collect();
+        let mut account = SourceAccount::new("knowledge");
+        account.proposed = candidates.len();
+        // Within-source rank relative to this query's best hit: preserved for
+        // ordering and diagnostics only. It must never be the admission value
+        // — a corpus's least-bad hit always ranks 1.0, which says nothing
+        // about whether it answers the question (LocalHub#32).
+        let max_raw = candidates
             .iter()
-            .take(limit)
             .map(|hit| hit.relevance)
             .fold(0.0_f32, f32::max);
-        Ok(hits
-            .into_iter()
-            .take(limit)
-            .map(|hit| map_knowledge_hit(question, &hit, max_relevance))
-            .collect())
+        // One read-only fetch for all candidate chunk bodies: the full
+        // bounded chunk both grounds the admission judgment and becomes the
+        // review-only "full source evidence" — the search snippet alone is a
+        // match window, not full source (LocalHub#34).
+        let ids: Vec<String> = candidates.iter().map(|hit| hit.chunk_id.clone()).collect();
+        let bodies: std::collections::HashMap<String, localpilot_localmind::FetchedBody> =
+            localpilot_localmind::fetch_layer(&self.root, &ids)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|body| (body.id.clone(), body))
+                .collect();
+        let mut evidence = Vec::new();
+        for hit in candidates {
+            let rank = if max_raw > 0.0 {
+                (hit.relevance / max_raw).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let body = bodies.get(&hit.chunk_id);
+            let content = body.map_or(hit.snippet.as_str(), |body| body.body.as_str());
+            // Question-level admission: the model judge when available (same
+            // strict-JSON contract as web pages), else deterministic
+            // significant-term coverage against the sub-question. Either path
+            // may admit zero local hits — an honest outcome.
+            let judged = match &self.admission {
+                Some(judge) => judge.classify(question, content).await,
+                None => None,
+            };
+            let (relevance, reason) = match judged {
+                Some(verdict) => {
+                    if !verdict.relevant || verdict.score < ADMISSION_MIN_SCORE {
+                        account.rejected_relevance += 1;
+                        continue;
+                    }
+                    (verdict.score, "model admission")
+                }
+                None => (term_overlap_relevance(question, content), "term overlap"),
+            };
+            account.admitted += 1;
+            evidence.push(
+                map_knowledge_hit(question, &hit, relevance)
+                    .with_admission(AdmissionTrail {
+                        raw: hit.relevance,
+                        rank,
+                        reason: reason.to_string(),
+                    })
+                    .with_full_source(full_chunk_evidence(&hit, body)),
+            );
+        }
+        Ok(Gathered { evidence, account })
     }
 }
 
+/// Map one knowledge hit to evidence with its question-level admission
+/// relevance. Provenance keeps the human-readable `path:start-end` locator
+/// plus the machine-fetchable chunk id.
 fn map_knowledge_hit(
     question: &str,
     hit: &localpilot_localmind::KnowledgeHit,
-    max_relevance: f32,
+    relevance: f32,
 ) -> Evidence {
-    // Unreviewed, machine-scored: carries the hit's relevance relative to the
-    // query's best hit, so a weak match reads as weak without the raw scale's
-    // corpus dependence.
-    let relevance = if max_relevance > 0.0 {
-        (hit.relevance / max_relevance).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
     Evidence::new(
         question,
         hit.snippet.clone(),
         Provenance::new(
             "knowledge",
             Some(format!("{}:{}-{}", hit.path, hit.start_line, hit.end_line)),
-        ),
+        )
+        .with_fetch_id(hit.chunk_id.clone()),
         relevance,
     )
+}
+
+/// The full bounded chunk text behind a local hit, as review-only evidence:
+/// the fetched chunk body when available (stale ingest state disclosed, any
+/// cut at the explicit bound disclosed), or an explicit unavailable marker —
+/// a search snippet must never silently pose as full source (LocalHub#34).
+fn full_chunk_evidence(
+    hit: &localpilot_localmind::KnowledgeHit,
+    body: Option<&localpilot_localmind::FetchedBody>,
+) -> String {
+    let Some(body) = body else {
+        return format!(
+            "[full source unavailable: chunk {} was not found in the knowledge index — \
+             only the search snippet is shown]\n\n{}",
+            hit.chunk_id, hit.snippet
+        );
+    };
+    let mut text = String::new();
+    if hit.stale {
+        text.push_str(
+            "[stale: the source file changed since ingest — the content below is the \
+             ingested version and the line range may no longer match]\n\n",
+        );
+    }
+    let total = body.body.chars().count();
+    if total > LOCAL_EVIDENCE_MAX_CHARS {
+        text.extend(body.body.chars().take(LOCAL_EVIDENCE_MAX_CHARS));
+        text.push_str(&format!(
+            "\n… (chunk truncated: first {LOCAL_EVIDENCE_MAX_CHARS} of {total} characters shown)"
+        ));
+    } else {
+        text.push_str(&body.body);
+    }
+    text
 }
 
 struct MemorySource {
@@ -474,14 +582,16 @@ impl Source for MemorySource {
     fn label(&self) -> &str {
         "memory"
     }
-    async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+    async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
         let hits = localpilot_localmind::search_readonly(&self.root, question)
             .map_err(|error| SourceError::new("memory", error.to_string()))?;
-        Ok(hits
-            .into_iter()
-            .take(limit)
-            .map(|hit| map_memory_hit(question, &hit))
-            .collect())
+        Ok(Gathered::from_evidence(
+            "memory",
+            hits.into_iter()
+                .take(limit)
+                .map(|hit| map_memory_hit(question, &hit))
+                .collect(),
+        ))
     }
 }
 
@@ -492,6 +602,11 @@ fn map_memory_hit(question: &str, hit: &localpilot_localmind::SearchHit) -> Evid
         Provenance::new("memory", Some(hit.memory_id.clone())),
         MEMORY_EVIDENCE_RELEVANCE,
     )
+    .with_admission(AdmissionTrail {
+        raw: MEMORY_EVIDENCE_RELEVANCE,
+        rank: 1.0,
+        reason: "reviewed memory".to_string(),
+    })
 }
 
 // --- web source (off by default; `policies/remote-egress.md`) ----------------
@@ -532,6 +647,7 @@ async fn build_web_source(
     root: &Path,
     config: &Config,
     model: Option<ModelHandle>,
+    admission: Option<Arc<AdmissionJudge>>,
     out: &mut dyn Write,
 ) -> anyhow::Result<WebSource> {
     let web_config = &config.research.web;
@@ -600,17 +716,6 @@ async fn build_web_source(
     };
 
     access.grant_session();
-    // Model-backed relevance admission over fetched pages: reuse-only model
-    // resolution (LocalMind [inference] chat first, the host's default
-    // provider second). Absent both, the deterministic term-overlap path and
-    // the engine's admission floor govern.
-    let admission = AdmissionJudge::resolve(root, model.as_ref());
-    if admission.is_none() {
-        writeln!(
-            out,
-            "  no model available for relevance admission — deterministic term-overlap              scoring with the admission floor applies"
-        )?;
-    }
     WebSource::new(access, audit_log, model, search, admission)
 }
 
@@ -782,11 +887,11 @@ struct WebSource {
     model: Option<ModelHandle>,
     search: Option<McpSearchProposer>,
     politeness: std::sync::Mutex<HostPoliteness>,
-    /// Model-backed relevance admission for fetched pages, when any already-
-    /// configured model resolves (LocalMind `[inference]` chat first, the
-    /// host's default provider as fallback). `None` degrades to the
-    /// deterministic term-overlap score plus the engine's admission floor.
-    admission: Option<AdmissionJudge>,
+    /// Model-backed relevance admission for fetched pages, shared with the
+    /// local knowledge source so local and web evidence are judged on the
+    /// same question-level basis. `None` degrades to the deterministic
+    /// term-overlap score plus the engine's admission floor.
+    admission: Option<Arc<AdmissionJudge>>,
 }
 
 /// Bound on page content sent to the admission classifier — enough to judge
@@ -798,19 +903,21 @@ const ADMISSION_CONTENT_CHARS: usize = 4_000;
 /// fallback share one threshold.
 const ADMISSION_MIN_SCORE: f32 = localpilot_research::COVERAGE_RELEVANCE_FLOOR;
 
-/// The strict-JSON classification a fetched page must clear to enter the
-/// evidence pool when a model judge is available.
+/// The strict-JSON classification an evidence candidate (a fetched page, a
+/// local chunk) must clear to enter the evidence pool when a model judge is
+/// available.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AdmissionVerdict {
     relevant: bool,
     score: f32,
 }
 
-/// The model that classifies fetched web content against a sub-question. It
-/// judges relevance only — it never authors, rewrites, or summarizes the
-/// finding. Reuses existing configuration exclusively (no research-specific
-/// model setting): LocalMind's `[inference]` chat model when configured with
-/// the research feature enabled, else the host's resolved default provider.
+/// The model that classifies research content (fetched web pages, local
+/// knowledge chunks) against a sub-question. It judges relevance only — it
+/// never authors, rewrites, or summarizes the finding. Reuses existing
+/// configuration exclusively (no research-specific model setting):
+/// LocalMind's `[inference]` chat model when configured with the research
+/// feature enabled, else the host's resolved default provider.
 enum AdmissionJudge {
     LocalMind(std::sync::Arc<localpilot_localmind::ResearchChat>),
     Host(ModelHandle),
@@ -830,7 +937,7 @@ impl AdmissionJudge {
     async fn classify(&self, question: &str, content: &str) -> Option<AdmissionVerdict> {
         let bounded: String = content.chars().take(ADMISSION_CONTENT_CHARS).collect();
         let instruction = format!(
-            "Classify whether the fetched web content below actually helps answer the \
+            "Classify whether the research content below actually helps answer the \
              research sub-question. Judge relevance only; do not rewrite or summarize the \
              content. Return ONLY this JSON object and nothing else: \
              {{\"relevant\": true|false, \"score\": <0.0-1.0>, \"reason\": \"<short>\"}}\n\n\
@@ -889,7 +996,7 @@ impl WebSource {
         audit_log: PathBuf,
         model: Option<ModelHandle>,
         search: Option<McpSearchProposer>,
-        admission: Option<AdmissionJudge>,
+        admission: Option<Arc<AdmissionJudge>>,
     ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEB_FETCH_TIMEOUT_SECS))
@@ -939,6 +1046,9 @@ impl WebSource {
             return Ok(None);
         }
         found.relevance = verdict.score;
+        if let Some(trail) = &mut found.admission {
+            trail.reason = "model admission".to_string();
+        }
         Ok(Some(found))
     }
 
@@ -986,16 +1096,18 @@ impl WebSource {
         Ok(extract_urls(&text))
     }
 
-    /// Fetch one allowlisted `url`, auditing the outbound request first. Returns
-    /// evidence on a success status, `None` otherwise (the request still
-    /// happened, so it is still audited).
+    /// Fetch one allowlisted `url`, auditing the outbound request first.
+    /// Every non-evidence outcome is countable (cooldown, redirect, failure)
+    /// rather than a silent `None` or a source-aborting error, so the
+    /// per-question account can say *why* web produced nothing — and one bad
+    /// URL never discards the evidence already gathered (LocalHub#33).
     async fn fetch(
         &self,
         url: &str,
         host: &str,
         question: &str,
         query: &str,
-    ) -> Result<Option<Evidence>, SourceError> {
+    ) -> Result<FetchOutcome, SourceError> {
         // A host that rate-limited or errored earlier in the run stays cooled
         // down — 429/5xx are host-level signals, not per-URL ones.
         if self.host_cooled(host) {
@@ -1003,7 +1115,7 @@ impl WebSource {
                 &self.audit_log,
                 &audit_entry(url, host, "host-cooldown", query),
             )?;
-            return Ok(None);
+            return Ok(FetchOutcome::Cooled);
         }
         // Pace repeat visits: the delay adapts to the host's own last
         // response time, clamped to a sane window.
@@ -1012,17 +1124,21 @@ impl WebSource {
         }
         append_audit(&self.audit_log, &audit_entry(url, host, "allowed", query))?;
         let fetch_started = std::time::Instant::now();
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|error| SourceError::new("web", format!("fetch failed: {error}")))?;
+        let response = match self.client.get(url).send().await {
+            Ok(response) => response,
+            Err(_) => {
+                append_audit(
+                    &self.audit_log,
+                    &audit_entry(url, host, "fetch-error", query),
+                )?;
+                return Ok(FetchOutcome::Failed);
+            }
+        };
         let status = response.status();
         let cool_down = status.as_u16() == 429 || status.is_server_error();
         self.record_fetch(host, fetch_started.elapsed(), cool_down);
         if cool_down {
-            return Ok(None);
+            return Ok(FetchOutcome::Failed);
         }
         // A redirect is never followed (the target host is unvetted); audit and
         // skip it so it can't become an un-allowlisted egress channel.
@@ -1031,7 +1147,7 @@ impl WebSource {
                 &self.audit_log,
                 &audit_entry(url, host, "redirect-not-followed", query),
             )?;
-            return Ok(None);
+            return Ok(FetchOutcome::Redirected);
         }
         // Capture the content type before `text()` consumes the response, so a
         // fetched HTML page can be reduced to readable prose below.
@@ -1041,12 +1157,18 @@ impl WebSource {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| SourceError::new("web", format!("read body failed: {error}")))?;
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(_) => {
+                append_audit(
+                    &self.audit_log,
+                    &audit_entry(url, host, "fetch-error", query),
+                )?;
+                return Ok(FetchOutcome::Failed);
+            }
+        };
         if !status.is_success() {
-            return Ok(None);
+            return Ok(FetchOutcome::Failed);
         }
         // An HTML document becomes evidence as readable Markdown, not raw
         // markup: otherwise script/style bodies and tags leak into the finding
@@ -1064,15 +1186,35 @@ impl WebSource {
         // Scored against the kept content, not a flat constant: a page that
         // barely mentions the question's terms reads as weak evidence and
         // stays below the coverage floor (the term-coverage rule applied to
-        // fetched pages).
+        // fetched pages). `admit` upgrades the trail when the model judges.
         let relevance = term_overlap_relevance(question, &snippet);
-        Ok(Some(Evidence::new(
-            question,
-            snippet,
-            Provenance::new("web", Some(url.to_string())),
-            relevance,
+        Ok(FetchOutcome::Fetched(Box::new(
+            Evidence::new(
+                question,
+                snippet,
+                Provenance::new("web", Some(url.to_string())),
+                relevance,
+            )
+            .with_admission(AdmissionTrail {
+                raw: relevance,
+                rank: 1.0,
+                reason: "term overlap".to_string(),
+            }),
         )))
     }
+}
+
+/// The countable outcome of one URL's fetch attempt.
+enum FetchOutcome {
+    /// Reduced, bounded evidence, term-overlap scored (pre-admission).
+    /// Boxed: this variant dwarfs the flag variants.
+    Fetched(Box<Evidence>),
+    /// The host is cooling down after an earlier rate-limit/server error.
+    Cooled,
+    /// A redirect response, never followed.
+    Redirected,
+    /// A transport error, unsuccessful status, or unreadable body.
+    Failed,
 }
 
 #[async_trait]
@@ -1081,12 +1223,16 @@ impl Source for WebSource {
         "web"
     }
 
-    async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+    async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
+        let mut account = SourceAccount::new("web");
         // Fail-closed: with no active consent, do nothing — not even propose
         // URLs (which would touch the model or a search server). This is the
         // `Disabled` path.
         if !self.access.is_active() {
-            return Ok(Vec::new());
+            return Ok(Gathered {
+                evidence: Vec::new(),
+                account,
+            });
         }
         // Only the redacted sub-question leaves the machine — never evidence.
         let query = prepare_query(localpilot_config::redact::redact, question);
@@ -1107,27 +1253,36 @@ impl Source for WebSource {
 
         let mut evidence = Vec::new();
         for url in urls.into_iter().take(limit) {
+            account.proposed += 1;
             let Some(host) = parse_host(&url) else {
+                account.failed += 1; // an unusable proposed URL is a counted outcome
                 continue;
             };
             match self.access.decide_host(&host) {
-                FetchDecision::Allowed => {
-                    if let Some(found) = self.fetch(&url, &host, question, &query).await? {
-                        if let Some(admitted) = self.admit(&url, &host, &query, found).await? {
+                FetchDecision::Allowed => match self.fetch(&url, &host, question, &query).await? {
+                    FetchOutcome::Fetched(found) => {
+                        if let Some(admitted) = self.admit(&url, &host, &query, *found).await? {
+                            account.admitted += 1;
                             evidence.push(admitted);
+                        } else {
+                            account.rejected_relevance += 1;
                         }
                     }
-                }
+                    FetchOutcome::Cooled => account.policy_skipped += 1,
+                    FetchOutcome::Redirected => account.redirected += 1,
+                    FetchOutcome::Failed => account.failed += 1,
+                },
                 FetchDecision::NeedsConfirmation => {
+                    account.policy_skipped += 1;
                     append_audit(
                         &self.audit_log,
                         &audit_entry(&url, &host, "skipped", &query),
                     )?;
                 }
-                FetchDecision::Disabled => return Ok(evidence),
+                FetchDecision::Disabled => return Ok(Gathered { evidence, account }),
             }
         }
-        Ok(evidence)
+        Ok(Gathered { evidence, account })
     }
 }
 
@@ -1375,14 +1530,20 @@ mod tests {
     }
 
     #[test]
-    fn knowledge_hit_maps_to_path_line_provenance() {
-        let evidence = map_knowledge_hit("how", &knowledge_hit(), 1.0);
+    fn knowledge_hit_maps_to_path_line_provenance_with_fetch_id() {
+        let evidence = map_knowledge_hit("how", &knowledge_hit(), 0.6);
         assert_eq!(evidence.snippet, "fn foo() {}");
         assert_eq!(evidence.provenance.source, "knowledge");
         assert_eq!(
             evidence.provenance.locator.as_deref(),
             Some("src/lib.rs:4-9")
         );
+        assert_eq!(
+            evidence.provenance.fetch_id.as_deref(),
+            Some("c1"),
+            "the fetchable chunk id survives into research provenance"
+        );
+        assert!((evidence.relevance - 0.6).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1390,6 +1551,75 @@ mod tests {
         let evidence = map_memory_hit("how", &memory_hit());
         assert_eq!(evidence.provenance.source, "memory");
         assert_eq!(evidence.provenance.locator.as_deref(), Some("mem_7"));
+        assert_eq!(
+            evidence
+                .admission
+                .as_ref()
+                .map(|trail| trail.reason.as_str()),
+            Some("reviewed memory")
+        );
+    }
+
+    #[test]
+    fn full_chunk_evidence_is_the_chunk_body_not_the_snippet() {
+        let hit = knowledge_hit();
+        let body = localpilot_localmind::FetchedBody {
+            id: "c1".to_string(),
+            path: "src/lib.rs".to_string(),
+            start_line: 4,
+            end_line: 9,
+            body: "fn foo() {}\n// the full surrounding chunk with real context\nfn bar() {}"
+                .to_string(),
+            token_cost: 16,
+        };
+        let text = full_chunk_evidence(&hit, Some(&body));
+        assert!(text.contains("the full surrounding chunk"), "{text}");
+        assert!(!text.contains("[stale:"), "fresh chunk carries no warning");
+    }
+
+    #[test]
+    fn stale_chunk_evidence_is_marked() {
+        let mut hit = knowledge_hit();
+        hit.stale = true;
+        let body = localpilot_localmind::FetchedBody {
+            id: "c1".to_string(),
+            path: "src/lib.rs".to_string(),
+            start_line: 4,
+            end_line: 9,
+            body: "fn foo() {}".to_string(),
+            token_cost: 4,
+        };
+        let text = full_chunk_evidence(&hit, Some(&body));
+        assert!(
+            text.starts_with("[stale:"),
+            "stale ingest state is disclosed, never silent: {text}"
+        );
+    }
+
+    #[test]
+    fn missing_chunk_evidence_is_an_explicit_unavailable_state() {
+        let hit = knowledge_hit();
+        let text = full_chunk_evidence(&hit, None);
+        assert!(
+            text.starts_with("[full source unavailable:"),
+            "a search snippet must not silently pose as full source: {text}"
+        );
+        assert!(text.contains("fn foo() {}"), "the snippet still shows");
+    }
+
+    #[test]
+    fn oversized_chunk_evidence_is_cut_with_disclosure() {
+        let hit = knowledge_hit();
+        let body = localpilot_localmind::FetchedBody {
+            id: "c1".to_string(),
+            path: "src/lib.rs".to_string(),
+            start_line: 4,
+            end_line: 9,
+            body: "x".repeat(LOCAL_EVIDENCE_MAX_CHARS + 10),
+            token_cost: 99,
+        };
+        let text = full_chunk_evidence(&hit, Some(&body));
+        assert!(text.contains("chunk truncated"), "the cut is loud");
     }
 
     #[test]
@@ -1671,6 +1901,100 @@ mod tests {
         );
     }
 
+    // --- local knowledge admission (LocalHub#32/#34) --------------------------
+
+    /// The issue-#32 reproduction: a corpus sharing only generic terms with
+    /// the question must yield **no admitted local evidence** — its least-bad
+    /// hit must not be promoted to full relevance by within-source rank.
+    /// Adding one genuinely answering chunk admits that chunk without
+    /// promoting the weak candidates riding the same corpus.
+    #[tokio::test]
+    async fn weak_local_corpus_yields_no_admitted_evidence_and_an_answer_admits_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/notes.md"),
+            "The pipeline logs progress counters for the team.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("docs/other.md"),
+            "Progress pipeline notes collected weekly.\n",
+        )
+        .unwrap();
+        localpilot_localmind::ingest_run(
+            dir.path(),
+            &localpilot_config::IngestConfig::default(),
+            localpilot_localmind::RunMode::Full,
+        )
+        .unwrap();
+        let source = KnowledgeSource {
+            root: dir.path().to_path_buf(),
+            admission: None,
+        };
+        let question = "how does the research pipeline report progress for animation \
+                        mixer clip weights during gpu skinning";
+        let gathered = source.gather(question, 5).await.unwrap();
+        for item in &gathered.evidence {
+            assert!(
+                item.relevance < localpilot_research::COVERAGE_RELEVANCE_FLOOR,
+                "a generic-terms-only corpus must stay below the admission floor; \
+                 got {} for {:?}",
+                item.relevance,
+                item.provenance.locator
+            );
+            let trail = item.admission.as_ref().expect("admission trail present");
+            assert_eq!(trail.reason, "term overlap");
+        }
+
+        // One genuinely answering chunk: admitted on its own merits, weak
+        // corpus siblings unchanged.
+        std::fs::write(
+            dir.path().join("docs/answer.md"),
+            "The animation mixer blends clip weights across the skeleton before \
+             gpu skinning deforms the mesh; the research pipeline reports mixer \
+             progress per clip.\n",
+        )
+        .unwrap();
+        localpilot_localmind::ingest_run(
+            dir.path(),
+            &localpilot_config::IngestConfig::default(),
+            localpilot_localmind::RunMode::Full,
+        )
+        .unwrap();
+        let gathered = source.gather(question, 5).await.unwrap();
+        let admitted: Vec<_> = gathered
+            .evidence
+            .iter()
+            .filter(|item| item.relevance >= localpilot_research::COVERAGE_RELEVANCE_FLOOR)
+            .collect();
+        assert!(
+            !admitted.is_empty(),
+            "the answering chunk clears the floor: {:?}",
+            gathered
+                .evidence
+                .iter()
+                .map(|item| (item.provenance.locator.clone(), item.relevance))
+                .collect::<Vec<_>>()
+        );
+        for item in &admitted {
+            let locator = item.provenance.locator.as_deref().unwrap_or_default();
+            assert!(
+                locator.contains("answer.md"),
+                "only the answering chunk is admitted, not its corpus siblings: {locator}"
+            );
+            assert!(
+                item.provenance.fetch_id.is_some(),
+                "the fetchable chunk id rides research provenance"
+            );
+            let full = item.full_source.as_deref().expect("full chunk fetched");
+            assert!(
+                full.contains("deforms the mesh"),
+                "full source is the chunk body, not only the search window: {full}"
+            );
+        }
+    }
+
     // --- web source (egress gate) --------------------------------------------
 
     async fn ok_server(body: &str) -> MockServer {
@@ -1711,7 +2035,8 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
 
-        let evidence = source.gather("how to use tokio", 3).await.unwrap();
+        let gathered = source.gather("how to use tokio", 3).await.unwrap();
+        let evidence = gathered.evidence;
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].provenance.source, "web");
         assert_eq!(
@@ -1719,6 +2044,7 @@ mod tests {
             Some(url.as_str())
         );
         assert!(evidence[0].snippet.contains("documentation body"));
+        assert_eq!(gathered.account.admitted, 1);
 
         let log = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(log.lines().count(), 1, "one audited request");
@@ -1750,7 +2076,7 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let (source, _fake) = web_source(&url, vec![host], true, audit);
 
-        let evidence = source.gather("what is tokio", 3).await.unwrap();
+        let evidence = source.gather("what is tokio", 3).await.unwrap().evidence;
         assert_eq!(evidence.len(), 1);
         let snippet = &evidence[0].snippet;
         assert!(
@@ -1808,8 +2134,15 @@ mod tests {
         // Allowlist a different domain so the server's loopback host is not on it.
         let (source, _fake) = web_source(&url, vec!["docs.rs".to_string()], true, audit.clone());
 
-        let evidence = source.gather("q", 3).await.unwrap();
-        assert!(evidence.is_empty(), "a non-allowlisted host is not fetched");
+        let gathered = source.gather("q", 3).await.unwrap();
+        assert!(
+            gathered.evidence.is_empty(),
+            "a non-allowlisted host is not fetched"
+        );
+        assert_eq!(
+            gathered.account.policy_skipped, 1,
+            "the policy skip is countable in the retrieval account"
+        );
         assert!(
             server.received_requests().await.unwrap().is_empty(),
             "no outbound request reached the host"
@@ -1837,8 +2170,15 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
 
-        let evidence = source.gather("q", 3).await.unwrap();
-        assert!(evidence.is_empty(), "a redirect yields no evidence");
+        let gathered = source.gather("q", 3).await.unwrap();
+        assert!(
+            gathered.evidence.is_empty(),
+            "a redirect yields no evidence"
+        );
+        assert_eq!(
+            gathered.account.redirected, 1,
+            "the unfollowed redirect is countable in the retrieval account"
+        );
         // The allowlisted host was requested once; the redirect target was not.
         let hits = server.received_requests().await.unwrap();
         assert_eq!(hits.len(), 1, "only the allowlisted host is contacted");
@@ -1856,7 +2196,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = localpilot_config::Config::default();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out)
+        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -1879,7 +2219,7 @@ mod tests {
         let mut config = localpilot_config::Config::default();
         config.research.web.allowlist.clear();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out)
+        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -1896,7 +2236,7 @@ mod tests {
         let mut config = localpilot_config::Config::default();
         config.research.web.enabled = false;
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, &mut out)
+        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -1942,7 +2282,11 @@ mod tests {
         )
         .unwrap();
 
-        let evidence = source.gather("how do skin matrices work", 3).await.unwrap();
+        let evidence = source
+            .gather("how do skin matrices work", 3)
+            .await
+            .unwrap()
+            .evidence;
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].provenance.source, "web");
         assert!(evidence[0].snippet.contains("search-found body"));
@@ -1978,7 +2322,7 @@ mod tests {
         )
         .unwrap();
 
-        let evidence = source.gather("q", 3).await.unwrap();
+        let evidence = source.gather("q", 3).await.unwrap().evidence;
         assert!(
             evidence.is_empty(),
             "a disallowlisted host is never fetched"
@@ -2007,7 +2351,7 @@ mod tests {
         access.grant_session();
         let source = WebSource::new(access, audit.clone(), None, Some(proposer), None).unwrap();
 
-        let evidence = source.gather("q", 3).await.unwrap();
+        let evidence = source.gather("q", 3).await.unwrap().evidence;
         assert!(evidence.is_empty());
         let log = std::fs::read_to_string(&audit).unwrap();
         assert!(
@@ -2037,7 +2381,7 @@ mod tests {
         )
         .unwrap();
 
-        let evidence = source.gather("q", 1).await.unwrap();
+        let evidence = source.gather("q", 1).await.unwrap().evidence;
         assert_eq!(evidence.len(), 1, "the duplicate URL is fetched once");
         let hits = server.received_requests().await.unwrap();
         assert_eq!(hits.len(), 1, "one outbound request for the deduped URL");
@@ -2207,10 +2551,15 @@ mod tests {
         )
         .unwrap();
 
-        let evidence = source.gather("q", 3).await.unwrap();
+        let gathered = source.gather("q", 3).await.unwrap();
         assert!(
-            evidence.is_empty(),
+            gathered.evidence.is_empty(),
             "the 500 yields nothing and the follow-up URL is skipped"
+        );
+        assert_eq!(gathered.account.failed, 1, "the 500 is a counted failure");
+        assert_eq!(
+            gathered.account.policy_skipped, 1,
+            "the cooled-down skip is a counted policy outcome"
         );
         let hits = server.received_requests().await.unwrap();
         assert_eq!(hits.len(), 1, "only the first URL reached the host");
@@ -2231,7 +2580,7 @@ mod tests {
         // Config-off: grant_session is a no-op, so the source is inert.
         let (source, fake) = web_source(&url, vec![host], false, audit.clone());
 
-        let evidence = source.gather("q", 3).await.unwrap();
+        let evidence = source.gather("q", 3).await.unwrap().evidence;
         assert!(evidence.is_empty());
         assert!(
             !audit.exists(),

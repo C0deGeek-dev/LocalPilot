@@ -14,6 +14,11 @@ pub struct Provenance {
     /// Locator within that source when one exists: a memory id, `path:start-end`,
     /// or a URL. `None` when the source cannot point at a sub-location.
     pub locator: Option<String>,
+    /// Machine-fetchable id within the source when one exists (an ingest chunk
+    /// id), so review/diagnostic surfaces can re-fetch the full source the
+    /// human-readable locator points at. `None` for sources without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_id: Option<String>,
 }
 
 impl Provenance {
@@ -23,8 +28,33 @@ impl Provenance {
         Self {
             source: source.into(),
             locator,
+            fetch_id: None,
         }
     }
+
+    /// Attach a machine-fetchable id.
+    #[must_use]
+    pub fn with_fetch_id(mut self, fetch_id: impl Into<String>) -> Self {
+        self.fetch_id = Some(fetch_id.into());
+        self
+    }
+}
+
+/// How one evidence item's final `relevance` was decided — the admission
+/// trail. Kept for diagnostics (rendered content-free in the report's
+/// retrieval accounting), so "high relevance" is auditable: within-source
+/// rank and question-level admission are different judgments and must not be
+/// conflated (LocalHub#32).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdmissionTrail {
+    /// The source engine's raw signal (e.g. bm25-derived unit relevance).
+    pub raw: f32,
+    /// Rank relative to the query's best hit within this source — ordering
+    /// only, never the admission value.
+    pub rank: f32,
+    /// How the final `relevance` was decided, e.g. `model admission`,
+    /// `term overlap`, `reviewed memory`.
+    pub reason: String,
 }
 
 /// A raw snippet gathered from a source in answer to a sub-question.
@@ -48,6 +78,17 @@ pub struct Evidence {
     /// the coverage account, never silently dropped.
     #[serde(default)]
     pub also_from: Vec<Provenance>,
+    /// The full bounded source text behind `snippet`, when the source holds
+    /// more than the match window (a local chunk body). `None` when the
+    /// snippet already is the full gathered content (a fetched web page) or
+    /// the source cannot supply more. Review-only context: it rides into the
+    /// finding's `evidence`, never into the claim itself (LocalHub#34).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_source: Option<String>,
+    /// How `relevance` was decided, for diagnostics. `None` for sources that
+    /// predate the trail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionTrail>,
 }
 
 impl Evidence {
@@ -65,7 +106,23 @@ impl Evidence {
             provenance,
             relevance,
             also_from: Vec::new(),
+            full_source: None,
+            admission: None,
         }
+    }
+
+    /// Attach the full bounded source text behind the snippet.
+    #[must_use]
+    pub fn with_full_source(mut self, full_source: impl Into<String>) -> Self {
+        self.full_source = Some(full_source.into());
+        self
+    }
+
+    /// Attach the admission trail explaining `relevance`.
+    #[must_use]
+    pub fn with_admission(mut self, admission: AdmissionTrail) -> Self {
+        self.admission = Some(admission);
+        self
     }
 }
 
@@ -115,12 +172,74 @@ pub fn flatten_whitespace(text: &str) -> String {
 /// How well one sub-question ended up supported by gathered evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoverageVerdict {
-    /// Enough relevant evidence from enough independent origins.
+    /// Enough relevant evidence from enough independent origins across at
+    /// least two source families — independently corroborated.
     Covered,
+    /// Enough relevant evidence and locator diversity, but every observation
+    /// comes from one source family (e.g. two files of one repository, or two
+    /// pages of one host) — supported, not independently corroborated
+    /// (LocalHub#33). Distinct from [`CoverageVerdict::Covered`] so file
+    /// diversity can never read as cross-source validation.
+    CoveredSingleSource,
     /// Some evidence, but thin — few snippets or a single origin.
     Weak,
     /// No evidence at all.
     Open,
+}
+
+/// Per-source retrieval account for one sub-question, aggregated across
+/// rounds and reformulated queries. Counts and reasons only — never source
+/// content or unredacted queries. This is what lets a reader of the report
+/// tell "web proposed nothing" from "web fetched and was rejected"
+/// (LocalHub#33).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceAccount {
+    /// The source label (`knowledge`, `memory`, `web`).
+    pub source: String,
+    /// Candidates considered: hits returned by the index, URLs proposed.
+    pub proposed: usize,
+    /// Evidence items handed to the engine's pool.
+    pub admitted: usize,
+    /// Rejected by the source's own relevance admission (e.g. the model
+    /// classifier) before reaching the pool.
+    pub rejected_relevance: usize,
+    /// Skipped by policy: non-allowlisted host, host cooldown, no consent.
+    pub policy_skipped: usize,
+    /// Redirect responses, never followed.
+    pub redirected: usize,
+    /// Fetch/read failures and unsuccessful responses (including a source
+    /// call that errored outright).
+    pub failed: usize,
+    /// Pool evidence that fell below the engine's admission floor.
+    pub below_floor: usize,
+    /// Content-free per-admitted-item diagnostics: locator plus the admission
+    /// trail (raw signal, within-source rank, final relevance, reason).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admitted_notes: Vec<String>,
+}
+
+impl SourceAccount {
+    /// An empty account for `source`.
+    #[must_use]
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Fold another account (same source, later query/round) into this one.
+    pub fn merge(&mut self, other: &SourceAccount) {
+        self.proposed += other.proposed;
+        self.admitted += other.admitted;
+        self.rejected_relevance += other.rejected_relevance;
+        self.policy_skipped += other.policy_skipped;
+        self.redirected += other.redirected;
+        self.failed += other.failed;
+        self.below_floor += other.below_floor;
+        self.admitted_notes
+            .extend(other.admitted_notes.iter().cloned());
+    }
 }
 
 /// Per-sub-question coverage: the deterministic scoring the multi-round loop
@@ -138,6 +257,15 @@ pub struct QuestionCoverage {
     pub strong_evidence: usize,
     /// Distinct evidence origins (source label + host/locator) above the floor.
     pub distinct_origins: usize,
+    /// Distinct source families above the floor: each web host is its own
+    /// family; every non-web source is one family per label. Locator
+    /// diversity within one family (two files of one repository) never
+    /// raises this (LocalHub#33).
+    #[serde(default)]
+    pub distinct_families: usize,
+    /// Per-source retrieval accounting for this question, sorted by source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<SourceAccount>,
 }
 
 /// The full result of a research run.
@@ -161,6 +289,12 @@ pub struct ResearchReport {
     /// silent truncation reads as "covered everything" when it didn't.
     #[serde(default)]
     pub retrieval_notes: Vec<String>,
+    /// Whether the run had web research enabled — set by the binding layer,
+    /// `None` when unknown (older reports). Lets the renderer mark a
+    /// question that web contributed nothing to as a source gap instead of
+    /// presenting local-only coverage as cross-validated (LocalHub#33).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_enabled: Option<bool>,
 }
 
 impl ResearchReport {
@@ -175,6 +309,7 @@ impl ResearchReport {
             coverage: Vec::new(),
             rounds_run: 0,
             retrieval_notes: Vec::new(),
+            web_enabled: None,
         }
     }
 }

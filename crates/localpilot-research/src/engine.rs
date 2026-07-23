@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::{
     flatten_whitespace, html_to_text, markdown_to_text, ClaimStatus, CoverageVerdict, Evidence,
-    Finding, Provenance, QuestionCoverage, ResearchError, ResearchReport, SourceError, SourceSet,
-    Synthesizer,
+    Finding, Provenance, QuestionCoverage, ResearchError, ResearchReport, SourceAccount,
+    SourceError, SourceSet, Synthesizer,
 };
 
 /// Longest a finding statement may be before it is treated as an over-long blob
@@ -18,16 +18,24 @@ const MAX_STATEMENT_CHARS: usize = 240;
 
 /// Evidence below this relevance neither counts toward coverage nor enters
 /// synthesis/findings/candidates — one admission bar, not merely a coverage
-/// counter. Conservative: term-overlap-scored web evidence matching at least
-/// two question terms, a model-admitted page, and a relatively-strong local
-/// hit all pass; a one-incidental-word match does not. Public so a binding
-/// layer's own admission step (e.g. the model-backed web classifier) uses the
-/// same bar instead of inventing a second threshold.
+/// counter. The value compared against it must be a **question-level**
+/// admission signal (a model classification or significant-term coverage
+/// against the sub-question), never a within-source rank: rank answers "how
+/// does this hit compare with its corpus siblings," not "does this answer
+/// the question" (LocalHub#32). Conservative: term-overlap-scored evidence
+/// matching at least two question terms and a model-admitted item pass; a
+/// one-incidental-word match does not. Public so a binding layer's own
+/// admission step (e.g. the model-backed classifier) uses the same bar
+/// instead of inventing a second threshold.
 pub const COVERAGE_RELEVANCE_FLOOR: f32 = 0.25;
 /// A question is covered when at least this many floor-passing snippets…
 const COVERED_MIN_EVIDENCE: usize = 2;
 /// …come from at least this many distinct origins.
 const COVERED_MIN_ORIGINS: usize = 2;
+/// …and full coverage (vs single-source coverage) additionally needs this
+/// many distinct source *families* — a web host each, a non-web source label
+/// each. File diversity inside one repository is not independence.
+const COVERED_MIN_FAMILIES: usize = 2;
 /// Follow-up queries asked per targeted question per round (the unmodified
 /// original question is always retried alongside them).
 const REFORMULATIONS_PER_ROUND: usize = 1;
@@ -141,6 +149,8 @@ pub struct RunOutcome {
 struct QuestionState {
     question: String,
     evidence: Vec<Evidence>,
+    /// Per-source retrieval accounts, merged across rounds and queries.
+    accounts: std::collections::BTreeMap<String, SourceAccount>,
 }
 
 /// Run the bounded research loop for `topic` with default control (no external
@@ -186,9 +196,17 @@ pub async fn run_research_controlled(
         .map(|question| QuestionState {
             question: question.clone(),
             evidence: Vec::new(),
+            accounts: std::collections::BTreeMap::new(),
         })
         .collect();
     report.questions = questions;
+    // Whether a second source family is even reachable: two distinct source
+    // labels, or a web source (which can span hosts, each its own family).
+    // With only one family available, single-family coverage is the honest
+    // ceiling and is not re-targeted; with more available, a single-family
+    // question keeps earning bounded follow-up rounds toward corroboration.
+    let labels: HashSet<&str> = sources.labels().into_iter().collect();
+    let multi_family_available = labels.len() >= COVERED_MIN_FAMILIES || labels.contains("web");
 
     // One key per evidence snippet ever seen, across rounds and reformulated
     // queries — dedup is against *seen*, not kept, so a round that only
@@ -206,7 +224,9 @@ pub async fn run_research_controlled(
         let targets: Vec<usize> = states
             .iter()
             .enumerate()
-            .filter(|(_, state)| round == 1 || assess(state).verdict != CoverageVerdict::Covered)
+            .filter(|(_, state)| {
+                round == 1 || !satisfied(assess(state).verdict, multi_family_available)
+            })
             .map(|(index, _)| index)
             .collect();
         if targets.is_empty() {
@@ -252,8 +272,15 @@ pub async fn run_research_controlled(
                 .per_source_evidence
                 .saturating_mul(round.min(ESCALATION_MAX_FACTOR));
             for query in queries {
-                let (evidence, mut errors) = sources.gather_all(&query, depth).await;
+                let (evidence, mut errors, accounts) = sources.gather_all(&query, depth).await;
                 source_errors.append(&mut errors);
+                for account in accounts {
+                    states[index]
+                        .accounts
+                        .entry(account.source.clone())
+                        .or_insert_with(|| SourceAccount::new(account.source.clone()))
+                        .merge(&account);
+                }
                 for mut item in evidence {
                     if total_evidence >= bounds.max_total_evidence {
                         evidence_cap_hit = true;
@@ -392,7 +419,7 @@ fn summarize_round(
     let mut open = 0;
     for state in states {
         match assess(state).verdict {
-            CoverageVerdict::Covered => covered += 1,
+            CoverageVerdict::Covered | CoverageVerdict::CoveredSingleSource => covered += 1,
             CoverageVerdict::Weak => weak += 1,
             CoverageVerdict::Open => open += 1,
         }
@@ -408,8 +435,22 @@ fn summarize_round(
     });
 }
 
+/// Whether a verdict needs no further targeting: full coverage always;
+/// single-family coverage only when no second source family is reachable —
+/// otherwise the question keeps earning bounded follow-up rounds so a source
+/// gap is pursued, not papered over by file diversity (LocalHub#33).
+fn satisfied(verdict: CoverageVerdict, multi_family_available: bool) -> bool {
+    match verdict {
+        CoverageVerdict::Covered => true,
+        CoverageVerdict::CoveredSingleSource => !multi_family_available,
+        CoverageVerdict::Weak | CoverageVerdict::Open => false,
+    }
+}
+
 /// Deterministic per-question coverage scoring: floor-passing evidence counts,
-/// and independence is measured in distinct origins.
+/// independence is measured in distinct origins (locators) *and* distinct
+/// source families — two files of one repository are two origins but one
+/// family, which is single-source coverage, never corroboration.
 fn assess(state: &QuestionState) -> QuestionCoverage {
     let strong: Vec<&Evidence> = state
         .evidence
@@ -420,27 +461,58 @@ fn assess(state: &QuestionState) -> QuestionCoverage {
     // corroborating observations: the same content found on a second origin
     // is exactly the independence signal the covered bar asks for.
     let mut origins: HashSet<String> = HashSet::new();
+    let mut families: HashSet<String> = HashSet::new();
     let mut observations = 0usize;
     for item in &strong {
         origins.insert(origin_key(item));
+        families.insert(provenance_family(&item.provenance));
         observations += 1 + item.also_from.len();
         for extra in &item.also_from {
             origins.insert(provenance_origin(extra));
+            families.insert(provenance_family(extra));
         }
     }
     let verdict = if observations >= COVERED_MIN_EVIDENCE && origins.len() >= COVERED_MIN_ORIGINS {
-        CoverageVerdict::Covered
+        if families.len() >= COVERED_MIN_FAMILIES {
+            CoverageVerdict::Covered
+        } else {
+            CoverageVerdict::CoveredSingleSource
+        }
     } else if state.evidence.is_empty() {
         CoverageVerdict::Open
     } else {
         CoverageVerdict::Weak
     };
+    // Account snapshot: the sources' own counts, plus the engine-side floor
+    // outcome and content-free admission diagnostics per admitted item.
+    // Rebuilt from evidence on every call, so repeated assessment never
+    // double-counts.
+    let mut accounts = state.accounts.clone();
+    for item in &state.evidence {
+        let entry = accounts
+            .entry(item.provenance.source.clone())
+            .or_insert_with(|| SourceAccount::new(item.provenance.source.clone()));
+        if item.relevance < COVERAGE_RELEVANCE_FLOOR {
+            entry.below_floor += 1;
+        } else if let Some(trail) = &item.admission {
+            entry.admitted_notes.push(format!(
+                "{} — raw {:.2}, rank {:.2}, admitted {:.2} ({})",
+                item.provenance.locator.as_deref().unwrap_or("(no locator)"),
+                trail.raw,
+                trail.rank,
+                item.relevance,
+                trail.reason
+            ));
+        }
+    }
     QuestionCoverage {
         question: state.question.clone(),
         verdict,
         evidence_count: state.evidence.len(),
         strong_evidence: observations,
         distinct_origins: origins.len(),
+        distinct_families: families.len(),
+        accounts: accounts.into_values().collect(),
     }
 }
 
@@ -553,6 +625,17 @@ fn provenance_origin(provenance: &Provenance) -> String {
         }
     }
     format!("{}|{locator}", provenance.source)
+}
+
+/// Source family of one snippet for corroboration counting: each web host is
+/// its own family (two hosts corroborate each other); every non-web source is
+/// one family per label, however many locators it yields — file diversity
+/// within a repository is ordering signal, not independence.
+fn provenance_family(provenance: &Provenance) -> String {
+    if provenance.source == "web" {
+        return provenance_origin(provenance);
+    }
+    provenance.source.clone()
 }
 
 /// Adversarial pass: a finding with no supporting provenance is downgraded to

@@ -22,10 +22,10 @@ pub use engine::{
 pub use html::{html_to_markdown, html_to_text, markdown_to_text};
 pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
 pub use report::{
-    flatten_whitespace, ClaimStatus, CoverageVerdict, Evidence, Finding, Provenance,
-    QuestionCoverage, ResearchReport,
+    flatten_whitespace, AdmissionTrail, ClaimStatus, CoverageVerdict, Evidence, Finding,
+    Provenance, QuestionCoverage, ResearchReport, SourceAccount,
 };
-pub use source::{Source, SourceSet};
+pub use source::{Gathered, Source, SourceSet};
 pub use synth::{expansion_queries, term_overlap_relevance, HeuristicSynthesizer, Synthesizer};
 pub use web::{host_allowed, host_matches, prepare_query, AuditEntry, FetchDecision, WebAccess};
 
@@ -79,18 +79,22 @@ mod tests {
         fn label(&self) -> &str {
             &self.label
         }
-        async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+        async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
             match &self.reply {
                 None => Err(SourceError::new(&self.label, "boom")),
-                Some(text) => Ok((0..limit.min(1))
-                    .map(|_| Evidence {
-                        question: question.to_string(),
-                        snippet: text.clone(),
-                        provenance: Provenance::new(self.label.clone(), Some("loc:1".to_string())),
-                        relevance: 1.0,
-                        also_from: Vec::new(),
-                    })
-                    .collect()),
+                Some(text) => Ok(Gathered::from_evidence(
+                    &self.label,
+                    (0..limit.min(1))
+                        .map(|_| {
+                            Evidence::new(
+                                question,
+                                text.clone(),
+                                Provenance::new(self.label.clone(), Some("loc:1".to_string())),
+                                1.0,
+                            )
+                        })
+                        .collect(),
+                )),
             }
         }
     }
@@ -138,9 +142,13 @@ mod tests {
             reply: Some("hit".to_string()),
         };
         let hits = source.gather("q", 5).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].provenance.source, "memory");
-        assert_eq!(hits[0].provenance.locator.as_deref(), Some("loc:1"));
+        assert_eq!(hits.evidence.len(), 1);
+        assert_eq!(hits.evidence[0].provenance.source, "memory");
+        assert_eq!(
+            hits.evidence[0].provenance.locator.as_deref(),
+            Some("loc:1")
+        );
+        assert_eq!(hits.account.admitted, 1);
     }
 
     #[tokio::test]
@@ -154,7 +162,7 @@ mod tests {
                 label: "bad".to_string(),
                 reply: None,
             }));
-        let (evidence, errors) = set.gather_all("q", 3).await;
+        let (evidence, errors, accounts) = set.gather_all("q", 3).await;
         assert_eq!(
             evidence.len(),
             1,
@@ -162,6 +170,13 @@ mod tests {
         );
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].source_label, "bad");
+        // Both sources account for the call — the failure is a counted
+        // outcome, not a silent absence.
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].source, "ok");
+        assert_eq!(accounts[0].admitted, 1);
+        assert_eq!(accounts[1].source, "bad");
+        assert_eq!(accounts[1].failed, 1);
     }
 
     #[tokio::test]
@@ -237,21 +252,24 @@ mod tests {
         fn label(&self) -> &str {
             "endless"
         }
-        async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+        async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
             if let Ok(mut log) = self.log.lock() {
                 log.push(question.to_string());
             }
-            Ok((0..self.per_call.min(limit))
-                .map(|_| {
-                    let n = self.counter.fetch_add(1, Ordering::Relaxed);
-                    Evidence::new(
-                        question,
-                        format!("unique snippet number {n} entirely distinct words {n}"),
-                        Provenance::new("endless", Some(format!("origin-{n}"))),
-                        1.0,
-                    )
-                })
-                .collect())
+            Ok(Gathered::from_evidence(
+                "endless",
+                (0..self.per_call.min(limit))
+                    .map(|_| {
+                        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                        Evidence::new(
+                            question,
+                            format!("unique snippet number {n} entirely distinct words {n}"),
+                            Provenance::new("endless", Some(format!("origin-{n}"))),
+                            1.0,
+                        )
+                    })
+                    .collect(),
+            ))
         }
     }
 
@@ -269,11 +287,14 @@ mod tests {
         };
         let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
         assert_eq!(outcome.report.rounds_run, 1, "no wasted rounds");
+        // A single-source set's honest ceiling is single-source coverage:
+        // enough origins, but only one family — and with no second family
+        // reachable, the loop rightly stops instead of chasing one.
         assert!(outcome
             .report
             .coverage
             .iter()
-            .all(|c| c.verdict == CoverageVerdict::Covered));
+            .all(|c| c.verdict == CoverageVerdict::CoveredSingleSource));
         assert!(outcome.report.open_questions.is_empty());
     }
 
@@ -315,7 +336,10 @@ mod tests {
             ..Bounds::default()
         };
         let outcome = run_research("t", &set, &synth, bounds).await.unwrap();
-        assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Covered);
+        assert_eq!(
+            outcome.report.coverage[0].verdict,
+            CoverageVerdict::CoveredSingleSource
+        );
         assert_eq!(
             outcome.report.rounds_run, 2,
             "covered after round 2; round 3 never runs"
@@ -420,17 +444,16 @@ mod tests {
             fn label(&self) -> &str {
                 &self.label
             }
-            async fn gather(
-                &self,
-                question: &str,
-                _limit: usize,
-            ) -> Result<Vec<Evidence>, SourceError> {
-                Ok(vec![Evidence::new(
-                    question,
-                    "the animation mixer blends clip weights across the skeleton every frame",
-                    Provenance::new("web", Some(self.origin.clone())),
-                    1.0,
-                )])
+            async fn gather(&self, question: &str, _limit: usize) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence(
+                    &self.label,
+                    vec![Evidence::new(
+                        question,
+                        "the animation mixer blends clip weights across the skeleton every frame",
+                        Provenance::new("web", Some(self.origin.clone())),
+                        1.0,
+                    )],
+                ))
             }
         }
         let set = SourceSet::new()
@@ -466,6 +489,10 @@ mod tests {
         assert_eq!(
             outcome.report.coverage[0].distinct_origins, 2,
             "a mirror on a second origin is an independence signal"
+        );
+        assert_eq!(
+            outcome.report.coverage[0].distinct_families, 2,
+            "two web hosts are two independent source families"
         );
         assert_eq!(outcome.report.coverage[0].verdict, CoverageVerdict::Covered);
         assert!(
@@ -511,22 +538,21 @@ mod tests {
             fn label(&self) -> &str {
                 "flood"
             }
-            async fn gather(
-                &self,
-                question: &str,
-                limit: usize,
-            ) -> Result<Vec<Evidence>, SourceError> {
-                Ok((0..self.per_call.min(limit))
-                    .map(|_| {
-                        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-                        Evidence::new(
-                            question,
-                            format!("flood snippet {n} entirely different words here {n}"),
-                            Provenance::new("web", Some(format!("{}/page{n}", self.origin))),
-                            1.0,
-                        )
-                    })
-                    .collect())
+            async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence(
+                    "flood",
+                    (0..self.per_call.min(limit))
+                        .map(|_| {
+                            let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                            Evidence::new(
+                                question,
+                                format!("flood snippet {n} entirely different words here {n}"),
+                                Provenance::new("web", Some(format!("{}/page{n}", self.origin))),
+                                1.0,
+                            )
+                        })
+                        .collect(),
+                ))
             }
         }
         let set = SourceSet::new()
@@ -588,22 +614,25 @@ mod tests {
         fn label(&self) -> &str {
             "gated"
         }
-        async fn gather(&self, question: &str, limit: usize) -> Result<Vec<Evidence>, SourceError> {
+        async fn gather(&self, question: &str, limit: usize) -> Result<Gathered, SourceError> {
             let easy = question.contains("q0");
             if !easy && limit <= 5 {
-                return Ok(Vec::new());
+                return Ok(Gathered::from_evidence("gated", Vec::new()));
             }
-            Ok((0..2)
-                .map(|_| {
-                    let n = self.counter.fetch_add(1, Ordering::Relaxed);
-                    Evidence::new(
-                        question,
-                        format!("distinct answer {n} with its own particular words {n}"),
-                        Provenance::new("gated", Some(format!("origin-{n}"))),
-                        1.0,
-                    )
-                })
-                .collect())
+            Ok(Gathered::from_evidence(
+                "gated",
+                (0..2)
+                    .map(|_| {
+                        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+                        Evidence::new(
+                            question,
+                            format!("distinct answer {n} with its own particular words {n}"),
+                            Provenance::new("gated", Some(format!("origin-{n}"))),
+                            1.0,
+                        )
+                    })
+                    .collect(),
+            ))
         }
     }
 
@@ -634,7 +663,12 @@ mod tests {
                 .report
                 .coverage
                 .iter()
-                .filter(|c| c.verdict == CoverageVerdict::Covered)
+                .filter(|c| {
+                    matches!(
+                        c.verdict,
+                        CoverageVerdict::Covered | CoverageVerdict::CoveredSingleSource
+                    )
+                })
                 .count();
             (
                 covered,
@@ -658,6 +692,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_local_files_are_one_family_and_earn_a_bounded_follow_up_round() {
+        // LocalHub#33: two floor-passing chunks from two files of one
+        // repository are two locators but one source family. With a web
+        // source present (but empty), the question must not read as fully
+        // covered after round 1 — it earns a bounded follow-up round, then
+        // ends honestly as single-source coverage when web keeps yielding
+        // nothing, with the gap accounted.
+        struct TwoFileSource;
+        #[async_trait]
+        impl Source for TwoFileSource {
+            fn label(&self) -> &str {
+                "knowledge"
+            }
+            async fn gather(&self, question: &str, _limit: usize) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence(
+                    "knowledge",
+                    vec![
+                        Evidence::new(
+                            question,
+                            "the plan mirrors one shared project assumption",
+                            Provenance::new("knowledge", Some("docs/plan.md:1-9".to_string())),
+                            0.9,
+                        ),
+                        Evidence::new(
+                            question,
+                            "the spec restates that very assumption differently",
+                            Provenance::new("knowledge", Some("docs/spec.md:4-12".to_string())),
+                            0.8,
+                        ),
+                    ],
+                ))
+            }
+        }
+        struct EmptyWeb;
+        #[async_trait]
+        impl Source for EmptyWeb {
+            fn label(&self) -> &str {
+                "web"
+            }
+            async fn gather(
+                &self,
+                _question: &str,
+                _limit: usize,
+            ) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence("web", Vec::new()))
+            }
+        }
+        let set = SourceSet::new()
+            .with(Box::new(TwoFileSource))
+            .with(Box::new(EmptyWeb));
+        let outcome = run_research(
+            "t",
+            &set,
+            &WideSynth { questions: 1 },
+            Bounds {
+                max_questions: 1,
+                max_rounds: 4,
+                ..Bounds::default()
+            },
+        )
+        .await
+        .unwrap();
+        let coverage = &outcome.report.coverage[0];
+        assert_eq!(
+            coverage.verdict,
+            CoverageVerdict::CoveredSingleSource,
+            "file diversity is not independent corroboration"
+        );
+        assert_eq!(coverage.distinct_origins, 2);
+        assert_eq!(coverage.distinct_families, 1);
+        assert!(
+            outcome.report.rounds_run >= 2,
+            "the source gap earned a bounded follow-up round: {}",
+            outcome.report.rounds_run
+        );
+        let web = coverage
+            .accounts
+            .iter()
+            .find(|account| account.source == "web")
+            .expect("web account present: {coverage:?}");
+        assert_eq!(web.admitted, 0, "the web gap is countable, not silent");
+    }
+
+    #[tokio::test]
     async fn low_relevance_evidence_never_reads_as_coverage() {
         // Precision guard: a source that only ever returns floor-failing
         // matches gathers evidence but never covers anything.
@@ -667,17 +785,16 @@ mod tests {
             fn label(&self) -> &str {
                 "junk"
             }
-            async fn gather(
-                &self,
-                question: &str,
-                _limit: usize,
-            ) -> Result<Vec<Evidence>, SourceError> {
-                Ok(vec![Evidence::new(
-                    question,
-                    "incidental one-word overlap",
-                    Provenance::new("junk", Some("junk-file".to_string())),
-                    0.1,
-                )])
+            async fn gather(&self, question: &str, _limit: usize) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence(
+                    "junk",
+                    vec![Evidence::new(
+                        question,
+                        "incidental one-word overlap",
+                        Provenance::new("junk", Some("junk-file".to_string())),
+                        0.1,
+                    )],
+                ))
             }
         }
         let set = SourceSet::new().with(Box::new(JunkSource));
@@ -722,25 +839,24 @@ mod tests {
             fn label(&self) -> &str {
                 "mixed"
             }
-            async fn gather(
-                &self,
-                question: &str,
-                _limit: usize,
-            ) -> Result<Vec<Evidence>, SourceError> {
-                Ok(vec![
-                    Evidence::new(
-                        question,
-                        "incidental one-word overlap",
-                        Provenance::new("mixed", Some("junk-page".to_string())),
-                        0.1,
-                    ),
-                    Evidence::new(
-                        question,
-                        "a directly relevant, on-topic answer",
-                        Provenance::new("mixed", Some("doc.md".to_string())),
-                        0.9,
-                    ),
-                ])
+            async fn gather(&self, question: &str, _limit: usize) -> Result<Gathered, SourceError> {
+                Ok(Gathered::from_evidence(
+                    "mixed",
+                    vec![
+                        Evidence::new(
+                            question,
+                            "incidental one-word overlap",
+                            Provenance::new("mixed", Some("junk-page".to_string())),
+                            0.1,
+                        ),
+                        Evidence::new(
+                            question,
+                            "a directly relevant, on-topic answer",
+                            Provenance::new("mixed", Some("doc.md".to_string())),
+                            0.9,
+                        ),
+                    ],
+                ))
             }
         }
         let set = SourceSet::new().with(Box::new(MixedSource));

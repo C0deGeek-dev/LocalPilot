@@ -5,7 +5,9 @@
 //! the candidates into LocalMind's review queue happen in the binding layer
 //! (subject 04): a candidate is never auto-accepted into durable memory.
 
-use crate::{flatten_whitespace, ClaimStatus, CoverageVerdict, Provenance, ResearchReport};
+use crate::{
+    flatten_whitespace, ClaimStatus, CoverageVerdict, Provenance, ResearchReport, SourceAccount,
+};
 
 /// Ceiling on raw evidence rendered inline in the Markdown artefact and the
 /// review candidate. Deliberately sized *above* the largest snippet a source
@@ -98,23 +100,30 @@ pub fn render_markdown(report: &ResearchReport) -> String {
             "_Retrieval ran {} round(s)._\n\n",
             report.rounds_run
         ));
-        out.push_str("| Sub-question | Verdict | Evidence | Corroborations | Origins |\n");
-        out.push_str("|---|---|---|---|---|\n");
+        out.push_str(
+            "| Sub-question | Verdict | Evidence | Corroborations | Origins | Families |\n",
+        );
+        out.push_str("|---|---|---|---|---|---|\n");
         for coverage in &report.coverage {
             let verdict = match coverage.verdict {
                 CoverageVerdict::Covered => "covered",
+                CoverageVerdict::CoveredSingleSource => {
+                    "covered (single source — not independently corroborated)"
+                }
                 CoverageVerdict::Weak => "weak",
                 CoverageVerdict::Open => "open",
             };
             out.push_str(&format!(
-                "| {} | {verdict} | {} | {} | {} |\n",
+                "| {} | {verdict} | {} | {} | {} | {} |\n",
                 flatten_whitespace(&coverage.question).replace('|', "\\|"),
                 coverage.evidence_count,
                 coverage.strong_evidence,
-                coverage.distinct_origins
+                coverage.distinct_origins,
+                coverage.distinct_families
             ));
         }
         out.push('\n');
+        push_retrieval_accounting(&mut out, report);
     }
 
     out.push_str("## Findings\n\n");
@@ -171,6 +180,82 @@ pub fn render_markdown(report: &ResearchReport) -> String {
     }
 
     out
+}
+
+/// Render the per-question, per-source retrieval accounting: counts and
+/// reasons only — what each source proposed, admitted, rejected, skipped, or
+/// failed — never source content or unredacted queries. With web enabled, a
+/// question that web contributed no admitted evidence to is marked as an
+/// explicit source gap so local-only coverage never reads as cross-validated
+/// (LocalHub#33).
+fn push_retrieval_accounting(out: &mut String, report: &ResearchReport) {
+    if report.coverage.iter().all(|c| c.accounts.is_empty()) {
+        return;
+    }
+    out.push_str("### Retrieval accounting\n\n");
+    for coverage in &report.coverage {
+        if coverage.accounts.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("- {}\n", flatten_whitespace(&coverage.question)));
+        for account in &coverage.accounts {
+            out.push_str(&format!("  - {}\n", account_line(account)));
+            for note in &account.admitted_notes {
+                out.push_str(&format!("    - {}\n", flatten_whitespace(note)));
+            }
+        }
+        if report.web_enabled == Some(true) {
+            let web_admitted = coverage
+                .accounts
+                .iter()
+                .filter(|account| account.source == "web")
+                .map(|account| account.admitted)
+                .sum::<usize>();
+            if web_admitted == 0 {
+                out.push_str(
+                    "  - source gap: web was enabled but contributed no admitted evidence — \
+                     this question is not independently corroborated online\n",
+                );
+            }
+        }
+    }
+    out.push('\n');
+}
+
+/// One source's account as a single readable line, listing only non-zero
+/// outcomes; a source that proposed nothing says so explicitly.
+fn account_line(account: &SourceAccount) -> String {
+    if account.proposed == 0 && account.admitted == 0 {
+        let failure = if account.failed > 0 {
+            format!(" ({} call(s) failed)", account.failed)
+        } else {
+            String::new()
+        };
+        return format!("{}: no candidates returned{failure}", account.source);
+    }
+    let mut parts = vec![
+        format!("{} proposed", account.proposed),
+        format!("{} admitted", account.admitted),
+    ];
+    if account.rejected_relevance > 0 {
+        parts.push(format!(
+            "{} rejected (low relevance)",
+            account.rejected_relevance
+        ));
+    }
+    if account.below_floor > 0 {
+        parts.push(format!("{} below admission floor", account.below_floor));
+    }
+    if account.policy_skipped > 0 {
+        parts.push(format!("{} skipped by policy", account.policy_skipped));
+    }
+    if account.redirected > 0 {
+        parts.push(format!("{} redirect(s) not followed", account.redirected));
+    }
+    if account.failed > 0 {
+        parts.push(format!("{} fetch failure(s)", account.failed));
+    }
+    format!("{}: {}", account.source, parts.join(", "))
 }
 
 /// Render a finding's raw evidence as a self-contained fenced block titled
@@ -493,6 +578,8 @@ mod tests {
                 evidence_count: 4,
                 strong_evidence: 5,
                 distinct_origins: 3,
+                distinct_families: 2,
+                accounts: Vec::new(),
             },
             crate::QuestionCoverage {
                 question: "gpu skinning cost".to_string(),
@@ -500,6 +587,8 @@ mod tests {
                 evidence_count: 0,
                 strong_evidence: 0,
                 distinct_origins: 0,
+                distinct_families: 0,
+                accounts: Vec::new(),
             },
         ];
         let rendered = render_markdown(&report);
@@ -509,11 +598,86 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("| how do bones \\| joints bind | covered | 4 | 5 | 3 |"),
+            rendered.contains("| how do bones \\| joints bind | covered | 4 | 5 | 3 | 2 |"),
             "pipe in the question is escaped: {rendered}"
         );
         assert!(
-            rendered.contains("| gpu skinning cost | open | 0 | 0 | 0 |"),
+            rendered.contains("| gpu skinning cost | open | 0 | 0 | 0 | 0 |"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn retrieval_accounting_explains_source_outcomes_and_web_gaps() {
+        let mut report = ResearchReport::new("t");
+        report.rounds_run = 1;
+        report.web_enabled = Some(true);
+        let mut knowledge = SourceAccount::new("knowledge");
+        knowledge.proposed = 5;
+        knowledge.admitted = 2;
+        knowledge.below_floor = 3;
+        knowledge
+            .admitted_notes
+            .push("src/lib.rs:4-9 — raw 0.80, rank 1.00, admitted 0.40 (term overlap)".to_string());
+        let mut web = SourceAccount::new("web");
+        web.proposed = 3;
+        web.rejected_relevance = 1;
+        web.redirected = 1;
+        web.failed = 1;
+        report.coverage = vec![crate::QuestionCoverage {
+            question: "how does the mixer blend".to_string(),
+            verdict: CoverageVerdict::CoveredSingleSource,
+            evidence_count: 5,
+            strong_evidence: 2,
+            distinct_origins: 2,
+            distinct_families: 1,
+            accounts: vec![knowledge, web],
+        }];
+        let rendered = render_markdown(&report);
+        assert!(
+            rendered.contains("covered (single source — not independently corroborated)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("### Retrieval accounting"), "{rendered}");
+        assert!(
+            rendered.contains("knowledge: 5 proposed, 2 admitted, 3 below admission floor"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "web: 3 proposed, 0 admitted, 1 rejected (low relevance), \
+                 1 redirect(s) not followed, 1 fetch failure(s)"
+            ),
+            "each zero-web cause is countable: {rendered}"
+        );
+        assert!(
+            rendered.contains("source gap: web was enabled but contributed no admitted evidence"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("raw 0.80, rank 1.00, admitted 0.40 (term overlap)"),
+            "admission diagnostics ride the report content-free: {rendered}"
+        );
+    }
+
+    #[test]
+    fn accounting_marks_a_source_that_proposed_nothing() {
+        let mut report = ResearchReport::new("t");
+        report.web_enabled = Some(true);
+        let mut web = SourceAccount::new("web");
+        web.failed = 1;
+        report.coverage = vec![crate::QuestionCoverage {
+            question: "q".to_string(),
+            verdict: CoverageVerdict::Weak,
+            evidence_count: 1,
+            strong_evidence: 0,
+            distinct_origins: 0,
+            distinct_families: 0,
+            accounts: vec![web],
+        }];
+        let rendered = render_markdown(&report);
+        assert!(
+            rendered.contains("web: no candidates returned (1 call(s) failed)"),
             "{rendered}"
         );
     }

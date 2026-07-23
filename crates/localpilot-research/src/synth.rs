@@ -197,10 +197,14 @@ fn finding_from(e: &Evidence) -> Finding {
         supporting: std::iter::once(e.provenance.clone())
             .chain(e.also_from.iter().cloned())
             .collect(),
-        // The loop's sanitize pass splits a raw snippet into a concise
-        // claim plus separate evidence; the model-free path leaves that
-        // to it rather than guessing a summary here.
-        evidence: None,
+        // A source that supplied the full bounded text behind its match
+        // window (a local chunk body) hands it through as the finding's
+        // review-only evidence, so "full source evidence" is the chunk, not
+        // the search snippet (LocalHub#34). Otherwise the loop's sanitize
+        // pass splits an over-long snippet into a concise claim plus separate
+        // evidence; the model-free path leaves that to it rather than
+        // guessing a summary here.
+        evidence: e.full_source.clone(),
         confidence: e.relevance.clamp(0.0, 1.0),
     }
 }
@@ -211,13 +215,12 @@ mod tests {
     use crate::Provenance;
 
     fn evidence(snippet: &str, origin: &str) -> Evidence {
-        Evidence {
-            question: "q".to_string(),
-            snippet: snippet.to_string(),
-            provenance: Provenance::new("web", Some(origin.to_string())),
-            relevance: 1.0,
-            also_from: Vec::new(),
-        }
+        Evidence::new(
+            "q",
+            snippet,
+            Provenance::new("web", Some(origin.to_string())),
+            1.0,
+        )
     }
 
     #[test]

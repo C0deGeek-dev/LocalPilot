@@ -250,12 +250,19 @@ finding is always backed.
 Retrieval is multi-round and coverage-driven (ADR-0078): per-question coverage
 is scored deterministically, uncovered questions are re-queried across rounds
 with drift-guarded query expansion and escalating depth, and the loop stops on
-full coverage, saturation, or its round/evidence/time budgets. Both surfaces
-report per-round progress and a covered/weak/open summary. Evidence is
-deduplicated (near-duplicates fold, provenance kept), diversity-capped per
-origin, and relevance-scored against the sub-question; anything dropped,
-folded, or capped is listed under "Retrieval notes" — never cut silently
-(ADR-0079).
+full coverage, saturation, or its round/evidence/time budgets. Independence is
+measured in both locators and **source families** (ADR-0089): two files of one
+repository are two locators but one family, so they can support a question —
+reported as *covered (single source)* — but never read as independent
+corroboration, and a single-family question keeps earning bounded follow-up
+rounds while another source family could still answer. Both surfaces report
+per-round progress and a covered/weak/open summary; the report's coverage
+table and per-question retrieval accounting say what each source proposed,
+admitted, rejected, skipped, or failed — a web-enabled run that admits no web
+evidence marks the gap explicitly. Evidence is deduplicated (near-duplicates
+fold, provenance kept), diversity-capped per origin, and relevance-scored
+against the sub-question; anything dropped, folded, or capped is listed under
+"Retrieval notes" — never cut silently (ADR-0079).
 
 **Web research is on by default** (ADR-0076) — research cannot rely on a small
 local model's parametric memory, so both surfaces reach the web unless told
@@ -265,9 +272,12 @@ own proposals as the fallback. Every web-active run prints an egress
 disclosure first, fetches only what the allowlist/disallowlist permits (skips
 are logged), audits every outbound request — search calls included — and
 sends only the redacted sub-question to search servers and web hosts. Fetched
-pages are relevance-classified by the user's own configured model before they
-can become evidence (ADR-0087); pages that fail are audited and never become
-findings or memory candidates.
+pages **and local knowledge hits** are relevance-classified against the
+sub-question by the user's own configured model before they can become
+evidence (ADR-0087, ADR-0088) — local hits are never admitted on their rank
+within the corpus, and a local hit that passes carries its full bounded chunk
+as review-only evidence (ADR-0090); content that fails is audited or counted
+and never becomes findings or memory candidates.
 `--no-web` skips web for one run; `[research.web].enabled = false` turns the
 outbound path off entirely and no flag can override it. See the security and
 privacy doc for the egress controls.
