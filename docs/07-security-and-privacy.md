@@ -441,13 +441,18 @@ construction:
   non-allowlisted (or internal) host. A redirect is audited
   (`decision=redirect-not-followed`) and yields no evidence — the allowlist is a
   true egress boundary, not just a first-hop check.
-- **Only the sub-question leaves the machine.** The outbound text is the
-  sub-question passed through the shared workspace redactor — never gathered
-  evidence, file contents, or memory. The redactor is a second guard over the
-  topic the user typed. This holds for designated MCP search tools too
-  (ADR-0077): a search call sends the redacted query only, is audited like a
-  fetch, and its results are candidate URLs that still pass this gate — a
-  search result never becomes evidence directly.
+- **Only the sub-question reaches search servers and web hosts.** The
+  outbound text is the sub-question passed through the shared workspace
+  redactor — never gathered evidence, file contents, or memory. The redactor
+  is a second guard over the topic the user typed. This holds for designated
+  MCP search tools too (ADR-0077): a search call sends the redacted query
+  only, is audited like a fetch, and its results are candidate URLs that
+  still pass this gate — a search result never becomes evidence directly.
+  One deliberate carve-out (ADR-0087): bounded *fetched web content* — public
+  pages this run just downloaded, nothing from the workspace — is sent to the
+  **user's own configured model** for a strict relevance classification. That
+  is the same model that already sees the session; no new destination exists,
+  and a rejected page is audited (`rejected-low-relevance`).
 - **Auditable.** When active, every outbound request and every skip appends one
   line to the audit log (`[research.web] audit_log`, default
   `.localpilot/research/egress-audit.log`): the decision, host, URL, and the

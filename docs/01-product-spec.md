@@ -264,7 +264,10 @@ not to. Candidate URLs come from designated MCP search tools when configured
 own proposals as the fallback. Every web-active run prints an egress
 disclosure first, fetches only what the allowlist/disallowlist permits (skips
 are logged), audits every outbound request — search calls included — and
-sends only the redacted sub-question off-machine.
+sends only the redacted sub-question to search servers and web hosts. Fetched
+pages are relevance-classified by the user's own configured model before they
+can become evidence (ADR-0087); pages that fail are audited and never become
+findings or memory candidates.
 `--no-web` skips web for one run; `[research.web].enabled = false` turns the
 outbound path off entirely and no flag can override it. See the security and
 privacy doc for the egress controls.
