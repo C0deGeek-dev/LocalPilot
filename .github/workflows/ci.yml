@@ -56,20 +56,36 @@ jobs:
       # exactly what was running.
       - if: runner.os != 'Linux'
         run: cargo nextest run --workspace
-      # The bash `timeout -k` in the first containment attempt never fired —
-      # the wedged process survives SIGKILL, which points at an uninterruptible
-      # (D-state) kernel I/O stall on the hosted runner's disk. A step-level
-      # timeout makes the *runner* abandon the step, so the job completes
-      # instead of dying log-less at the job ceiling; the follow-ups then
-      # capture nextest's progress, the process table, and the kernel's
-      # hung-task traces, and the last step keeps the job honestly red until
-      # the wedge is actually fixed.
+      # Since the 2026-07-08 runner rollout, this phase freezes the whole
+      # hosted-ubuntu VM: neither a bash `timeout -k` (SIGKILL) nor a
+      # step-level timeout fires — the runner worker itself stops making
+      # progress until the job ceiling kills the job from the outside, logs
+      # included. The same commit passes the full suite in minutes on
+      # windows/macos runners and on a local Linux machine, so the trigger is
+      # resource pressure on the 4-vCPU VM: parallel linking of ~74 test
+      # binaries plus parallel test execution (some tests spawn nested cargo
+      # builds) starving memory until the VM thrashes to a standstill.
+      # Two levers: cap the build parallelism, and run a watchdog that kills
+      # the compile/link storm while the VM is still responsive — a fast,
+      # attributable failure with logs instead of a frozen corpse.
       - id: nextest-linux
         if: runner.os == 'Linux'
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 25
         shell: bash
-        run: timeout -k 30s 18m cargo nextest run --workspace > nextest-run.log 2>&1
+        run: |
+          ( while true; do
+              avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+              if [ "${avail:-9999999}" -lt 1000000 ]; then
+                echo "watchdog: MemAvailable ${avail}kB — killing the build/test storm" >> nextest-run.log
+                pkill -9 -f 'nextest|rustc|\bld\b|cc1|corpus' || true
+              fi
+              sleep 5
+            done ) >/dev/null 2>&1 & WATCHDOG=$!
+          status=0
+          timeout -k 30s 20m cargo nextest run --workspace --build-jobs 2 > nextest-run.log 2>&1 || status=$?
+          kill "$WATCHDOG" 2>/dev/null || true
+          exit "$status"
       - if: runner.os == 'Linux' && always()
         shell: bash
         run: |
@@ -127,13 +143,26 @@ jobs:
       # from the measured baseline, raised deliberately, never lowered to
       # admit a regression.
       #
-      # Same containment as the ubuntu test job (see its nextest step): a
-      # step-level timeout completes the job so the logs survive, and the
-      # follow-ups capture progress, processes, and kernel hung-task traces.
+      # Same containment as the ubuntu test job (see its nextest step):
+      # capped build parallelism + a low-memory watchdog, because the
+      # instrumented build links are even heavier than the plain ones.
       - id: cov-nextest
         continue-on-error: true
-        timeout-minutes: 25
-        run: timeout -k 30s 23m cargo llvm-cov nextest --workspace --fail-under-lines 75 > coverage-run.log 2>&1
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          ( while true; do
+              avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+              if [ "${avail:-9999999}" -lt 1000000 ]; then
+                echo "watchdog: MemAvailable ${avail}kB — killing the build/test storm" >> coverage-run.log
+                pkill -9 -f 'nextest|rustc|\bld\b|cc1|corpus' || true
+              fi
+              sleep 5
+            done ) >/dev/null 2>&1 & WATCHDOG=$!
+          status=0
+          timeout -k 30s 25m cargo llvm-cov nextest --workspace --build-jobs 2 --fail-under-lines 75 > coverage-run.log 2>&1 || status=$?
+          kill "$WATCHDOG" 2>/dev/null || true
+          exit "$status"
       - if: always()
         run: |
           tail -n 300 coverage-run.log || true
