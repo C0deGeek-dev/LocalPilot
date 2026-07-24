@@ -384,17 +384,64 @@ pub async fn run_skill_research(
     web: bool,
     out: &mut dyn Write,
 ) -> anyhow::Result<SkillsOutcome> {
+    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
+    let audit_log = config.research.web.audit_log.clone().map_or_else(
+        || {
+            root.join(".localpilot")
+                .join("research")
+                .join("egress-audit.log")
+        },
+        |path| root.join(path),
+    );
+    // Production seams: a real GitHub search over reqwest and a real git fetcher.
+    let search = GitHubRepoSearch::new(Arc::new(ReqwestHttp::new(reqwest::Client::new())));
+    let fetcher = GitFetcher;
+    let deps = DiscoveryDeps {
+        search: &search,
+        fetcher: &fetcher,
+        home: localpilot_skills::user_home(),
+        web_enabled: config.research.web.enabled,
+        allowlist: config.research.web.allowlist.clone(),
+        disallowlist: config.research.web.disallowlist.clone(),
+        audit_log,
+        autonomous_discovery: config.skills.autonomous_discovery,
+    };
+    run_discovery(root, query, global, web, &deps, out).await
+}
+
+/// Injected dependencies for the discovery service, so the whole flow — local
+/// classification, egress-gated web discovery, proposal persistence, ranking, and
+/// the autonomous-load gate — is testable with fakes and a hermetic home.
+struct DiscoveryDeps<'a> {
+    search: &'a dyn RepoSearch,
+    fetcher: &'a dyn RepoFetcher,
+    /// The user-global home, injected so a test never reads the real one.
+    home: Option<std::path::PathBuf>,
+    web_enabled: bool,
+    allowlist: Vec<String>,
+    disallowlist: Vec<String>,
+    audit_log: std::path::PathBuf,
+    autonomous_discovery: bool,
+}
+
+/// The seam-injectable core of [`run_skill_research`].
+async fn run_discovery(
+    root: &Path,
+    query: &str,
+    global: bool,
+    web: bool,
+    deps: &DiscoveryDeps<'_>,
+    out: &mut dyn Write,
+) -> anyhow::Result<SkillsOutcome> {
     let query = query.trim();
     if query.is_empty() {
         writeln!(out, "error: a query is required (skills research <query>)")?;
         return Ok(SkillsOutcome { had_failure: true });
     }
-    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
-    let home = localpilot_skills::user_home();
+    let home = deps.home.as_deref();
     let trusted = trust::is_trusted(root);
     let now = unix_now_string();
-    let fetcher = GitFetcher;
-    let manager = SkillsManager::new(root, home.as_deref(), trusted, &fetcher, &now);
+    let manager = SkillsManager::new(root, home, trusted, deps.fetcher, &now);
     let read = if global {
         ReadScope::GlobalOnly
     } else {
@@ -405,38 +452,29 @@ pub async fn run_skill_research(
     let mut candidates = manager.local_discovery(read)?;
 
     // Web discovery: bounded, egress-gated, best-effort.
-    let web_on = web && config.research.web.enabled;
+    let web_on = web && deps.web_enabled;
     let mut discovered_repos: Vec<ValidatedRepo> = Vec::new();
     if web_on {
-        let audit_log = config.research.web.audit_log.clone().map_or_else(
-            || {
-                root.join(".localpilot")
-                    .join("research")
-                    .join("egress-audit.log")
-            },
-            |path| root.join(path),
-        );
         writeln!(
             out,
             "skill discovery (egress disclosure): web is on — only the query text is sent \
              to {GITHUB_SEARCH_HOST}; --no-web or [research.web].enabled = false disables it. \
              audit: {}",
-            audit_log.display()
+            deps.audit_log.display()
         )?;
         let mut access = WebAccess::new(
-            config.research.web.enabled,
-            config.research.web.allowlist.clone(),
-            config.research.web.disallowlist.clone(),
+            deps.web_enabled,
+            deps.allowlist.clone(),
+            deps.disallowlist.clone(),
         );
         access.grant_session();
-        let search = GitHubRepoSearch::new(Arc::new(ReqwestHttp::new(reqwest::Client::new())));
         let cfg = WebDiscoveryConfig {
             access,
-            audit_log,
+            audit_log: deps.audit_log.clone(),
             staging_root: root.join(".localpilot").join("skill-discovery"),
             limit: 10,
         };
-        let found = discover_web_repositories(query, &search, &fetcher, &cfg).await;
+        let found = discover_web_repositories(query, deps.search, deps.fetcher, &cfg).await;
         for note in &found.notes {
             writeln!(out, "note: {note}")?;
         }
@@ -464,7 +502,7 @@ pub async fn run_skill_research(
     // Persist a review proposal per newly discovered repository (dedup by
     // repo/skill/scope). Never mutates a source or install.
     let scope_label = if global { "global" } else { "project" };
-    if let Some(store_path) = proposals_path(root, home.as_deref(), global) {
+    if let Some(store_path) = proposals_path(root, home, global) {
         let mut store = ProposalStore::load(&store_path)?;
         for repo in &discovered_repos {
             store.upsert(build_proposal(repo, query, scope_label, &now));
@@ -487,7 +525,7 @@ pub async fn run_skill_research(
 
     let ranked = rank(query, candidates, None);
     render_discovery(query, &ranked, out)?;
-    report_autoload(&ranked, config.skills.autonomous_discovery, out)?;
+    report_autoload(&ranked, deps.autonomous_discovery, out)?;
     Ok(SkillsOutcome { had_failure: false })
 }
 
@@ -926,6 +964,81 @@ mod tests {
             "irrelevant match hidden: {text}"
         );
         assert!(text.contains("Recommended: threejs-webgl"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn end_to_end_threejs_discovers_recommends_saves_and_mutates_nothing() {
+        // The #41 flagship acceptance case, fully hermetic: a configured provider
+        // surfaces `freshtechbro/claudedesignskills`, the fetcher validates a catalog
+        // offering `threejs-webgl`, and discovery recommends it, writes the report,
+        // and saves a review proposal — registering no source and installing nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let provider = FakeProvider {
+            host: "github.com".to_string(),
+            urls: vec!["https://github.com/freshtechbro/claudedesignskills".to_string()],
+        };
+        let fetcher = FakeFetcher {
+            names: vec!["threejs-webgl".to_string(), "other".to_string()],
+            commit: "c0ffee1234".to_string(),
+        };
+        let deps = DiscoveryDeps {
+            search: &provider,
+            fetcher: &fetcher,
+            home: Some(home),
+            web_enabled: true,
+            allowlist: vec!["github.com".to_string(), "api.github.com".to_string()],
+            disallowlist: Vec::new(),
+            audit_log: root
+                .join(".localpilot")
+                .join("research")
+                .join("egress-audit.log"),
+            autonomous_discovery: false,
+        };
+        let mut buf = Vec::new();
+        let outcome = run_discovery(
+            &root,
+            "threejs procedural materials",
+            false,
+            true,
+            &deps,
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert!(!outcome.had_failure);
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("Relevant skills"), "{text}");
+        assert!(text.contains("Recommended: threejs-webgl"), "{text}");
+
+        // A review proposal was saved with the full evidence.
+        let proposals = root.join(".localpilot").join("skill-proposals.toml");
+        assert!(proposals.is_file(), "no review proposal was saved");
+        let saved = std::fs::read_to_string(&proposals).unwrap();
+        assert!(saved.contains("freshtechbro/claudedesignskills"), "{saved}");
+        assert!(saved.contains("threejs-webgl"), "{saved}");
+        assert!(saved.contains("pending"), "{saved}");
+
+        // Nothing was mutated: no source registered, no skill installed, and the
+        // transient validation snapshot was cleaned up.
+        assert!(
+            !root.join(".localpilot").join("skill-sources.toml").exists(),
+            "discovery must not register a source"
+        );
+        assert!(
+            !root.join(".localpilot").join("skills").exists(),
+            "discovery must not install a skill"
+        );
+        let staging = root
+            .join(".localpilot")
+            .join("skill-discovery")
+            .join(source_id(
+                "https://github.com/freshtechbro/claudedesignskills",
+            ));
+        assert!(!staging.exists(), "validation left a snapshot behind");
     }
 
     #[test]

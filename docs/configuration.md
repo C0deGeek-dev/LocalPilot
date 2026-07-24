@@ -290,7 +290,7 @@ See [mcp.md](mcp.md).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `autonomous_discovery` | bool | `false` | Register the `skill_search`/`skill_load` tools so the model may discover and read project skills on its own. Off by default, so a small local model never auto-injects a skill. The deterministic `localpilot skills list \| show` surface works regardless. |
+| `autonomous_discovery` | bool | `false` | Register the `skill_search`/`skill_load` tools so the model may discover and read project skills on its own, **and** allow the skill-discovery lane to load a relevant, model-discoverable *installed* skill into a `/research` run (ADR-0099). Off by default, so a small local model never auto-injects a skill; an available/discovered match or a user-only skill stays report-only regardless. The deterministic `localpilot skills list \| show \| research` surface works regardless. |
 
 Project skills are advisory prompt modules under `.localpilot/skills/` or
 `.agents/skills/`; see [05-tool-system.md](05-tool-system.md) §Project Skill

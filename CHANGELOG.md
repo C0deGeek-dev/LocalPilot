@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Review-only skill discovery** (ADR-0099, LocalHub#41). `skills research [-g]
+  <query>` (and `/skills research …`) discovers relevant skills — installed,
+  available in a registered source, or in a newly found public GitHub repository —
+  ranks them, and saves a review proposal to `.localpilot/skill-proposals.toml`
+  without registering a source or installing a skill. `/research <topic>` runs the
+  same lane automatically and adds a separate `Relevant skills` report section. Web
+  discovery reuses the `[research.web]` egress (allowlist/disallowlist/audit/
+  `--no-web`) with the official public GitHub repository-search API as the
+  fresh-install fallback; a rate limit yields a partial result. Skill
+  recommendations are never research findings or memory candidates; LocalMind's
+  Skills tab reviews the proposals and delegates any mutation back to `skills …`.
 - **Skill source repositories and managed installs** (ADR-0098, LocalHub#40).
   A curated way to pull advisory skills from public **HTTPS** Git repositories:
   `skills repo add|refresh|list|delete`, `skills available [query]`,

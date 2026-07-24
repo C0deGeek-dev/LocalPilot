@@ -403,6 +403,29 @@ through the permission engine. This keeps the no-silent-execution contract intac
 (see [`docs/localmind-integration.md`](localmind-integration.md) for the parallel
 advisory-skill contract on the LocalMind side).
 
+### Review-only discovery (`skills research`)
+
+`localpilot skills research [-g] <query>` (and `/skills research …`) discovers
+skills relevant to a query and is strictly **read-only** — it recommends, it never
+registers a source or installs a skill (ADR-0099). It classifies each match as
+`installed` (in the effective catalog), `available` (in a registered source), or
+`discovered` (in a new public repository), ranks them by name+description, and —
+for a newly discovered repository it validated read-only — saves a review proposal
+to `<scope>/.localpilot/skill-proposals.toml`. `-g` searches the user-global
+catalog and defaults proposals to global scope; otherwise the effective
+project+global view with a project-scope default.
+
+Web discovery (finding *new* public repositories) runs only when web research is
+enabled and reuses the `[research.web]` egress — allowlist/disallowlist, egress
+disclosure, audit log, and `--no-web` — with configured research search providers
+preferred and the official public GitHub repository-search API as the
+fresh-install fallback; a rate limit or outage yields an honest partial result and
+never discards local matches. `/research <topic>` runs the same lane automatically
+and adds a separate `Relevant skills` report section. Skill recommendations are
+**not** research findings or memory candidates; LocalMind's Skills review tab reads
+the proposals and delegates any resulting mutation back to `skills repo add` /
+`skills install`.
+
 ## Pull-Discovery Broker
 
 The tool surface can be made **pull-based** instead of advertising every tool's

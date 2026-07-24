@@ -501,6 +501,16 @@ A sample audit line:
 decision=allowed host=docs.rs url=https://docs.rs/tokio question=how does tokio schedule tasks
 ```
 
+**Skill discovery rides this same surface** (ADR-0099). `skills research` and the
+`/research` skill-discovery lane make no separate egress: finding new public skill
+repositories goes through the same `[research.web]` allowlist/disallowlist, egress
+disclosure, audit log, and `--no-web`, using the official public GitHub
+repository-search API as the fresh-install fallback. Discovery is read-only — it
+validates a candidate repository by fetching a snapshot and reading its catalog,
+executing nothing, and it registers no source and installs no skill (that stays
+with `skills repo add`/`install`). A rate limit or outage is a partial result,
+never a failure.
+
 ### Two different network surfaces
 
 Research web egress (above) is the **allowlisted, audited, redacted** surface —

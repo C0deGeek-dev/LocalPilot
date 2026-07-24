@@ -2,6 +2,54 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0099: Skill Discovery Is Review-Only — It Recommends, Never Registers Or Installs; Web Discovery Reuses The `/research` Egress With A Public GitHub Search Fallback
+
+Status: accepted. Closes LocalHub#41. Builds on the effective skill catalog
+(ADR-0097), skill source repositories and managed installs (ADR-0098), and the
+`/research` egress contract (ADR-0060/ADR-0076).
+
+ADR-0098 gave a curated, user-managed way to *install* skills but deliberately
+excluded discovery. This adds discovery as a strictly **read-only** lane:
+`localpilot skills research [-g] <query>` and `/skills research …`, plus an
+automatic lane inside `/research <topic>` that adds a separate `Relevant skills`
+report section. Discovery classifies matches, ranks them, validates a candidate
+repository, and saves a review proposal — it **never** registers a source or
+installs a skill, and a skill recommendation is **never** a research finding or a
+memory candidate.
+
+1. **Read-only by construction.** Discovery searches the effective project+global
+   catalog and registered-source caches, classifies each match `installed` /
+   `available` / `discovered`, and validates a candidate repository by fetching a
+   snapshot read-only (the ADR-0098 `RepoFetcher` + `read_catalog`), executing
+   nothing and leaving no snapshot behind. Every mutation stays with the ADR-0098
+   `SkillsManager`; the model may classify/recommend through an optional
+   classifier seam but can never invoke a mutation.
+2. **Ranking is deterministic with an optional model overlay.** A term-match
+   baseline over name+description gives a stable, order-independent ranking; an
+   optional classifier may only refine the *primary* recommendation to a real
+   candidate — it never reorders, rescores, or mutates. Discovery stays
+   reproducible and its tests stay hermetic.
+3. **Web discovery reuses one disclosed egress surface.** A bounded search for new
+   public HTTPS GitHub repositories runs only when web research is enabled, through
+   the existing `[research.web]` allowlist/disallowlist, egress disclosure, audit
+   log, and `--no-web`. Configured research search providers are preferred; the
+   official public **GitHub repository-search API** (`GET /search/repositories`,
+   unauthenticated) is the fresh-install fallback. A rate limit or outage yields an
+   honest partial result and never discards local matches. Official public
+   endpoints only (clean-room).
+4. **Proposals are a separate surface, de-duplicated.** A proposal records the
+   normalized URL, resolved commit, catalog root, available skills, recommendation,
+   confidence/reason, query, intended scope, provenance, and timestamps, keyed by
+   (repository, recommended skill, scope) so a repeat run refreshes evidence rather
+   than duplicating. Proposals live in `<scope>/.localpilot/skill-proposals.toml`,
+   read by LocalMind's dedicated Skills review tab (D-LM-0031) — never the memory
+   review queue.
+5. **Autonomous loading is gated.** A relevant skill is loaded into a research run
+   only when it is already installed, model-discoverable, and
+   `[skills].autonomous_discovery` is on; an available/discovered match, a
+   user-only skill, or the toggle off all stay report-only. Installed matches are
+   always reported.
+
 ## ADR-0098: Skill Sources Are Explicit Public-HTTPS Git Snapshots; Managed Installs Are Provenance-Tracked And Never Overwrite Or Delete Unmanaged Content
 
 Status: accepted. Closes LocalHub#40. Builds on the effective skill catalog
