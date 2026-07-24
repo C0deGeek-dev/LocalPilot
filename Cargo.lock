@@ -1921,7 +1921,7 @@ dependencies = [
 [[package]]
 name = "localx-eval-core"
 version = "0.1.0"
-source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=0ab9ef92e07baa9fdc76599ec67e599a0b4dbb63#0ab9ef92e07baa9fdc76599ec67e599a0b4dbb63"
+source = "git+https://github.com/C0deGeek-dev/localx-llama.git?rev=c4f91f180168a0d7a62e9de2ec4c9acf358f5430#c4f91f180168a0d7a62e9de2ec4c9acf358f5430"
 dependencies = [
  "regex",
  "serde",
