@@ -1440,7 +1440,9 @@ impl WebSource {
         // 2. Recover allowlisted iframes through the ordinary gated path (works
         // with no browser); if nothing is recovered, record an explicit
         // render-required outcome so the gap is inspectable (LocalHub#37).
-        let recovered = self.recover_frames(ctx, lead, account, evidence).await?;
+        let recovered = self
+            .recover_frames(ctx, lead, account, evidence, false)
+            .await?;
         if recovered > 0 {
             account.render_notes.push(format!(
                 "{} — {}: recovered {recovered} allowlisted frame(s)",
@@ -1507,9 +1509,57 @@ impl WebSource {
                 return Ok(RenderAttempt::Failed);
             }
         };
-        let text = html_to_markdown(&doc.html);
-        let snippet = bound_body(&text, WEB_MAX_BODY_BYTES);
-        if snippet.trim().chars().count() < MIN_RENDERED_CHARS {
+
+        // The rendered main document.
+        let main_produced = self
+            .admit_rendered_html(
+                &doc.html,
+                ctx.parent_url,
+                ctx,
+                "rendered",
+                account,
+                evidence,
+            )
+            .await?;
+
+        // Each accessible rendered frame (same-origin / `srcdoc`), with the
+        // frame's own resolved URL — or a parent+srcdoc locator — as provenance.
+        // Near-duplicate parent/frame content is folded by the engine, keeping
+        // both origins.
+        let base = reqwest::Url::parse(ctx.parent_url).ok();
+        let mut frames_produced = 0;
+        for frame in &doc.frames {
+            let locator = match &frame.url {
+                Some(src) => base
+                    .as_ref()
+                    .and_then(|b| b.join(src).ok())
+                    .map_or_else(|| src.clone(), |resolved| resolved.to_string()),
+                None => format!("{} (srcdoc frame)", ctx.parent_url),
+            };
+            if self
+                .admit_rendered_html(
+                    &frame.html,
+                    &locator,
+                    ctx,
+                    "rendered frame",
+                    account,
+                    evidence,
+                )
+                .await?
+            {
+                frames_produced += 1;
+            }
+        }
+
+        // Cross-origin frames the browser could not read from the main DOM are
+        // recovered as documents through the gated HTTP path (same-origin ones
+        // are already covered by the render above).
+        let http_frames = self
+            .recover_frames(ctx, lead, account, evidence, true)
+            .await?;
+
+        let total_frames = frames_produced + http_frames;
+        if !main_produced && total_frames == 0 {
             account.render_notes.push(format!(
                 "{} — {}: no substantive rendered content ({} subresource(s) blocked)",
                 ctx.parent_url,
@@ -1518,21 +1568,48 @@ impl WebSource {
             ));
             return Ok(RenderAttempt::Empty);
         }
+        account.render_notes.push(format!(
+            "{} — rendered main document + {total_frames} frame(s) ({} subresource(s) blocked)",
+            ctx.parent_url, doc.blocked
+        ));
+        Ok(RenderAttempt::Produced)
+    }
+
+    /// Reduce a rendered HTML document, score it against the topic-scoped
+    /// question, and admit it under `locator`. Returns whether it produced
+    /// substantive content (below [`MIN_RENDERED_CHARS`] it is treated as
+    /// empty). Shared by the rendered main document and each rendered frame.
+    async fn admit_rendered_html(
+        &self,
+        html: &str,
+        locator: &str,
+        ctx: &FrameContext<'_>,
+        reason: &str,
+        account: &mut SourceAccount,
+        evidence: &mut Vec<Evidence>,
+    ) -> Result<bool, SourceError> {
+        let text = html_to_markdown(html);
+        let snippet = bound_body(&text, WEB_MAX_BODY_BYTES);
+        if snippet.trim().chars().count() < MIN_RENDERED_CHARS {
+            return Ok(false);
+        }
         let scoped = scope_to_topic(&self.topic, ctx.question);
         let relevance = term_overlap_relevance(&scoped, &snippet);
         let rendered = Evidence::new(
             ctx.question,
             snippet,
-            Provenance::new("web", Some(ctx.parent_url.to_string())),
+            Provenance::new("web", Some(locator.to_string())),
             relevance,
         )
         .with_admission(AdmissionTrail {
             raw: relevance,
             rank: 1.0,
-            reason: "rendered".to_string(),
+            reason: reason.to_string(),
         });
+        // Rendered frames are same-origin/srcdoc, so the parent host governs the
+        // admission audit.
         if let Some(admitted) = self
-            .admit(ctx.parent_url, ctx.parent_host, ctx.query, rendered)
+            .admit(locator, ctx.parent_host, ctx.query, rendered)
             .await?
         {
             account.admitted += 1;
@@ -1540,11 +1617,7 @@ impl WebSource {
         } else {
             account.rejected_relevance += 1;
         }
-        account.render_notes.push(format!(
-            "{} — rendered main document ({} subresource(s) blocked)",
-            ctx.parent_url, doc.blocked
-        ));
-        Ok(RenderAttempt::Produced)
+        Ok(true)
     }
 
     /// Fetch a page's allowlisted iframe sources through the same gated path as
@@ -1559,6 +1632,7 @@ impl WebSource {
         lead: &RenderLead,
         account: &mut SourceAccount,
         evidence: &mut Vec<Evidence>,
+        cross_origin_only: bool,
     ) -> Result<usize, SourceError> {
         const FRAME_RECOVERY_LIMIT: usize = 3;
         let base = reqwest::Url::parse(ctx.parent_url).ok();
@@ -1573,6 +1647,12 @@ impl WebSource {
             let Some(frame_host) = resolved.host_str().map(str::to_string) else {
                 continue;
             };
+            // After a successful browser render, same-origin frames were already
+            // extracted from the rendered DOM; only cross-origin frames still
+            // need the gated HTTP path.
+            if cross_origin_only && frame_host == ctx.parent_host {
+                continue;
+            }
             let frame_url = resolved.to_string();
             account.proposed += 1; // a frame is a fresh lead considered
             match self.access.decide_host(&frame_host) {
@@ -2810,10 +2890,12 @@ mod tests {
         );
     }
 
-    /// A renderer stub: returns fixed post-JavaScript HTML and exercises the
-    /// gate, so the WebSource render-admit wiring is tested without a browser.
+    /// A renderer stub: returns fixed post-JavaScript HTML (and optional frames)
+    /// and exercises the gate, so the WebSource render-admit wiring is tested
+    /// without a browser.
     struct FakeRenderer {
         html: String,
+        frames: Vec<localpilot_research::RenderedFrame>,
     }
 
     #[async_trait]
@@ -2828,7 +2910,7 @@ mod tests {
             let _ = gate.allow(&request.url);
             Ok(localpilot_research::RenderedDoc {
                 html: self.html.clone(),
-                frames: Vec::new(),
+                frames: self.frames.clone(),
                 blocked: 0,
             })
         }
@@ -2857,6 +2939,7 @@ mod tests {
         );
         let source = source.with_renderer(Some(Arc::new(FakeRenderer {
             html: rendered_html,
+            frames: Vec::new(),
         })));
 
         let gathered = source
@@ -2887,6 +2970,67 @@ mod tests {
                 .any(|note| note.contains("rendered main document")),
             "a render note records the rendered document: {:?}",
             gathered.account.render_notes
+        );
+    }
+
+    #[tokio::test]
+    async fn rendered_frames_are_admitted_with_frame_provenance() {
+        // LocalHub#37: a rendered frame's document is admitted as its own
+        // evidence, carrying the frame's resolved URL (or a srcdoc locator) as
+        // provenance — the frame content is never lost or merged into the parent.
+        let server = MockServer::start().await;
+        let shell = "<html><body><div id=\"root\"></div>\
+                     <iframe src=\"/child\"></iframe></body></html>";
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(shell.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/app", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+        let frame_html = format!(
+            "<html><body><article>{}</article></body></html>",
+            "framed widget render documentation. ".repeat(10)
+        );
+        let source = source.with_renderer(Some(Arc::new(FakeRenderer {
+            html: "<html><body><nav>shell</nav></body></html>".to_string(),
+            frames: vec![
+                localpilot_research::RenderedFrame {
+                    url: Some("/child".to_string()),
+                    html: frame_html,
+                },
+                localpilot_research::RenderedFrame {
+                    url: None,
+                    html: format!(
+                        "<html><body><p>{}</p></body></html>",
+                        "srcdoc widget render notes. ".repeat(10)
+                    ),
+                },
+            ],
+        })));
+
+        let gathered = source
+            .gather("how does the widget render", 3)
+            .await
+            .unwrap();
+        let locators: Vec<String> = gathered
+            .evidence
+            .iter()
+            .filter_map(|e| e.provenance.locator.clone())
+            .collect();
+        assert!(
+            locators.iter().any(|l| l.ends_with("/child")),
+            "the same-origin frame is admitted with its resolved URL: {locators:?}"
+        );
+        assert!(
+            locators.iter().any(|l| l.contains("srcdoc frame")),
+            "the srcdoc frame is admitted with a srcdoc locator: {locators:?}"
+        );
+        assert_eq!(
+            gathered.account.render_required, 0,
+            "rendered frames count as content, not render-required"
         );
     }
 

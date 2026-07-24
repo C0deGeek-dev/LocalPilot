@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use localpilot_research::{RenderFailure, RenderGate, RenderRequest, RenderedDoc, Renderer};
+use localpilot_research::{
+    RenderFailure, RenderGate, RenderRequest, RenderedDoc, RenderedFrame, Renderer,
+};
 
 use browser::Browser;
 use cdp::CdpClient;
@@ -169,13 +171,73 @@ async fn render_page(
         .unwrap_or_default()
         .to_string();
 
+    // Extract accessible child frames (same-origin and `srcdoc`) — their
+    // documents are separate from the main DOM, so a documentation iframe's
+    // content is otherwise lost. Their network already passed the gate through
+    // the main session's Fetch interception.
+    let frames = extract_frames(&client, session, request.bounds.max_frames)
+        .await
+        .unwrap_or_default();
+
     browser.close().await;
 
     Ok(RenderedDoc {
         html,
-        frames: Vec::new(),
+        frames,
         blocked: blocked.load(Ordering::Relaxed),
     })
+}
+
+/// Extract the post-JavaScript HTML of each accessible child frame — same-origin
+/// frames and inline `srcdoc` frames, whose `contentDocument` is reachable from
+/// the main session. Cross-origin frames (whose `contentDocument` is null) are
+/// recovered by the caller's gated HTTP path instead. Bounded by `max_frames`.
+async fn extract_frames(
+    client: &CdpClient,
+    session: Option<&str>,
+    max_frames: usize,
+) -> Result<Vec<RenderedFrame>, RenderError> {
+    // Runs in the main session's same-origin context; a cross-origin
+    // `contentDocument` access throws and is skipped.
+    let expression = format!(
+        "(function() {{ var out = []; var frames = document.querySelectorAll('iframe'); \
+         for (var i = 0; i < frames.length && out.length < {max_frames}; i++) {{ \
+           try {{ var doc = frames[i].contentDocument; \
+             if (doc && doc.documentElement) {{ \
+               out.push({{ url: frames[i].getAttribute('src') || null, \
+                           html: doc.documentElement.outerHTML }}); }} \
+           }} catch (e) {{}} }} \
+         return JSON.stringify(out); }})()"
+    );
+    let evaluated = client
+        .call(
+            "Runtime.evaluate",
+            json!({ "expression": expression, "returnByValue": true }),
+            session,
+        )
+        .await?;
+    let serialized = evaluated
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("[]");
+    let parsed: Value = serde_json::from_str(serialized).unwrap_or(Value::Array(Vec::new()));
+    let mut frames = Vec::new();
+    if let Some(array) = parsed.as_array() {
+        for item in array {
+            let html = item
+                .get("html")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if html.trim().is_empty() {
+                continue;
+            }
+            let url = item.get("url").and_then(Value::as_str).map(str::to_string);
+            frames.push(RenderedFrame { url, html });
+        }
+    }
+    Ok(frames)
 }
 
 /// Drive the event loop from just after navigation through a bounded settle

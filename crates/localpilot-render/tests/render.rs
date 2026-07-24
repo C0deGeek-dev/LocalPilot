@@ -81,6 +81,65 @@ async fn renders_javascript_injected_content() {
 }
 
 #[tokio::test]
+async fn extracts_same_origin_and_srcdoc_frame_documents() {
+    if !ChromiumRenderer::available() {
+        eprintln!("no chromium-family browser found; skipping renderer e2e test");
+        return;
+    }
+    let server = MockServer::start().await;
+    let child =
+        "<html><body><article>SAME_ORIGIN_FRAME_MARKER documentation body.</article></body></html>";
+    Mock::given(method("GET"))
+        .and(path("/frame-child"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(child.as_bytes(), "text/html"))
+        .mount(&server)
+        .await;
+    let parent = format!(
+        "<html><body><div id=\"root\">parent</div>\
+         <iframe src=\"{}/frame-child\"></iframe>\
+         <iframe srcdoc=\"<html><body><p>SRCDOC_FRAME_MARKER</p></body></html>\"></iframe>\
+         </body></html>",
+        server.uri()
+    );
+    Mock::given(method("GET"))
+        .and(path("/parent"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(parent.as_bytes(), "text/html"))
+        .mount(&server)
+        .await;
+    let url = format!("{}/parent", server.uri());
+    let gate = OriginGate {
+        allowed_prefix: server.uri(),
+    };
+    let renderer = ChromiumRenderer::new();
+
+    let doc = renderer
+        .render(
+            &RenderRequest {
+                url,
+                bounds: bounds(),
+            },
+            &gate,
+        )
+        .await
+        .expect("render succeeds");
+
+    assert!(
+        doc.frames.len() >= 2,
+        "both the same-origin and srcdoc frames are extracted: {} frames",
+        doc.frames.len()
+    );
+    let all_frames: String = doc.frames.iter().map(|f| f.html.as_str()).collect();
+    assert!(
+        all_frames.contains("SAME_ORIGIN_FRAME_MARKER"),
+        "same-origin frame document extracted: {all_frames}"
+    );
+    assert!(
+        all_frames.contains("SRCDOC_FRAME_MARKER"),
+        "srcdoc frame document extracted: {all_frames}"
+    );
+}
+
+#[tokio::test]
 async fn gate_blocks_a_disallowed_subresource_and_counts_it() {
     if !ChromiumRenderer::available() {
         eprintln!("no chromium-family browser found; skipping renderer e2e test");
