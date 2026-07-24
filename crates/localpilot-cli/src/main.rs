@@ -32,6 +32,7 @@ mod research;
 mod rpc_cmd;
 mod self_review_cmd;
 mod session_cmd;
+mod skill_discovery;
 mod skills_cmd;
 mod trust;
 mod update;
@@ -465,6 +466,20 @@ enum ProjectSkillsCommand {
         /// Approve the mutation without an interactive prompt.
         #[arg(long)]
         yes: bool,
+    },
+    /// Discover relevant skills — installed, available in a registered source, or
+    /// in a newly found public repository — and save review proposals (read-only;
+    /// registers and installs nothing).
+    Research {
+        /// The discovery query (required; multiple words are joined).
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Search only the user-global catalog and default proposals to global scope.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Skip web discovery for this run (search local catalogs only).
+        #[arg(long)]
+        no_web: bool,
     },
 }
 
@@ -1741,9 +1756,29 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         },
         Command::Skills { command } => {
             let cwd = std::env::current_dir()?;
-            let stdin_is_tty = io::stdin().is_terminal();
             let mut stdout = io::stdout().lock();
-            let outcome = skills_cmd::run(command, &cwd, stdin_is_tty, &mut stdout)?;
+            // Discovery is async (bounded web search); the rest of the skills
+            // surface is synchronous. Both share the one command enum.
+            let outcome = match command {
+                ProjectSkillsCommand::Research {
+                    query,
+                    global,
+                    no_web,
+                } => {
+                    skill_discovery::run_skill_research(
+                        &cwd,
+                        &query.join(" "),
+                        global,
+                        !no_web,
+                        &mut stdout,
+                    )
+                    .await?
+                }
+                other => {
+                    let stdin_is_tty = io::stdin().is_terminal();
+                    skills_cmd::run(other, &cwd, stdin_is_tty, &mut stdout)?
+                }
+            };
             stdout.flush()?;
             if outcome.had_failure {
                 exit_code = std::process::ExitCode::FAILURE;

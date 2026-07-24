@@ -878,7 +878,7 @@ async fn run_slash(
         },
         SlashAction::Skills(raw) => {
             let mut output = Vec::new();
-            let result = run_skills_slash(host.cwd, &raw, &mut output);
+            let result = run_skills_slash(host.cwd, &raw, &mut output).await;
             apply_command_result(state, output, result);
         }
         SlashAction::Background(command) => {
@@ -903,7 +903,7 @@ async fn run_slash(
 /// treated as non-interactive: its impact is disclosed and, without `--yes`, it is
 /// refused rather than run unattended. A parse error surfaces clap's usage text as
 /// a notice instead of aborting the REPL.
-fn run_skills_slash(
+async fn run_skills_slash(
     cwd: &std::path::Path,
     raw: &str,
     out: &mut dyn std::io::Write,
@@ -912,16 +912,34 @@ fn run_skills_slash(
     if tokens.is_empty() {
         writeln!(
             out,
-            "usage: /skills <list|show|available|install|delete|repo> … — see \
+            "usage: /skills <list|show|available|install|delete|repo|research> … — see \
              `localpilot skills --help`"
         )?;
         return Ok(());
     }
     match <crate::SkillsSlash as clap::Parser>::try_parse_from(tokens) {
-        Ok(parsed) => {
-            let _ = crate::skills_cmd::run(parsed.command, cwd, false, out)?;
-            Ok(())
-        }
+        Ok(parsed) => match parsed.command {
+            // Discovery is async (bounded web search); the rest is synchronous.
+            crate::ProjectSkillsCommand::Research {
+                query,
+                global,
+                no_web,
+            } => {
+                let _ = crate::skill_discovery::run_skill_research(
+                    cwd,
+                    &query.join(" "),
+                    global,
+                    !no_web,
+                    out,
+                )
+                .await?;
+                Ok(())
+            }
+            other => {
+                let _ = crate::skills_cmd::run(other, cwd, false, out)?;
+                Ok(())
+            }
+        },
         Err(err) => {
             writeln!(out, "{err}")?;
             Ok(())

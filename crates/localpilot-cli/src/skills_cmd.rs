@@ -117,8 +117,11 @@ fn run_managed(
             approval(yes, stdin_is_tty, &mut confirm),
             out,
         ),
-        // List/Show are handled in `run` before reaching here.
-        ProjectSkillsCommand::List { .. } | ProjectSkillsCommand::Show { .. } => Ok(()),
+        // List/Show are handled in `run` before reaching here; Research runs on the
+        // async discovery path (never routed into the synchronous manager).
+        ProjectSkillsCommand::List { .. }
+        | ProjectSkillsCommand::Show { .. }
+        | ProjectSkillsCommand::Research { .. } => Ok(()),
     };
 
     match result {
