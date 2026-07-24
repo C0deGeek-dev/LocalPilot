@@ -3034,6 +3034,108 @@ mod tests {
         );
     }
 
+    /// A renderer that counts its invocations, to assert the browser is not
+    /// launched for a server-rendered page.
+    struct CountingRenderer {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Renderer for CountingRenderer {
+        async fn render(
+            &self,
+            _request: &RenderRequest,
+            _gate: &dyn RenderGate,
+        ) -> Result<localpilot_research::RenderedDoc, localpilot_research::RenderFailure> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(localpilot_research::RenderedDoc::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn server_rendered_page_does_not_invoke_the_renderer() {
+        // LocalHub#37 control: a page with real static content shows no render
+        // signal, so the browser is never launched and the static content is
+        // admitted unchanged.
+        let server = MockServer::start().await;
+        let page = format!(
+            "<html><body><article><h1>Widget guide</h1><p>{}</p></article></body></html>",
+            "SERVER_RENDERED_MARKER real documentation content. ".repeat(15)
+        );
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(page.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/guide", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = source.with_renderer(Some(Arc::new(CountingRenderer {
+            calls: Arc::clone(&calls),
+        })));
+
+        let gathered = source
+            .gather("how does the widget guide work", 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a server-rendered page shows no render signal, so the browser is never launched"
+        );
+        assert_eq!(gathered.account.render_required, 0);
+        assert!(
+            gathered
+                .evidence
+                .iter()
+                .any(|e| e.snippet.contains("SERVER_RENDERED_MARKER")),
+            "the static content is admitted unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_render_records_no_substantive_content() {
+        // A genuinely empty page (a shell whose render yields nothing) records
+        // an explicit no-substantive-content outcome, never fabricated evidence.
+        let server = MockServer::start().await;
+        let shell = "<html><body><div id=\"root\"></div>\
+                     <script src=\"/app.js\"></script></body></html>";
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(shell.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/app", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit);
+        let source = source.with_renderer(Some(Arc::new(FakeRenderer {
+            html: "<html><body></body></html>".to_string(),
+            frames: Vec::new(),
+        })));
+
+        let gathered = source
+            .gather("how does the widget render", 3)
+            .await
+            .unwrap();
+        assert!(
+            gathered
+                .account
+                .render_notes
+                .iter()
+                .any(|note| note.contains("no substantive rendered content")),
+            "an empty render is recorded, not fabricated: {:?}",
+            gathered.account.render_notes
+        );
+        assert_eq!(
+            gathered.account.render_required, 1,
+            "an empty render with no recoverable frame is flagged render-required"
+        );
+    }
+
     #[test]
     fn render_gate_enforces_scheme_allowlist_and_blocks_internal() {
         // The browser renderer's egress boundary: http/https only, host

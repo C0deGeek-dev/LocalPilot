@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0095: Research Renders JavaScript-Only Pages In A Headless Browser, Inside The Egress Boundary
+
+Status: accepted. Closes LocalHub#37. Builds on the research egress boundary
+(ADR-0060/0076) and the topic-scope admission contract (ADR-0094).
+
+Static HTTP extraction cannot recover content that only appears after JavaScript
+runs: a single-page-app shell, a hydration-only document, or an iframe-embedded
+page reduces to empty/shell-only text, and admitting that shell as complete
+evidence is a silent failure. The fix is a bounded browser-rendering fallback —
+but rendering executes public-page JavaScript and loads subresources/frames, a
+wider action than one GET, so it must stay strictly inside the research egress
+boundary rather than be delegated to a permission-gated-but-host-agnostic
+browser MCP.
+
+1. **Detection is dependency-free and always on.** `localpilot-research` gains a
+   `render_signal` heuristic (empty framework mount, hydration markers,
+   iframe-only body, `Loading…` placeholder, script-heavy thin content) run over
+   the fetched HTML after reduction. A `[research.render].mode`
+   (`auto` default / `off` kill switch / `always`) governs the fallback.
+2. **The render contract is host-neutral; the browser is optional.** The
+   `Renderer`/`RenderGate` traits and render value/outcome types live in
+   `localpilot-research`. The concrete `ChromiumRenderer` is a separate crate
+   `localpilot-render`, pulled in by the cli only under the `render-browser`
+   feature. The default binary links no browser stack; without the feature or a
+   browser, research records `renderer unavailable` and falls back to iframe
+   recovery.
+3. **The mechanism is an original CDP client over the system browser.** A
+   dependency-light Chrome DevTools Protocol client over `tokio-tungstenite`
+   drives a discovered system Chromium/Chrome/Edge (none bundled or downloaded).
+   CDP is an official documented protocol; keeping the client in-repo keeps the
+   security-critical `Fetch`-domain interception in reviewed code rather than a
+   black-boxed dependency.
+4. **One egress boundary, enforced per browser request.** Every browser request
+   — navigation, redirect, subresource, frame — is gated through the same
+   `[research.web]` allowlist (a `WebAccessGate` over `WebAccess`) before it
+   leaves the machine, http/https only, with an **unconditional** SSRF block on
+   `localhost`/loopback/link-local/private addresses ahead of the allowlist
+   (a rendered page can reference arbitrary hosts). Redirects are re-gated as new
+   destinations. Every request/block is audited content-free.
+5. **Bounded, ephemeral, and honest.** The browser runs with a throwaway
+   cookie-less profile removed after the run; the render is time-bounded (no
+   indefinite network-idle wait). Rendered main-document and same-origin/`srcdoc`
+   frame content is reduced and admitted through the *same* topic-scope admission
+   path (ADR-0094) as static content, with the frame's URL (or a `srcdoc`
+   locator) as provenance; cross-origin frame documents are recovered via the
+   gated HTTP path. A page that renders empty records `no substantive rendered
+   content`; a page that needed rendering but could not get it records an
+   explicit render-required outcome — never fabricated evidence.
+6. **Documented limitations** (kept honest, never presented as prose): frames
+   nested more than one level deep via the browser, a cross-origin frame whose
+   content is itself JavaScript-rendered, and non-HTML (PDF) frame extraction are
+   out of scope — such frames yield no extractable content and are skipped.
+
 ## ADR-0094: The Research Topic Is A Contract Through Decomposition And Admission; Evidence Relevance And Candidate Trust Are Separate
 
 Status: accepted. Closes LocalHub#36. Follows ADR-0088's model-backed

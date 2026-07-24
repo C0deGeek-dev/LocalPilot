@@ -229,6 +229,28 @@ Must not own:
 Keeping the loop here (not in `localpilot-localmind`) holds the adapter boundary
 (ADR-0036) and lets the security-sensitive gate be unit-tested with fakes.
 
+It also owns the **host-neutral render contract** (ADR-0095): the render-signal
+detector (`render_signal`), the `Renderer`/`RenderGate` traits, and the render
+value/outcome types. The detector and traits are always compiled; the concrete
+browser implementation lives in the optional `localpilot-render` crate.
+
+### `localpilot-render`
+
+Owns the **optional** browser-rendering fallback for research (ADR-0095), pulled
+in by `localpilot-cli` only under the `render-browser` feature:
+
+- an original, dependency-light Chrome DevTools Protocol client over a local
+  WebSocket (`tokio-tungstenite`), and headless-browser discovery/launch with an
+  ephemeral cookie-less profile — no browser is bundled or downloaded
+- `ChromiumRenderer`, which implements `localpilot-research`'s `Renderer`:
+  bounded navigate/settle/extract, CDP `Fetch`-domain request interception that
+  gates every browser request through the caller's `RenderGate`, and
+  same-origin/`srcdoc` frame extraction
+
+Must not own the allowlist policy or audit: it consults the `RenderGate` the
+binding layer implements over `WebAccess`, so there is one egress boundary, not
+two. A build without the feature links no browser stack.
+
 ### `localpilot-skills`
 
 Owns:
