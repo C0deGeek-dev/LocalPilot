@@ -2,6 +2,35 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0093: A Catalog Model May Name Its Drafter; One Speculation Engine Per Launch
+
+Status: accepted. LocalBox/shared-tier decision (series home per ADR-0062).
+
+Model repos increasingly ship a small companion drafter GGUF for classic
+speculative decoding (the Bonsai repos ship DSpark Q4_1 drafters with a
+claimed ~1.34× CUDA decode uplift). The launcher had an MTP spec-type path
+but no way to use a drafter file; catalog prose honestly said "not wired".
+
+1. **`DraftModule` is a first-class catalog field**, the drafter sibling of
+   `VisionModule`: a filename in the model's repo, resolved to the model's
+   folder, opt-in per launch (`--draft`), shown in dry-run as
+   present/will-download, downloaded on demand, and a failed download stops
+   the launch rather than silently degrading. Configured-only — a drafter is
+   never auto-detected from disk, because an arbitrary neighbouring GGUF is
+   not a safe drafter guess (unlike the `mmproj-*` vision convention).
+2. **The argv contract lives in the shared tier**: a resolved drafter path
+   emits `--spec-type draft-simple --spec-draft-model <path>` (with
+   `--spec-draft-n-max` riding along when set) from the same builder every
+   consumer shares.
+3. **One speculation engine per launch.** A drafter combined with any
+   explicit spec-type other than `draft-simple` (notably the MTP family) is
+   a typed error at plan time, not ambiguous server behaviour. A
+   tokenizer-mismatched drafter remains the server's own startup refusal,
+   surfaced honestly.
+4. **The tuner does not search the drafter.** It is a catalog-driven launch
+   lever; benchmark arms that want it set it explicitly, keeping tuned
+   profiles comparable.
+
 ## ADR-0092: Shipped Config Layers Refresh; The User Catalog Merges Additively
 
 Status: accepted. LocalBox-tier decision (shared-series home per ADR-0062);
