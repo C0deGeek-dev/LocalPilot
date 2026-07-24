@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- Prism-served responses are no longer misreported as truncated streams: the
+  Anthropic-dialect stream normalizer synthesizes a missing
+  `content_block_start` and flushes held-back visible text before
+  `content_block_stop`, while genuine EOFs still surface as truncations.
 - **Research evidence passes an admission gate, and promotion can no longer
   write source dumps into memory** (ADR-0087, LocalHub#30/#24). Fetched web
   content is classified for relevance by an already-configured model
