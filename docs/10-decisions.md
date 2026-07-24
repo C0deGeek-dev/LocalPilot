@@ -2,6 +2,47 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0097: User-Global Skills Are A Baseline Overlaid By The Trusted Project, Resolved To One Effective Skill Per Name
+
+Status: accepted. Closes LocalHub#39. Builds on the skill model (ADR-0027) and
+the BOM/skip loader contract (ADR-0096).
+
+Skill discovery read only the active project (`<project>/.localpilot/skills`,
+`<project>/.agents/skills`), so a reusable skill had to be copied into every
+repository before `skills list`/`show`, `skill_search`, or `skill_load` could
+see it. The feature spec already named a `user-local` scope; this wires it into
+live discovery with explicit collision semantics.
+
+1. **Two scopes, four roots, one effective skill per name.** A per-user global
+   baseline (`~/.localpilot/skills`, `~/.agents/skills`) is overlaid by the
+   project (`<project>/.localpilot/skills`, `<project>/.agents/skills`).
+   Resolution is by parsed manifest `name` — not directory name — into a single
+   effective skill per name. Precedence, highest to lowest:
+   project `.localpilot` › project `.agents` › global `.localpilot` › global
+   `.agents`. `SkillScope` carries this on every `Skill` as origin metadata.
+2. **Whole-package replacement, never a merge.** The winning definition replaces
+   the shadowed one atomically; no body, manifest field, trigger, permission,
+   asset, or script is merged across scopes. Removing a project override reveals
+   the unchanged global skill again with no reinstall.
+3. **Deterministic, enumeration-independent.** `SkillSet::load(dirs)` became
+   `SkillSet::resolve(&[(PathBuf, SkillScope)])`: precedence comes from the scope,
+   not list position or `read_dir` order, and a same-scope name collision breaks
+   by the lexicographically smaller directory path. Resolution keys on a
+   `BTreeMap<name, Skill>`, so the effective set is stable and sorted.
+4. **Trust gates the project overlay, never the global baseline.** Global skills
+   are user-controlled advisory content and load independently of workspace
+   trust; the project overlay loads only when the workspace is trusted, so an
+   untrusted project cannot shadow a global skill with checked-in instructions.
+   The home directory is resolved cross-platform (consistent with `~/.localpilot/`
+   global instructions); an absent home cleanly omits the global layer and leaves
+   project-only behaviour unchanged.
+5. **Surfaced everywhere the catalog is.** `skills list`/`show` report one line
+   per effective name with its origin scope; `skill_search`/`skill_load` and
+   handoff suggestions rank and load the same effective definition. A user-only
+   skill (`disable-model-invocation: true`) stays reachable by exact name but
+   absent from autonomous search, unchanged. Loading remains read-only and grants
+   nothing — any action still passes the permission engine.
+
 ## ADR-0096: Skill Loading Tolerates A UTF-8 BOM And Skips A Malformed Skill Instead Of Aborting The Set
 
 Status: accepted. Closes LocalHub#38.
@@ -18,14 +59,15 @@ valid project skill (the repo's own `.agents/skills` had five such files).
    `U+FEFF` prefix is removed — no other whitespace is trimmed, so the `---`
    delimiter contract and all frontmatter validation stay strict (junk or
    whitespace before `---` is still rejected).
-2. **A malformed skill is skipped and reported, not fatal.** `SkillSet::load`
-   collects per-skill parse/read failures into `SkillSet::skipped()` (each a
-   `path: error` line) and loads the valid skills regardless — one bad file
-   never hides the rest. `skills list`/`show` surface the skipped entries as
-   warnings. `load` keeps its `Result` signature (currently always `Ok`) so a
-   future catastrophic failure can still be surfaced without a breaking change.
-   This is the explicit resolution of the abort-vs-skip question, matching the
-   recover-and-continue posture of ADR-0083.
+2. **A malformed skill is skipped and reported, not fatal.** The loader entry
+   (`SkillSet::load` at the time; renamed to the scope-aware `SkillSet::resolve`
+   in ADR-0097, skip-behaviour unchanged) collects per-skill parse/read failures
+   into `SkillSet::skipped()` (each a `path: error` line) and loads the valid
+   skills regardless — one bad file never hides the rest. `skills list`/`show`
+   surface the skipped entries as warnings. The entry keeps its `Result`
+   signature (currently always `Ok`) so a future catastrophic failure can still
+   be surfaced without a breaking change. This is the explicit resolution of the
+   abort-vs-skip question, matching the recover-and-continue posture of ADR-0083.
 3. **The repository's own checked-in skill files are normalised to UTF-8
    without BOM**, so they load on existing binaries too; the parser tolerance is
    the durable fix, the normalisation is hygiene.

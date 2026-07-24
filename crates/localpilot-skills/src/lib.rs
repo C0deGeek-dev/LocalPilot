@@ -16,8 +16,10 @@ mod templates;
 mod tools;
 
 pub use error::SkillError;
-pub use loader::{standard_skill_dirs, Skill, SkillSet};
+pub use loader::{
+    discovery_roots, global_skill_dirs, standard_skill_dirs, Skill, SkillScope, SkillSet,
+};
 pub use manifest::{Invocation, SkillManifest, SkillTriggers};
 pub use suggest::{SkillDraft, SuggestionEngine};
 pub use templates::{standard_template_dirs, PromptTemplate, TemplateSet};
-pub use tools::{discover_trusted, SkillLoad, SkillSearch};
+pub use tools::{discover, discover_trusted, SkillLoad, SkillSearch};

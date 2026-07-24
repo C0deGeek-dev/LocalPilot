@@ -53,15 +53,16 @@ const SKILL_DRAFTS_CUE: &str = concat!(
 );
 
 /// The cue, appended only when the `skill_search` tool is registered (autonomous
-/// skill discovery is enabled), that tells the model project skills are reachable
-/// on demand by search rather than carried in context.
+/// skill discovery is enabled), that tells the model skills — from the user's
+/// global directory or this project — are reachable on demand by search rather
+/// than carried in context.
 const SKILL_SEARCH_CUE: &str = concat!(
     "\n\n",
-    "This project may define skills — advisory prompt modules for recurring tasks. They are not ",
-    "loaded into context; when a task looks like one, call `skill_search` to find relevant skills ",
-    "(you get back names and one-line summaries), then `skill_load` to read one and apply its ",
-    "guidance yourself. Loading a skill runs nothing; any action it suggests still goes through the ",
-    "normal permission gate.",
+    "Your user-global directory or this project may define skills — advisory prompt modules for ",
+    "recurring tasks. They are not loaded into context; when a task looks like one, call ",
+    "`skill_search` to find relevant skills (you get back names and one-line summaries), then ",
+    "`skill_load` to read one and apply its guidance yourself. Loading a skill runs nothing; any ",
+    "action it suggests still goes through the normal permission gate.",
 );
 
 /// The cue, appended only when the `tool_search` tool is registered (the

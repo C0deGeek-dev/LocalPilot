@@ -25,7 +25,9 @@ pub fn write(root: &Path, objective: Option<&str>, out: &mut dyn Write) -> anyho
         return Ok(());
     };
 
-    // Suggest discoverable project skills relevant to the objective (best-effort).
+    // Suggest discoverable skills relevant to the objective from the effective
+    // merged catalog — the user-global baseline plus the project overlay
+    // (best-effort, LocalHub#39).
     let suggested = objective
         .map(|obj| {
             discover_trusted(root, true)

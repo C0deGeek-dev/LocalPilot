@@ -117,6 +117,21 @@ Skills can be:
 Generated skills are never enabled silently. The user must review the content,
 permissions, and triggers.
 
+Scope and precedence (ADR-0097):
+
+- User-local (global) skills are the baseline every project inherits, discovered
+  under `~/.localpilot/skills` and `~/.agents/skills`.
+- Project-local skills overlay the baseline, discovered under
+  `<project>/.localpilot/skills` and `<project>/.agents/skills`.
+- Skills resolve by manifest `name` to one effective skill per name. Highest to
+  lowest precedence: project `.localpilot` › project `.agents` › global
+  `.localpilot` › global `.agents`. A project definition replaces a global one
+  of the same name as a whole package — nothing is merged across scopes — and
+  removing the override reveals the global skill again.
+- Global skills load independently of workspace trust; the project overlay loads
+  only in a trusted workspace, so an untrusted project cannot shadow a global
+  skill. `skills list`/`show` expose each effective skill's origin scope.
+
 ## Skill Suggestions
 
 LocalPilot can suggest skill creation when repeated usage patterns appear.

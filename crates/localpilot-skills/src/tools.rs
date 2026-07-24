@@ -11,7 +11,7 @@
 //! workspace is trusted.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use localpilot_core::{one_line, word_overlap, Locator, SUMMARY_CHARS};
@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::SkillError;
-use crate::loader::{standard_skill_dirs, Skill, SkillSet};
+use crate::loader::{discovery_roots, home_dir, Skill, SkillSet};
 
 /// Locators returned by a search are capped so a turn spends a bounded number of
 /// tokens to *find* a skill before paying for any body.
@@ -30,18 +30,28 @@ const MAX_LOCATORS: usize = 10;
 /// Upper bound on a single loaded skill body, so pulling guidance stays lean.
 const BODY_CHARS: usize = 12_000;
 
-/// Load the project-local skills for `root`, **gated on workspace trust**: an
-/// untrusted workspace contributes no skills (project-local `SKILL.md` files load
-/// only when the workspace is trusted). The single trust gate for every skill
-/// surface.
+/// Resolve the effective skill set for `root`, resolving the per-user home
+/// directory from the environment. The per-user global baseline
+/// (`~/.localpilot/skills`, `~/.agents/skills`) is always included; the
+/// project overlay is **gated on workspace trust** — an untrusted workspace
+/// contributes no project skills and so cannot shadow a global skill
+/// (LocalHub#39).
 ///
 /// # Errors
 /// Returns [`SkillError`] if a discovered manifest or frontmatter fails to parse.
 pub fn discover_trusted(root: &Path, trusted: bool) -> Result<SkillSet, SkillError> {
-    if !trusted {
-        return Ok(SkillSet::default());
-    }
-    SkillSet::load(&standard_skill_dirs(root))
+    discover(root, home_dir().as_deref(), trusted)
+}
+
+/// Resolve the effective skill set for `root` against an explicit `home` (the
+/// per-user global baseline root, or `None` to omit the global layer). The
+/// injectable seam behind [`discover_trusted`]: the global baseline is always
+/// included, the project overlay only when `trusted`.
+///
+/// # Errors
+/// Returns [`SkillError`] if a discovered manifest or frontmatter fails to parse.
+pub fn discover(root: &Path, home: Option<&Path>, trusted: bool) -> Result<SkillSet, SkillError> {
+    SkillSet::resolve(&discovery_roots(root, home, trusted))
 }
 
 /// A simple relevance score for a locator: how many of the query's words the
@@ -69,10 +79,31 @@ struct SkillSearchInput {
     query: String,
 }
 
-/// `skill_search`: find project skills relevant to a query, returning lean ranked
+/// `skill_search`: find skills relevant to a query, returning lean ranked
 /// locators (name + one-line summary + score) over the *discoverable* skills only.
-/// Read-only; loads no bodies and surfaces no user-only skill.
-pub struct SkillSearch;
+/// Searches the effective merged catalog — the user-global baseline plus the
+/// trusted project overlay (LocalHub#39). Read-only; loads no bodies and surfaces
+/// no user-only skill.
+pub struct SkillSearch {
+    /// The per-user home directory for the global skill baseline, resolved once
+    /// at construction. `None` omits the global layer (e.g. no resolvable home).
+    home: Option<PathBuf>,
+}
+
+impl SkillSearch {
+    /// Construct the tool, resolving the per-user home directory from the
+    /// environment for the global skill baseline.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { home: home_dir() }
+    }
+}
+
+impl Default for SkillSearch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl Tool for SkillSearch {
@@ -112,15 +143,12 @@ impl Tool for SkillSearch {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: SkillSearchInput =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let set = match discover_trusted(ctx.workspace.root(), ctx.trusted) {
+        // The user-global baseline is always available; the project overlay is
+        // included only when the workspace is trusted (LocalHub#39).
+        let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
             Ok(set) => set,
-            Err(_) => return Ok(ToolOutput::ok("project skills are unreadable")),
+            Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
-        if !ctx.trusted {
-            return Ok(ToolOutput::ok(
-                "the workspace is not trusted, so project skills are not loaded",
-            ));
-        }
 
         let query_lower = input.query.to_ascii_lowercase();
         let query_words: Vec<&str> = query_lower
@@ -144,12 +172,12 @@ impl Tool for SkillSearch {
 
         if locators.is_empty() {
             return Ok(ToolOutput::ok(format!(
-                "no project skills match \"{}\"",
+                "no skills match \"{}\"",
                 input.query
             )));
         }
         let mut out = String::from(
-            "Matching project skills (locators only — call `skill_load` with a name to read one):\n",
+            "Matching skills (locators only — call `skill_load` with a name to read one):\n",
         );
         for loc in &locators {
             let _ = writeln!(out, "- {} (score {}): {}", loc.name, loc.score, loc.summary);
@@ -165,11 +193,31 @@ struct SkillLoadInput {
     name: String,
 }
 
-/// `skill_load`: read one project skill's body by exact name. Works for any skill
-/// by name (the deterministic load path); the body is advisory guidance the agent
-/// applies in its own reasoning. The skill's declared required tools/permissions
-/// are surfaced, but loading grants nothing.
-pub struct SkillLoad;
+/// `skill_load`: read one skill's body by exact name from the effective merged
+/// catalog — the user-global baseline plus the trusted project overlay
+/// (LocalHub#39). Works for any skill by name (the deterministic load path); the
+/// body is advisory guidance the agent applies in its own reasoning. The skill's
+/// declared required tools/permissions are surfaced, but loading grants nothing.
+pub struct SkillLoad {
+    /// The per-user home directory for the global skill baseline, resolved once
+    /// at construction. `None` omits the global layer (e.g. no resolvable home).
+    home: Option<PathBuf>,
+}
+
+impl SkillLoad {
+    /// Construct the tool, resolving the per-user home directory from the
+    /// environment for the global skill baseline.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { home: home_dir() }
+    }
+}
+
+impl Default for SkillLoad {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl Tool for SkillLoad {
@@ -211,19 +259,16 @@ impl Tool for SkillLoad {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: SkillLoadInput =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let set = match discover_trusted(ctx.workspace.root(), ctx.trusted) {
+        // The user-global baseline is always available; the project overlay is
+        // included only when the workspace is trusted (LocalHub#39).
+        let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
             Ok(set) => set,
-            Err(_) => return Ok(ToolOutput::ok("project skills are unreadable")),
+            Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
-        if !ctx.trusted {
-            return Ok(ToolOutput::ok(
-                "the workspace is not trusted, so project skills are not loaded",
-            ));
-        }
         match set.by_name(input.name.trim()) {
             Some(skill) => Ok(ToolOutput::ok(render_skill(skill))),
             None => Ok(ToolOutput::ok(format!(
-                "no project skill named \"{}\"",
+                "no skill named \"{}\"",
                 input.name.trim()
             ))),
         }
@@ -234,8 +279,9 @@ impl Tool for SkillLoad {
 /// required tools/permissions (transparency, not a grant), then the bounded body.
 fn render_skill(skill: &Skill) -> String {
     let mut out = format!(
-        "Skill `{}` (advisory guidance — apply it yourself; loading runs nothing):\n",
-        skill.manifest.name
+        "Skill `{}` [{}] (advisory guidance — apply it yourself; loading runs nothing):\n",
+        skill.manifest.name,
+        skill.scope.label()
     );
     if let Some(hint) = &skill.manifest.argument_hint {
         let _ = writeln!(out, "argument: {hint}");
@@ -298,8 +344,23 @@ mod tests {
         }
     }
 
+    /// A `skill_search` tool with an injected (or absent) global-baseline home,
+    /// so tests never depend on the host's real home directory.
+    fn search(home: Option<&Path>) -> SkillSearch {
+        SkillSearch {
+            home: home.map(Path::to_path_buf),
+        }
+    }
+
+    /// A `skill_load` tool with an injected (or absent) global-baseline home.
+    fn load(home: Option<&Path>) -> SkillLoad {
+        SkillLoad {
+            home: home.map(Path::to_path_buf),
+        }
+    }
+
     #[test]
-    fn discover_is_gated_on_workspace_trust() {
+    fn discover_gates_the_project_overlay_but_never_the_global_baseline() {
         let dir = tempfile::tempdir().unwrap();
         write_skill_md(
             dir.path(),
@@ -309,12 +370,13 @@ mod tests {
             "",
         );
 
-        // Untrusted: project-local skills are not loaded.
-        let untrusted = discover_trusted(dir.path(), false).unwrap();
+        // Untrusted, no home: project-local skills are not loaded, and there is
+        // no global layer to fall back to.
+        let untrusted = discover(dir.path(), None, false).unwrap();
         assert!(untrusted.names().is_empty());
 
-        // Trusted: the skill is discovered.
-        let trusted = discover_trusted(dir.path(), true).unwrap();
+        // Trusted: the project skill is discovered.
+        let trusted = discover(dir.path(), None, true).unwrap();
         assert_eq!(trusted.names(), vec!["add-provider"]);
     }
 
@@ -337,7 +399,7 @@ mod tests {
         );
         let ws = Workspace::new(dir.path()).unwrap();
 
-        let out = SkillSearch
+        let out = search(None)
             .invoke(
                 json!({ "query": "how do I guide adding a provider" }),
                 &ctx(&ws, true),
@@ -370,7 +432,7 @@ mod tests {
         write_skill_md(dir.path(), "add-provider", long.trim(), false, "");
         let ws = Workspace::new(dir.path()).unwrap();
 
-        let out = SkillSearch
+        let out = search(None)
             .invoke(json!({ "query": "guide adding provider" }), &ctx(&ws, true))
             .await
             .unwrap();
@@ -398,7 +460,7 @@ mod tests {
         );
         let ws = Workspace::new(dir.path()).unwrap();
 
-        let hit = SkillLoad
+        let hit = load(None)
             .invoke(json!({ "name": "add-provider" }), &ctx(&ws, true))
             .await
             .unwrap();
@@ -410,16 +472,12 @@ mod tests {
         );
 
         // An unknown name is a clean miss, not an error.
-        let miss = SkillLoad
+        let miss = load(None)
             .invoke(json!({ "name": "no-such-skill" }), &ctx(&ws, true))
             .await
             .unwrap();
         assert!(!miss.is_error);
-        assert!(
-            miss.text.contains("no project skill named"),
-            "got: {}",
-            miss.text
-        );
+        assert!(miss.text.contains("no skill named"), "got: {}", miss.text);
     }
 
     #[tokio::test]
@@ -436,7 +494,7 @@ mod tests {
         std::fs::write(sdir.join("SKILL.md"), "# writer\n\nDo the thing.\n").unwrap();
         let ws = Workspace::new(dir.path()).unwrap();
 
-        let out = SkillLoad
+        let out = load(None)
             .invoke(json!({ "name": "writer" }), &ctx(&ws, true))
             .await
             .unwrap();
@@ -454,7 +512,7 @@ mod tests {
 
         // Loading a skill is a read inside the workspace and nothing more — no
         // permission side channel, whatever the skill declares.
-        let effects = SkillLoad
+        let effects = load(None)
             .effects(&json!({ "name": "writer" }), &ctx(&ws, true))
             .unwrap();
         assert_eq!(
@@ -467,21 +525,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_untrusted_workspace_loads_no_skills() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn search_and_load_reach_a_global_skill_from_an_unrelated_project() {
+        // A global skill under the injected home, and a project with none.
+        let home = tempfile::tempdir().unwrap();
         write_skill_md(
-            dir.path(),
-            "add-provider",
-            "guide adding a provider",
+            home.path(),
+            "threejs-webgl",
+            "guide building a three.js scene",
             false,
             "",
         );
-        let ws = Workspace::new(dir.path()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(project.path()).unwrap();
 
-        let out = SkillSearch
-            .invoke(json!({ "query": "provider" }), &ctx(&ws, false))
+        // Search reaches the global skill…
+        let found = search(Some(home.path()))
+            .invoke(
+                json!({ "query": "how do I build a three.js scene" }),
+                &ctx(&ws, true),
+            )
             .await
             .unwrap();
-        assert!(out.text.contains("not trusted"), "got: {}", out.text);
+        assert!(found.text.contains("threejs-webgl"), "got: {}", found.text);
+
+        // …and load returns its body, labelled as a global origin.
+        let body = load(Some(home.path()))
+            .invoke(json!({ "name": "threejs-webgl" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(
+            body.text.contains("Body of threejs-webgl"),
+            "got: {}",
+            body.text
+        );
+        assert!(
+            body.text.contains("global"),
+            "origin not shown: {}",
+            body.text
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_search_keeps_global_skills_but_drops_project_skills() {
+        let home = tempfile::tempdir().unwrap();
+        write_skill_md(
+            home.path(),
+            "global-helper",
+            "guide a shared workflow",
+            false,
+            "",
+        );
+        let project = tempfile::tempdir().unwrap();
+        write_skill_md(
+            project.path(),
+            "project-helper",
+            "guide a shared workflow",
+            false,
+            "",
+        );
+        let ws = Workspace::new(project.path()).unwrap();
+
+        // Untrusted: the global skill is still searchable; the project one is not.
+        let out = search(Some(home.path()))
+            .invoke(
+                json!({ "query": "guide a shared workflow" }),
+                &ctx(&ws, false),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.text.contains("global-helper"),
+            "global dropped: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("project-helper"),
+            "untrusted project skill leaked: {}",
+            out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_skill_shadows_a_global_skill_through_the_load_tool() {
+        let home = tempfile::tempdir().unwrap();
+        write_skill_md(
+            home.path(),
+            "modern-web-design",
+            "the global one",
+            false,
+            "GLOBAL. ",
+        );
+        let project = tempfile::tempdir().unwrap();
+        write_skill_md(
+            project.path(),
+            "modern-web-design",
+            "the project one",
+            false,
+            "PROJECT. ",
+        );
+        let ws = Workspace::new(project.path()).unwrap();
+
+        let out = load(Some(home.path()))
+            .invoke(json!({ "name": "modern-web-design" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        // The project package is effective, atomically — no global body leaks.
+        assert!(out.text.contains("PROJECT."), "got: {}", out.text);
+        assert!(
+            !out.text.contains("GLOBAL."),
+            "shadowed global leaked: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("project"),
+            "origin not shown: {}",
+            out.text
+        );
     }
 }

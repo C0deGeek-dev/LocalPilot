@@ -85,8 +85,8 @@ impl McpTools {
         // small local model never reaches for a skill on its own by default; both
         // tools are read-only and trust-gated regardless.
         if self.skills_autonomous {
-            registry.register(Box::new(localpilot_skills::SkillSearch));
-            registry.register(Box::new(localpilot_skills::SkillLoad));
+            registry.register(Box::new(localpilot_skills::SkillSearch::new()));
+            registry.register(Box::new(localpilot_skills::SkillLoad::new()));
         }
         for (server, descriptor, transport) in &self.entries {
             let mut tool = McpTool::new(descriptor, vec![Effect::Network], Arc::clone(transport));
