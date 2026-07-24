@@ -36,6 +36,29 @@ jobs:
       # Prebuilt nextest binary; install-action does not build from source, so the
       # pinned 1.82 toolchain does not constrain the runner version.
       - uses: taiki-e/install-action@nextest
+      # The hosted-ubuntu VM freezes under parallel link/test storms (see the
+      # nextest step's history note). The first containment only wrapped that
+      # one step — but every later cargo step (doctests, the vendored
+      # LocalMind workspace suite, the TUI feature build) can raise the same
+      # storm, and the vendored workspace grew sharply on 2026-07-23, which
+      # is when wedges became deterministic. Contain the whole job instead:
+      # cap build parallelism for every subsequent cargo invocation, and run
+      # one job-lifetime low-memory watchdog that kills a storm while the VM
+      # can still report it.
+      - if: runner.os == 'Linux'
+        name: linux resource containment (build-jobs cap + memory watchdog)
+        shell: bash
+        run: |
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          ( while true; do
+              avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+              if [ "${avail:-9999999}" -lt 1000000 ]; then
+                echo "watchdog: MemAvailable ${avail}kB — killing the build/test storm"
+                pkill -9 -f 'nextest|rustc|\bld\b|cc1|corpus' || true
+              fi
+              sleep 5
+            done ) >/dev/null 2>&1 &
+          disown
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Disk headroom before and after the heaviest step: the failure mode this
@@ -105,22 +128,34 @@ jobs:
         run: echo "::error::linux nextest step did not succeed (wedge or failures — see nextest-wedge-log)"; exit 1
       - run: df -h .
         shell: bash
+      # Per-step ceilings so a wedge names its step instead of eating the
+      # 45-minute job ceiling with its log lost. Generous vs green-run times
+      # (each step is minutes warm); only a storm trips them.
       - run: cargo test --doc --workspace
+        timeout-minutes: 15
       - run: cargo check --workspace
+        timeout-minutes: 10
       # The vendored LocalMind engine is its own workspace; run its suite so a
       # broken vendored test fails this build and the pinned commit's behavior
-      # stays verified on every OS.
+      # stays verified on every OS. This is a second full-workspace build —
+      # the heaviest post-suite step, covered by the job-wide Linux
+      # containment above.
       - run: cargo nextest run --workspace --manifest-path external/localmind/Cargo.toml
+        timeout-minutes: 20
       - run: cargo test --doc --workspace --manifest-path external/localmind/Cargo.toml
+        timeout-minutes: 15
       # The interactive TUI (`chat`) is behind an opt-in feature; lint, build, and
       # test it here so the terminal driver — including the inline scrollback-commit
       # fidelity tests — is covered on every OS.
       - run: cargo clippy -p localpilot --features tui,learning --all-targets -- -D warnings
+        timeout-minutes: 15
       - run: cargo build -p localpilot --features tui,learning
+        timeout-minutes: 15
       # Run the binary's own unit tests under the TUI feature (the inline-driver
       # scrollback-commit tests live here). Scoped to the bin: the integration tests
       # under tests/ are not feature-dependent and already run in the workspace step.
       - run: cargo nextest run -p localpilot --features tui,learning --bin localpilot
+        timeout-minutes: 15
 
   coverage:
     name: coverage (line floor)
