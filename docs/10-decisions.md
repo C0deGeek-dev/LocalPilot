@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0092: Shipped Config Layers Refresh; The User Catalog Merges Additively
+
+Status: accepted. LocalBox-tier decision (shared-series home per ADR-0062);
+the config-file half of ADR-0091's anti-staleness posture.
+
+LocalBox reads its three config layers from disk
+(`defaults.json` < `llm-models.json` < `settings.json`), but first-run
+seeding wrote each file once and never touched it again. The consequence:
+upgrading the binary changed nothing an existing install actually read —
+new engine pins, new repos, and newly shipped catalog models silently never
+arrived. The layers have different ownership, so they get different rules:
+
+1. **Shipped layers refresh.** `defaults.json` and `llm-models.example.json`
+   are the binary's property: seeding now rewrites them whenever they differ
+   from the embedded copies, so an existing install always reads the pins and
+   shipped-model set of the binary it runs. This is safe by layer precedence
+   — user overrides belong in `settings.json`, which always wins; editing
+   `defaults.json` directly is documented as unsupported.
+2. **The user catalog is never rewritten.** `llm-models.json` is the user's
+   file: seeded when absent, then additive-only. `localbox update` reports
+   shipped models the catalog predates; `localbox update --merge-models`
+   adds exactly the missing model keys from the embedded shipped catalog —
+   an existing entry is never modified, `CommandAliases` and every other
+   top-level key survive, and `--check` previews the keys before any write.
+3. **The embedded catalog is the merge source**, not the on-disk example —
+   the binary knows what it ships; the on-disk example is a human-readable
+   mirror of the same bytes.
+4. **A source checkout keeps its dev override**: inside the repo,
+   `local-llm/` remains the live tree, so development exercises the shipped
+   files directly.
+
 ## ADR-0091: Engine Pins Age Loudly And Advance Deliberately — Freshness Reporting Plus A Digest-Verified Pin Refresh
 
 Status: accepted. LocalBox-tier decision (the shared-series home per ADR-0062's
