@@ -383,6 +383,16 @@ pub async fn run_research_command_controlled(
         outcome.report.open_questions.len(),
         outcome.report.rounds_run
     )?;
+    // Skill-discovery lane: surface relevant skills for the topic as a separate
+    // `Relevant skills` section and save review proposals. Best-effort — a
+    // discovery failure must never fail the research run, and skill
+    // recommendations are never research findings or memory candidates (they use a
+    // separate proposal store, not the memory-candidate queue) (LocalHub#41).
+    if let Err(error) =
+        crate::skill_discovery::run_skill_research(root, topic, false, web, out).await
+    {
+        writeln!(out, "note: skill discovery skipped: {error}")?;
+    }
     Ok(())
 }
 

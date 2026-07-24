@@ -487,7 +487,48 @@ pub async fn run_skill_research(
 
     let ranked = rank(query, candidates, None);
     render_discovery(query, &ranked, out)?;
+    report_autoload(&ranked, config.skills.autonomous_discovery, out)?;
     Ok(SkillsOutcome { had_failure: false })
+}
+
+/// Whether a relevant match may be auto-loaded into a research run: only an
+/// installed, model-discoverable skill, and only when `[skills].autonomous_discovery`
+/// is enabled. An available/discovered match, a user-only skill, or a project with
+/// autonomous discovery off all stay report-only (LocalHub#41).
+#[must_use]
+pub fn should_autoload(skill: &DiscoveredSkill, autonomous_discovery: bool) -> bool {
+    autonomous_discovery && skill.state == MatchState::Installed && skill.discoverable
+}
+
+/// Report which installed, discoverable skills are loaded into this run under
+/// `[skills].autonomous_discovery`; note the report-only posture when the toggle is
+/// off but a discoverable installed skill would otherwise have loaded.
+fn report_autoload(
+    ranked: &Ranked,
+    autonomous_discovery: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let relevant = || ranked.matches.iter().filter(|m| m.score > 0.0);
+    let loaded: Vec<&str> = relevant()
+        .filter(|m| should_autoload(&m.skill, autonomous_discovery))
+        .map(|m| m.skill.name.as_str())
+        .collect();
+    if !loaded.is_empty() {
+        writeln!(
+            out,
+            "loaded into this run ([skills].autonomous_discovery on): {}",
+            loaded.join(", ")
+        )?;
+    } else if !autonomous_discovery
+        && relevant().any(|m| m.skill.state == MatchState::Installed && m.skill.discoverable)
+    {
+        writeln!(
+            out,
+            "report-only: enable [skills].autonomous_discovery to load a discoverable \
+             installed skill into a research run"
+        )?;
+    }
+    Ok(())
 }
 
 /// Build a pending review proposal from a validated discovered repository, ranking
@@ -885,6 +926,29 @@ mod tests {
             "irrelevant match hidden: {text}"
         );
         assert!(text.contains("Recommended: threejs-webgl"), "{text}");
+    }
+
+    #[test]
+    fn autoload_gate_only_loads_an_installed_discoverable_skill_under_the_toggle() {
+        let mk = |state: MatchState, discoverable: bool| DiscoveredSkill {
+            name: "s".to_string(),
+            description: "d".to_string(),
+            state,
+            repo_url: None,
+            source_id: None,
+            commit: None,
+            catalog_root: None,
+            source_path: None,
+            discoverable,
+        };
+        // Toggle on: only an installed, discoverable skill auto-loads.
+        assert!(should_autoload(&mk(MatchState::Installed, true), true));
+        // A user-only installed skill stays report-only.
+        assert!(!should_autoload(&mk(MatchState::Installed, false), true));
+        // An available match never auto-loads (it is not installed).
+        assert!(!should_autoload(&mk(MatchState::Available, true), true));
+        // Toggle off: nothing auto-loads, even an installed discoverable skill.
+        assert!(!should_autoload(&mk(MatchState::Installed, true), false));
     }
 
     #[tokio::test]
