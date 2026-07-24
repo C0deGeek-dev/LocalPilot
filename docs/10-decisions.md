@@ -2,6 +2,46 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0091: Engine Pins Age Loudly And Advance Deliberately — Freshness Reporting Plus A Digest-Verified Pin Refresh
+
+Status: accepted. LocalBox-tier decision (the shared-series home per ADR-0062's
+repo split); extends the verified-download posture of the launcher stack.
+
+LocalBox pins every downloadable `llama-server` engine (mainline, turboquant,
+PrismML) to a release tag plus SHA-256 asset pins. Pinning is correct — but it
+aged silently: nothing ever said "your pin is N releases behind", and advancing
+a pin was a hand-ceremony of editing tags and copying hashes. In practice pins
+lagged for months without anyone deciding that.
+
+1. **Staleness is reported, never acted on.** `localbox update --check` now
+   reports, per pinned mode, whether the pinned tag is the latest upstream
+   release. The report is informational; no path auto-installs a newer
+   release. A pinned build must never re-download or advance because upstream
+   moved (the `.build-stamp` freshness contract keyed to the *resolved* tag is
+   unchanged).
+2. **Advancing is one deliberate command.** `localbox update --mode <m>
+   --refresh-pins` resolves the *latest* release for that mode, selects this
+   host's assets through the existing per-mode selectors, and installs them.
+   The flag requires an explicit `--mode`; there is no refresh-everything
+   sweep. `--refresh-pins --check` previews the tag and asset set without
+   downloading.
+3. **A freshly recorded pin is digest-verified, not trust-on-first-use.** For
+   an asset with no local pin, the upstream release API's `sha256` digest is
+   the integrity check: computed bytes that do not match the published digest
+   refuse to install or be recorded. Only well-formed `sha256:<hex>` digests
+   count; other algorithms are ignored rather than mistrusted. Where upstream
+   publishes no digest, the computed hash is recorded and disclosed — the
+   pre-existing unpinned behaviour.
+4. **Refreshed pins land in the settings layer.** The refresh writes the
+   mode's pinned-tag key and the asset hashes into `~/.local-llm/settings.json`
+   (upserting only those keys, preserving everything else). Settings win layer
+   precedence and survive upgrades; the shipped `defaults.json` stays the
+   fresh-install baseline.
+5. **The local pin table remains the install-time authority.** Upstream
+   digests are a cross-check at pin-recording time only; a normal pinned
+   install verifies against the locally recorded hash exactly as before, and
+   a mismatch still deletes the file and refuses.
+
 ## ADR-0090: Local Research Evidence Carries The Full Bounded Chunk; A Snippet Never Poses As Full Source
 
 Status: accepted. Completes ADR-0087's full-evidence review contract for the
