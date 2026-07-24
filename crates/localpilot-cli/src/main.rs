@@ -33,7 +33,6 @@ mod rpc_cmd;
 mod self_review_cmd;
 mod session_cmd;
 mod skills_cmd;
-#[cfg(feature = "tui")]
 mod trust;
 mod update;
 
@@ -410,15 +409,119 @@ enum HandoffCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommand, PartialEq, Eq)]
 enum ProjectSkillsCommand {
-    /// List the project's discovered skills.
-    List,
+    /// List the effective skills (the global baseline overlaid by the project).
+    List {
+        /// Restrict the view to the user-global scope.
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
     /// Print one skill's body by exact name (a deterministic load).
     Show {
         /// The skill name (see `skills list`).
         name: String,
+        /// Resolve the name in the user-global scope only.
+        #[arg(short = 'g', long)]
+        global: bool,
     },
+    /// Manage skill source repositories (public HTTPS Git).
+    Repo {
+        #[command(subcommand)]
+        command: SkillsRepoCommand,
+    },
+    /// Search cached source catalogs for installable skills (offline).
+    Available {
+        /// Optional query matched against skill names and descriptions.
+        query: Option<String>,
+        /// Restrict the view to the user-global scope.
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
+    /// Install a managed skill, or every package of a source with `--all`.
+    Install {
+        /// The skill name to install (omit only together with `--all`).
+        name: Option<String>,
+        /// Disambiguate a name offered by several sources, or the source for `--all`.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Install every package of the `--repo` source (all-or-nothing).
+        #[arg(long)]
+        all: bool,
+        /// Install into the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the mutation without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove a managed (LocalPilot-installed) skill.
+    Delete {
+        /// The installed skill name.
+        name: String,
+        /// Remove from the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the mutation without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum SkillsRepoCommand {
+    /// Register a public HTTPS Git repository as a skill source (fetches one
+    /// snapshot; installs nothing).
+    Add {
+        /// The public HTTPS repository URL.
+        url: String,
+        /// Register in the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the network fetch without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Refresh one source (by id or URL), or every source when none is given.
+    Refresh {
+        /// The source id or URL; omit to refresh every source in scope.
+        url: Option<String>,
+        /// Operate on the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the network fetch without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List registered sources.
+    List {
+        /// Restrict the view to the user-global scope.
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
+    /// Remove a source registration and its cache (installed skills remain).
+    Delete {
+        /// The source id or URL.
+        url: String,
+        /// Operate on the user-global scope instead of the project.
+        #[arg(short = 'g', long)]
+        global: bool,
+        /// Approve the removal without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// A `Parser` wrapper so the interactive `/skills …` slash command parses its raw
+/// arguments through the exact same command surface as `localpilot skills …`,
+/// guaranteeing the two forms parse to the same operations (LocalHub#40). Only the
+/// TUI slash path uses it.
+#[cfg(feature = "tui")]
+#[derive(Debug, Parser)]
+#[command(name = "skills", no_binary_name = true)]
+struct SkillsSlash {
+    #[command(subcommand)]
+    command: ProjectSkillsCommand,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1638,12 +1741,13 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         },
         Command::Skills { command } => {
             let cwd = std::env::current_dir()?;
+            let stdin_is_tty = io::stdin().is_terminal();
             let mut stdout = io::stdout().lock();
-            match command {
-                ProjectSkillsCommand::List => skills_cmd::list(&cwd, &mut stdout)?,
-                ProjectSkillsCommand::Show { name } => skills_cmd::show(&cwd, &name, &mut stdout)?,
-            }
+            let outcome = skills_cmd::run(command, &cwd, stdin_is_tty, &mut stdout)?;
             stdout.flush()?;
+            if outcome.had_failure {
+                exit_code = std::process::ExitCode::FAILURE;
+            }
         }
         Command::Handoff { command } => {
             let cwd = std::env::current_dir()?;
@@ -1787,6 +1891,58 @@ mod tests {
             resolve_learning_store(Some(pinned.clone()), &cwd),
             StoreRoot::Found(pinned)
         );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn skills_slash_and_cli_parse_to_the_same_operation() {
+        // LocalHub#40 acceptance: the `/skills …` slash form and the
+        // `localpilot skills …` CLI form parse to identical operations, because
+        // both drive the one clap command surface.
+        fn cli(args: &[&str]) -> ProjectSkillsCommand {
+            let parsed =
+                Cli::try_parse_from(std::iter::once("localpilot").chain(args.iter().copied()))
+                    .expect("cli parse");
+            match parsed.command.expect("a command") {
+                Command::Skills { command } => command,
+                other => panic!("expected Skills, got {other:?}"),
+            }
+        }
+        fn slash(raw: &str) -> ProjectSkillsCommand {
+            let tokens: Vec<&str> = raw.split_whitespace().collect();
+            SkillsSlash::try_parse_from(tokens)
+                .expect("slash parse")
+                .command
+        }
+        let cases = [
+            (
+                vec!["skills", "repo", "add", "https://github.com/o/r", "--yes"],
+                "repo add https://github.com/o/r --yes",
+            ),
+            (vec!["skills", "repo", "list", "-g"], "repo list -g"),
+            (
+                vec!["skills", "install", "helper", "--repo", "src", "-g"],
+                "install helper --repo src -g",
+            ),
+            (
+                vec!["skills", "install", "--all", "--repo", "src"],
+                "install --all --repo src",
+            ),
+            (vec!["skills", "available", "query"], "available query"),
+            (
+                vec!["skills", "delete", "helper", "--yes"],
+                "delete helper --yes",
+            ),
+            (vec!["skills", "list"], "list"),
+            (vec!["skills", "show", "helper", "-g"], "show helper -g"),
+        ];
+        for (cli_args, slash_raw) in cases {
+            assert_eq!(
+                cli(&cli_args),
+                slash(slash_raw),
+                "mismatch for `{slash_raw}`"
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,209 @@ use std::io::Write;
 use std::path::Path;
 
 use localpilot_core::{one_line, SUMMARY_CHARS};
-use localpilot_skills::{discover_trusted, Invocation, SkillSet};
+use localpilot_skills::{
+    discover_trusted_scoped, user_home, Approval, Confirm, GitFetcher, InstallSpec, Invocation,
+    ReadScope, Scope, SkillError, SkillSet, SkillsManager,
+};
+
+use crate::trust;
+use crate::{ProjectSkillsCommand, SkillsRepoCommand};
+
+/// Whether a `skills` invocation ended in a user-facing failure, so the process
+/// can exit non-zero (mirrors `localpilot models`). A refused or rejected
+/// mutation is a failure; a printed read-only result is not.
+pub struct SkillsOutcome {
+    pub had_failure: bool,
+}
+
+/// Execute one `localpilot skills …` subcommand. Read-only commands print and
+/// always succeed; a mutation that is refused, rejected, or fails is reported and
+/// flagged so the caller exits non-zero. This is the CLI half of the one contract
+/// the `/skills` slash surface shares (LocalHub#40).
+///
+/// # Errors
+/// Returns an error only if output cannot be written; user-facing failures are
+/// reported in `SkillsOutcome`, not as `Err`.
+pub fn run(
+    command: ProjectSkillsCommand,
+    cwd: &Path,
+    stdin_is_tty: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<SkillsOutcome> {
+    // Read-only listing/reading needs no source manager and never fails the run.
+    match command {
+        ProjectSkillsCommand::List { global } => {
+            list(cwd, global, out)?;
+            Ok(SkillsOutcome { had_failure: false })
+        }
+        ProjectSkillsCommand::Show { name, global } => {
+            show(cwd, &name, global, out)?;
+            Ok(SkillsOutcome { had_failure: false })
+        }
+        managed => run_managed(managed, cwd, stdin_is_tty, out),
+    }
+}
+
+/// Run a source/install subcommand through the shared [`SkillsManager`], mapping a
+/// `SkillError` into printed output plus a non-zero-exit flag.
+fn run_managed(
+    command: ProjectSkillsCommand,
+    cwd: &Path,
+    stdin_is_tty: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<SkillsOutcome> {
+    let fetcher = GitFetcher;
+    let home = user_home();
+    let trusted = trust::is_trusted(cwd);
+    let now = unix_now_string();
+    let manager = SkillsManager::new(cwd, home.as_deref(), trusted, &fetcher, &now);
+    let mut confirm = StdinConfirm;
+
+    let result: Result<(), SkillError> = match command {
+        ProjectSkillsCommand::Repo { command } => match command {
+            SkillsRepoCommand::Add { url, global, yes } => manager.repo_add(
+                scope(global),
+                &url,
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+            SkillsRepoCommand::Refresh { url, global, yes } => manager.repo_refresh(
+                scope(global),
+                url.as_deref(),
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+            SkillsRepoCommand::List { global } => manager.repo_list(read_scope(global), out),
+            SkillsRepoCommand::Delete { url, global, yes } => manager.repo_delete(
+                scope(global),
+                &url,
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+        },
+        ProjectSkillsCommand::Available { query, global } => {
+            manager.available(read_scope(global), query.as_deref(), out)
+        }
+        ProjectSkillsCommand::Install {
+            name,
+            repo,
+            all,
+            global,
+            yes,
+        } => match install_spec(name, repo, all) {
+            Ok(spec) => manager.install(
+                scope(global),
+                spec,
+                approval(yes, stdin_is_tty, &mut confirm),
+                out,
+            ),
+            Err(err) => Err(err),
+        },
+        ProjectSkillsCommand::Delete { name, global, yes } => manager.delete(
+            scope(global),
+            &name,
+            approval(yes, stdin_is_tty, &mut confirm),
+            out,
+        ),
+        // List/Show are handled in `run` before reaching here.
+        ProjectSkillsCommand::List { .. } | ProjectSkillsCommand::Show { .. } => Ok(()),
+    };
+
+    match result {
+        Ok(()) => Ok(SkillsOutcome { had_failure: false }),
+        Err(err) => {
+            writeln!(out, "error: {err}")?;
+            Ok(SkillsOutcome { had_failure: true })
+        }
+    }
+}
+
+/// Resolve the mutation scope from the `-g` flag.
+fn scope(global: bool) -> Scope {
+    if global {
+        Scope::Global
+    } else {
+        Scope::Project
+    }
+}
+
+/// Resolve the read scope from the `-g` flag: the effective global+project view,
+/// or the global scope alone.
+fn read_scope(global: bool) -> ReadScope {
+    if global {
+        ReadScope::GlobalOnly
+    } else {
+        ReadScope::Effective
+    }
+}
+
+/// Build the install target from the CLI flags, enforcing the `--all`/`--repo`
+/// contract before any effect.
+fn install_spec(
+    name: Option<String>,
+    repo: Option<String>,
+    all: bool,
+) -> Result<InstallSpec, SkillError> {
+    if all {
+        if name.is_some() {
+            return Err(SkillError::Rejected(
+                "--all installs an entire source; do not also name a skill".to_string(),
+            ));
+        }
+        let repo = repo.ok_or_else(|| {
+            SkillError::Rejected("--all requires --repo <id> to name the source".to_string())
+        })?;
+        Ok(InstallSpec::All { repo })
+    } else {
+        let name = name.ok_or_else(|| {
+            SkillError::Rejected(
+                "provide a skill name, or use `--all --repo <id>` to install a whole source"
+                    .to_string(),
+            )
+        })?;
+        Ok(InstallSpec::Named { name, repo })
+    }
+}
+
+/// Choose the approval policy: an explicit `--yes`, an interactive terminal, or a
+/// non-interactive refusal.
+fn approval(yes: bool, stdin_is_tty: bool, confirm: &mut StdinConfirm) -> Approval<'_> {
+    if yes {
+        Approval::AssumeYes
+    } else if stdin_is_tty {
+        Approval::Interactive(confirm)
+    } else {
+        Approval::NonInteractive
+    }
+}
+
+/// A blocking `[y/N]` prompt on the real terminal, used only when stdin is a TTY
+/// and `--yes` was not given.
+struct StdinConfirm;
+
+impl Confirm for StdinConfirm {
+    fn confirm(&mut self, question: &str) -> bool {
+        let mut stdout = std::io::stdout();
+        if write!(stdout, "{question} [y/N] ").is_err() {
+            return false;
+        }
+        let _ = stdout.flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            return false;
+        }
+        matches!(answer.trim(), "y" | "Y" | "yes")
+    }
+}
+
+/// The current Unix time in seconds as a string, injected as the manager's clock.
+fn unix_now_string() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string()
+}
 
 /// List the effective skills (global baseline overlaid by the project) with
 /// their invocation, origin scope, and a one-line summary. The user explicitly
@@ -21,8 +223,8 @@ use localpilot_skills::{discover_trusted, Invocation, SkillSet};
 ///
 /// # Errors
 /// Returns an error only if output cannot be written.
-pub fn list(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
-    match discover_trusted(root, true) {
+pub fn list(root: &Path, global: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    match discover_trusted_scoped(root, true, global) {
         Ok(set) => render_list(&set, out),
         Err(err) => {
             writeln!(out, "could not read skills: {err}")?;
@@ -74,8 +276,8 @@ fn render_list(set: &SkillSet, out: &mut dyn Write) -> anyhow::Result<()> {
 ///
 /// # Errors
 /// Returns an error only if output cannot be written.
-pub fn show(root: &Path, name: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    match discover_trusted(root, true) {
+pub fn show(root: &Path, name: &str, global: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    match discover_trusted_scoped(root, true, global) {
         Ok(set) => render_show(&set, name, out),
         Err(err) => {
             writeln!(out, "could not read skills: {err}")?;

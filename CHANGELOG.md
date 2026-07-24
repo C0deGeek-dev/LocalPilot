@@ -6,6 +6,23 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Skill source repositories and managed installs** (ADR-0098, LocalHub#40).
+  A curated way to pull advisory skills from public **HTTPS** Git repositories:
+  `skills repo add|refresh|list|delete`, `skills available [query]`,
+  `skills install [--repo <id>] <name>` / `--all`, and `skills delete <name>`,
+  each available as both `localpilot skills …` and `/skills …` with identical
+  behaviour. Sources are explicit cached commit snapshots (adding installs
+  nothing; refresh is the only network update and is atomic); a source exposes one
+  catalog root (`.localpilot/skills` › `.agents/skills` › `.claude/skills` ›
+  `skills` › a root `SKILL.md`) and is rejected as a whole on an invalid or
+  duplicate-named manifest. Managed installs copy the full package into
+  `.localpilot/skills` (effective through the normal resolver), record provenance,
+  never overwrite a same-scope skill, run nothing, and grant nothing; `--all` is
+  all-or-nothing. `skills delete` removes only LocalPilot-installed skills and
+  refuses hand-authored content. Management is user-only (never a model tool):
+  project mutations need a trusted workspace, global mutations add a global-impact
+  disclosure, and every network/write/delete discloses its impact and needs an
+  interactive confirmation or `--yes`. `-g` selects the user-global scope.
 - **A UTF-8 BOM in a `SKILL.md` no longer hides every project skill**
   (ADR-0096, LocalHub#38). The manifest parser now strips one optional leading
   byte-order mark before checking for the `---` frontmatter delimiter (all other

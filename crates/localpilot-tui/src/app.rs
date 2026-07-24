@@ -85,6 +85,10 @@ pub enum SlashAction {
     /// enters persistent research mode.
     Research(Option<String>),
     ContextBuild(String),
+    /// Manage skills: sources, installs, listing. The raw argument string is
+    /// parsed by the shared `skills` command so the slash and CLI forms parse to
+    /// and execute the same operations (LocalHub#40).
+    Skills(String),
     /// Manage background processes started this session.
     Background(BackgroundCommand),
     Quit,
@@ -208,6 +212,9 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         }
         _ if name == "research" => SlashAction::Research(None),
         _ if name == "context" => parse_context(args),
+        // `/skills …` captures its raw arguments; the host parses them with the
+        // same command surface as `localpilot skills …` for exact parity.
+        _ if name == "skills" => SlashAction::Skills(args.to_string()),
         _ if name == "bg" => parse_bg(args),
         _ if matches!(name, "quit" | "q") && args.is_empty() => SlashAction::Quit,
         _ if matches!(
@@ -499,6 +506,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         )),
         SlashAction::Research(_) => state.apply(UiEvent::Notice(
             "/research is handled by the interactive host".to_string(),
+        )),
+        SlashAction::Skills(_) => state.apply(UiEvent::Notice(
+            "/skills is handled by the interactive host".to_string(),
         )),
         SlashAction::Background(_) => state.apply(UiEvent::Notice(
             "/bg is handled by the interactive host".to_string(),

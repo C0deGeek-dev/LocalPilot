@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::SkillError;
-use crate::loader::{discovery_roots, home_dir, Skill, SkillSet};
+use crate::loader::{discovery_roots, global_only_roots, home_dir, Skill, SkillSet};
 
 /// Locators returned by a search are capped so a turn spends a bounded number of
 /// tokens to *find* a skill before paying for any body.
@@ -52,6 +52,35 @@ pub fn discover_trusted(root: &Path, trusted: bool) -> Result<SkillSet, SkillErr
 /// Returns [`SkillError`] if a discovered manifest or frontmatter fails to parse.
 pub fn discover(root: &Path, home: Option<&Path>, trusted: bool) -> Result<SkillSet, SkillError> {
     SkillSet::resolve(&discovery_roots(root, home, trusted))
+}
+
+/// Resolve the effective skill set for `root`, optionally restricted to the
+/// user-global scope (`global_only`). The global baseline is resolved from the
+/// environment home; when `global_only` is false the trusted project overlay is
+/// added. Backs `skills list [-g]` / `skills show [-g]` (LocalHub#40).
+///
+/// # Errors
+/// Returns [`SkillError`] if a discovered manifest or frontmatter fails to parse.
+pub fn discover_trusted_scoped(
+    root: &Path,
+    trusted: bool,
+    global_only: bool,
+) -> Result<SkillSet, SkillError> {
+    let home = home_dir();
+    if global_only {
+        SkillSet::resolve(&global_only_roots(home.as_deref()))
+    } else {
+        discover(root, home.as_deref(), trusted)
+    }
+}
+
+/// The per-user home directory used for the global skill scope, resolved
+/// cross-platform. Exposed so a caller (the CLI) can construct a
+/// [`crate::SkillsManager`] with the same home the discovery layer uses. `None`
+/// when no home is set.
+#[must_use]
+pub fn user_home() -> Option<PathBuf> {
+    home_dir()
 }
 
 /// A simple relevance score for a locator: how many of the query's words the

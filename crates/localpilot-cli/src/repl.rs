@@ -876,6 +876,11 @@ async fn run_slash(
                 )));
             }
         },
+        SlashAction::Skills(raw) => {
+            let mut output = Vec::new();
+            let result = run_skills_slash(host.cwd, &raw, &mut output);
+            apply_command_result(state, output, result);
+        }
         SlashAction::Background(command) => {
             apply_background_command(state, runtime.background_registry(), command)
         }
@@ -890,6 +895,38 @@ async fn run_slash(
         }
     }
     Ok(())
+}
+
+/// Execute a `/skills …` slash command through the shared `skills` command
+/// surface, so the interactive form parses and behaves exactly like
+/// `localpilot skills …` (LocalHub#40). Because the TUI owns stdin, a mutation is
+/// treated as non-interactive: its impact is disclosed and, without `--yes`, it is
+/// refused rather than run unattended. A parse error surfaces clap's usage text as
+/// a notice instead of aborting the REPL.
+fn run_skills_slash(
+    cwd: &std::path::Path,
+    raw: &str,
+    out: &mut dyn std::io::Write,
+) -> anyhow::Result<()> {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    if tokens.is_empty() {
+        writeln!(
+            out,
+            "usage: /skills <list|show|available|install|delete|repo> … — see \
+             `localpilot skills --help`"
+        )?;
+        return Ok(());
+    }
+    match <crate::SkillsSlash as clap::Parser>::try_parse_from(tokens) {
+        Ok(parsed) => {
+            let _ = crate::skills_cmd::run(parsed.command, cwd, false, out)?;
+            Ok(())
+        }
+        Err(err) => {
+            writeln!(out, "{err}")?;
+            Ok(())
+        }
+    }
 }
 
 /// Drive the `/model` command: with no provider, list the configured providers

@@ -312,6 +312,25 @@ pub fn discovery_roots(
     roots
 }
 
+/// The user-global discovery roots only (no project overlay), for a read scoped
+/// to the global baseline (`skills list -g` / `show -g`). A missing home yields an
+/// empty root set, so a global-only view is simply empty rather than an error.
+#[must_use]
+pub fn global_only_roots(home: Option<&Path>) -> Vec<(PathBuf, SkillScope)> {
+    let mut roots = Vec::new();
+    if let Some(home) = home {
+        roots.push((
+            home.join(".localpilot").join("skills"),
+            SkillScope::GlobalLocalPilot,
+        ));
+        roots.push((
+            home.join(".agents").join("skills"),
+            SkillScope::GlobalAgents,
+        ));
+    }
+    roots
+}
+
 /// The per-user home directory, resolved cross-platform, consistent with the
 /// global instruction directory under `~/.localpilot/`. `None` when no home is
 /// set, in which case the global skill layer is omitted cleanly.
@@ -336,6 +355,23 @@ fn read(path: &Path) -> Result<String, SkillError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Read just the manifest of a skill package directory — the same rule the
+/// loader applies: a `skill.toml` if present, otherwise the `SKILL.md`
+/// frontmatter. Shared by discovery-time loading and catalog validation so both
+/// agree on what a valid package is (LocalHub#40).
+///
+/// # Errors
+/// Returns [`SkillError::Io`] if a file cannot be read or [`SkillError::InvalidManifest`]
+/// if the manifest/frontmatter is malformed.
+pub(crate) fn read_manifest(skill_dir: &Path) -> Result<SkillManifest, SkillError> {
+    let manifest_path = skill_dir.join("skill.toml");
+    if manifest_path.is_file() {
+        SkillManifest::parse(&read(&manifest_path)?)
+    } else {
+        Ok(SkillManifest::parse_skill_md(&read(&skill_dir.join("SKILL.md"))?)?.0)
+    }
 }
 
 #[cfg(test)]

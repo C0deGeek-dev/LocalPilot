@@ -2,6 +2,59 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0098: Skill Sources Are Explicit Public-HTTPS Git Snapshots; Managed Installs Are Provenance-Tracked And Never Overwrite Or Delete Unmanaged Content
+
+Status: accepted. Closes LocalHub#40. Builds on the effective skill catalog
+(ADR-0097) and the read-only advisory skill model (ADR-0020, ADR-0027).
+
+A reusable skill still had to be copied into a repository by hand. This adds a
+curated, user-managed way to pull skill packages from public Git repositories —
+`localpilot skills repo …`, `skills available`, `skills install`, `skills delete`
+(and `list`/`show`), each also reachable as `/skills …` in the REPL. It is a
+curated source list, not a marketplace: LocalPilot never discovers, ranks, or
+trusts a repository for the user.
+
+1. **A source is one explicit, cached commit snapshot.** `skills repo add`
+   validates a public **HTTPS** URL (SSH, embedded credentials, explicit refs,
+   private repos, and local paths are rejected), fetches the default branch once,
+   validates its catalog, and records the URL + commit in a per-scope
+   `skill-sources.toml`. Adding installs nothing. `.git`/trailing-slash variants
+   normalize to one identity, so re-adding a registered URL is refused — `skills
+   repo refresh` is the only network update, and it is atomic: a fetch/validation
+   failure keeps the previous usable cache, and a refresh never changes an
+   already-installed skill. `repo delete` removes only the registration and cache;
+   installed skills remain usable with their provenance.
+2. **Exactly one catalog root, chosen by fixed precedence.** A fetched snapshot
+   exposes one intentional catalog, taking the first non-empty of
+   `.localpilot/skills`, `.agents/skills`, `.claude/skills`, `skills`, or a single
+   root `SKILL.md`. Only that root's immediate package directories are read
+   (mirrored plugin/bundle trees are ignored). A source with no supported root, an
+   invalid manifest, or a duplicate manifest name in the selected root is rejected
+   as a whole.
+3. **Managed installs land in `.localpilot/skills` and carry provenance.** An
+   install copies the complete package snapshot into the scope's
+   `.localpilot/skills/<name>` (already a discovery root, so the skill becomes
+   effective through ADR-0097's resolver with no enable step) and records source
+   id/url/commit/source-path/scope/time in a per-scope `installed-skills.toml`
+   ledger, kept outside the third-party content. Nothing in a package is executed
+   and no permission is granted. A same-scope skill is never overwritten (a project
+   install may still deliberately shadow a global one); a bulk `--all` install
+   preflights and is all-or-nothing. `skills delete` removes only a
+   ledger-proven managed skill and refuses hand-authored or checked-in content;
+   removing a project install reveals the matching global skill again.
+4. **Management is user-only, gated, and side-effect-seamed.** These commands are
+   never model-callable tools. Project mutations require a trusted workspace;
+   global mutations require a resolvable home and add a global-impact disclosure.
+   Every network/write/delete discloses source/commit/destination/impact before
+   acting; the CLI confirms interactively or via explicit `--yes` and refuses an
+   unattended run without it, and the REPL (which owns stdin) treats a mutation as
+   non-interactive so it discloses and requires `--yes`. Content is bounded
+   (size/file caps) and escaping symlinks are rejected. The network is a
+   `RepoFetcher` seam, the clock is injected, and confirmation is an `Approval`
+   value, so the one management service is fully testable without live Git and the
+   `/skills` slash and `localpilot skills` CLI forms parse to and execute the same
+   operations.
+
 ## ADR-0097: User-Global Skills Are A Baseline Overlaid By The Trusted Project, Resolved To One Effective Skill Per Name
 
 Status: accepted. Closes LocalHub#39. Builds on the skill model (ADR-0027) and

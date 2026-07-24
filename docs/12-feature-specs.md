@@ -132,6 +132,41 @@ Scope and precedence (ADR-0097):
   only in a trusted workspace, so an untrusted project cannot shadow a global
   skill. `skills list`/`show` expose each effective skill's origin scope.
 
+Skill sources and managed installs (ADR-0098):
+
+- A user may register public **HTTPS** Git repositories as skill sources —
+  `skills repo add|refresh|list|delete` — search their cached catalogs offline
+  with `skills available [query]`, and install/remove packages with
+  `skills install` / `skills delete`. Every command is available as both
+  `localpilot skills …` (CLI) and `/skills …` (REPL), parsing to the same
+  operation. This is a curated source list, not a marketplace: LocalPilot does not
+  discover, rank, or trust repositories on the user's behalf.
+- Without `-g` a mutation targets the current project; `-g` targets the user-global
+  scope. Read-only commands without `-g` show the effective global+project view;
+  `-g` restricts them to the global scope.
+- `repo add` records one validated commit snapshot and installs nothing. Re-adding
+  a registered URL is refused (`.git`/trailing-slash variants normalize to one
+  identity); `repo refresh` is the only network update and is atomic — a failure
+  keeps the previous cache and never changes an installed skill. `repo delete`
+  removes only the registration and cache; installed skills remain usable.
+- A source exposes exactly one catalog root, chosen as the first non-empty of
+  `.localpilot/skills`, `.agents/skills`, `.claude/skills`, `skills`, or a single
+  root `SKILL.md`; mirrored bundle trees are ignored. A source with no supported
+  root, an invalid manifest, or a duplicate manifest name is rejected as a whole.
+- A managed install copies the complete package into the scope's
+  `.localpilot/skills` (so it becomes effective through the resolver above) and
+  records provenance in a per-scope ledger. Nothing is executed and no permission
+  is granted. A same-scope skill is never overwritten; `--all` is all-or-nothing.
+  `skills delete` removes only a LocalPilot-installed skill and refuses
+  hand-authored or checked-in content; removing a project install reveals the
+  global skill again.
+- Management is user-invoked only (never a model-callable tool). Project mutations
+  require a trusted workspace; global mutations require a resolvable home and an
+  extra global-impact disclosure. Network, write, and delete operations disclose
+  source/commit/destination/impact and require interactive confirmation or an
+  explicit `--yes`; an unattended run without `--yes` is refused. Repository and
+  package content is bounded and escaping symlinks are rejected.
+
 ## Skill Suggestions
 
 LocalPilot can suggest skill creation when repeated usage patterns appear.

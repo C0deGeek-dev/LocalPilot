@@ -42,7 +42,9 @@ pub fn is_trusted(cwd: &Path) -> bool {
 }
 
 /// Record `cwd` as trusted. A no-op if it is already recorded or if no config
-/// directory is available.
+/// directory is available. Only the interactive REPL persists trust, so this is
+/// unused when the TUI is compiled out.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn remember(cwd: &Path) {
     let Some(path) = store_path() else {
         return;

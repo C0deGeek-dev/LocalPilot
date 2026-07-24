@@ -783,6 +783,10 @@ impl AppState {
             "research",
             "Research a topic, local + web per config (/research [topic])",
         ),
+        (
+            "skills",
+            "Manage skills: repos, install, list (/skills <subcommand>)",
+        ),
         ("bg", "List background processes (/bg stop <id>|all)"),
         ("quit", "Exit LocalPilot"),
     ];
