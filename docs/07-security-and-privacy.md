@@ -462,6 +462,38 @@ construction:
 - **Findings stay review-gated.** Web-derived findings flow through the same
   provenance cross-check and review queue as local ones; nothing a fetch produced
   is written to accepted memory without human promotion.
+- **The browser-render fallback stays inside this boundary** (LocalHub#37).
+  Some pages deliver their content only after JavaScript runs; when a fetched
+  page's initial HTML shows a render signal (an empty framework mount, thin
+  content, an iframe-only body, a `Loading…` placeholder), research may render
+  it in a headless system browser. That means **executing the public page's
+  JavaScript and loading its allowlisted subresources and frames** — a wider
+  action than a single GET, so it is bounded the same way:
+  - The renderer is **off by default in the shipped binary** (built only under
+    the `render-browser` feature) and governed by `[research.render].mode`
+    (`auto`/`off`/`always`); `off` is a complete kill switch, and no browser is
+    bundled or downloaded (a system Chromium/Chrome/Edge is discovered or the
+    run records `renderer unavailable`).
+  - **Every browser request — the navigation, each redirect, every subresource,
+    every frame — is gated** through the same `[research.web]` allowlist before
+    it leaves the machine, via CDP request interception installed before the
+    first navigation. A disallowed request is failed in-browser and counted;
+    a redirect is re-gated as a new destination, never inheriting the original
+    host's permission.
+  - **http/https only, and internal addresses are always blocked** regardless
+    of the allowlist: `localhost` and any loopback, link-local, private, or
+    unspecified IP are refused (an SSRF guard, since a rendered page can
+    reference arbitrary hosts). Blocked requests are audited
+    (`render-blocked`, `render-blocked-internal`, `render-blocked-scheme`).
+  - **The browser context is ephemeral and cookie-less** — a fresh throwaway
+    profile removed after the run — so no cookies, storage, or authentication
+    state survive. The render is time-bounded (no indefinite network-idle wait);
+    a page that cannot render leaves an inspectable outcome, never a hang.
+  - Browser requests are **audited content-free** (`render-request` and the
+    block reasons above) with the redacted sub-question — never page bodies,
+    credentials, or unredacted queries. If a constrained allowlist blocks a
+    resource the article needed, the outcome is recorded, not presented as
+    complete content.
 
 A sample audit line:
 

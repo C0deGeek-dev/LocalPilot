@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research can render JavaScript-only documentation in a headless system
+  browser, inside the egress boundary** (LocalHub#37). Built under the optional
+  `render-browser` feature, the renderer drives a discovered system
+  Chromium/Chrome/Edge over the Chrome DevTools Protocol (no browser is bundled
+  or downloaded) to recover a page's post-JavaScript content when a render
+  signal fires. It stays strictly within the research boundary: every browser
+  request — navigation, redirect, subresource, frame — is gated through the same
+  `[research.web]` allowlist before it leaves the machine, http/https only,
+  with an unconditional SSRF block on `localhost`/loopback/link-local/private
+  addresses; the browser context is ephemeral and cookie-less; the render is
+  time-bounded; and every request/block is audited content-free. Without the
+  feature or a browser, research records an explicit "renderer unavailable"
+  outcome and falls back to iframe recovery.
 - **Research detects pages that need browser rendering and stops silently
   returning shell-only evidence** (LocalHub#37, first slice). A fetched page
   whose real content is missing from its initial HTML — an empty single-page-app

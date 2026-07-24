@@ -186,6 +186,125 @@ impl RenderOutcome {
     }
 }
 
+/// A per-request egress decision the renderer consults on every browser
+/// navigation, redirect, subresource, and frame before it leaves the machine —
+/// so browser rendering stays inside the same allowlist/audit boundary as a
+/// static fetch (LocalHub#37, `docs/07-security-and-privacy.md`). The binding
+/// layer implements this over its `WebAccess`; the renderer never sees the
+/// allowlist directly, only this yes/no (and the gate audits as it decides).
+pub trait RenderGate: Send + Sync {
+    /// Whether the browser may issue a request to `url`. The gate sees the full
+    /// URL so it can enforce the http/https-only rule and the host allowlist,
+    /// and record the decision in the egress audit.
+    fn allow(&self, url: &str) -> bool;
+}
+
+/// Bounds on one render: the caller maps its resolved rails into these so the
+/// renderer cannot run unbounded.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderBounds {
+    /// Longest to wait for the DOM to stabilise after load before extracting —
+    /// a bounded settle window, never an indefinite network-idle wait.
+    pub settle: std::time::Duration,
+    /// Hard ceiling on the whole render (navigation + settle + extraction).
+    pub timeout: std::time::Duration,
+    /// Maximum child frames to traverse (subject 04).
+    pub max_frames: usize,
+    /// Maximum nested-frame depth (subject 04).
+    pub max_depth: usize,
+}
+
+impl Default for RenderBounds {
+    fn default() -> Self {
+        Self {
+            settle: std::time::Duration::from_millis(1_500),
+            timeout: std::time::Duration::from_secs(20),
+            max_frames: 8,
+            max_depth: 3,
+        }
+    }
+}
+
+/// A request to render one page.
+#[derive(Debug, Clone)]
+pub struct RenderRequest {
+    /// The URL to render. The caller has already gated this host; the renderer
+    /// re-gates every browser request through the [`RenderGate`].
+    pub url: String,
+    /// Bounds for this render.
+    pub bounds: RenderBounds,
+}
+
+/// A rendered document: the post-JavaScript main document plus any extracted
+/// frames, returned to the caller for the same reduction + admission a static
+/// body gets.
+#[derive(Debug, Clone, Default)]
+pub struct RenderedDoc {
+    /// The main document's post-JavaScript HTML (the serialized rendered DOM).
+    pub html: String,
+    /// Extracted frame documents (subject 04); empty until frame traversal.
+    pub frames: Vec<RenderedFrame>,
+    /// Browser requests (subresources, frames, redirects) the gate blocked
+    /// during the render — so an incomplete DOM is reported, not presented as
+    /// complete.
+    pub blocked: usize,
+}
+
+/// One extracted frame document with its origin.
+#[derive(Debug, Clone)]
+pub struct RenderedFrame {
+    /// The frame's source URL; `None` for an inline `srcdoc` frame.
+    pub url: Option<String>,
+    /// The frame document's post-JavaScript HTML.
+    pub html: String,
+}
+
+/// A typed render failure the caller maps to a [`RenderOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderFailure {
+    /// No renderer/browser is available (feature off, or no browser found).
+    Unavailable,
+    /// The render exceeded its time budget.
+    Timeout,
+    /// The render ran but produced no substantive content.
+    NoContent,
+    /// A resource the page needed was blocked by the egress policy, leaving the
+    /// DOM incomplete.
+    Blocked,
+    /// The browser errored (launch/connection/protocol) — content-free detail
+    /// for diagnostics, never page content.
+    Browser(String),
+}
+
+impl RenderFailure {
+    /// The countable outcome this failure records in the retrieval accounting.
+    #[must_use]
+    pub fn outcome(&self) -> RenderOutcome {
+        match self {
+            Self::Unavailable | Self::Browser(_) => RenderOutcome::RendererUnavailable,
+            Self::Timeout => RenderOutcome::RenderTimeout,
+            Self::NoContent => RenderOutcome::NoSubstantiveContent,
+            Self::Blocked => RenderOutcome::BlockedByPolicy,
+        }
+    }
+}
+
+/// Renders a page's post-JavaScript content behind a [`RenderGate`]. The
+/// concrete browser implementation lives in the optional `localpilot-render`
+/// crate (behind the `render-browser` feature); the loop and binding layer
+/// depend only on this trait, so a build without the browser dependency simply
+/// has no renderer and records [`RenderOutcome::RendererUnavailable`].
+#[async_trait::async_trait]
+pub trait Renderer: Send + Sync {
+    /// Render `request.url`, gating every browser request through `gate`, and
+    /// return the rendered document or a typed failure.
+    async fn render(
+        &self,
+        request: &RenderRequest,
+        gate: &dyn RenderGate,
+    ) -> Result<RenderedDoc, RenderFailure>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,6 +16,7 @@ members = [
     "crates/localpilot-quota",
     "crates/localpilot-localmind",
     "crates/localpilot-research",
+    "crates/localpilot-render",
     "crates/localpilot-patchgen",
     "crates/localpilot-selfreview",
     "crates/localpilot-verify",
@@ -102,6 +103,12 @@ thiserror = "=2.0.9"
 toml = "=0.8.23"
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }
+# WebSocket client for the Chrome DevTools Protocol connection to a headless
+# system browser, used only by `localpilot-render` behind the cli `render-browser`
+# feature. No TLS: CDP is a local `ws://127.0.0.1` endpoint, so default features
+# (which pull a TLS backend) are off and only `connect` is enabled — a small,
+# MSRV-1.82-clean tree.
+tokio-tungstenite = { version = "=0.24.0", default-features = false, features = ["connect"] }
 tracing = "=0.1.41"
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "=1.11.0", features = ["v4", "serde"] }

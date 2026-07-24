@@ -37,6 +37,13 @@ tui = [
 # LocalMind is always linked; this feature remains as a compatibility alias for
 # existing build commands.
 learning = []
+# The research browser-rendering fallback (LocalHub#37): links the optional
+# `localpilot-render` crate (and its headless-browser CDP stack) so a
+# JavaScript-rendered or iframe-embedded documentation page can be rendered
+# through a discovered system Chromium/Edge, inside the research egress
+# boundary. Off by default so the standard binary links no browser stack; the
+# always-on render-required detection and iframe recovery work without it.
+render-browser = ["dep:localpilot-render"]
 
 [dependencies]
 anyhow.workspace = true
@@ -82,6 +89,7 @@ localpilot-mcp = { path = "../localpilot-mcp" }
 localpilot-patchgen = { path = "../localpilot-patchgen" }
 localpilot-quota = { path = "../localpilot-quota" }
 localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-render = { path = "../localpilot-render", optional = true }
 localpilot-research = { path = "../localpilot-research" }
 localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }

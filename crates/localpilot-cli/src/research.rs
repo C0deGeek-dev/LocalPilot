@@ -22,8 +22,9 @@ use localpilot_research::{
     candidates_from, evidence_block, html_to_markdown, iframe_sources, prepare_query,
     render_markdown, render_signal, run_research_controlled, term_overlap_relevance,
     AdmissionTrail, AuditEntry, Bounds, CoverageVerdict, Evidence, FetchDecision, Finding,
-    Gathered, HeuristicSynthesizer, Provenance, RenderSignal, ResearchError, ResearchReport,
-    RunControl, Source, SourceAccount, SourceError, SourceSet, Synthesizer, WebAccess,
+    Gathered, HeuristicSynthesizer, Provenance, RenderBounds, RenderGate, RenderRequest,
+    RenderSignal, Renderer, ResearchError, ResearchReport, RunControl, Source, SourceAccount,
+    SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -740,7 +741,15 @@ async fn build_web_source(
     };
 
     access.grant_session();
-    WebSource::new(
+    let renderer = build_renderer(config.research.render.mode);
+    if renderer.is_some() {
+        writeln!(
+            out,
+            "  render fallback: pages needing JavaScript are rendered by a headless \
+             system browser, gated by the same allowlist and audited"
+        )?;
+    }
+    Ok(WebSource::new(
         topic,
         config.research.render.mode,
         access,
@@ -748,7 +757,28 @@ async fn build_web_source(
         model,
         search,
         admission,
-    )
+    )?
+    .with_renderer(renderer))
+}
+
+/// Construct the browser-rendering fallback when the `render-browser` feature is
+/// built, a system browser is present, and the mode is not `off`. `None`
+/// otherwise, so the run degrades to static extraction + iframe recovery and
+/// records an explicit render-required outcome for a page that needed rendering.
+#[cfg(feature = "render-browser")]
+fn build_renderer(mode: localpilot_config::RenderMode) -> Option<Arc<dyn Renderer>> {
+    if matches!(mode, localpilot_config::RenderMode::Off) {
+        return None;
+    }
+    localpilot_render::ChromiumRenderer::available()
+        .then(|| Arc::new(localpilot_render::ChromiumRenderer::new()) as Arc<dyn Renderer>)
+}
+
+/// Without the `render-browser` feature there is no browser renderer; the
+/// always-on detection + iframe recovery still apply.
+#[cfg(not(feature = "render-browser"))]
+fn build_renderer(_mode: localpilot_config::RenderMode) -> Option<Arc<dyn Renderer>> {
+    None
 }
 
 /// Connect the `[research.mcp]`-designated search tools and disclose them.
@@ -934,6 +964,11 @@ struct WebSource {
     /// same question-level basis. `None` degrades to the deterministic
     /// term-overlap score plus the engine's admission floor.
     admission: Option<Arc<AdmissionJudge>>,
+    /// The browser-rendering fallback, present only when the `render-browser`
+    /// feature is built and a system browser was found. `None` degrades to
+    /// static extraction plus iframe recovery, recording `renderer unavailable`
+    /// for a page that needed rendering (LocalHub#37).
+    renderer: Option<Arc<dyn Renderer>>,
 }
 
 /// Bound on page content sent to the admission classifier — enough to judge
@@ -1141,7 +1176,16 @@ impl WebSource {
             search,
             politeness: std::sync::Mutex::new(HostPoliteness::default()),
             admission,
+            renderer: None,
         })
+    }
+
+    /// Attach a browser-rendering fallback. Builder-style so the 7-arg
+    /// constructor and its call sites stay unchanged; `None` (the default) keeps
+    /// the static-only behaviour.
+    fn with_renderer(mut self, renderer: Option<Arc<dyn Renderer>>) -> Self {
+        self.renderer = renderer;
+        self
     }
 
     /// Run the model-backed relevance admission over one fetched page, right
@@ -1378,6 +1422,24 @@ impl WebSource {
         account: &mut SourceAccount,
         evidence: &mut Vec<Evidence>,
     ) -> Result<(), SourceError> {
+        // 1. The browser renderer, when available: the direct fix for a page
+        // whose content only appears after JavaScript. A successful render
+        // captures the main document and we are done; an empty or failed render
+        // falls through to iframe recovery (the rendered main DOM never carries
+        // cross-origin frame content).
+        if let Some(renderer) = self.renderer.clone() {
+            match self
+                .render_page(renderer.as_ref(), ctx, lead, account, evidence)
+                .await?
+            {
+                RenderAttempt::Produced => return Ok(()),
+                RenderAttempt::Empty | RenderAttempt::Failed => {}
+            }
+        }
+
+        // 2. Recover allowlisted iframes through the ordinary gated path (works
+        // with no browser); if nothing is recovered, record an explicit
+        // render-required outcome so the gap is inspectable (LocalHub#37).
         let recovered = self.recover_frames(ctx, lead, account, evidence).await?;
         if recovered > 0 {
             account.render_notes.push(format!(
@@ -1387,8 +1449,13 @@ impl WebSource {
             ));
         } else {
             account.render_required += 1;
+            let cause = if self.renderer.is_some() {
+                "no rendered or frame content recovered"
+            } else {
+                "renderer unavailable, no allowlisted frame recovered"
+            };
             account.render_notes.push(format!(
-                "{} — {}: renderer unavailable, no allowlisted frame recovered",
+                "{} — {}: {cause}",
                 ctx.parent_url,
                 lead.signal.reason()
             ));
@@ -1403,6 +1470,81 @@ impl WebSource {
             )?;
         }
         Ok(())
+    }
+
+    /// Render the page through the browser fallback and admit its
+    /// post-JavaScript main document. Every browser request is gated + audited
+    /// through [`WebAccessGate`]. Returns whether substantive content was
+    /// produced (`Produced`), the page genuinely rendered empty (`Empty`), or
+    /// the render failed (`Failed`) — the latter two fall through to iframe
+    /// recovery.
+    async fn render_page(
+        &self,
+        renderer: &dyn Renderer,
+        ctx: &FrameContext<'_>,
+        lead: &RenderLead,
+        account: &mut SourceAccount,
+        evidence: &mut Vec<Evidence>,
+    ) -> Result<RenderAttempt, SourceError> {
+        let gate = WebAccessGate {
+            access: self.access.clone(),
+            audit_log: self.audit_log.clone(),
+            query: ctx.query.to_string(),
+        };
+        let request = RenderRequest {
+            url: ctx.parent_url.to_string(),
+            bounds: RenderBounds::default(),
+        };
+        let doc = match renderer.render(&request, &gate).await {
+            Ok(doc) => doc,
+            Err(failure) => {
+                account.render_notes.push(format!(
+                    "{} — {}: {}",
+                    ctx.parent_url,
+                    lead.signal.reason(),
+                    failure.outcome().label()
+                ));
+                return Ok(RenderAttempt::Failed);
+            }
+        };
+        let text = html_to_markdown(&doc.html);
+        let snippet = bound_body(&text, WEB_MAX_BODY_BYTES);
+        if snippet.trim().chars().count() < MIN_RENDERED_CHARS {
+            account.render_notes.push(format!(
+                "{} — {}: no substantive rendered content ({} subresource(s) blocked)",
+                ctx.parent_url,
+                lead.signal.reason(),
+                doc.blocked
+            ));
+            return Ok(RenderAttempt::Empty);
+        }
+        let scoped = scope_to_topic(&self.topic, ctx.question);
+        let relevance = term_overlap_relevance(&scoped, &snippet);
+        let rendered = Evidence::new(
+            ctx.question,
+            snippet,
+            Provenance::new("web", Some(ctx.parent_url.to_string())),
+            relevance,
+        )
+        .with_admission(AdmissionTrail {
+            raw: relevance,
+            rank: 1.0,
+            reason: "rendered".to_string(),
+        });
+        if let Some(admitted) = self
+            .admit(ctx.parent_url, ctx.parent_host, ctx.query, rendered)
+            .await?
+        {
+            account.admitted += 1;
+            evidence.push(admitted);
+        } else {
+            account.rejected_relevance += 1;
+        }
+        account.render_notes.push(format!(
+            "{} — rendered main document ({} subresource(s) blocked)",
+            ctx.parent_url, doc.blocked
+        ));
+        Ok(RenderAttempt::Produced)
     }
 
     /// Fetch a page's allowlisted iframe sources through the same gated path as
@@ -1495,6 +1637,107 @@ struct FrameContext<'a> {
     parent_host: &'a str,
     question: &'a str,
     query: &'a str,
+}
+
+/// Below this many readable characters, a rendered document has no substantive
+/// content — an honest empty, never fabricated evidence.
+const MIN_RENDERED_CHARS: usize = 100;
+
+/// The result of a browser-render attempt.
+enum RenderAttempt {
+    /// The render produced substantive content (admitted or judged off-topic).
+    Produced,
+    /// The render ran but the page had no substantive content.
+    Empty,
+    /// The render failed (unavailable, timeout, blocked, browser error).
+    Failed,
+}
+
+/// A [`RenderGate`] over the research [`WebAccess`]: the browser renderer
+/// consults it on every navigation, redirect, subresource, and frame, so
+/// rendering obeys the same http/https-only + allowlist boundary as a static
+/// fetch and every browser request/skip is audited content-free (LocalHub#37).
+struct WebAccessGate {
+    access: WebAccess,
+    audit_log: PathBuf,
+    query: String,
+}
+
+impl RenderGate for WebAccessGate {
+    fn allow(&self, url: &str) -> bool {
+        let Ok(parsed) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        let host = parsed.host_str().unwrap_or_default();
+        // http/https only: no local-file, loopback-scheme, or other unsafe
+        // destination may be rendered, matching the static fetch boundary.
+        if !matches!(parsed.scheme(), "http" | "https") {
+            let _ = append_audit(
+                &self.audit_log,
+                &audit_entry(url, host, "render-blocked-scheme", &self.query),
+            );
+            return false;
+        }
+        // A rendered page can reference arbitrary subresources; an open-web
+        // allowlist must never let the browser reach a loopback, link-local,
+        // or private-network address (SSRF). This block is unconditional,
+        // ahead of the host allowlist.
+        if is_internal_host(host) {
+            let _ = append_audit(
+                &self.audit_log,
+                &audit_entry(url, host, "render-blocked-internal", &self.query),
+            );
+            return false;
+        }
+        match self.access.decide_host(host) {
+            FetchDecision::Allowed => {
+                let _ = append_audit(
+                    &self.audit_log,
+                    &audit_entry(url, host, "render-request", &self.query),
+                );
+                true
+            }
+            FetchDecision::NeedsConfirmation | FetchDecision::Disabled => {
+                let _ = append_audit(
+                    &self.audit_log,
+                    &audit_entry(url, host, "render-blocked", &self.query),
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Whether a host is an internal/private destination the renderer must never
+/// reach, regardless of the allowlist: `localhost`, or an IP literal in a
+/// loopback, link-local, private, or unspecified range (SSRF guard). A public
+/// DNS name returns `false` (its resolved address is the browser's concern; the
+/// allowlist governs which names are reachable at all).
+fn is_internal_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique-local fc00::/7 and link-local fe80::/10 (is_unique_local /
+                // is_unicast_link_local are unstable, so test the prefixes here).
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 /// The countable outcome of one URL's fetch attempt.
@@ -2565,6 +2808,155 @@ mod tests {
             !log.contains("render-required"),
             "no render-required audit under mode=off: {log}"
         );
+    }
+
+    /// A renderer stub: returns fixed post-JavaScript HTML and exercises the
+    /// gate, so the WebSource render-admit wiring is tested without a browser.
+    struct FakeRenderer {
+        html: String,
+    }
+
+    #[async_trait]
+    impl Renderer for FakeRenderer {
+        async fn render(
+            &self,
+            request: &RenderRequest,
+            gate: &dyn RenderGate,
+        ) -> Result<localpilot_research::RenderedDoc, localpilot_research::RenderFailure> {
+            // The real renderer gates every browser request; exercise the gate
+            // on the page URL so the wiring path is realistic.
+            let _ = gate.allow(&request.url);
+            Ok(localpilot_research::RenderedDoc {
+                html: self.html.clone(),
+                frames: Vec::new(),
+                blocked: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_render_signal_page_admits_the_rendered_main_document() {
+        // LocalHub#37: when a render signal fires and a renderer is present, the
+        // page's post-JavaScript content is rendered, admitted, and the page is
+        // no longer flagged render-required.
+        let server = MockServer::start().await;
+        let shell = "<html><body><div id=\"root\"></div>\
+                     <script src=\"/app.js\"></script></body></html>";
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(shell.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/app", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+        let rendered_html = format!(
+            "<html><body><article>{}</article></body></html>",
+            "rendered widget documentation content. ".repeat(10)
+        );
+        let source = source.with_renderer(Some(Arc::new(FakeRenderer {
+            html: rendered_html,
+        })));
+
+        let gathered = source
+            .gather("how does the widget render", 3)
+            .await
+            .unwrap();
+        assert!(
+            gathered
+                .evidence
+                .iter()
+                .any(|e| e.snippet.contains("rendered widget documentation")),
+            "the rendered main document is admitted as evidence: {:?}",
+            gathered
+                .evidence
+                .iter()
+                .map(|e| &e.snippet)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            gathered.account.render_required, 0,
+            "a successful render is not flagged render-required"
+        );
+        assert!(
+            gathered
+                .account
+                .render_notes
+                .iter()
+                .any(|note| note.contains("rendered main document")),
+            "a render note records the rendered document: {:?}",
+            gathered.account.render_notes
+        );
+    }
+
+    #[test]
+    fn render_gate_enforces_scheme_allowlist_and_blocks_internal() {
+        // The browser renderer's egress boundary: http/https only, host
+        // allowlist, and an unconditional SSRF block on internal addresses —
+        // every decision audited content-free (LocalHub#37, docs/07).
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("gate.log");
+        let mut access = WebAccess::new(true, vec!["docs.example".to_string()], Vec::new());
+        access.grant_session();
+        let gate = WebAccessGate {
+            access,
+            audit_log: audit.clone(),
+            query: "q".to_string(),
+        };
+
+        assert!(
+            gate.allow("https://docs.example/page"),
+            "allowlisted host is allowed"
+        );
+        assert!(
+            !gate.allow("https://evil.example/x"),
+            "non-allowlisted host is blocked"
+        );
+        assert!(
+            !gate.allow("file:///etc/passwd"),
+            "non-http scheme is blocked"
+        );
+        assert!(!gate.allow("http://127.0.0.1/x"), "loopback is blocked");
+        assert!(
+            !gate.allow("http://169.254.169.254/latest/meta-data"),
+            "link-local metadata endpoint is blocked"
+        );
+        assert!(!gate.allow("http://10.0.0.5/x"), "private range is blocked");
+        assert!(!gate.allow("http://localhost/x"), "localhost is blocked");
+
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(log.contains("decision=render-request"), "{log}");
+        assert!(log.contains("decision=render-blocked"), "{log}");
+        assert!(log.contains("decision=render-blocked-internal"), "{log}");
+        assert!(log.contains("decision=render-blocked-scheme"), "{log}");
+    }
+
+    #[test]
+    fn is_internal_host_classifies_loopback_private_and_linklocal() {
+        for internal in [
+            "localhost",
+            "127.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "10.1.2.3",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fc00::abcd",
+        ] {
+            assert!(is_internal_host(internal), "{internal} is internal");
+        }
+        for public in [
+            "docs.rs",
+            "example.com",
+            "93.184.216.34",
+            "8.8.8.8",
+            "2606:2800:220::1",
+        ] {
+            assert!(!is_internal_host(public), "{public} is public");
+        }
     }
 
     #[tokio::test]
