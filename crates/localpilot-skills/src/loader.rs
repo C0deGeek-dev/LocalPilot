@@ -25,6 +25,11 @@ impl Skill {
 #[derive(Debug, Clone, Default)]
 pub struct SkillSet {
     skills: Vec<Skill>,
+    /// Skills that failed to parse, as `path: error` lines. A malformed skill
+    /// (bad frontmatter, unreadable file) is skipped and recorded here rather
+    /// than aborting the whole set — one bad file must never hide every valid
+    /// project skill (LocalHub#38).
+    skipped: Vec<String>,
 }
 
 impl SkillSet {
@@ -36,41 +41,66 @@ impl SkillSet {
     /// `description`), so cross-harness skill directories load as-is. Later
     /// directories do not override earlier ones; all are collected.
     ///
+    /// A malformed skill (unparseable frontmatter, unreadable file) is skipped
+    /// and recorded in [`SkillSet::skipped`] with its path, so one bad file
+    /// never hides every valid project skill (LocalHub#38).
+    ///
     /// # Errors
-    /// Returns [`SkillError::InvalidManifest`] if a manifest or frontmatter
-    /// fails to parse.
+    /// Currently never returns `Err` — per-skill failures are collected, not
+    /// fatal. The `Result` is kept so a future catastrophic failure can be
+    /// surfaced without a breaking signature change.
     pub fn load(dirs: &[PathBuf]) -> Result<Self, SkillError> {
         let mut skills = Vec::new();
+        let mut skipped = Vec::new();
         for dir in dirs {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let skill_dir = entry.path();
-                let manifest_path = skill_dir.join("skill.toml");
                 let instructions_path = skill_dir.join("SKILL.md");
                 if !instructions_path.is_file() {
                     continue;
                 }
-                let skill = if manifest_path.is_file() {
-                    Skill {
-                        manifest: SkillManifest::parse(&read(&manifest_path)?)?,
-                        instructions: read(&instructions_path)?,
-                        dir: skill_dir,
+                match Self::load_one(&skill_dir) {
+                    Ok(skill) => skills.push(skill),
+                    Err(error) => {
+                        skipped.push(format!("{}: {error}", instructions_path.display()));
                     }
-                } else {
-                    let (manifest, body) =
-                        SkillManifest::parse_skill_md(&read(&instructions_path)?)?;
-                    Skill {
-                        manifest,
-                        instructions: body,
-                        dir: skill_dir,
-                    }
-                };
-                skills.push(skill);
+                }
             }
         }
-        Ok(Self { skills })
+        Ok(Self { skills, skipped })
+    }
+
+    /// Load a single skill directory: a `skill.toml` uses the LocalPilot
+    /// manifest, otherwise `SKILL.md` frontmatter is read in the standard
+    /// format. The error path/diagnostic is added by the caller.
+    fn load_one(skill_dir: &Path) -> Result<Skill, SkillError> {
+        let manifest_path = skill_dir.join("skill.toml");
+        let instructions_path = skill_dir.join("SKILL.md");
+        if manifest_path.is_file() {
+            Ok(Skill {
+                manifest: SkillManifest::parse(&read(&manifest_path)?)?,
+                instructions: read(&instructions_path)?,
+                dir: skill_dir.to_path_buf(),
+            })
+        } else {
+            let (manifest, body) = SkillManifest::parse_skill_md(&read(&instructions_path)?)?;
+            Ok(Skill {
+                manifest,
+                instructions: body,
+                dir: skill_dir.to_path_buf(),
+            })
+        }
+    }
+
+    /// Skills that failed to parse and were skipped, as `path: error` lines.
+    /// A caller (e.g. `skills list`) surfaces these as warnings so a malformed
+    /// skill is visible without hiding the valid ones (LocalHub#38).
+    #[must_use]
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
     }
 
     /// The names of all loaded skills.
@@ -202,21 +232,58 @@ Use the bundled script.
     }
 
     #[test]
-    fn a_bad_standard_skill_name_is_rejected() {
+    fn a_bad_standard_skill_is_skipped_and_reported_not_fatal() {
+        // LocalHub#38: a malformed skill is skipped with its path recorded, and
+        // valid skills in the same directory still load — one bad file must not
+        // hide the rest.
         let dir = tempfile::tempdir().unwrap();
-        let skill_dir = dir.path().join("bad");
-        std::fs::create_dir_all(&skill_dir).unwrap();
+        let bad = dir.path().join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---
-name: Not Valid
-description: x
----
-body
-",
+            bad.join("SKILL.md"),
+            "---\nname: Not Valid\ndescription: x\n---\nbody\n",
         )
         .unwrap();
-        assert!(SkillSet::load(&[dir.path().to_path_buf()]).is_err());
+        write_skill(dir.path(), "good-skill", "a valid skill", "");
+
+        let set = SkillSet::load(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            set.names(),
+            vec!["good-skill"],
+            "the valid skill still loads"
+        );
+        assert_eq!(set.skipped().len(), 1, "the bad skill is reported");
+        assert!(
+            set.skipped()[0].contains("bad") && set.skipped()[0].contains("SKILL.md"),
+            "the skipped report names the offending path: {}",
+            set.skipped()[0]
+        );
+    }
+
+    #[test]
+    fn a_bom_prefixed_standard_skill_loads() {
+        // LocalHub#38: a SKILL.md saved as UTF-8 with a BOM (EF BB BF) loads
+        // identically to its BOM-free form.
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("bom-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let body =
+            "---\nname: bom-skill\ndescription: a skill saved with a BOM\n---\nDo the thing.\n";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(body.as_bytes());
+        std::fs::write(skill_dir.join("SKILL.md"), bytes).unwrap();
+
+        let set = SkillSet::load(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(set.names(), vec!["bom-skill"]);
+        assert!(
+            set.skipped().is_empty(),
+            "a BOM is tolerated, not a parse failure"
+        );
+        assert!(set
+            .by_name("bom-skill")
+            .unwrap()
+            .instructions
+            .starts_with("Do the thing."));
     }
 
     #[test]

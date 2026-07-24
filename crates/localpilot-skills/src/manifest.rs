@@ -80,6 +80,10 @@ impl SkillManifest {
     /// Returns [`SkillError::InvalidManifest`] naming the offending field.
     pub fn parse(toml_str: &str) -> Result<Self, SkillError> {
         use figment::providers::Format;
+        // A file saved as UTF-8 with BOM (a common Windows/editor default)
+        // begins with U+FEFF; strip that one optional prefix so the manifest
+        // parses. All other validation stays strict.
+        let toml_str = strip_bom(toml_str);
         figment::Figment::new()
             .merge(figment::providers::Toml::string(toml_str))
             .extract()
@@ -96,6 +100,11 @@ impl SkillManifest {
     /// Returns [`SkillError::InvalidManifest`] if the frontmatter is missing,
     /// malformed, or violates the name constraints.
     pub fn parse_skill_md(content: &str) -> Result<(Self, String), SkillError> {
+        // Accept one optional leading UTF-8 BOM (U+FEFF) before the `---`
+        // delimiter — a byte-identical file saved with or without a BOM must
+        // parse the same. Only that exact prefix is removed; arbitrary
+        // whitespace or characters before `---` stay rejected.
+        let content = strip_bom(content);
         let rest = content.strip_prefix("---").ok_or_else(|| {
             SkillError::InvalidManifest(
                 "SKILL.md must start with `---` YAML frontmatter".to_string(),
@@ -144,6 +153,14 @@ impl SkillManifest {
     }
 }
 
+/// Strip one optional leading UTF-8 byte-order mark (U+FEFF). A file saved as
+/// "UTF-8 with BOM" decodes to a string beginning with this code point; it is
+/// not content and must not defeat a delimiter check. Exactly one is removed;
+/// no other whitespace is trimmed, so the delimiter contract stays strict.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// The frontmatter fields of a standard `SKILL.md` file.
 #[derive(Debug, Deserialize)]
 struct SkillFrontmatter {
@@ -182,6 +199,31 @@ file_globs = [\"**/*.rs\"]\n";
         assert_eq!(manifest.required_tools, vec!["read_file"]);
         assert_eq!(manifest.triggers.commands, vec!["guard"]);
         assert_eq!(manifest.permissions, vec!["read:docs"]);
+    }
+
+    #[test]
+    fn skill_md_parses_identically_with_and_without_a_leading_bom() {
+        // LocalHub#38: a byte-identical SKILL.md with a leading UTF-8 BOM
+        // (U+FEFF / EF BB BF) parses the same as its BOM-free form.
+        let content = "---\nname: bom-skill\ndescription: saved with a BOM\n---\nBody.\n";
+        let with_bom = format!("\u{feff}{content}");
+        assert_eq!(with_bom.as_bytes()[..3], [0xEF, 0xBB, 0xBF]);
+
+        let (plain_manifest, plain_body) = SkillManifest::parse_skill_md(content).unwrap();
+        let (bom_manifest, bom_body) = SkillManifest::parse_skill_md(&with_bom).unwrap();
+        assert_eq!(plain_manifest.name, bom_manifest.name);
+        assert_eq!(plain_manifest.description, bom_manifest.description);
+        assert_eq!(plain_manifest.invocation, bom_manifest.invocation);
+        assert_eq!(plain_body, bom_body);
+        assert_eq!(bom_manifest.name, "bom-skill");
+    }
+
+    #[test]
+    fn skill_md_rejects_non_bom_junk_before_the_delimiter() {
+        // Only the exact BOM prefix is tolerated; arbitrary whitespace or
+        // characters before `---` stay rejected.
+        assert!(SkillManifest::parse_skill_md("  ---\nname: x\ndescription: y\n---\n").is_err());
+        assert!(SkillManifest::parse_skill_md("junk---\nname: x\ndescription: y\n---\n").is_err());
     }
 
     #[test]

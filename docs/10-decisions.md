@@ -2,6 +2,37 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0096: Skill Loading Tolerates A UTF-8 BOM And Skips A Malformed Skill Instead Of Aborting The Set
+
+Status: accepted. Closes LocalHub#38.
+
+A `SKILL.md` or `skill.toml` saved as "UTF-8 with BOM" (a common Windows/editor
+default) begins with `U+FEFF`. The manifest parser required the decoded string
+to start literally with `---`, so a BOM produced `SKILL.md must start with '---'
+YAML frontmatter` even though the frontmatter was present — and because
+discovery aborted on the first parse error, one BOM-prefixed file hid **every**
+valid project skill (the repo's own `.agents/skills` had five such files).
+
+1. **One optional leading BOM is stripped before any delimiter check**, in both
+   `SkillManifest::parse` (toml) and `parse_skill_md` (frontmatter). Exactly the
+   `U+FEFF` prefix is removed — no other whitespace is trimmed, so the `---`
+   delimiter contract and all frontmatter validation stay strict (junk or
+   whitespace before `---` is still rejected).
+2. **A malformed skill is skipped and reported, not fatal.** `SkillSet::load`
+   collects per-skill parse/read failures into `SkillSet::skipped()` (each a
+   `path: error` line) and loads the valid skills regardless — one bad file
+   never hides the rest. `skills list`/`show` surface the skipped entries as
+   warnings. `load` keeps its `Result` signature (currently always `Ok`) so a
+   future catastrophic failure can still be surfaced without a breaking change.
+   This is the explicit resolution of the abort-vs-skip question, matching the
+   recover-and-continue posture of ADR-0083.
+3. **The repository's own checked-in skill files are normalised to UTF-8
+   without BOM**, so they load on existing binaries too; the parser tolerance is
+   the durable fix, the normalisation is hygiene.
+4. **Tolerance is verified by byte-level tests** (the literal `EF BB BF` prefix),
+   not an editor-specific fixture encoding, so the behaviour cannot silently
+   regress.
+
 ## ADR-0095: Research Renders JavaScript-Only Pages In A Headless Browser, Inside The Egress Boundary
 
 Status: accepted. Closes LocalHub#37. Builds on the research egress boundary

@@ -26,6 +26,11 @@ pub fn list(root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
             return Ok(());
         }
     };
+    // A malformed skill is skipped, not fatal — warn about it but still list the
+    // valid ones (LocalHub#38).
+    for warning in set.skipped() {
+        writeln!(out, "warning: skipped a malformed skill — {warning}")?;
+    }
     let names = set.names();
     if names.is_empty() {
         writeln!(
@@ -65,6 +70,9 @@ pub fn show(root: &Path, name: &str, out: &mut dyn Write) -> anyhow::Result<()> 
             return Ok(());
         }
     };
+    for warning in set.skipped() {
+        writeln!(out, "warning: skipped a malformed skill — {warning}")?;
+    }
     match set.by_name(name.trim()) {
         Some(skill) => {
             writeln!(out, "# skill: {}", skill.manifest.name)?;

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A UTF-8 BOM in a `SKILL.md` no longer hides every project skill**
+  (ADR-0096, LocalHub#38). The manifest parser now strips one optional leading
+  byte-order mark before checking for the `---` frontmatter delimiter (all other
+  validation stays strict), so a file saved as "UTF-8 with BOM" loads normally.
+  Discovery is also resilient: a malformed skill is skipped and reported (by
+  path) as a warning rather than aborting the whole set, so one bad file never
+  hides the valid ones. `localpilot skills list`/`show` surface the skipped
+  entries. The repository's own `.agents/skills` files are normalised to UTF-8
+  without a BOM.
 - **Research can render JavaScript-only documentation in a headless system
   browser, inside the egress boundary** (LocalHub#37). Built under the optional
   `render-browser` feature, the renderer drives a discovered system

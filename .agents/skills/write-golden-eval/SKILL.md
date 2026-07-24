@@ -1,4 +1,4 @@
-﻿---
+---
 name: write-golden-eval
 description: >-
   Author a golden-task eval — a deterministic, original task fixture with the

@@ -1,4 +1,4 @@
-﻿---
+---
 name: add-tool
 description: >-
   Add or change a builtin tool — implement the Tool trait, generate its JSON

@@ -1,4 +1,4 @@
-﻿---
+---
 name: add-provider
 description: >-
   Add or change a model provider — implement the provider trait in localpilot-llm
