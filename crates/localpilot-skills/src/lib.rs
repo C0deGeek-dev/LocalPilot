@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod catalog;
+mod discovery;
 mod error;
 mod fetch;
 mod install;
@@ -21,6 +22,11 @@ mod templates;
 mod tools;
 
 pub use catalog::{read_catalog, Catalog, CatalogPackage, CATALOG_ROOTS};
+pub use discovery::{
+    rank, validate_repo, DiscoveredSkill, MatchState, ProposalState, ProposalStore, Ranked,
+    RankedSkill, Recommendation, RecommendationSource, SkillClassifier, SkillProposal,
+    ValidatedRepo,
+};
 pub use error::SkillError;
 pub use fetch::{GitFetcher, RepoFetcher, Snapshot};
 pub use install::{InstallLedger, Provenance};

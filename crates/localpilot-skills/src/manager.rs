@@ -14,13 +14,16 @@
 //! fetched package is executed and no permission is granted; management only moves
 //! validated files and records provenance.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::catalog::{read_catalog, Catalog};
+use crate::discovery::{DiscoveredSkill, MatchState};
 use crate::error::SkillError;
 use crate::fetch::{ensure_snapshot_within_bounds, RepoFetcher, Snapshot};
 use crate::install::{delete_installed, install_package, InstallLedger, Provenance};
+use crate::loader::{discovery_roots, global_only_roots, SkillSet};
 use crate::source::{normalize_url, source_id, SkillSource, SourceRegistry};
 
 /// The scope a mutation targets: the current project or the user-global baseline.
@@ -483,6 +486,60 @@ impl<'a> SkillsManager<'a> {
         Ok(())
     }
 
+    /// Structured, read-only discovery of the local view: the effective installed
+    /// skills (the #39 resolution) plus the packages available from registered
+    /// sources, each classified [`MatchState::Installed`] or
+    /// [`MatchState::Available`]. No network and no output — this is the local
+    /// data the discovery lane ranks and the review surface consumes; an installed
+    /// skill shadows an available package of the same name (LocalHub#41).
+    ///
+    /// # Errors
+    /// Returns an error only if reading a registry or a cached catalog fails.
+    pub fn local_discovery(&self, read: ReadScope) -> Result<Vec<DiscoveredSkill>, SkillError> {
+        // Installed = present in the effective skill catalog, resolved with the
+        // same precedence and trust gate the loader uses (#39).
+        let roots = match read {
+            ReadScope::Effective => discovery_roots(self.project_root, self.home, self.trusted),
+            ReadScope::GlobalOnly => global_only_roots(self.home),
+        };
+        let effective = SkillSet::resolve(&roots)?;
+        let mut by_name: BTreeMap<String, DiscoveredSkill> = BTreeMap::new();
+        for name in effective.names() {
+            if let Some(skill) = effective.by_name(name) {
+                by_name.insert(
+                    skill.manifest.name.clone(),
+                    DiscoveredSkill {
+                        name: skill.manifest.name.clone(),
+                        description: skill.manifest.description.clone(),
+                        state: MatchState::Installed,
+                        repo_url: None,
+                        source_id: None,
+                        commit: None,
+                        catalog_root: None,
+                        source_path: None,
+                        discoverable: skill.manifest.invocation.is_discoverable(),
+                    },
+                );
+            }
+        }
+        // Available = in a registered source's cached catalog but not installed.
+        let (catalogs, _unreadable) = self.source_catalogs(read)?;
+        for entry in &catalogs {
+            for package in &entry.catalog.packages {
+                by_name.entry(package.name.clone()).or_insert_with(|| {
+                    DiscoveredSkill::available(
+                        package,
+                        &entry.source.id,
+                        &entry.source.url,
+                        &entry.source.commit,
+                        &entry.catalog.root_label,
+                    )
+                });
+            }
+        }
+        Ok(by_name.into_values().collect())
+    }
+
     // --- installation -----------------------------------------------------
 
     /// Install a named skill or every package of a source into `scope`, from the
@@ -708,14 +765,16 @@ impl<'a> SkillsManager<'a> {
         self.fetch_snapshot_into_cache(paths, &source.id, &source.url)
     }
 
-    /// Load every source's cached catalog across the read scope, skipping (with a
-    /// note) a source whose cache is missing or unreadable.
-    fn load_catalogs(
+    /// Gather every source's cached catalog across the read scope. A source whose
+    /// cache is missing or unreadable is not fatal; its id is returned in the
+    /// second vector so a caller can surface it. No output — the shared plumbing
+    /// behind both the text `available` listing and structured `local_discovery`.
+    fn source_catalogs(
         &self,
         read: ReadScope,
-        out: &mut dyn Write,
-    ) -> Result<Vec<SourceCatalog>, SkillError> {
+    ) -> Result<(Vec<SourceCatalog>, Vec<String>), SkillError> {
         let mut catalogs = Vec::new();
+        let mut unreadable = Vec::new();
         for (scope, paths) in self.read_scopes(read) {
             let registry = SourceRegistry::load(&paths.sources_file())?;
             for source in registry.sources() {
@@ -729,17 +788,26 @@ impl<'a> SkillsManager<'a> {
                             base: paths.base.clone(),
                         },
                     }),
-                    Err(_) => {
-                        line(
-                            out,
-                            &format!(
-                                "note: source `{}` has no usable cache — run `skills repo refresh`",
-                                source.id
-                            ),
-                        )?;
-                    }
+                    Err(_) => unreadable.push(source.id.clone()),
                 }
             }
+        }
+        Ok((catalogs, unreadable))
+    }
+
+    /// Load every source's cached catalog across the read scope, noting (on `out`)
+    /// a source whose cache is missing or unreadable.
+    fn load_catalogs(
+        &self,
+        read: ReadScope,
+        out: &mut dyn Write,
+    ) -> Result<Vec<SourceCatalog>, SkillError> {
+        let (catalogs, unreadable) = self.source_catalogs(read)?;
+        for id in unreadable {
+            line(
+                out,
+                &format!("note: source `{id}` has no usable cache — run `skills repo refresh`"),
+            )?;
         }
         Ok(catalogs)
     }
@@ -1070,6 +1138,45 @@ mod tests {
                 .is_file(),
             "previous cache was lost on a failed refresh"
         );
+    }
+
+    #[test]
+    fn local_discovery_classifies_installed_and_available_and_installed_shadows() {
+        let c = ctx(&["alpha", "beta"]);
+        let fetcher = FakeFetcher {
+            fixture: c.fixture.clone(),
+            commit: "abc".to_string(),
+        };
+        let m = manager(&c, &fetcher, "1");
+        m.repo_add(
+            Scope::Project,
+            "https://github.com/o/r",
+            Approval::AssumeYes,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        // Install `alpha` into the project so it enters the effective catalog.
+        m.install(
+            Scope::Project,
+            InstallSpec::Named {
+                name: "alpha".to_string(),
+                repo: None,
+            },
+            Approval::AssumeYes,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let found = m.local_discovery(ReadScope::Effective).unwrap();
+        let by = |name: &str| found.iter().find(|d| d.name == name).cloned();
+        // `alpha` is installed (in the effective catalog); `beta` is only available.
+        assert_eq!(by("alpha").unwrap().state, MatchState::Installed);
+        assert_eq!(by("beta").unwrap().state, MatchState::Available);
+        // An installed skill carries no repository fields; an available one does.
+        assert!(by("alpha").unwrap().repo_url.is_none());
+        let beta = by("beta").unwrap();
+        assert_eq!(beta.repo_url.as_deref(), Some("https://github.com/o/r"));
+        assert_eq!(beta.commit.as_deref(), Some("abc"));
     }
 
     #[test]
