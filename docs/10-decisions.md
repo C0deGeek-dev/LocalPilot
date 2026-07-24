@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0094: The Research Topic Is A Contract Through Decomposition And Admission; Evidence Relevance And Candidate Trust Are Separate
+
+Status: accepted. Closes LocalHub#36. Follows ADR-0088's model-backed
+admission (which judged only the generated sub-question) and ADR-0090's
+full-evidence contract.
+
+Model-backed admission (ADR-0088) judged a fetched page or local chunk against
+the *generated sub-question* alone. A decomposed sub-question can silently drop
+the topic's load-bearing constraints — "three.js procedural materials" produced
+"How are parametric controls exposed to users in real-time?", which named no
+framework — so the search returned Unreal/Unity/Substance pages and admission
+scored them ~0.85 against the generic question. Separately, every review
+candidate read `0.30` because candidate creation caps confidence at the
+unreviewed-trust ceiling; admitted evidence scoring 0.75–0.95 all collapsed to
+that one number, conflating *evidence relevance* with *candidate trust*.
+
+1. **The original topic is threaded to admission.** Both the web source and the
+   local knowledge source carry the topic and pass it to the classifier
+   alongside the sub-question. The classifier is instructed that the topic's
+   load-bearing constraints — framework, library, language, runtime, platform,
+   version — always apply, and to reject a page that answers the sub-question
+   but is about a different framework/engine unless the topic itself asks for a
+   comparison or transferable techniques.
+2. **Decomposition is constrained.** The decompose prompt requires every
+   sub-question to stay within the topic's scope and keep its named constraints,
+   rather than broadening into a question another tool could answer.
+3. **Search queries are re-scoped to the topic.** When a sub-question no longer
+   carries the topic's significant terms, the topic is prefixed before the
+   redacted query leaves the machine (`scope_to_topic`), so a generic
+   sub-question cannot silently become a generic web search. The same scoped
+   text feeds the deterministic term-overlap fallback, making the no-model path
+   topic-aware: a cross-framework page missing the topic's terms floors below
+   the admission floor instead of matching the generic sub-question.
+4. **Evidence relevance and candidate trust are distinct, truthfully named.**
+   `CandidateSpec` preserves the finding's uncapped `evidence_relevance` beside
+   the capped `confidence` (candidate trust). The enqueued candidate names both
+   ("evidence relevance 0.85, candidate trust 0.30"), so a reviewer distinguishes
+   strong from weak evidence without the trust cap being raised — unreviewed
+   research stays low-trust and review-gated (ADR-0011).
+5. **The classifier's reason is preserved.** Admission parses and carries the
+   model's short rationale into the admission trail and the report's retrieval
+   accounting, so "admitted at 0.85" is auditable, content-free.
+6. **The deterministic fallback stays topic-aware, never dropping constraints
+   silently.** Losing the admission model degrades to topic-scoped term overlap,
+   not the previous constraint-blind sub-question overlap.
+
 ## ADR-0093: A Catalog Model May Name Its Drafter; One Speculation Engine Per Launch
 
 Status: accepted. LocalBox/shared-tier decision (series home per ADR-0062).

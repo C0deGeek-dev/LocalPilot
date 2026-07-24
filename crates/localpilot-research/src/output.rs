@@ -37,8 +37,16 @@ pub struct CandidateSpec {
     /// Confidence to attach: the finding's own relevance-derived
     /// `confidence`, capped by the caller's `confidence_cap` (never above it,
     /// however strong the match, because research findings are
-    /// machine-derived and unreviewed).
+    /// machine-derived and unreviewed). This is the *candidate trust* — the
+    /// low ceiling on an unreviewed machine-derived candidate — not a measure
+    /// of how well the evidence matched (see `evidence_relevance`).
     pub confidence: f32,
+    /// The finding's uncapped evidence relevance (`0.0..=1.0`), preserved
+    /// alongside the capped trust so the two are never conflated: a reviewer
+    /// can tell strong evidence (relevance 0.95) from weak (0.30) even though
+    /// every unreviewed candidate shares the same low trust ceiling
+    /// (LocalHub#36). Surfaced in the candidate the binding layer enqueues.
+    pub evidence_relevance: f32,
 }
 
 /// Derive review-queue candidate specs from a report.
@@ -60,18 +68,26 @@ pub struct CandidateSpec {
 /// `confidence`, capped at `confidence_cap` — never a single flat value
 /// applied uniformly, so a strong multi-source match reads as more
 /// trustworthy than a weak, single-incidental-word one, without ever
-/// exceeding the caller's low-trust ceiling for unreviewed candidates.
+/// exceeding the caller's low-trust ceiling for unreviewed candidates. The
+/// uncapped relevance is also preserved as `evidence_relevance`, so the
+/// binding layer can show evidence strength and candidate trust as two
+/// distinct, truthfully-named numbers rather than collapsing both into the
+/// capped value (LocalHub#36).
 #[must_use]
 pub fn candidates_from(report: &ResearchReport, confidence_cap: f32) -> Vec<CandidateSpec> {
     report
         .findings
         .iter()
         .filter(|f| f.status == ClaimStatus::Supported && !f.supporting.is_empty())
-        .map(|f| CandidateSpec {
-            body: f.statement.clone(),
-            provenance: f.supporting.clone(),
-            evidence: f.evidence.clone(),
-            confidence: f.confidence.clamp(0.0, 1.0).min(confidence_cap),
+        .map(|f| {
+            let relevance = f.confidence.clamp(0.0, 1.0);
+            CandidateSpec {
+                body: f.statement.clone(),
+                provenance: f.supporting.clone(),
+                evidence: f.evidence.clone(),
+                confidence: relevance.min(confidence_cap),
+                evidence_relevance: relevance,
+            }
         })
         .collect()
 }
@@ -510,6 +526,41 @@ mod tests {
             candidates[1].confidence, 0.4,
             "strong match is capped at the ceiling, not let through uncapped"
         );
+    }
+
+    #[test]
+    fn evidence_relevance_is_preserved_uncapped_beside_the_capped_trust() {
+        // LocalHub#36: the trust cap must not erase the evidence-relevance
+        // signal. Two findings admitted at 0.75 and 0.95 both hit the 0.30
+        // trust ceiling, but stay distinguishable by evidence_relevance.
+        let mut report = ResearchReport::new("t");
+        let mut a = finding(
+            "match a",
+            ClaimStatus::Supported,
+            vec![Provenance::new(
+                "web",
+                Some("https://a.example/1".to_string()),
+            )],
+        );
+        a.confidence = 0.75;
+        let mut b = finding(
+            "match b",
+            ClaimStatus::Supported,
+            vec![Provenance::new(
+                "web",
+                Some("https://b.example/2".to_string()),
+            )],
+        );
+        b.confidence = 0.95;
+        report.findings = vec![a, b];
+
+        let candidates = candidates_from(&report, 0.3);
+        // Trust collapses to the shared low ceiling…
+        assert_eq!(candidates[0].confidence, 0.3);
+        assert_eq!(candidates[1].confidence, 0.3);
+        // …but the evidence relevance stays distinct and uncapped.
+        assert_eq!(candidates[0].evidence_relevance, 0.75);
+        assert_eq!(candidates[1].evidence_relevance, 0.95);
     }
 
     #[test]

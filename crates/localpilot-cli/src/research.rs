@@ -127,8 +127,13 @@ impl Synthesizer for CliSynthesizer {
 fn decompose_prompt(topic: &str, max_questions: usize) -> String {
     format!(
         "Break the research topic below into at most {max_questions} focused \
-         sub-questions that together cover it. Output one sub-question per line, \
-         with no numbering, bullets, or commentary.\n\nTopic: {topic}"
+         sub-questions that together cover it. Each sub-question MUST stay within \
+         the topic's scope: keep every load-bearing constraint the topic names — \
+         its framework, library, language, runtime, platform, and version — even \
+         when a sub-question narrows to one aspect. Do not broaden a sub-question \
+         into a general question that a different framework or tool could answer. \
+         Output one sub-question per line, with no numbering, bullets, or \
+         commentary.\n\nTopic: {topic}"
     )
 }
 
@@ -284,9 +289,10 @@ pub async fn run_research_command_controlled(
         )?;
     }
     let web = web_override.unwrap_or(true);
-    let mut sources = build_local_sources(root, admission.clone());
+    let mut sources = build_local_sources(root, topic, admission.clone());
     if web {
-        let web_source = build_web_source(root, &config, model.clone(), admission, out).await?;
+        let web_source =
+            build_web_source(root, topic, &config, model.clone(), admission, out).await?;
         sources.push(Box::new(web_source));
     } else {
         writeln!(out, "web research: skipped for this run (--no-web)")?;
@@ -427,10 +433,15 @@ const LOCAL_EVIDENCE_MAX_CHARS: usize = 64 * 1024;
 /// Assemble the local source set: ingested knowledge + accepted memory. The
 /// shared admission judge (when a model resolves) gives local hits the same
 /// question-level relevance admission as fetched web pages (LocalHub#32).
-fn build_local_sources(root: &Path, admission: Option<Arc<AdmissionJudge>>) -> SourceSet {
+fn build_local_sources(
+    root: &Path,
+    topic: &str,
+    admission: Option<Arc<AdmissionJudge>>,
+) -> SourceSet {
     SourceSet::new()
         .with(Box::new(KnowledgeSource {
             root: root.to_path_buf(),
+            topic: topic.to_string(),
             admission,
         }))
         .with(Box::new(MemorySource {
@@ -440,6 +451,9 @@ fn build_local_sources(root: &Path, admission: Option<Arc<AdmissionJudge>>) -> S
 
 struct KnowledgeSource {
     root: PathBuf,
+    /// The original research topic, so local hits are judged against the
+    /// topic's constraints, not only the sub-question (LocalHub#36).
+    topic: String,
     /// Model-backed question-level admission, shared with the web source.
     /// `None` degrades to deterministic term-overlap scoring — never to the
     /// within-source rank, which orders hits but must not admit them.
@@ -491,7 +505,7 @@ impl Source for KnowledgeSource {
             // significant-term coverage against the sub-question. Either path
             // may admit zero local hits — an honest outcome.
             let judged = match &self.admission {
-                Some(judge) => judge.classify(question, content).await,
+                Some(judge) => judge.classify(&self.topic, question, content).await,
                 None => None,
             };
             let (relevance, reason) = match judged {
@@ -500,9 +514,18 @@ impl Source for KnowledgeSource {
                         account.rejected_relevance += 1;
                         continue;
                     }
-                    (verdict.score, "model admission")
+                    (verdict.score, admission_reason(&verdict.reason))
                 }
-                None => (term_overlap_relevance(question, content), "term overlap"),
+                // Topic-scoped so the deterministic fallback is topic-aware: a
+                // chunk missing the topic's load-bearing terms floors low even
+                // when it matches the generic sub-question (LocalHub#36).
+                None => {
+                    let scoped = scope_to_topic(&self.topic, question);
+                    (
+                        term_overlap_relevance(&scoped, content),
+                        "term overlap".to_string(),
+                    )
+                }
             };
             account.admitted += 1;
             evidence.push(
@@ -510,7 +533,7 @@ impl Source for KnowledgeSource {
                     .with_admission(AdmissionTrail {
                         raw: hit.relevance,
                         rank,
-                        reason: reason.to_string(),
+                        reason,
                     })
                     .with_full_source(full_chunk_evidence(&hit, body)),
             );
@@ -645,6 +668,7 @@ fn default_audit_log(root: &Path) -> PathBuf {
 /// fetched.
 async fn build_web_source(
     root: &Path,
+    topic: &str,
     config: &Config,
     model: Option<ModelHandle>,
     admission: Option<Arc<AdmissionJudge>>,
@@ -716,7 +740,7 @@ async fn build_web_source(
     };
 
     access.grant_session();
-    WebSource::new(access, audit_log, model, search, admission)
+    WebSource::new(topic, access, audit_log, model, search, admission)
 }
 
 /// Connect the `[research.mcp]`-designated search tools and disclose them.
@@ -881,6 +905,11 @@ impl McpSearchProposer {
 /// allowlist-only — no interactive per-fetch confirm). Only the redacted
 /// sub-question is ever sent off-machine.
 struct WebSource {
+    /// The original research topic, kept so admission judges each fetched page
+    /// against the topic's load-bearing constraints, not only the sub-question
+    /// (LocalHub#36) — and so a sub-question that dropped those constraints is
+    /// re-scoped before it becomes a search query.
+    topic: String,
     client: reqwest::Client,
     access: WebAccess,
     audit_log: PathBuf,
@@ -905,11 +934,14 @@ const ADMISSION_MIN_SCORE: f32 = localpilot_research::COVERAGE_RELEVANCE_FLOOR;
 
 /// The strict-JSON classification an evidence candidate (a fetched page, a
 /// local chunk) must clear to enter the evidence pool when a model judge is
-/// available.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// available. Carries the classifier's short reason so "admitted at 0.85" is
+/// auditable and the reviewer can see *why* a cross-framework page was kept or
+/// dropped, not only the number (LocalHub#36).
+#[derive(Debug, Clone, PartialEq)]
 struct AdmissionVerdict {
     relevant: bool,
     score: f32,
+    reason: String,
 }
 
 /// The model that classifies research content (fetched web pages, local
@@ -931,17 +963,32 @@ impl AdmissionJudge {
         host_model.cloned().map(Self::Host)
     }
 
-    /// Classify bounded page content against the sub-question. `None` when
+    /// Classify bounded page content against the sub-question **within the
+    /// original research topic's constraints**. The sub-question is judged only
+    /// as a focus inside the topic: content that answers the sub-question but
+    /// violates a load-bearing topic constraint (a different framework,
+    /// language, runtime, or platform) is rejected unless the topic itself asks
+    /// for a comparison or transferable techniques (LocalHub#36). `None` when
     /// the model is unavailable or its output is not the agreed strict JSON —
     /// the caller keeps the deterministic path rather than guessing.
-    async fn classify(&self, question: &str, content: &str) -> Option<AdmissionVerdict> {
+    async fn classify(
+        &self,
+        topic: &str,
+        question: &str,
+        content: &str,
+    ) -> Option<AdmissionVerdict> {
         let bounded: String = content.chars().take(ADMISSION_CONTENT_CHARS).collect();
         let instruction = format!(
-            "Classify whether the research content below actually helps answer the \
-             research sub-question. Judge relevance only; do not rewrite or summarize the \
-             content. Return ONLY this JSON object and nothing else: \
-             {{\"relevant\": true|false, \"score\": <0.0-1.0>, \"reason\": \"<short>\"}}\n\n\
-             Sub-question: {question}\n\nContent:\n{bounded}"
+            "Classify whether the research content below actually helps answer the research \
+             sub-question WITHIN the constraints of the original research topic. The topic's \
+             load-bearing constraints — framework, library, language, runtime, platform, and \
+             version — always apply, even when the sub-question does not repeat them. Reject \
+             content that answers the sub-question but is about a different framework, engine, \
+             language, or platform than the topic names, UNLESS the topic explicitly asks for a \
+             comparison, cross-tool techniques, or transferable examples. Judge relevance only; \
+             do not rewrite or summarize the content. Return ONLY this JSON object and nothing \
+             else: {{\"relevant\": true|false, \"score\": <0.0-1.0>, \"reason\": \"<short>\"}}\n\n\
+             Original topic: {topic}\n\nSub-question: {question}\n\nContent:\n{bounded}"
         );
         let reply = match self {
             Self::LocalMind(chat) => {
@@ -961,12 +1008,16 @@ impl AdmissionJudge {
 }
 
 /// Parse the strict admission JSON out of a model reply. Tolerates prose
-/// around exactly one JSON object; anything else is unusable (`None`).
+/// around exactly one JSON object; anything else is unusable (`None`). The
+/// classifier's short `reason` is kept so it can ride the admission trail into
+/// the report and review surfaces (LocalHub#36); a missing reason is not fatal.
 fn parse_admission(reply: &str) -> Option<AdmissionVerdict> {
     #[derive(serde::Deserialize)]
     struct Raw {
         relevant: bool,
         score: f32,
+        #[serde(default)]
+        reason: String,
     }
     let start = reply.find('{')?;
     let end = reply.rfind('}')?;
@@ -977,7 +1028,65 @@ fn parse_admission(reply: &str) -> Option<AdmissionVerdict> {
     Some(AdmissionVerdict {
         relevant: raw.relevant,
         score: raw.score.clamp(0.0, 1.0),
+        reason: flatten_reason(&raw.reason),
     })
+}
+
+/// Reduce a classifier reason to a short, single-line, bounded string safe to
+/// embed in the report's retrieval accounting (content-free by construction —
+/// it is the model's own rationale, never page text).
+fn flatten_reason(reason: &str) -> String {
+    let flat: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(160).collect()
+}
+
+/// The admission-trail reason for a model-admitted item: `model admission`,
+/// with the classifier's own short rationale appended when it gave one, so the
+/// report's accounting shows *why* a page was admitted against the topic, not
+/// only that a model did it (LocalHub#36).
+fn admission_reason(model_reason: &str) -> String {
+    if model_reason.is_empty() {
+        "model admission".to_string()
+    } else {
+        format!("model admission — {model_reason}")
+    }
+}
+
+/// Combine the original research topic with a sub-question so a sub-question
+/// that dropped the topic's load-bearing terms still carries them into search
+/// and deterministic relevance scoring (LocalHub#36). When the sub-question
+/// already contains every significant topic term (case-insensitive), it is
+/// returned unchanged — no redundant duplication. Otherwise the topic is
+/// prefixed, so a generic sub-question cannot silently become a generic search
+/// and a cross-framework page cannot term-overlap its way past the floor.
+fn scope_to_topic(topic: &str, question: &str) -> String {
+    let topic = topic.trim();
+    let question = question.trim();
+    if topic.is_empty() {
+        return question.to_string();
+    }
+    let question_terms: std::collections::HashSet<String> = significant_terms(question).collect();
+    let carries_constraints = significant_terms(topic).all(|term| question_terms.contains(&term));
+    if carries_constraints {
+        question.to_string()
+    } else {
+        format!("{topic} {question}")
+    }
+}
+
+/// Lowercased alphanumeric terms of length ≥ 3 that are not generic filler —
+/// the load-bearing words of a topic or question (a framework, library,
+/// language, or noun), used to decide whether a sub-question still carries its
+/// topic's constraints.
+fn significant_terms(text: &str) -> impl Iterator<Item = String> + '_ {
+    const FILLER: [&str; 20] = [
+        "the", "and", "for", "with", "how", "are", "use", "from", "into", "what", "why", "that",
+        "this", "does", "can", "should", "when", "which", "using", "your",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 3)
+        .map(str::to_ascii_lowercase)
+        .filter(|token| !FILLER.contains(&token.as_str()))
 }
 
 /// Per-run per-host fetch discipline: serialize-and-pace repeat visits
@@ -992,6 +1101,7 @@ struct HostPoliteness {
 
 impl WebSource {
     fn new(
+        topic: impl Into<String>,
         access: WebAccess,
         audit_log: PathBuf,
         model: Option<ModelHandle>,
@@ -1008,6 +1118,7 @@ impl WebSource {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
+            topic: topic.into(),
             client,
             access,
             audit_log,
@@ -1035,7 +1146,10 @@ impl WebSource {
         let Some(judge) = &self.admission else {
             return Ok(Some(found));
         };
-        let Some(verdict) = judge.classify(&found.question, &found.snippet).await else {
+        let Some(verdict) = judge
+            .classify(&self.topic, &found.question, &found.snippet)
+            .await
+        else {
             return Ok(Some(found));
         };
         if !verdict.relevant || verdict.score < ADMISSION_MIN_SCORE {
@@ -1047,7 +1161,7 @@ impl WebSource {
         }
         found.relevance = verdict.score;
         if let Some(trail) = &mut found.admission {
-            trail.reason = "model admission".to_string();
+            trail.reason = admission_reason(&verdict.reason);
         }
         Ok(Some(found))
     }
@@ -1186,8 +1300,13 @@ impl WebSource {
         // Scored against the kept content, not a flat constant: a page that
         // barely mentions the question's terms reads as weak evidence and
         // stays below the coverage floor (the term-coverage rule applied to
-        // fetched pages). `admit` upgrades the trail when the model judges.
-        let relevance = term_overlap_relevance(question, &snippet);
+        // fetched pages). Scored against the *topic-scoped* question so the
+        // deterministic fallback is topic-aware: a page missing the topic's
+        // load-bearing terms (a different framework) floors low even when it
+        // matches the generic sub-question (LocalHub#36). `admit` upgrades the
+        // trail when the model judges.
+        let scoped = scope_to_topic(&self.topic, question);
+        let relevance = term_overlap_relevance(&scoped, &snippet);
         Ok(FetchOutcome::Fetched(Box::new(
             Evidence::new(
                 question,
@@ -1235,7 +1354,11 @@ impl Source for WebSource {
             });
         }
         // Only the redacted sub-question leaves the machine — never evidence.
-        let query = prepare_query(localpilot_config::redact::redact, question);
+        // A sub-question that dropped the topic's load-bearing constraints is
+        // re-scoped with the topic first, so a generic sub-question cannot
+        // silently become a generic web search (LocalHub#36).
+        let scoped = scope_to_topic(&self.topic, question);
+        let query = prepare_query(localpilot_config::redact::redact, &scoped);
         // Designated search tools propose first (real search results); the
         // model's proposals fill any remaining budget. Either may be absent —
         // search works without a model and vice versa.
@@ -1410,9 +1533,16 @@ fn write_report(dir: &Path, topic: &str, report: &ResearchReport) -> anyhow::Res
 fn enqueue_candidates(root: &Path, report: &ResearchReport) -> anyhow::Result<usize> {
     let mut enqueued = 0;
     for spec in candidates_from(report, RESEARCH_CANDIDATE_CONFIDENCE_CAP) {
+        // Surface evidence relevance and candidate trust as two named,
+        // truthful numbers: the reviewer sees how strong the match was
+        // (relevance) without confusing it with the deliberately low trust an
+        // unreviewed machine-derived candidate carries (LocalHub#36).
         let body = format!(
-            "{}\n\n(research finding; sources: {})",
+            "{}\n\n(research finding — evidence relevance {:.2}, candidate trust {:.2}; \
+             sources: {})",
             spec.body,
+            spec.evidence_relevance,
+            spec.confidence,
             provenance_summary(&spec.provenance)
         );
         let mut lesson = localpilot_localmind::RetrospectiveLesson::research_finding(
@@ -1865,15 +1995,17 @@ mod tests {
             parse_admission(r#"{"relevant": true, "score": 0.8, "reason": "on-topic"}"#),
             Some(AdmissionVerdict {
                 relevant: true,
-                score: 0.8
+                score: 0.8,
+                reason: "on-topic".to_string(),
             })
         );
-        // Prose around one JSON object is tolerated…
+        // Prose around one JSON object is tolerated; a missing reason is empty.
         assert_eq!(
             parse_admission("Sure: {\"relevant\": false, \"score\": 0.1} done"),
             Some(AdmissionVerdict {
                 relevant: false,
-                score: 0.1
+                score: 0.1,
+                reason: String::new(),
             })
         );
         // …anything else is unusable, so the deterministic path stands.
@@ -1884,8 +2016,57 @@ mod tests {
             parse_admission(r#"{"relevant": true, "score": 7.0}"#),
             Some(AdmissionVerdict {
                 relevant: true,
-                score: 1.0
+                score: 1.0,
+                reason: String::new(),
             })
+        );
+    }
+
+    #[test]
+    fn scope_to_topic_prepends_when_a_sub_question_dropped_the_constraint() {
+        // LocalHub#36: a sub-question that no longer names the framework is
+        // re-scoped with the topic, so the search is not silently generic.
+        let scoped = scope_to_topic(
+            "three.js procedural materials",
+            "How are parametric controls exposed to users in real-time?",
+        );
+        assert!(
+            scoped.starts_with("three.js procedural materials "),
+            "the topic is prefixed: {scoped}"
+        );
+        assert!(scoped.contains("parametric controls"));
+    }
+
+    #[test]
+    fn scope_to_topic_leaves_a_sub_question_that_still_carries_the_constraint() {
+        // The framework and both topic nouns are already present — no redundant
+        // duplication.
+        let question = "How do noise functions generate procedural materials in three.js?";
+        let scoped = scope_to_topic("three.js procedural materials", question);
+        assert_eq!(scoped, question);
+    }
+
+    #[test]
+    fn scope_to_topic_is_a_noop_for_an_empty_topic() {
+        assert_eq!(scope_to_topic("   ", "some question"), "some question");
+    }
+
+    #[test]
+    fn decompose_prompt_demands_the_topic_constraints_are_kept() {
+        let prompt = decompose_prompt("three.js procedural materials", 6);
+        assert!(prompt.contains("framework"), "{prompt}");
+        assert!(
+            prompt.contains("stay within") || prompt.contains("scope"),
+            "the prompt binds sub-questions to the topic scope: {prompt}"
+        );
+    }
+
+    #[test]
+    fn admission_reason_carries_the_model_rationale_when_present() {
+        assert_eq!(admission_reason(""), "model admission");
+        assert_eq!(
+            admission_reason("off-topic engine"),
+            "model admission — off-topic engine"
         );
     }
 
@@ -1930,6 +2111,7 @@ mod tests {
         .unwrap();
         let source = KnowledgeSource {
             root: dir.path().to_path_buf(),
+            topic: "test topic".to_string(),
             admission: None,
         };
         let question = "how does the research pipeline report progress for animation \
@@ -2016,6 +2198,7 @@ mod tests {
         access.grant_session();
         let fake = Arc::new(FakeProvider::new().text(server_url));
         let source = WebSource::new(
+            "test topic",
             access,
             audit_log,
             Some(model_handle(Arc::clone(&fake))),
@@ -2196,7 +2379,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = localpilot_config::Config::default();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
+        let _source = build_web_source(dir.path(), "test topic", &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -2219,7 +2402,7 @@ mod tests {
         let mut config = localpilot_config::Config::default();
         config.research.web.allowlist.clear();
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
+        let _source = build_web_source(dir.path(), "test topic", &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -2236,7 +2419,7 @@ mod tests {
         let mut config = localpilot_config::Config::default();
         config.research.web.enabled = false;
         let mut out = Vec::new();
-        let _source = build_web_source(dir.path(), &config, None, None, &mut out)
+        let _source = build_web_source(dir.path(), "test topic", &config, None, None, &mut out)
             .await
             .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -2274,6 +2457,7 @@ mod tests {
         let mut access = WebAccess::new(true, vec![host], Vec::new());
         access.grant_session();
         let source = WebSource::new(
+            "test topic",
             access,
             audit.clone(),
             None,
@@ -2314,6 +2498,7 @@ mod tests {
         let mut access = WebAccess::new(true, vec!["*".to_string()], vec![host]);
         access.grant_session();
         let source = WebSource::new(
+            "test topic",
             access,
             audit.clone(),
             None,
@@ -2349,7 +2534,15 @@ mod tests {
         };
         let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
         access.grant_session();
-        let source = WebSource::new(access, audit.clone(), None, Some(proposer), None).unwrap();
+        let source = WebSource::new(
+            "test topic",
+            access,
+            audit.clone(),
+            None,
+            Some(proposer),
+            None,
+        )
+        .unwrap();
 
         let evidence = source.gather("q", 3).await.unwrap().evidence;
         assert!(evidence.is_empty());
@@ -2373,6 +2566,7 @@ mod tests {
         access.grant_session();
         let fake = Arc::new(FakeProvider::new().text(&url));
         let source = WebSource::new(
+            "test topic",
             access,
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),
@@ -2422,7 +2616,7 @@ mod tests {
         ) -> localpilot_research::RunOutcome {
             let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
             access.grant_session();
-            let source = WebSource::new(access, audit, None, search, None).unwrap();
+            let source = WebSource::new("test topic", access, audit, None, search, None).unwrap();
             let sources = SourceSet::new().with(Box::new(source));
             localpilot_research::run_research(
                 question,
@@ -2497,7 +2691,15 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
         access.grant_session();
-        let source = WebSource::new(access, audit.clone(), None, Some(proposer), None).unwrap();
+        let source = WebSource::new(
+            "test topic",
+            access,
+            audit.clone(),
+            None,
+            Some(proposer),
+            None,
+        )
+        .unwrap();
 
         let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
         let question = format!("how do I rotate {secret} safely");
@@ -2543,6 +2745,7 @@ mod tests {
         access.grant_session();
         let fake = Arc::new(FakeProvider::new().text(&format!("{url_a}\n{url_b}")));
         let source = WebSource::new(
+            "test topic",
             access,
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),

@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research keeps the topic as a contract through decomposition, search, and
+  admission, and separates evidence relevance from candidate trust** (ADR-0094,
+  LocalHub#36). The original topic is now passed to the relevance classifier
+  alongside the sub-question, so a page that answers a generic sub-question but
+  is about a different framework/engine is rejected unless the topic asks for a
+  comparison. Decomposition is instructed to keep the topic's load-bearing
+  constraints in every sub-question; a sub-question that drops them is re-scoped
+  with the topic before its redacted query leaves the machine (and before the
+  deterministic term-overlap fallback scores it), so a generic sub-question
+  cannot silently become a generic web search. Review candidates now name both
+  numbers — "evidence relevance 0.85, candidate trust 0.30" — so admitted
+  evidence scoring 0.75–0.95 stays distinguishable instead of all collapsing to
+  the low unreviewed-trust ceiling; the classifier's short reason is preserved
+  in the retrieval accounting.
 - Prism-served responses are no longer misreported as truncated streams: the
   Anthropic-dialect stream normalizer synthesizes a missing
   `content_block_start` and flushes held-back visible text before
