@@ -219,6 +219,9 @@ fn push_retrieval_accounting(out: &mut String, report: &ResearchReport) {
             for note in &account.admitted_notes {
                 out.push_str(&format!("    - {}\n", flatten_whitespace(note)));
             }
+            for note in &account.render_notes {
+                out.push_str(&format!("    - render: {}\n", flatten_whitespace(note)));
+            }
         }
         if report.web_enabled == Some(true) {
             let web_admitted = coverage
@@ -261,6 +264,9 @@ fn account_line(account: &SourceAccount) -> String {
     }
     if account.below_floor > 0 {
         parts.push(format!("{} below admission floor", account.below_floor));
+    }
+    if account.render_required > 0 {
+        parts.push(format!("{} needed rendering", account.render_required));
     }
     if account.policy_skipped > 0 {
         parts.push(format!("{} skipped by policy", account.policy_skipped));

@@ -212,10 +212,22 @@ pub struct SourceAccount {
     pub failed: usize,
     /// Pool evidence that fell below the engine's admission floor.
     pub below_floor: usize,
+    /// Fetched pages whose static HTML showed a render signal (a client-rendered
+    /// shell, hydration-only markup, or an iframe-only body) that the static
+    /// path cannot fully extract — an explicit, inspectable outcome so a page
+    /// that needed rendering is never silently counted as complete
+    /// (LocalHub#37). Zero on the ordinary server-rendered path.
+    #[serde(default)]
+    pub render_required: usize,
     /// Content-free per-admitted-item diagnostics: locator plus the admission
     /// trail (raw signal, within-source rank, final relevance, reason).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted_notes: Vec<String>,
+    /// Content-free render diagnostics: one short line per fetched page that
+    /// showed a render signal — the signal reason and what became of it
+    /// (frame recovered, renderer unavailable). Never page content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub render_notes: Vec<String>,
 }
 
 impl SourceAccount {
@@ -237,8 +249,10 @@ impl SourceAccount {
         self.redirected += other.redirected;
         self.failed += other.failed;
         self.below_floor += other.below_floor;
+        self.render_required += other.render_required;
         self.admitted_notes
             .extend(other.admitted_notes.iter().cloned());
+        self.render_notes.extend(other.render_notes.iter().cloned());
     }
 }
 

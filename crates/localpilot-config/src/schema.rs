@@ -127,6 +127,11 @@ pub struct ResearchConfig {
     /// research. Empty by default — no MCP server is consulted unless the user
     /// explicitly designates a tool.
     pub mcp: ResearchMcpConfig,
+    /// Browser-rendering fallback controls for pages whose content only appears
+    /// after JavaScript execution (SPA shells, iframe-embedded docs). Static
+    /// HTTP extraction stays the fast default; rendering is an HTTP-first
+    /// fallback the research path owns and the `[research.web]` allowlist gates.
+    pub render: ResearchRenderConfig,
 }
 
 impl Default for ResearchConfig {
@@ -142,8 +147,40 @@ impl Default for ResearchConfig {
             ingest_report: false,
             web: ResearchWebConfig::default(),
             mcp: ResearchMcpConfig::default(),
+            render: ResearchRenderConfig::default(),
         }
     }
+}
+
+/// Browser-rendering fallback controls for web research.
+///
+/// The renderer runs a discovered system Chromium/Chrome/Edge in headless mode,
+/// strictly inside the `[research.web]` allowlist/audit boundary, and only for
+/// pages that need it. It is a fallback, never the primary path: server-rendered
+/// documentation is still extracted by the fast static HTTP path with no browser
+/// launch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResearchRenderConfig {
+    /// When the browser-rendering fallback runs. Default [`RenderMode::Auto`]:
+    /// render only when the static HTML shows a render signal (an empty
+    /// framework mount, very little readable content, an iframe-only body, or an
+    /// explicit client-render placeholder). `off` is a complete kill switch;
+    /// `always` renders every fetched page (diagnostics / known dynamic sites).
+    pub mode: RenderMode,
+}
+
+/// When the browser-rendering fallback runs (see [`ResearchRenderConfig`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderMode {
+    /// Render only when the static HTML shows a render signal — the default.
+    #[default]
+    Auto,
+    /// Never render; static HTTP extraction only. The kill switch.
+    Off,
+    /// Render every fetched page, regardless of render signal.
+    Always,
 }
 
 /// Outbound web-research controls — the egress gate.
@@ -1300,6 +1337,26 @@ mod tests {
         assert_eq!(parsed.tools.len(), 1);
         assert_eq!(parsed.tools[0].server, "ddg");
         assert_eq!(parsed.tools[0].tool, "search");
+    }
+
+    #[test]
+    fn research_render_mode_defaults_auto_and_parses() {
+        // The browser-rendering fallback defaults to auto (render only on a
+        // render signal); `off` is the kill switch, `always` forces it.
+        assert_eq!(ResearchRenderConfig::default().mode, RenderMode::Auto);
+        assert_eq!(ResearchConfig::default().render.mode, RenderMode::Auto);
+        // An absent `[research.render]` block takes the default.
+        let absent: ResearchRenderConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.mode, RenderMode::Auto);
+        for (raw, expected) in [
+            ("off", RenderMode::Off),
+            ("auto", RenderMode::Auto),
+            ("always", RenderMode::Always),
+        ] {
+            let parsed: ResearchRenderConfig =
+                serde_json::from_value(json!({ "mode": raw })).unwrap();
+            assert_eq!(parsed.mode, expected, "mode {raw} parses");
+        }
     }
 
     #[test]

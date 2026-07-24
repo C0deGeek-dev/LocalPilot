@@ -19,11 +19,11 @@ use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
 use localpilot_research::{
-    candidates_from, evidence_block, html_to_markdown, prepare_query, render_markdown,
-    run_research_controlled, term_overlap_relevance, AdmissionTrail, AuditEntry, Bounds,
-    CoverageVerdict, Evidence, FetchDecision, Finding, Gathered, HeuristicSynthesizer, Provenance,
-    ResearchError, ResearchReport, RunControl, Source, SourceAccount, SourceError, SourceSet,
-    Synthesizer, WebAccess,
+    candidates_from, evidence_block, html_to_markdown, iframe_sources, prepare_query,
+    render_markdown, render_signal, run_research_controlled, term_overlap_relevance,
+    AdmissionTrail, AuditEntry, Bounds, CoverageVerdict, Evidence, FetchDecision, Finding,
+    Gathered, HeuristicSynthesizer, Provenance, RenderSignal, ResearchError, ResearchReport,
+    RunControl, Source, SourceAccount, SourceError, SourceSet, Synthesizer, WebAccess,
 };
 
 /// Ceiling on the confidence attached to research-derived memory candidates:
@@ -740,7 +740,15 @@ async fn build_web_source(
     };
 
     access.grant_session();
-    WebSource::new(topic, access, audit_log, model, search, admission)
+    WebSource::new(
+        topic,
+        config.research.render.mode,
+        access,
+        audit_log,
+        model,
+        search,
+        admission,
+    )
 }
 
 /// Connect the `[research.mcp]`-designated search tools and disclose them.
@@ -910,6 +918,11 @@ struct WebSource {
     /// (LocalHub#36) — and so a sub-question that dropped those constraints is
     /// re-scoped before it becomes a search query.
     topic: String,
+    /// When the browser-rendering fallback runs (`auto`/`off`/`always`). Also
+    /// governs render-signal detection and same-allowlist iframe recovery: `off`
+    /// disables both (pure static extraction), `auto` acts on a detected signal,
+    /// `always` treats every fetched page as needing rendering (LocalHub#37).
+    render_mode: localpilot_config::RenderMode,
     client: reqwest::Client,
     access: WebAccess,
     audit_log: PathBuf,
@@ -1102,6 +1115,7 @@ struct HostPoliteness {
 impl WebSource {
     fn new(
         topic: impl Into<String>,
+        render_mode: localpilot_config::RenderMode,
         access: WebAccess,
         audit_log: PathBuf,
         model: Option<ModelHandle>,
@@ -1119,6 +1133,7 @@ impl WebSource {
             .build()?;
         Ok(Self {
             topic: topic.into(),
+            render_mode,
             client,
             access,
             audit_log,
@@ -1291,10 +1306,18 @@ impl WebSource {
         // the page's headings, links, lists, and code blocks readable for the
         // reviewer and the model alike. Non-HTML bodies (plain text, Markdown,
         // JSON) are kept verbatim.
-        let text = if is_html(&content_type, &body) {
-            html_to_markdown(&body)
+        //
+        // While the raw HTML is still in hand, detect whether the page's real
+        // content is likely missing from the initial HTML (a client-rendered
+        // shell, hydration-only markup, or an iframe-only body) so the caller
+        // can recover an allowlisted frame or record an explicit render-required
+        // outcome instead of admitting a shell as complete (LocalHub#37).
+        let (text, lead) = if is_html(&content_type, &body) {
+            let reduced = html_to_markdown(&body);
+            let lead = self.render_lead(&body, &reduced);
+            (reduced, lead)
         } else {
-            body
+            (body, None)
         };
         let snippet = bound_body(&text, WEB_MAX_BODY_BYTES);
         // Scored against the kept content, not a flat constant: a page that
@@ -1307,27 +1330,178 @@ impl WebSource {
         // trail when the model judges.
         let scoped = scope_to_topic(&self.topic, question);
         let relevance = term_overlap_relevance(&scoped, &snippet);
-        Ok(FetchOutcome::Fetched(Box::new(
-            Evidence::new(
-                question,
-                snippet,
-                Provenance::new("web", Some(url.to_string())),
-                relevance,
-            )
-            .with_admission(AdmissionTrail {
-                raw: relevance,
-                rank: 1.0,
-                reason: "term overlap".to_string(),
-            }),
-        )))
+        let evidence = Evidence::new(
+            question,
+            snippet,
+            Provenance::new("web", Some(url.to_string())),
+            relevance,
+        )
+        .with_admission(AdmissionTrail {
+            raw: relevance,
+            rank: 1.0,
+            reason: "term overlap".to_string(),
+        });
+        Ok(FetchOutcome::Fetched(Box::new(FetchedPage {
+            evidence,
+            lead,
+        })))
     }
+
+    /// Whether a fetched HTML page needs rendering, per the operator's render
+    /// mode: `off` never signals (pure static extraction), `auto` reports a
+    /// detected [`RenderSignal`], `always` treats every page as needing
+    /// rendering (defaulting the reason to thin content). A signal carries the
+    /// page's iframe leads so the caller can recover an allowlisted frame.
+    fn render_lead(&self, html: &str, reduced: &str) -> Option<RenderLead> {
+        let signal = match self.render_mode {
+            localpilot_config::RenderMode::Off => return None,
+            localpilot_config::RenderMode::Auto => render_signal(html, reduced)?,
+            localpilot_config::RenderMode::Always => {
+                render_signal(html, reduced).unwrap_or(RenderSignal::ThinContent)
+            }
+        };
+        Some(RenderLead {
+            signal,
+            iframe_srcs: iframe_sources(html),
+        })
+    }
+
+    /// Act on a fetched page's render lead: recover its real content from
+    /// allowlisted iframes through the ordinary gated fetch path, and if nothing
+    /// was recovered, record an explicit render-required outcome (the renderer
+    /// is unavailable in the static build) so a page that needed rendering is
+    /// inspectable, never silently counted as complete (LocalHub#37).
+    async fn handle_render_lead(
+        &self,
+        ctx: &FrameContext<'_>,
+        lead: &RenderLead,
+        account: &mut SourceAccount,
+        evidence: &mut Vec<Evidence>,
+    ) -> Result<(), SourceError> {
+        let recovered = self.recover_frames(ctx, lead, account, evidence).await?;
+        if recovered > 0 {
+            account.render_notes.push(format!(
+                "{} — {}: recovered {recovered} allowlisted frame(s)",
+                ctx.parent_url,
+                lead.signal.reason()
+            ));
+        } else {
+            account.render_required += 1;
+            account.render_notes.push(format!(
+                "{} — {}: renderer unavailable, no allowlisted frame recovered",
+                ctx.parent_url,
+                lead.signal.reason()
+            ));
+            append_audit(
+                &self.audit_log,
+                &audit_entry(
+                    ctx.parent_url,
+                    ctx.parent_host,
+                    "render-required",
+                    ctx.query,
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Fetch a page's allowlisted iframe sources through the same gated path as
+    /// any other web fetch, admitting recovered frame content as evidence.
+    /// Resolves relative/protocol-relative srcs against the parent, enforces
+    /// http/https and the allowlist per frame, and does not recurse into a
+    /// frame's own iframes (nested/dynamic frames are the renderer's job).
+    /// Returns how many frames contributed admitted evidence.
+    async fn recover_frames(
+        &self,
+        ctx: &FrameContext<'_>,
+        lead: &RenderLead,
+        account: &mut SourceAccount,
+        evidence: &mut Vec<Evidence>,
+    ) -> Result<usize, SourceError> {
+        const FRAME_RECOVERY_LIMIT: usize = 3;
+        let base = reqwest::Url::parse(ctx.parent_url).ok();
+        let mut recovered = 0;
+        for src in lead.iframe_srcs.iter().take(FRAME_RECOVERY_LIMIT) {
+            let Some(resolved) = base.as_ref().and_then(|b| b.join(src).ok()) else {
+                continue;
+            };
+            if !matches!(resolved.scheme(), "http" | "https") {
+                continue;
+            }
+            let Some(frame_host) = resolved.host_str().map(str::to_string) else {
+                continue;
+            };
+            let frame_url = resolved.to_string();
+            account.proposed += 1; // a frame is a fresh lead considered
+            match self.access.decide_host(&frame_host) {
+                FetchDecision::Allowed => {
+                    match self
+                        .fetch(&frame_url, &frame_host, ctx.question, ctx.query)
+                        .await?
+                    {
+                        FetchOutcome::Fetched(page) => {
+                            // Ignore the frame's own render lead here — nesting
+                            // is the renderer's concern, not static recovery.
+                            let FetchedPage { evidence: fev, .. } = *page;
+                            if let Some(admitted) =
+                                self.admit(&frame_url, &frame_host, ctx.query, fev).await?
+                            {
+                                account.admitted += 1;
+                                recovered += 1;
+                                evidence.push(admitted);
+                            } else {
+                                account.rejected_relevance += 1;
+                            }
+                        }
+                        FetchOutcome::Cooled => account.policy_skipped += 1,
+                        FetchOutcome::Redirected => account.redirected += 1,
+                        FetchOutcome::Failed => account.failed += 1,
+                    }
+                }
+                FetchDecision::NeedsConfirmation => {
+                    account.policy_skipped += 1;
+                    append_audit(
+                        &self.audit_log,
+                        &audit_entry(&frame_url, &frame_host, "skipped", ctx.query),
+                    )?;
+                }
+                FetchDecision::Disabled => {}
+            }
+        }
+        Ok(recovered)
+    }
+}
+
+/// A statically-fetched page plus the render lead (if any) the caller acts on.
+struct FetchedPage {
+    /// The reduced, bounded, term-overlap-scored evidence for the page itself.
+    evidence: Evidence,
+    /// Set when the page's initial HTML looked client-rendered/iframe-embedded
+    /// under the active render mode — the caller recovers an allowlisted frame
+    /// or records an explicit render-required outcome.
+    lead: Option<RenderLead>,
+}
+
+/// Why a fetched page looks like it needs rendering, plus its iframe leads.
+struct RenderLead {
+    signal: RenderSignal,
+    iframe_srcs: Vec<String>,
+}
+
+/// The fetch context shared by a page and the frames recovered from it: the
+/// parent's URL/host and the redacted query the frames are gathered for.
+struct FrameContext<'a> {
+    parent_url: &'a str,
+    parent_host: &'a str,
+    question: &'a str,
+    query: &'a str,
 }
 
 /// The countable outcome of one URL's fetch attempt.
 enum FetchOutcome {
-    /// Reduced, bounded evidence, term-overlap scored (pre-admission).
-    /// Boxed: this variant dwarfs the flag variants.
-    Fetched(Box<Evidence>),
+    /// Reduced, bounded evidence with any render lead (pre-admission). Boxed:
+    /// this variant dwarfs the flag variants.
+    Fetched(Box<FetchedPage>),
     /// The host is cooling down after an earlier rate-limit/server error.
     Cooled,
     /// A redirect response, never followed.
@@ -1383,12 +1557,30 @@ impl Source for WebSource {
             };
             match self.access.decide_host(&host) {
                 FetchDecision::Allowed => match self.fetch(&url, &host, question, &query).await? {
-                    FetchOutcome::Fetched(found) => {
-                        if let Some(admitted) = self.admit(&url, &host, &query, *found).await? {
+                    FetchOutcome::Fetched(page) => {
+                        let FetchedPage {
+                            evidence: found,
+                            lead,
+                        } = *page;
+                        if let Some(admitted) = self.admit(&url, &host, &query, found).await? {
                             account.admitted += 1;
                             evidence.push(admitted);
                         } else {
                             account.rejected_relevance += 1;
+                        }
+                        // A client-rendered/iframe-embedded page: recover its
+                        // real content from allowlisted frames through the same
+                        // gated path, or record an explicit render-required
+                        // outcome so the gap is inspectable (LocalHub#37).
+                        if let Some(lead) = lead {
+                            let ctx = FrameContext {
+                                parent_url: &url,
+                                parent_host: &host,
+                                question,
+                                query: &query,
+                            };
+                            self.handle_render_lead(&ctx, &lead, &mut account, &mut evidence)
+                                .await?;
                         }
                     }
                     FetchOutcome::Cooled => account.policy_skipped += 1,
@@ -2199,6 +2391,7 @@ mod tests {
         let fake = Arc::new(FakeProvider::new().text(server_url));
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit_log,
             Some(model_handle(Arc::clone(&fake))),
@@ -2232,6 +2425,146 @@ mod tests {
         let log = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(log.lines().count(), 1, "one audited request");
         assert!(log.contains("decision=allowed"));
+    }
+
+    #[tokio::test]
+    async fn iframe_only_parent_recovers_the_allowlisted_child_frame() {
+        // LocalHub#37: a documentation page whose body is an iframe used to be
+        // reduced to empty/nav-only evidence, the frame silently discarded. Now
+        // the frame src is extracted and fetched through the same gated path, so
+        // the child article is recovered with the frame URL as its provenance.
+        let server = MockServer::start().await;
+        let child_body = "<html><body><article><h1>Procedural materials</h1><p>".to_string()
+            + &"procedural materials in three.js use noise. ".repeat(12)
+            + "</p></article></body></html>";
+        let parent_body = format!(
+            "<html><body><nav>menu</nav>\
+             <iframe src=\"{}/child\"></iframe></body></html>",
+            server.uri()
+        );
+        wiremock::Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/child"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(child_body.as_bytes(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/parent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(parent_body.as_bytes(), "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let parent_url = format!("{}/parent", server.uri());
+        let child_url = format!("{}/child", server.uri());
+        let host = parse_host(&parent_url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&parent_url, vec![host], true, audit.clone());
+
+        let gathered = source
+            .gather("how do procedural materials work in three.js", 3)
+            .await
+            .unwrap();
+        assert!(
+            gathered
+                .evidence
+                .iter()
+                .any(|e| e.provenance.locator.as_deref() == Some(child_url.as_str())),
+            "the child frame article is recovered with its own provenance: {:?}",
+            gathered
+                .evidence
+                .iter()
+                .map(|e| e.provenance.locator.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            gathered
+                .account
+                .render_notes
+                .iter()
+                .any(|note| note.contains("recovered")),
+            "a render note records the recovery: {:?}",
+            gathered.account.render_notes
+        );
+    }
+
+    #[tokio::test]
+    async fn spa_shell_with_no_frame_records_render_required_not_silent() {
+        // LocalHub#37: an empty framework shell must produce an explicit
+        // render-required outcome (renderer unavailable in the static build),
+        // never be silently counted as complete evidence.
+        let server = MockServer::start().await;
+        let shell = "<html><body><div id=\"root\"></div>\
+                     <script src=\"/app.js\"></script></body></html>";
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(shell.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/app", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source
+            .gather("how does the widget render", 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            gathered.account.render_required, 1,
+            "the shell is flagged render-required, not treated as complete"
+        );
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=render-required"),
+            "render-required is audited: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_mode_off_disables_detection_entirely() {
+        // The kill switch: with mode `off`, an empty shell is fetched statically
+        // and never flagged — no detection, no render-required, no extra audit.
+        let server = MockServer::start().await;
+        let shell = "<html><body><div id=\"root\"></div>\
+                     <script src=\"/a.js\"></script><script src=\"/b.js\"></script></body></html>";
+        wiremock::Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(shell.as_bytes(), "text/html"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/app", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let mut access = WebAccess::new(true, vec![host], Vec::new());
+        access.grant_session();
+        let fake = Arc::new(FakeProvider::new().text(&url));
+        let source = WebSource::new(
+            "test topic",
+            localpilot_config::RenderMode::Off,
+            access,
+            audit.clone(),
+            Some(model_handle(Arc::clone(&fake))),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let gathered = source
+            .gather("how does the widget render", 3)
+            .await
+            .unwrap();
+        assert_eq!(
+            gathered.account.render_required, 0,
+            "mode=off performs no render detection"
+        );
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            !log.contains("render-required"),
+            "no render-required audit under mode=off: {log}"
+        );
     }
 
     #[tokio::test]
@@ -2458,6 +2791,7 @@ mod tests {
         access.grant_session();
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             None,
@@ -2499,6 +2833,7 @@ mod tests {
         access.grant_session();
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             None,
@@ -2536,6 +2871,7 @@ mod tests {
         access.grant_session();
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             None,
@@ -2567,6 +2903,7 @@ mod tests {
         let fake = Arc::new(FakeProvider::new().text(&url));
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),
@@ -2616,7 +2953,16 @@ mod tests {
         ) -> localpilot_research::RunOutcome {
             let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
             access.grant_session();
-            let source = WebSource::new("test topic", access, audit, None, search, None).unwrap();
+            let source = WebSource::new(
+                "test topic",
+                localpilot_config::RenderMode::Auto,
+                access,
+                audit,
+                None,
+                search,
+                None,
+            )
+            .unwrap();
             let sources = SourceSet::new().with(Box::new(source));
             localpilot_research::run_research(
                 question,
@@ -2693,6 +3039,7 @@ mod tests {
         access.grant_session();
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             None,
@@ -2746,6 +3093,7 @@ mod tests {
         let fake = Arc::new(FakeProvider::new().text(&format!("{url_a}\n{url_b}")));
         let source = WebSource::new(
             "test topic",
+            localpilot_config::RenderMode::Auto,
             access,
             audit.clone(),
             Some(model_handle(Arc::clone(&fake))),

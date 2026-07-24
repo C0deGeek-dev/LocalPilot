@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research detects pages that need browser rendering and stops silently
+  returning shell-only evidence** (LocalHub#37, first slice). A fetched page
+  whose real content is missing from its initial HTML — an empty single-page-app
+  mount, hydration-only markup, an iframe-only body, or a `Loading…` placeholder
+  — is now recognised. Research recovers an allowlisted iframe's document through
+  the ordinary gated fetch path (with the frame URL as its provenance), and when
+  nothing can be recovered it records an explicit "needed rendering" outcome in
+  the retrieval accounting and egress audit instead of counting the shell as
+  complete. A new `[research.render].mode` (`auto` default, `off` kill switch,
+  `always`) governs the behaviour; server-rendered pages are unaffected and
+  never trigger detection. The JavaScript-executing browser renderer itself
+  lands in the following slices.
 - **Research keeps the topic as a contract through decomposition, search, and
   admission, and separates evidence relevance from candidate trust** (ADR-0094,
   LocalHub#36). The original topic is now passed to the relevance classifier

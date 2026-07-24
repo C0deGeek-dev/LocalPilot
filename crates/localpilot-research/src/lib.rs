@@ -10,6 +10,7 @@
 mod engine;
 mod html;
 mod output;
+mod render;
 mod report;
 mod source;
 mod synth;
@@ -19,8 +20,9 @@ pub use engine::{
     run_research, run_research_controlled, Bounds, ProgressFn, RoundSummary, RunControl,
     RunOutcome, COVERAGE_RELEVANCE_FLOOR,
 };
-pub use html::{html_to_markdown, html_to_text, markdown_to_text};
+pub use html::{html_to_markdown, html_to_text, iframe_sources, markdown_to_text};
 pub use output::{candidates_from, evidence_block, render_markdown, CandidateSpec};
+pub use render::{render_signal, RenderOutcome, RenderSignal};
 pub use report::{
     flatten_whitespace, AdmissionTrail, ClaimStatus, CoverageVerdict, Evidence, Finding,
     Provenance, QuestionCoverage, ResearchReport, SourceAccount,

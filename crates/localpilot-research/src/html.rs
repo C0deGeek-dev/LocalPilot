@@ -203,6 +203,106 @@ fn strip_element(input: &str, tag: &str) -> String {
     out
 }
 
+/// Extract the `src` URLs of `<iframe>` elements, in document order, deduped.
+///
+/// The reducer drops the iframe element wholesale (its body is not the parent's
+/// prose — see [`DROPPED_ELEMENTS`]), but a documentation iframe's *source* is a
+/// real lead the research path can gate through the `[research.web]` allowlist
+/// and fetch through the ordinary path. Only navigable srcs are returned
+/// (`http(s)`, protocol-relative, or relative — resolved against the parent by
+/// the caller); `srcdoc`, `about:blank`, `javascript:`, and `data:` are skipped
+/// (inline `srcdoc` content is the renderer's job, not a fetchable lead).
+/// Entities in the URL are decoded. Total and panic-free.
+#[must_use]
+pub fn iframe_sources(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("<iframe") {
+        let start = i + rel;
+        // Confirm a real tag boundary after `<iframe` so `<iframexyz>` is not a
+        // match; on a miss advance past the `<` and re-scan.
+        let after = html[start + "<iframe".len()..].chars().next();
+        let is_tag = matches!(after, Some(c) if c == '>' || c == '/' || c.is_whitespace())
+            || after.is_none();
+        if !is_tag {
+            i = start + "<iframe".len();
+            continue;
+        }
+        let tag_end = lower[start..].find('>').map_or(html.len(), |e| start + e);
+        let tag = &html[start..tag_end];
+        if let Some(src) = extract_attr(tag, "src") {
+            let decoded = decode_entities(src.trim());
+            let src = decoded.trim();
+            if is_navigable_src(src) && seen.insert(src.to_string()) {
+                out.push(src.to_string());
+            }
+        }
+        i = tag_end.max(start + "<iframe".len());
+    }
+    out
+}
+
+/// Read one attribute's value out of a single start-tag string
+/// (e.g. `<iframe src="x">`). Case-insensitive name; the match must sit on an
+/// attribute boundary (so `srcdoc`/`data-src` do not match `src`) and be
+/// followed by `=`. Tolerates double-, single-, and unquoted values. `None`
+/// when the attribute is absent or valueless.
+fn extract_attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find(name) {
+        let at = search + rel;
+        let boundary_before = at == 0
+            || matches!(
+                bytes[at - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'<' | b'/'
+            );
+        let after_name = &tag[at + name.len()..];
+        if boundary_before {
+            let eq = after_name.trim_start();
+            if let Some(value) = eq.strip_prefix('=') {
+                return Some(read_attr_value(value.trim_start()));
+            }
+        }
+        search = at + name.len();
+    }
+    None
+}
+
+/// Read an attribute value beginning at `s` (leading whitespace already
+/// trimmed): a `"…"`/`'…'` quoted run, or an unquoted token up to the next
+/// whitespace or `>`.
+fn read_attr_value(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(quote @ ('"' | '\'')) => {
+            let inner = &s[quote.len_utf8()..];
+            match inner.find(quote) {
+                Some(end) => inner[..end].to_string(),
+                None => inner.to_string(),
+            }
+        }
+        _ => s
+            .split(|c: char| c.is_whitespace() || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// Whether an iframe `src` is a navigable lead worth gating and fetching, as
+/// opposed to an inline/non-navigable scheme the fetch path cannot use.
+fn is_navigable_src(src: &str) -> bool {
+    if src.is_empty() {
+        return false;
+    }
+    let lower = src.to_ascii_lowercase();
+    !(lower.starts_with("javascript:") || lower.starts_with("data:") || lower == "about:blank")
+}
+
 // --- Markdown conversion ------------------------------------------------------
 
 /// A converted span of the document: prose (whitespace-tidied at render) or a
@@ -662,6 +762,54 @@ mod tests {
         let html = "<p>one</p><p>two</p><div>three</div>";
         let text = html_to_text(html);
         assert_eq!(text, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn iframe_sources_extracts_navigable_srcs_in_order_deduped() {
+        let html = "<div><iframe src=\"https://docs.example/ch1\"></iframe>\
+                    <iframe src='https://docs.example/ch2'></iframe>\
+                    <iframe src=\"https://docs.example/ch1\"></iframe>\
+                    <iframe srcdoc=\"<p>inline</p>\"></iframe>\
+                    <iframe src=about:blank></iframe>\
+                    <iframe src=\"javascript:void(0)\"></iframe>\
+                    <iframe></iframe></div>";
+        let srcs = iframe_sources(html);
+        assert_eq!(
+            srcs,
+            vec![
+                "https://docs.example/ch1".to_string(),
+                "https://docs.example/ch2".to_string(),
+            ],
+            "only navigable srcs, order-preserving, deduped; srcdoc/about:blank/js skipped"
+        );
+    }
+
+    #[test]
+    fn iframe_sources_decodes_entities_and_ignores_lookalikes() {
+        // `data-src` must not match `src`; `&amp;` decodes.
+        let html = "<iframe data-src=\"https://x.example/nope\" \
+                    src=\"https://x.example/a?p=1&amp;q=2\"></iframe>";
+        assert_eq!(
+            iframe_sources(html),
+            vec!["https://x.example/a?p=1&q=2".to_string()]
+        );
+    }
+
+    #[test]
+    fn iframe_sources_survives_reduction_that_drops_the_element_body() {
+        // The reducer still removes the iframe body as junk, but the src is
+        // recoverable as a lead (LocalHub#37).
+        let html = "<body><nav>menu</nav>\
+                    <iframe src=\"https://frame.example/doc\">fallback text</iframe></body>";
+        assert_eq!(
+            iframe_sources(html),
+            vec!["https://frame.example/doc".to_string()]
+        );
+        let reduced = html_to_text(html);
+        assert!(
+            !reduced.contains("fallback text"),
+            "body still dropped: {reduced}"
+        );
     }
 
     #[test]

@@ -428,6 +428,23 @@ redacted query.
 
 See [mcp.md](mcp.md) §Research search tools.
 
+#### `[research.render]`
+
+The browser-rendering fallback for pages whose real content only appears after
+JavaScript runs (single-page-app shells, iframe-embedded docs). Static HTTP
+extraction stays the fast default and server-rendered pages never launch a
+browser; rendering is an HTTP-first fallback that stays inside the
+`[research.web]` allowlist/audit boundary. When a page's initial HTML shows a
+render signal — an empty framework mount (`#root`/`#app`/`#__next`), very little
+readable content after reduction, an iframe-only body, or an explicit `Loading…`
+placeholder — research recovers an allowlisted iframe through the ordinary gated
+path and records an explicit render outcome so a page that needed rendering is
+never silently counted as complete.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mode` | `"auto"` \| `"off"` \| `"always"` | `"auto"` | `auto` renders/recovers only when a render signal fires; `off` is a complete kill switch (pure static extraction, no detection); `always` treats every fetched page as needing rendering (diagnostics / known dynamic sites). |
+
 ## Example
 
 ```toml
