@@ -34,6 +34,21 @@ is SemVer-stable; the configuration schema stability policy is in
   project mutations need a trusted workspace, global mutations add a global-impact
   disclosure, and every network/write/delete discloses its impact and needs an
   interactive confirmation or `--yes`. `-g` selects the user-global scope.
+- **A reusable skill can live once in your home directory** (ADR-0097,
+  LocalHub#39). Skill discovery now reads a per-user global baseline
+  (`~/.localpilot/skills`, `~/.agents/skills`) overlaid by the active project
+  (`<project>/.localpilot/skills`, `<project>/.agents/skills`), resolved by the
+  manifest `name` into one effective skill per name — project `.localpilot` ›
+  project `.agents` › global `.localpilot` › global `.agents`. A winning
+  definition replaces the shadowed one whole (never a field-level merge), so
+  removing a project override reveals the unchanged global skill again with no
+  reinstall. Resolution is enumeration-independent (precedence comes from the
+  scope, not `read_dir` order). Workspace trust gates the *project* overlay only:
+  global skills are user-controlled content and load regardless, while an
+  untrusted project cannot shadow one with checked-in instructions. `skills
+  list`/`show` report each effective skill's origin scope, and
+  `skill_search`/`skill_load` load the same effective definition; loading stays
+  read-only and grants nothing.
 - **A UTF-8 BOM in a `SKILL.md` no longer hides every project skill**
   (ADR-0096, LocalHub#38). The manifest parser now strips one optional leading
   byte-order mark before checking for the `---` frontmatter delimiter (all other
