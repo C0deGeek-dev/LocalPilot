@@ -242,16 +242,52 @@ jobs:
       #                     that already finished (this is why the original
       #                     unsplit step redirected too);
       #   stdin from null   nothing can block reading a console that isn't there.
-      - if: runner.os == 'Linux'
+      # The step is bounded from the inside so it always ends and its log always
+      # survives: `nextest`'s own `slow-timeout terminate-after` already kills a
+      # hung *test* at five minutes, so a step running for forty-five is nextest
+      # unable to finish — waiting on stdout/stderr pipes a leaked grandchild
+      # still holds. Killing cargo releases that wait, the tail then runs, and
+      # with `--test-threads 1` the test after the last reported one is the
+      # culprit by construction.
+      - id: tools-linux
+        if: runner.os == 'Linux'
+        continue-on-error: true
         name: 'linux — tests: localpilot-tools'
         timeout-minutes: 12
         shell: bash
         run: |
           status=0
-          setsid capped cargo nextest run -p localpilot-tools --test-threads 1 \
+          setsid timeout -k 30s 6m capped cargo nextest run -p localpilot-tools \
+            --test-threads 1 --status-level all \
             > nextest-tools.log 2>&1 < /dev/null || status=$?
-          tail -n 200 nextest-tools.log || true
+          echo "cargo nextest exit status: $status"
           exit "$status"
+      - if: runner.os == 'Linux' && always()
+        name: 'linux — tools diagnostics'
+        shell: bash
+        run: |
+          echo "=== nextest output (tail) ==="
+          tail -n 300 nextest-tools.log || true
+          echo "=== surviving processes (a leak is what holds the pipes) ==="
+          ps -ef --forest | tail -n 40 || true
+          echo "=== stragglers and the descriptors they hold ==="
+          for pid in $(pgrep -f 'sleep|/bin/sh|localpilot|nextest' 2>/dev/null || true); do
+            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+            [ -n "$cmd" ] || continue
+            echo "-- pid $pid: $cmd"
+            ls -l "/proc/$pid/fd" 2>/dev/null | head -n 6 || true
+          done
+      - if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tools-wedge-log
+          path: nextest-tools.log
+          retention-days: 7
+      - if: runner.os == 'Linux' && steps.tools-linux.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::error::localpilot-tools tests did not succeed (see the tools diagnostics step and the tools-wedge-log artifact)"
+          exit 1
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-tui'
         timeout-minutes: 6
