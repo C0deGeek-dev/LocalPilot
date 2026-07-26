@@ -227,10 +227,31 @@ jobs:
         name: 'linux — tests: localpilot-store'
         timeout-minutes: 6
         run: capped cargo nextest run -p localpilot-store --test-threads 2
+      # The one package whose tests spawn real child processes — `run_shell`
+      # (including a deliberately hung command) and the background-process
+      # registry. It is also the only package that has wedged the runner since
+      # execution was split per package, so it gets the strictest containment:
+      #
+      #   --test-threads 1  no two process-spawning tests are ever live at once;
+      #   setsid            children land in their own session rather than
+      #                     sharing the runner's, so a leaked one cannot signal
+      #                     or wait on it;
+      #   output to a file  a leaked child inherits the command's stdout, and a
+      #                     child holding the *step's* pipe keeps it open after
+      #                     the command exits — the runner then waits on a step
+      #                     that already finished (this is why the original
+      #                     unsplit step redirected too);
+      #   stdin from null   nothing can block reading a console that isn't there.
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-tools'
-        timeout-minutes: 8
-        run: capped cargo nextest run -p localpilot-tools --test-threads 2
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          status=0
+          setsid capped cargo nextest run -p localpilot-tools --test-threads 1 \
+            > nextest-tools.log 2>&1 < /dev/null || status=$?
+          tail -n 200 nextest-tools.log || true
+          exit "$status"
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-tui'
         timeout-minutes: 6
@@ -368,8 +389,12 @@ jobs:
           status=0
           cargo llvm-cov clean --workspace
           for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort); do
+            # Serial for the two packages that spawn real child processes: the
+            # corpus tests each run a nested `cargo test`, and localpilot-tools
+            # drives `run_shell` and the background-process registry (the
+            # package that wedged the plain test job).
             threads=2
-            if [ "$pkg" = "localpilot-harness" ]; then threads=1; fi
+            case "$pkg" in localpilot-harness | localpilot-tools) threads=1 ;; esac
             echo "=== coverage: $pkg (--test-threads $threads) ==="
             timeout -k 30s 10m cargo llvm-cov nextest --no-report -p "$pkg" \
               --build-jobs 2 --test-threads "$threads" >> coverage-run.log 2>&1 || status=$?
