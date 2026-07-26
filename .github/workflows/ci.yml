@@ -249,15 +249,36 @@ jobs:
       # still holds. Killing cargo releases that wait, the tail then runs, and
       # with `--test-threads 1` the test after the last reported one is the
       # culprit by construction.
+      # An inner `timeout` did not fire either, which rules the held pipe out:
+      # `timeout` cannot fire if nothing in the VM is being scheduled. So the
+      # runner is genuinely starved, by one test, even at `--test-threads 1` —
+      # and a starved VM delivers no log no matter how the step is instrumented.
+      #
+      # Make the evidence positional instead of instrumented: split this package
+      # across three steps whose selections partition it exactly (85 + 57 + 6 =
+      # 148 tests), with the integration binary that drives `run_shell` last. The
+      # steps that complete are reported normally; the one that never completes
+      # is the culprit. `binary(tools)` is the suspect — it holds the slowest
+      # spawning tests, including the destructive-command prompt and the
+      # timeout-and-reap path.
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-tools (unit)'
+        timeout-minutes: 8
+        run: capped cargo nextest run -E 'package(localpilot-tools) and kind(lib)' --test-threads 2
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-tools (spawn invariants, validate)'
+        timeout-minutes: 6
+        run: capped cargo nextest run -E 'package(localpilot-tools) and kind(test) and not binary(tools)' --test-threads 1
       - id: tools-linux
         if: runner.os == 'Linux'
         continue-on-error: true
-        name: 'linux — tests: localpilot-tools'
+        name: 'linux — tests: localpilot-tools (process-spawning integration)'
         timeout-minutes: 12
         shell: bash
         run: |
           status=0
-          setsid timeout -k 30s 6m capped cargo nextest run -p localpilot-tools \
+          setsid timeout -k 30s 6m capped cargo nextest run \
+            -E 'package(localpilot-tools) and binary(tools)' \
             --test-threads 1 --status-level all \
             > nextest-tools.log 2>&1 < /dev/null || status=$?
           echo "cargo nextest exit status: $status"
