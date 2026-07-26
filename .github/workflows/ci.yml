@@ -121,22 +121,26 @@ jobs:
       # (which grew sharply on 2026-07-23, when the wedges became
       # deterministic) build in this same workspace.
       #
-      # Two independent levers, because prevention alone is unverifiable from
-      # the outside:
-      #   1. bound the concurrency that actually storms — build jobs *and*
-      #      test threads, so at most two nested cargo builds are ever live;
-      #   2. give the process tree a hard cgroup memory ceiling, so a residual
-      #      storm is OOM-killed *inside* the cgroup while the VM stays
-      #      responsive. That is what converts an unattributable frozen corpse
-      #      into a fast failure whose log survives.
-      - id: nextest-linux
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        timeout-minutes: 25
+      # Bounded concurrency, a cgroup memory ceiling, and reclaiming ~25 GB of
+      # runner disk each failed to move it, so the constraint is not one of the
+      # things guessed at from outside. What survives a frozen VM is not the
+      # log — it dies with the runner — but the *step boundaries*, which the
+      # jobs API reports either way. So the phase is split into steps that each
+      # answer one question, and the step with no completion timestamp names
+      # the culprit on the next run:
+      #
+      #   build   — linking ~74 test binaries, the heaviest single act;
+      #   run     — the suite minus the nested-cargo corpus;
+      #   corpus  — `localpilot-harness`'s first-party tests, which each spawn a
+      #             nested `cargo test` (tests/first_party.rs), run serially.
+      #
+      # Splitting is also a fix candidate in its own right: the corpus no
+      # longer runs concurrently with anything else.
+      - if: runner.os == 'Linux'
+        name: linux — build test binaries
+        timeout-minutes: 20
         shell: bash
         run: |
-          # Best-effort: an older runner image without the memory controller
-          # delegated simply runs uncapped rather than failing the step.
           cg=/sys/fs/cgroup/localpilot-nextest
           if sudo mkdir -p "$cg" 2>/dev/null \
              && echo 11G | sudo tee "$cg/memory.max" >/dev/null 2>&1 \
@@ -146,6 +150,24 @@ jobs:
           else
             echo "memory ceiling unavailable — running uncapped"
           fi
+          df -h /
+          cargo nextest run --workspace --no-run --build-jobs 2
+          df -h /
+      - if: runner.os == 'Linux'
+        name: linux — run the suite (without the nested-cargo corpus)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo nextest run --workspace --build-jobs 2 --test-threads 2 \
+            -E 'not package(localpilot-harness)'
+          df -h /
+      - id: nextest-linux
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 20
+        name: linux — run the harness corpus serially
+        shell: bash
+        run: |
           ( while true; do
               avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
               if [ "${avail:-9999999}" -lt 1000000 ]; then
@@ -155,8 +177,9 @@ jobs:
               sleep 5
             done ) >/dev/null 2>&1 & WATCHDOG=$!
           status=0
-          timeout -k 30s 20m cargo nextest run --workspace --build-jobs 2 --test-threads 2 > nextest-run.log 2>&1 || status=$?
+          timeout -k 30s 15m cargo nextest run -p localpilot-harness --build-jobs 2 --test-threads 1 > nextest-run.log 2>&1 || status=$?
           kill "$WATCHDOG" 2>/dev/null || true
+          df -h /
           exit "$status"
       - if: runner.os == 'Linux' && always()
         shell: bash
