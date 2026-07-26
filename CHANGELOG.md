@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.4.0 - 2026-07-26
+
+Coordinated LocalX release.
+
 - **A timed-out or stopped command no longer leaves its work running.** On Linux
   the process-tree reap was a silent no-op: `kill` was invoked as
   `kill -KILL -<group>`, which procps parses as two option words — it exits
