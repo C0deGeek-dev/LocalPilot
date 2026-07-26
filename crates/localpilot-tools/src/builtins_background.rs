@@ -28,8 +28,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::builtins::cap;
 use crate::builtins_shell::{
-    execution_class, execution_text, normalize_execution, render_stream, shell_program_and_args,
-    RunShellExecution,
+    execution_class, execution_text, kill_process_tree, kill_process_tree_detached,
+    normalize_execution, render_stream, shell_program_and_args, RunShellExecution,
 };
 use crate::contract::{
     Idempotency, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
@@ -224,11 +224,27 @@ impl BackgroundProcesses {
     }
 
     /// Stop and forget the process `id`. Returns whether it was tracked.
+    ///
+    /// Kills the whole process group, not just the child. The child leads its own
+    /// group (set at spawn), and a shell-wrapped command leaves the real workload
+    /// — a dev server, a watcher, a test run — as a grandchild: killing only the
+    /// leader orphans it, still holding the port it bound and the stdout pipe it
+    /// inherited. `run_shell` has always reaped the tree on timeout for exactly
+    /// this reason; a stopped background process needs the same guarantee.
     pub async fn stop(&self, id: &str) -> bool {
         // Remove under the lock, then await the kill outside it — never hold the
         // lock across an await.
         let entry = self.state.lock().procs.remove(id);
         if let Some(mut entry) = entry {
+            // Read the pid before signalling: once the child is waited on, its id
+            // is gone and the group can no longer be addressed.
+            let pid = entry.child.id();
+            // Reap the tree *before* killing the child: the descendants are found
+            // by walking links from the parent, so killing the parent first
+            // orphans them and the walk then finds nothing.
+            if let Some(pid) = pid {
+                kill_process_tree(pid).await;
+            }
             let _ = entry.child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(5), entry.child.wait()).await;
             true
@@ -239,10 +255,15 @@ impl BackgroundProcesses {
 
     /// Stop and forget the process `id` without awaiting its exit. Returns
     /// whether it was tracked. Synchronous so a UI command (a `/bg stop`) can run
-    /// it off the turn loop; `kill_on_drop` reaps the child as the entry drops.
+    /// it off the turn loop; `kill_on_drop` reaps the child as the entry drops,
+    /// and the detached group kill reaps what the child itself started.
     pub fn stop_now(&self, id: &str) -> bool {
         let mut state = self.state.lock();
         if let Some(mut entry) = state.procs.remove(id) {
+            let pid = entry.child.id();
+            if let Some(pid) = pid {
+                kill_process_tree_detached(pid);
+            }
             let _ = entry.child.start_kill();
             true
         } else {
@@ -251,10 +272,16 @@ impl BackgroundProcesses {
     }
 
     /// Terminate and forget every tracked process. Synchronous so it can run from
-    /// the session-close path; `kill_on_drop` reaps the children as they drop.
+    /// the session-close path; `kill_on_drop` reaps the children as they drop, and
+    /// the detached group kill reaps their descendants — otherwise closing a
+    /// session leaves the servers it started running.
     pub fn kill_all(&self) {
         let mut state = self.state.lock();
         for entry in state.procs.values_mut() {
+            let pid = entry.child.id();
+            if let Some(pid) = pid {
+                kill_process_tree_detached(pid);
+            }
             let _ = entry.child.start_kill();
         }
         state.procs.clear();
@@ -616,6 +643,82 @@ mod tests {
 
         procs.kill_all();
         assert!(procs.list().is_empty());
+    }
+
+    /// Stopping a shell-wrapped process must take the workload with it, not just
+    /// the shell. The grandchild writes to a file it holds open; if it survives
+    /// the stop it keeps appending, so the file growing after `stop` returned is
+    /// the leak, observed without depending on platform process tables.
+    #[tokio::test]
+    async fn stopping_a_shell_wrapped_process_takes_its_workload_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ticks");
+        let marker_arg = marker.to_string_lossy().replace('\\', "/");
+
+        // The writer must be a *grandchild* that outlives its parent, or the test
+        // proves nothing: a loop running in the immediate child stops when that
+        // child is killed, with or without a group kill. So the child starts a
+        // detached writer and then just waits.
+        #[cfg(windows)]
+        let execution = RunShellExecution::Direct {
+            program: "powershell.exe".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "Start-Process -NoNewWindow powershell -ArgumentList \
+                     '-NoProfile','-NonInteractive','-Command',\
+                     'while ($true) {{ Add-Content -Path ''{marker_arg}'' -Value x; \
+                     Start-Sleep -Milliseconds 50 }}'; Start-Sleep -Seconds 60"
+                ),
+            ],
+        };
+        #[cfg(not(windows))]
+        let execution = RunShellExecution::Direct {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "sh -c \"while true; do printf x >> '{marker_arg}'; sleep 0.05; done\" & \
+                     wait"
+                ),
+            ],
+        };
+
+        let procs = BackgroundProcesses::new();
+        let outcome = procs
+            .start(execution, dir.path(), Duration::from_millis(400))
+            .await
+            .unwrap();
+        let id = match outcome {
+            StartOutcome::Running { id, .. } => id,
+            StartOutcome::ExitedEarly { .. } => panic!("the loop must stay up"),
+        };
+        // Let the workload prove it is running before it is stopped.
+        let mut ticked = false;
+        for _ in 0..100 {
+            if marker.exists() && std::fs::metadata(&marker).unwrap().len() > 0 {
+                ticked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ticked, "the workload never started writing");
+
+        assert!(
+            procs.stop(&id).await,
+            "stop reports the process was tracked"
+        );
+        // Give anything that survived a generous window to keep writing.
+        let after_stop = std::fs::metadata(&marker).unwrap().len();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let later = std::fs::metadata(&marker).unwrap().len();
+        assert_eq!(
+            after_stop, later,
+            "the workload kept running after stop — the shell was killed but its \
+             grandchild was orphaned (it would also still hold its ports and pipes)"
+        );
     }
 
     #[test]

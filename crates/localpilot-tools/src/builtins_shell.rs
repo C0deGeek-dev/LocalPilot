@@ -534,7 +534,7 @@ impl Tool for RunShell {
 /// child leads its own process group (set at spawn), so a negative pid signals
 /// the whole group even after the leader exits. Best-effort: an unreapable
 /// process is the OS's to report, never surfaced as a tool error.
-async fn kill_process_tree(pid: u32) {
+pub(crate) async fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         let _ = tokio::process::Command::new("taskkill")
@@ -552,6 +552,33 @@ async fn kill_process_tree(pid: u32) {
             .stderr(std::process::Stdio::null())
             .status()
             .await;
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+    }
+}
+
+/// The same reap, for callers that cannot await: a UI command running off the
+/// turn loop, or the session-close path. Fire-and-forget by design — the point
+/// is that the signal reaches the *group* before the caller forgets the child,
+/// so nothing is left holding an inherited pipe or a port.
+pub(crate) fn kill_process_tree_detached(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
     #[cfg(not(any(windows, unix)))]
     {
