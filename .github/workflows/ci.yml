@@ -114,47 +114,24 @@ jobs:
       # Unit + integration tests via nextest. Fallback without nextest installed:
       # `cargo test --workspace`. nextest does not run doctests, so run those too.
       #
-      # On hosted ubuntu this step has wedged to the job ceiling — with its log
-      # lost — on every run since the 2026-07-08 runner-agent rollout
-      # (2.335.1 → 2.336.0), while windows/macos and a local Linux run of the
-      # same commit pass in minutes. Contain it on Linux: output goes to a
-      # file (a leaked child can hold a file handle without holding the
-      # step's output pipe open, so the step can end) and a hard timeout kills
-      # a wedged nextest with its progress preserved; the tail step then names
-      # exactly what was running.
       - if: runner.os != 'Linux'
         run: cargo nextest run --workspace
-      # Since the 2026-07-08 runner rollout, this phase freezes the whole
-      # hosted-ubuntu VM: neither a bash `timeout -k` (SIGKILL) nor a
-      # step-level timeout fires — the runner worker itself stops making
-      # progress until the job ceiling kills the job from the outside, logs
-      # included (the job then ends at exactly 55 minutes: the 45-minute
-      # ceiling plus GitHub's grace for an unresponsive runner). The same
-      # commit passes the full suite in ~9 minutes on windows/macos and on a
-      # local Linux machine, so the trigger is resource pressure on the
-      # 4-vCPU/16 GB VM.
+      # The Linux legs wedged to the job ceiling, with the log lost, from the
+      # 2026-07-08 runner rollout until 2026-07-26. The cause was not the
+      # resource pressure it looked like: the process-group reap in
+      # `builtins_shell` was a silent no-op on Linux (`kill -KILL -<group>` is
+      # parsed by procps as two option words — it exits 0 and signals nothing),
+      # so a timed-out command orphaned its children, those children kept the
+      # test binary's stdout/stderr pipes open, and nextest could never finish.
+      # Capping build jobs, capping memory, reclaiming disk, and serialising
+      # tests all left it untouched, because none of them addressed a leaked
+      # process.
       #
-      # Capping `--build-jobs` alone did not stop it, because the storm is not
-      # only compilation: `localpilot-harness`'s first-party corpus tests each
-      # spawn a nested `cargo test` (tests/first_party.rs), and nextest
-      # defaults to one test thread per core — so four nested cargo builds can
-      # run on top of the main link storm, and the vendored LocalMind crates
-      # (which grew sharply on 2026-07-23, when the wedges became
-      # deterministic) build in this same workspace.
-      #
-      # Bounded concurrency, a cgroup memory ceiling, and reclaiming ~25 GB of
-      # runner disk each failed to move it, so the constraint is not one of the
-      # things guessed at from outside. What survives a frozen VM is not the
-      # log — it dies with the runner — but the *step boundaries*, which the
-      # jobs API reports either way. So the phase runs as steps that each answer
-      # one question, and the step with no completion timestamp names the
-      # culprit.
-      #
-      # That split already ruled out the two loudest suspects: building and
-      # linking all ~74 test binaries completes in under two minutes, and the
-      # nested-cargo corpus is not reached. The wedge is in *test execution*, so
-      # execution is now one step per package: the first step without a
-      # completion timestamp is the package that freezes the runner.
+      # Two things here are worth keeping regardless. Running one package per
+      # step costs nothing, loses no coverage, and turns any future wedge into a
+      # named step instead of an unattributable 55-minute corpse — which is what
+      # localised this one. Building the test binaries in their own step keeps
+      # the heaviest phase distinct from execution.
       - if: runner.os == 'Linux'
         name: linux — build test binaries
         timeout-minutes: 20
@@ -261,80 +238,16 @@ jobs:
       # is the culprit. `binary(tools)` is the suspect — it holds the slowest
       # spawning tests, including the destructive-command prompt and the
       # timeout-and-reap path.
-      # The unit tests are where it wedges, so they are split the same way: the
-      # 72 that touch no process, then the two process-driving modules on their
-      # own. Whichever step lacks a completion timestamp is the answer, and the
-      # other two still report.
+      # This package drives real child processes (`run_shell`, the background
+      # registry), so it runs serially. It wedged the runner for weeks until the
+      # cause was found: the Linux process-group reap was a silent no-op, so
+      # timed-out commands orphaned children that kept the test binary's pipes
+      # open and nextest could never finish. Fixed in `builtins_shell`; the
+      # serial run stays because these tests spawn real processes.
       - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tools (unit, no process spawning)'
-        timeout-minutes: 6
-        run: |
-          capped cargo nextest run --test-threads 2 \
-            -E 'package(localpilot-tools) and kind(lib) and not (test(/builtins_shell/) or test(/builtins_background/))'
-      - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tools (unit, background registry)'
-        timeout-minutes: 6
-        run: |
-          capped cargo nextest run --test-threads 1 \
-            -E 'package(localpilot-tools) and kind(lib) and test(/builtins_background/)'
-      - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tools (unit, run_shell)'
-        timeout-minutes: 6
-        run: |
-          capped cargo nextest run --test-threads 1 \
-            -E 'package(localpilot-tools) and kind(lib) and test(/builtins_shell/)'
-      - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tools (spawn invariants, validate)'
-        timeout-minutes: 6
-        run: capped cargo nextest run -E 'package(localpilot-tools) and kind(test) and not binary(tools)' --test-threads 1
-      - id: tools-linux
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        name: 'linux — tests: localpilot-tools (process-spawning integration)'
-        timeout-minutes: 12
-        shell: bash
-        run: |
-          status=0
-          setsid timeout -k 30s 6m capped cargo nextest run \
-            -E 'package(localpilot-tools) and binary(tools)' \
-            --test-threads 1 --status-level all \
-            > nextest-tools.log 2>&1 < /dev/null || status=$?
-          echo "cargo nextest exit status: $status"
-          exit "$status"
-      - if: runner.os == 'Linux' && always()
-        name: 'linux — tools diagnostics'
-        shell: bash
-        run: |
-          echo "=== nextest output (tail) ==="
-          tail -n 300 nextest-tools.log || true
-          echo "=== surviving processes (a leak is what holds the pipes) ==="
-          ps -ef --forest | tail -n 40 || true
-          echo "=== stragglers and the descriptors they hold ==="
-          for pid in $(pgrep -f 'sleep|/bin/sh|localpilot|nextest' 2>/dev/null || true); do
-            cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-            [ -n "$cmd" ] || continue
-            echo "-- pid $pid: $cmd"
-            ls -l "/proc/$pid/fd" 2>/dev/null | head -n 6 || true
-          done
-      - if: runner.os == 'Linux' && always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tools-wedge-log
-          path: nextest-tools.log
-          retention-days: 7
-      - if: runner.os == 'Linux' && steps.tools-linux.outcome != 'success'
-        shell: bash
-        run: |
-          echo "::error::localpilot-tools tests did not succeed (see the tools diagnostics step and the tools-wedge-log artifact)"
-          exit 1
-      - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tui'
-        timeout-minutes: 6
-        run: capped cargo nextest run -p localpilot-tui --test-threads 2
-      - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-verify'
-        timeout-minutes: 6
-        run: capped cargo nextest run -p localpilot-verify --test-threads 2
+        name: 'linux — tests: localpilot-tools'
+        timeout-minutes: 10
+        run: capped cargo nextest run -p localpilot-tools --test-threads 1
       - if: runner.os == 'Linux'
         run: df -h /
       - id: nextest-linux

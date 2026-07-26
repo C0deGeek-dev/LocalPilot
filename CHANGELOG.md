@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A timed-out or stopped command no longer leaves its work running.** On Linux
+  the process-tree reap was a silent no-op: `kill` was invoked as
+  `kill -KILL -<group>`, which procps parses as two option words — it exits
+  reporting success and signals nothing. So every `run_shell` that hit its
+  timeout left the whole tree alive, still holding its ports, pipes, and memory
+  for the rest of the session. The call now uses the explicit
+  `kill -s KILL -- -<group>` form that actually reaches the process group.
+  Separately, `run_background`'s `stop`, `/bg stop`, and session close only
+  signalled the child they spawned, which for a shell-wrapped command is the
+  wrapper: stopping a dev server killed the shell and orphaned the server. They
+  now reap the whole group, *before* killing the child — descendants are found by
+  walking links from the parent, so killing the parent first orphans them and the
+  walk finds nothing. A regression test drives a real grandchild that outlives its
+  parent and fails if the workload survives being stopped.
 - **Research resolves search-provider redirect wrappers instead of discarding
   them** (ADR-0100, LocalHub#42). A 3xx no longer ends a candidate URL. The HTTP
   client's automatic redirect following stays off — no hop may bypass the

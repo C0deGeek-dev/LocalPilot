@@ -546,8 +546,11 @@ pub(crate) async fn kill_process_tree(pid: u32) {
     }
     #[cfg(unix)]
     {
+        // `-s KILL` and the `--` separator are both required: procps `kill`
+        // parses `-KILL -1234` as two option words, exits 0, and signals
+        // nothing at all — a silent no-op that left every timed-out tree alive.
         let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -574,8 +577,10 @@ pub(crate) fn kill_process_tree_detached(pid: u32) {
     }
     #[cfg(unix)]
     {
+        // See the note in `kill_process_tree`: without `-s`/`--` this signals
+        // nothing and still reports success.
         let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
