@@ -205,8 +205,15 @@ pub struct SourceAccount {
     pub rejected_relevance: usize,
     /// Skipped by policy: non-allowlisted host, host cooldown, no consent.
     pub policy_skipped: usize,
-    /// Redirect responses, never followed.
+    /// Redirect responses that ended the candidate: a destination refused by
+    /// policy, a malformed `Location`, a cycle, or the hop limit (LocalHub#42).
+    /// A redirect that was safely followed is counted by `redirects_followed`
+    /// instead, so "we refused to go there" reads differently from "we went
+    /// there and it worked".
     pub redirected: usize,
+    /// Redirect hops followed after independently re-gating each destination.
+    #[serde(default)]
+    pub redirects_followed: usize,
     /// Fetch/read failures and unsuccessful responses (including a source
     /// call that errored outright).
     pub failed: usize,
@@ -228,6 +235,12 @@ pub struct SourceAccount {
     /// (frame recovered, renderer unavailable). Never page content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub render_notes: Vec<String>,
+    /// Content-free redirect diagnostics: one short line per redirected
+    /// candidate — the hop outcome and its reason (followed to a re-gated
+    /// destination, refused by policy, malformed, cyclic, hop limit). Locators
+    /// only, never page content (LocalHub#42).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirect_notes: Vec<String>,
 }
 
 impl SourceAccount {
@@ -247,12 +260,15 @@ impl SourceAccount {
         self.rejected_relevance += other.rejected_relevance;
         self.policy_skipped += other.policy_skipped;
         self.redirected += other.redirected;
+        self.redirects_followed += other.redirects_followed;
         self.failed += other.failed;
         self.below_floor += other.below_floor;
         self.render_required += other.render_required;
         self.admitted_notes
             .extend(other.admitted_notes.iter().cloned());
         self.render_notes.extend(other.render_notes.iter().cloned());
+        self.redirect_notes
+            .extend(other.redirect_notes.iter().cloned());
     }
 }
 

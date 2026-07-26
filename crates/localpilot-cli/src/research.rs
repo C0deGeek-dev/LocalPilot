@@ -660,6 +660,13 @@ const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
 const WEB_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Cap on body bytes kept as evidence from one fetch, bounding context cost.
 const WEB_MAX_BODY_BYTES: usize = 64 * 1024;
+/// Redirect hops one candidate URL may be followed through before the chain is
+/// abandoned (LocalHub#42). Generous for the real shapes this exists to serve —
+/// a search provider's attribution wrapper, an http→https upgrade, a canonical
+/// host move, a relocated documentation page — and small enough that a chain
+/// cannot become an unbounded crawl. Cycles are caught separately, so this
+/// bounds honest chains rather than loops.
+const WEB_MAX_REDIRECT_HOPS: usize = 5;
 
 /// Default egress audit-log path when `[research.web].audit_log` is unset.
 fn default_audit_log(root: &Path) -> PathBuf {
@@ -1284,6 +1291,12 @@ impl WebSource {
     /// rather than a silent `None` or a source-aborting error, so the
     /// per-question account can say *why* web produced nothing — and one bad
     /// URL never discards the evidence already gathered (LocalHub#33).
+    ///
+    /// A 3xx is followed, but only through LocalPilot's own policy: `reqwest`
+    /// auto-following stays off so no hop can bypass the allowlist or the audit
+    /// log, and each destination is re-gated by [`decide_destination`] before it
+    /// is requested (LocalHub#42). Cooldown, pacing, timeouts, body bounds, and
+    /// admission all apply per hop, exactly as on a direct fetch.
     async fn fetch(
         &self,
         url: &str,
@@ -1291,68 +1304,106 @@ impl WebSource {
         question: &str,
         query: &str,
     ) -> Result<FetchOutcome, SourceError> {
-        // A host that rate-limited or errored earlier in the run stays cooled
-        // down — 429/5xx are host-level signals, not per-URL ones.
-        if self.host_cooled(host) {
-            append_audit(
-                &self.audit_log,
-                &audit_entry(url, host, "host-cooldown", query),
-            )?;
-            return Ok(FetchOutcome::Cooled);
-        }
-        // Pace repeat visits: the delay adapts to the host's own last
-        // response time, clamped to a sane window.
-        if let Some(pause) = self.pause_before(host) {
-            tokio::time::sleep(pause).await;
-        }
-        append_audit(&self.audit_log, &audit_entry(url, host, "allowed", query))?;
-        let fetch_started = std::time::Instant::now();
-        let response = match self.client.get(url).send().await {
-            Ok(response) => response,
-            Err(_) => {
+        let mut current_url = url.to_string();
+        let mut current_host = host.to_string();
+        // Every URL already requested in this chain, so a loop is caught rather
+        // than walked until the hop limit.
+        let mut visited: std::collections::BTreeSet<String> =
+            std::iter::once(current_url.clone()).collect();
+        let mut hops = 0usize;
+
+        let (content_type, body) = loop {
+            // A host that rate-limited or errored earlier in the run stays cooled
+            // down — 429/5xx are host-level signals, not per-URL ones.
+            if self.host_cooled(&current_host) {
                 append_audit(
                     &self.audit_log,
-                    &audit_entry(url, host, "fetch-error", query),
+                    &audit_entry(&current_url, &current_host, "host-cooldown", query),
                 )?;
-                return Ok(FetchOutcome::Failed);
+                return Ok(FetchOutcome::Cooled);
             }
-        };
-        let status = response.status();
-        let cool_down = status.as_u16() == 429 || status.is_server_error();
-        self.record_fetch(host, fetch_started.elapsed(), cool_down);
-        if cool_down {
-            return Ok(FetchOutcome::Failed);
-        }
-        // A redirect is never followed (the target host is unvetted); audit and
-        // skip it so it can't become an un-allowlisted egress channel.
-        if status.is_redirection() {
+            // Pace repeat visits: the delay adapts to the host's own last
+            // response time, clamped to a sane window.
+            if let Some(pause) = self.pause_before(&current_host) {
+                tokio::time::sleep(pause).await;
+            }
             append_audit(
                 &self.audit_log,
-                &audit_entry(url, host, "redirect-not-followed", query),
+                &audit_entry(&current_url, &current_host, "allowed", query),
             )?;
-            return Ok(FetchOutcome::Redirected);
-        }
-        // Capture the content type before `text()` consumes the response, so a
-        // fetched HTML page can be reduced to readable prose below.
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let body = match response.text().await {
-            Ok(body) => body,
-            Err(_) => {
-                append_audit(
-                    &self.audit_log,
-                    &audit_entry(url, host, "fetch-error", query),
-                )?;
+            let fetch_started = std::time::Instant::now();
+            let response = match self.client.get(&current_url).send().await {
+                Ok(response) => response,
+                Err(_) => {
+                    append_audit(
+                        &self.audit_log,
+                        &audit_entry(&current_url, &current_host, "fetch-error", query),
+                    )?;
+                    return Ok(FetchOutcome::Failed);
+                }
+            };
+            let status = response.status();
+            let cool_down = status.as_u16() == 429 || status.is_server_error();
+            self.record_fetch(&current_host, fetch_started.elapsed(), cool_down);
+            if cool_down {
                 return Ok(FetchOutcome::Failed);
             }
+            if status.is_redirection() {
+                let stop = match self.redirect_destination(&current_url, &response) {
+                    Ok(next) => {
+                        let next_host = next.host_str().unwrap_or_default().to_string();
+                        let next_url = next.to_string();
+                        if hops + 1 > WEB_MAX_REDIRECT_HOPS {
+                            Err(RedirectStop::DepthExceeded)
+                        } else if !visited.insert(next_url.clone()) {
+                            Err(RedirectStop::Cycle)
+                        } else {
+                            append_audit(
+                                &self.audit_log,
+                                &audit_entry(&next_url, &next_host, "redirect-followed", query),
+                            )?;
+                            hops += 1;
+                            current_url = next_url;
+                            current_host = next_host;
+                            Ok(())
+                        }
+                    }
+                    Err(stop) => Err(stop),
+                };
+                match stop {
+                    Ok(()) => continue,
+                    Err(stop) => {
+                        append_audit(
+                            &self.audit_log,
+                            &audit_entry(&current_url, &current_host, stop.reason(), query),
+                        )?;
+                        return Ok(FetchOutcome::Redirected(stop));
+                    }
+                }
+            }
+            // Capture the content type before `text()` consumes the response, so a
+            // fetched HTML page can be reduced to readable prose below.
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(_) => {
+                    append_audit(
+                        &self.audit_log,
+                        &audit_entry(&current_url, &current_host, "fetch-error", query),
+                    )?;
+                    return Ok(FetchOutcome::Failed);
+                }
+            };
+            if !status.is_success() {
+                return Ok(FetchOutcome::Failed);
+            }
+            break (content_type, body);
         };
-        if !status.is_success() {
-            return Ok(FetchOutcome::Failed);
-        }
         // An HTML document becomes evidence as readable Markdown, not raw
         // markup: otherwise script/style bodies and tags leak into the finding
         // and its evidence block as junk, and the length budget is spent on
@@ -1384,10 +1435,14 @@ impl WebSource {
         // trail when the model judges.
         let scoped = scope_to_topic(&self.topic, question);
         let relevance = term_overlap_relevance(&scoped, &snippet);
+        // The locator is the URL the content actually came from, not the URL
+        // that was proposed: a wrapper URL is where the page was found, the
+        // final URL is where the page *is*, and a reader following the evidence
+        // must land on the latter. The proposed URL is kept as provenance.
         let evidence = Evidence::new(
             question,
             snippet,
-            Provenance::new("web", Some(url.to_string())),
+            Provenance::new("web", Some(current_url.clone())),
             relevance,
         )
         .with_admission(AdmissionTrail {
@@ -1398,7 +1453,38 @@ impl WebSource {
         Ok(FetchOutcome::Fetched(Box::new(FetchedPage {
             evidence,
             lead,
+            redirect: (hops > 0).then(|| RedirectProvenance {
+                from: url.to_string(),
+                hops,
+            }),
         })))
+    }
+
+    /// Resolve one redirect hop's destination from `response`, refusing any
+    /// destination the active reach does not permit. Deliberately does not
+    /// audit: the caller records the hop in its own vocabulary, and keeping this
+    /// pure makes the policy decision testable on its own.
+    fn redirect_destination(
+        &self,
+        current_url: &str,
+        response: &reqwest::Response,
+    ) -> Result<reqwest::Url, RedirectStop> {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(RedirectStop::Malformed)?;
+        // A `Location` may be relative ("/article", "../x"); resolve it against
+        // the URL that produced it, exactly as a browser would.
+        let base = reqwest::Url::parse(current_url).map_err(|_| RedirectStop::Malformed)?;
+        let next = base.join(location).map_err(|_| RedirectStop::Malformed)?;
+        let origin_host = base.host_str().unwrap_or_default().to_string();
+        match decide_destination(&self.access, &next, Some(&origin_host)) {
+            DestinationVerdict::Allowed => Ok(next),
+            DestinationVerdict::BlockedScheme
+            | DestinationVerdict::BlockedInternal
+            | DestinationVerdict::Blocked => Err(RedirectStop::Blocked),
+        }
     }
 
     /// Whether a fetched HTML page needs rendering, per the operator's render
@@ -1686,7 +1772,12 @@ impl WebSource {
                             }
                         }
                         FetchOutcome::Cooled => account.policy_skipped += 1,
-                        FetchOutcome::Redirected => account.redirected += 1,
+                        FetchOutcome::Redirected(stop) => {
+                            account.redirected += 1;
+                            account
+                                .redirect_notes
+                                .push(format!("{frame_url}: {}", stop.reason()));
+                        }
                         FetchOutcome::Failed => account.failed += 1,
                     }
                 }
@@ -1712,6 +1803,9 @@ struct FetchedPage {
     /// under the active render mode — the caller recovers an allowlisted frame
     /// or records an explicit render-required outcome.
     lead: Option<RenderLead>,
+    /// Set when the page was reached through one or more re-gated redirect
+    /// hops; `None` on the direct path (LocalHub#42).
+    redirect: Option<RedirectProvenance>,
 }
 
 /// Why a fetched page looks like it needs rendering, plus its iframe leads.
@@ -1753,48 +1847,75 @@ struct WebAccessGate {
     query: String,
 }
 
+/// Whether one destination URL may be reached at all, decided independently of
+/// how it was arrived at. The browser render gate and the static fetch's
+/// redirect loop both route through [`decide_destination`], so a navigation and
+/// a 3xx hop enforce the *same* boundary rather than two drifting copies of it
+/// (LocalHub#37, LocalHub#42).
+enum DestinationVerdict {
+    /// Reachable: http/https, not internal, and allowed by the active reach.
+    Allowed,
+    /// Not http/https (local file, custom scheme, …).
+    BlockedScheme,
+    /// Loopback, link-local, private-network, or unspecified address — refused
+    /// unconditionally, ahead of the allowlist, so an open-web reach can never
+    /// be turned into an SSRF channel.
+    BlockedInternal,
+    /// A public destination the active reach does not permit. A destination
+    /// needing confirmation counts as blocked: the grant in hand is the only
+    /// authority, and a redirect must never be the thing that widens it.
+    Blocked,
+}
+
+/// Decide whether `parsed` may be reached under `access`. Pure: it audits
+/// nothing and mutates nothing, so each caller can record the outcome in its
+/// own vocabulary.
+///
+/// `origin_host`, when given, is the host that referred us here (the host that
+/// issued a redirect). A destination on that same host inherits its permission
+/// and skips the internal-address guard: continuing a conversation with a host
+/// already being fetched grants no reach that was not already granted, so an
+/// internal host someone deliberately allowlisted can still redirect within
+/// itself. The guard still refuses a *cross-host* hop to an internal address,
+/// which is the case it exists for — an allowlisted public page steering the
+/// fetcher at loopback or a metadata endpoint. A caller with no referring host
+/// (the browser render gate) passes `None` and gets the strict rule.
+fn decide_destination(
+    access: &WebAccess,
+    parsed: &reqwest::Url,
+    origin_host: Option<&str>,
+) -> DestinationVerdict {
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return DestinationVerdict::BlockedScheme;
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let same_host_as_origin = origin_host.is_some_and(|origin| origin.eq_ignore_ascii_case(host));
+    if is_internal_host(host) && !same_host_as_origin {
+        return DestinationVerdict::BlockedInternal;
+    }
+    match access.decide_host(host) {
+        FetchDecision::Allowed => DestinationVerdict::Allowed,
+        FetchDecision::NeedsConfirmation | FetchDecision::Disabled => DestinationVerdict::Blocked,
+    }
+}
+
 impl RenderGate for WebAccessGate {
     fn allow(&self, url: &str) -> bool {
         let Ok(parsed) = reqwest::Url::parse(url) else {
             return false;
         };
         let host = parsed.host_str().unwrap_or_default();
-        // http/https only: no local-file, loopback-scheme, or other unsafe
-        // destination may be rendered, matching the static fetch boundary.
-        if !matches!(parsed.scheme(), "http" | "https") {
-            let _ = append_audit(
-                &self.audit_log,
-                &audit_entry(url, host, "render-blocked-scheme", &self.query),
-            );
-            return false;
-        }
-        // A rendered page can reference arbitrary subresources; an open-web
-        // allowlist must never let the browser reach a loopback, link-local,
-        // or private-network address (SSRF). This block is unconditional,
-        // ahead of the host allowlist.
-        if is_internal_host(host) {
-            let _ = append_audit(
-                &self.audit_log,
-                &audit_entry(url, host, "render-blocked-internal", &self.query),
-            );
-            return false;
-        }
-        match self.access.decide_host(host) {
-            FetchDecision::Allowed => {
-                let _ = append_audit(
-                    &self.audit_log,
-                    &audit_entry(url, host, "render-request", &self.query),
-                );
-                true
-            }
-            FetchDecision::NeedsConfirmation | FetchDecision::Disabled => {
-                let _ = append_audit(
-                    &self.audit_log,
-                    &audit_entry(url, host, "render-blocked", &self.query),
-                );
-                false
-            }
-        }
+        let (decision, allowed) = match decide_destination(&self.access, &parsed, None) {
+            DestinationVerdict::Allowed => ("render-request", true),
+            DestinationVerdict::BlockedScheme => ("render-blocked-scheme", false),
+            DestinationVerdict::BlockedInternal => ("render-blocked-internal", false),
+            DestinationVerdict::Blocked => ("render-blocked", false),
+        };
+        let _ = append_audit(
+            &self.audit_log,
+            &audit_entry(url, host, decision, &self.query),
+        );
+        allowed
     }
 }
 
@@ -1837,10 +1958,46 @@ enum FetchOutcome {
     Fetched(Box<FetchedPage>),
     /// The host is cooling down after an earlier rate-limit/server error.
     Cooled,
-    /// A redirect response, never followed.
-    Redirected,
+    /// A redirect chain that ended without a page, carrying the content-free
+    /// reason it stopped so the account can distinguish "refused to follow"
+    /// from "followed and it broke" (LocalHub#42).
+    Redirected(RedirectStop),
     /// A transport error, unsuccessful status, or unreadable body.
     Failed,
+}
+
+/// Why a redirect chain ended without producing a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RedirectStop {
+    /// The destination is not permitted (scheme, internal address, or reach).
+    Blocked,
+    /// No `Location` header, or one that will not parse against the current URL.
+    Malformed,
+    /// The chain revisited a URL it had already fetched.
+    Cycle,
+    /// The chain exceeded [`WEB_MAX_REDIRECT_HOPS`].
+    DepthExceeded,
+}
+
+impl RedirectStop {
+    /// The audit decision and account note wording for this stop.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Blocked => "redirect-blocked",
+            Self::Malformed => "redirect-malformed",
+            Self::Cycle => "redirect-cycle",
+            Self::DepthExceeded => "redirect-depth-exceeded",
+        }
+    }
+}
+
+/// How a fetched page was reached, when it was not reached directly.
+struct RedirectProvenance {
+    /// The originally proposed candidate URL, kept so evidence can say where
+    /// the locator came from (a search provider's wrapper, say).
+    from: String,
+    /// How many hops were followed to reach the final URL.
+    hops: usize,
 }
 
 #[async_trait]
@@ -1894,7 +2051,19 @@ impl Source for WebSource {
                         let FetchedPage {
                             evidence: found,
                             lead,
+                            redirect,
                         } = *page;
+                        // A page reached through re-gated hops is recorded as
+                        // such: the account distinguishes it from a direct
+                        // fetch, and the note keeps the proposed URL visible
+                        // next to the locator it resolved to (LocalHub#42).
+                        if let Some(RedirectProvenance { from, hops }) = redirect {
+                            account.redirects_followed += hops;
+                            let to = found.provenance.locator.as_deref().unwrap_or_default();
+                            account
+                                .redirect_notes
+                                .push(format!("{from}: followed {hops} hop(s) to {to}"));
+                        }
                         if let Some(admitted) = self.admit(&url, &host, &query, found).await? {
                             account.admitted += 1;
                             evidence.push(admitted);
@@ -1917,7 +2086,12 @@ impl Source for WebSource {
                         }
                     }
                     FetchOutcome::Cooled => account.policy_skipped += 1,
-                    FetchOutcome::Redirected => account.redirected += 1,
+                    FetchOutcome::Redirected(stop) => {
+                        account.redirected += 1;
+                        account
+                            .redirect_notes
+                            .push(format!("{url}: {}", stop.reason()));
+                    }
                     FetchOutcome::Failed => account.failed += 1,
                 },
                 FetchDecision::NeedsConfirmation => {
@@ -3316,9 +3490,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allowlisted_host_redirect_is_not_followed_and_is_audited() {
-        // An allowlisted host that 302s to another location must not be followed
-        // (that target host was never allowlisted), and the redirect is audited.
+    async fn redirect_to_a_disallowed_host_is_blocked_before_the_destination_is_contacted() {
+        // The boundary that must survive redirect following: a hop whose
+        // destination the reach does not permit is refused *before* any request
+        // reaches it, so a 3xx can never become an un-allowlisted egress channel.
         use wiremock::matchers::path;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3337,20 +3512,334 @@ mod tests {
         let gathered = source.gather("q", 3).await.unwrap();
         assert!(
             gathered.evidence.is_empty(),
-            "a redirect yields no evidence"
+            "a blocked redirect yields no evidence"
         );
         assert_eq!(
             gathered.account.redirected, 1,
-            "the unfollowed redirect is countable in the retrieval account"
+            "the refused redirect is countable in the retrieval account"
         );
-        // The allowlisted host was requested once; the redirect target was not.
+        assert_eq!(
+            gathered.account.redirects_followed, 0,
+            "nothing was followed"
+        );
         let hits = server.received_requests().await.unwrap();
         assert_eq!(hits.len(), 1, "only the allowlisted host is contacted");
         let log = std::fs::read_to_string(&audit).unwrap();
         assert!(
-            log.contains("decision=redirect-not-followed"),
-            "the redirect is audited: {log}"
+            log.contains("decision=redirect-blocked"),
+            "the refusal is audited with its reason: {log}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_relative_same_host_redirect_is_followed_to_the_final_article() {
+        // The plainest legitimate shape: a relocated page pointing at its new
+        // path on the same host. The final article becomes the evidence.
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/old"))
+            .respond_with(ResponseTemplate::new(301).insert_header("location", "/article"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("the moved documentation body"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/old", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source.gather("moved documentation", 3).await.unwrap();
+        assert_eq!(
+            gathered.evidence.len(),
+            1,
+            "the destination became evidence"
+        );
+        assert!(gathered.evidence[0]
+            .snippet
+            .contains("the moved documentation body"));
+        assert_eq!(
+            gathered.evidence[0].provenance.locator.as_deref(),
+            Some(format!("{}/article", server.uri()).as_str()),
+            "the locator is the final URL, not the proposed one"
+        );
+        assert_eq!(gathered.account.redirects_followed, 1);
+        assert_eq!(gathered.account.redirected, 0);
+        assert!(
+            gathered
+                .account
+                .redirect_notes
+                .iter()
+                .any(|note| note.contains("/old") && note.contains("/article")),
+            "provenance keeps the proposed URL beside the resolved one: {:?}",
+            gathered.account.redirect_notes
+        );
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=redirect-followed"),
+            "the followed hop is audited: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grounding_wrapper_resolves_to_its_allowed_source() {
+        // The shape this exists for (LocalHub#42): a search provider returns an
+        // attribution/grounding wrapper URL rather than the source URL. With
+        // both hosts allowed, the wrapper resolves and the source yields
+        // evidence — because every hop is revalidated, not because any vendor
+        // host is special-cased.
+        use wiremock::matchers::path;
+        let source_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("grounded source body"))
+            .mount(&source_server)
+            .await;
+        let wrapper_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/grounding-api-redirect/token"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                format!("{}/article", source_server.uri()).as_str(),
+            ))
+            .mount(&wrapper_server)
+            .await;
+
+        let wrapper_url = format!("{}/grounding-api-redirect/token", wrapper_server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(
+            &wrapper_url,
+            vec![
+                parse_host(&wrapper_url).unwrap(),
+                parse_host(&source_server.uri()).unwrap(),
+            ],
+            true,
+            audit.clone(),
+        );
+
+        let gathered = source.gather("grounded source", 3).await.unwrap();
+        assert_eq!(gathered.evidence.len(), 1, "the wrapper resolved to a page");
+        assert!(gathered.evidence[0]
+            .snippet
+            .contains("grounded source body"));
+        assert_eq!(
+            gathered.evidence[0].provenance.locator.as_deref(),
+            Some(format!("{}/article", source_server.uri()).as_str()),
+            "evidence points at the real source, not the wrapper"
+        );
+        assert_eq!(gathered.account.redirects_followed, 1);
+        assert_eq!(
+            source_server.received_requests().await.unwrap().len(),
+            1,
+            "the destination host was contacted exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_internal_address_is_blocked_under_an_open_web_allowlist() {
+        // Open-web reach ("*") must not become an SSRF channel: a hop to
+        // loopback, a private range, or a non-http scheme is refused ahead of
+        // the allowlist, exactly as the render gate refuses it.
+        use wiremock::matchers::path;
+        // Each destination is a *different* host from the (loopback) test
+        // origin, so the same-host inheritance in `decide_destination` does not
+        // apply and the internal-address guard is what must refuse them.
+        for location in [
+            "http://localhost:9/x",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.0.0.5/x",
+            "file:///etc/passwd",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/page"))
+                .respond_with(ResponseTemplate::new(302).insert_header("location", location))
+                .mount(&server)
+                .await;
+            let url = format!("{}/page", server.uri());
+            let dir = tempfile::tempdir().unwrap();
+            let audit = dir.path().join("audit.log");
+            // "*" is the open-web reach: every public host is allowed.
+            let (source, _fake) = web_source(&url, vec!["*".to_string()], true, audit.clone());
+
+            let gathered = source.gather("q", 3).await.unwrap();
+            assert!(
+                gathered.evidence.is_empty(),
+                "an internal destination yields no evidence: {location}"
+            );
+            assert_eq!(
+                gathered.account.redirects_followed, 0,
+                "no internal hop is followed: {location}"
+            );
+            assert_eq!(gathered.account.redirected, 1, "counted: {location}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_location_header_is_a_counted_outcome_not_an_aborted_run() {
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(ResponseTemplate::new(302))
+            .mount(&server)
+            .await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source.gather("q", 3).await.unwrap();
+        assert!(gathered.evidence.is_empty());
+        assert_eq!(gathered.account.redirected, 1);
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=redirect-malformed"),
+            "a malformed redirect is audited distinctly: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_cycle_stops_without_refetching_the_same_url() {
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/b"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/a"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/a", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source.gather("q", 3).await.unwrap();
+        assert!(gathered.evidence.is_empty());
+        assert_eq!(gathered.account.redirected, 1);
+        // /a then /b, and the cycle back to /a is detected rather than fetched.
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "the cycle is caught instead of re-requesting a visited URL"
+        );
+        let log = std::fs::read_to_string(&audit).unwrap();
+        assert!(
+            log.contains("decision=redirect-cycle"),
+            "the cycle is audited distinctly: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_redirect_chain_stops_at_the_hop_limit() {
+        // Each hop points at a genuinely fresh path, so this is a long honest
+        // chain rather than a cycle: it must stop at the bound, and the cycle
+        // detector must not be what stops it.
+        use wiremock::matchers::path;
+        let server = MockServer::start().await;
+        let chain = WEB_MAX_REDIRECT_HOPS + 3;
+        for hop in 0..chain {
+            Mock::given(method("GET"))
+                .and(path(format!("/hop/{hop}")))
+                .respond_with(
+                    ResponseTemplate::new(302)
+                        .insert_header("location", format!("/hop/{}", hop + 1).as_str()),
+                )
+                .mount(&server)
+                .await;
+        }
+        let url = format!("{}/hop/0", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source.gather("q", 3).await.unwrap();
+        assert!(
+            gathered.evidence.is_empty(),
+            "a bounded chain yields nothing"
+        );
+        assert_eq!(gathered.account.redirected, 1);
+        let hits = server.received_requests().await.unwrap().len();
+        assert!(
+            hits <= WEB_MAX_REDIRECT_HOPS + 1,
+            "the chain stopped at the bound instead of running on: {hits} requests"
+        );
+    }
+
+    #[test]
+    fn a_destination_on_the_referring_host_inherits_its_permission() {
+        // The rule the redirect loop leans on, stated directly: an internal
+        // destination is refused when a *different* host steered us there, and
+        // permitted when the host already being fetched redirects within
+        // itself — the latter grants no reach that was not already granted.
+        let mut access = WebAccess::new(true, vec!["*".to_string()], Vec::new());
+        access.grant_session();
+        let internal = reqwest::Url::parse("http://127.0.0.1:8080/x").unwrap();
+
+        assert!(
+            matches!(
+                decide_destination(&access, &internal, Some("127.0.0.1")),
+                DestinationVerdict::Allowed
+            ),
+            "a same-host hop inherits the permission already granted"
+        );
+        assert!(
+            matches!(
+                decide_destination(&access, &internal, Some("docs.example.com")),
+                DestinationVerdict::BlockedInternal
+            ),
+            "a public page must not steer the fetcher at loopback"
+        );
+        assert!(
+            matches!(
+                decide_destination(&access, &internal, None),
+                DestinationVerdict::BlockedInternal
+            ),
+            "with no referring host the strict rule applies"
+        );
+        let scheme = reqwest::Url::parse("file:///etc/passwd").unwrap();
+        assert!(
+            matches!(
+                decide_destination(&access, &scheme, Some("127.0.0.1")),
+                DestinationVerdict::BlockedScheme
+            ),
+            "same-host inheritance never widens the scheme boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_page_keeps_its_existing_behaviour() {
+        // The non-redirect path is untouched: no redirect accounting appears.
+        let server = ok_server("plain documentation body").await;
+        let url = format!("{}/page", server.uri());
+        let host = parse_host(&url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = dir.path().join("audit.log");
+        let (source, _fake) = web_source(&url, vec![host], true, audit.clone());
+
+        let gathered = source.gather("plain documentation", 3).await.unwrap();
+        assert_eq!(gathered.evidence.len(), 1);
+        assert_eq!(
+            gathered.evidence[0].provenance.locator.as_deref(),
+            Some(url.as_str())
+        );
+        assert_eq!(gathered.account.redirects_followed, 0);
+        assert_eq!(gathered.account.redirected, 0);
+        assert!(gathered.account.redirect_notes.is_empty());
     }
 
     #[tokio::test]

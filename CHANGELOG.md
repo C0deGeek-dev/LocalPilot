@@ -6,6 +6,27 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Research resolves search-provider redirect wrappers instead of discarding
+  them** (ADR-0100, LocalHub#42). A 3xx no longer ends a candidate URL. The HTTP
+  client's automatic redirect following stays off — no hop may bypass the
+  allowlist or the audit log — and LocalPilot resolves each hop itself: a
+  `Location` is required and resolved against the URL that produced it (so a
+  relative target works), only `http`/`https` destinations are accepted, and each
+  destination is re-gated by the same decision the first hop passed, through the
+  same check the browser renderer uses. A destination needing confirmation stays
+  blocked, and a cross-host hop to loopback, link-local, a private range, or an
+  unspecified address is refused ahead of the allowlist so an open-web reach
+  cannot become an SSRF channel (a host redirecting within itself inherits the
+  permission it already had). Chains stop at five hops and cycles are detected;
+  cooldown, pacing, timeouts, body bounds, redaction, and admission apply per
+  hop. This is what makes an MCP search tool that returns attribution or grounding
+  wrapper URLs useful — previously it could find the right source and still
+  contribute no evidence. Evidence now records the **final** URL as its locator,
+  keeping the proposed URL as provenance, and the retrieval account separates
+  redirects *followed* from candidates that ended at one, with a distinct audit
+  decision per outcome (`redirect-followed`, `redirect-blocked`,
+  `redirect-malformed`, `redirect-cycle`, `redirect-depth-exceeded`) in place of
+  the old single `redirect-not-followed`. No vendor host is special-cased.
 - **Review-only skill discovery** (ADR-0099, LocalHub#41). `skills research [-g]
   <query>` (and `/skills research …`) discovers relevant skills — installed,
   available in a registered source, or in a newly found public GitHub repository —

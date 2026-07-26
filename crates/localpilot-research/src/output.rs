@@ -271,6 +271,12 @@ fn account_line(account: &SourceAccount) -> String {
     if account.policy_skipped > 0 {
         parts.push(format!("{} skipped by policy", account.policy_skipped));
     }
+    if account.redirects_followed > 0 {
+        parts.push(format!(
+            "{} redirect(s) followed",
+            account.redirects_followed
+        ));
+    }
     if account.redirected > 0 {
         parts.push(format!("{} redirect(s) not followed", account.redirected));
     }

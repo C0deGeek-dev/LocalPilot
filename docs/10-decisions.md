@@ -2,6 +2,60 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0100: Research Follows Redirects Through Its Own Policy — Every Hop Re-Gated And Audited, Automatic Following Still Off
+
+Status: accepted. Closes LocalHub#42. Amends the absolute no-follow boundary in
+[`docs/07-security-and-privacy.md`](07-security-and-privacy.md) and reuses the
+per-destination render gating (ADR-0095, LocalHub#37).
+
+Research treated every 3xx as the end of a candidate: the client ran with
+`redirect::Policy::none()` and `fetch` mapped any redirection straight to
+`Redirected`, never reading `Location`. That made the allowlist a true egress
+boundary, but it also discarded same-host relocations, canonical host moves,
+`http`→`https` upgrades, and — the case that surfaced it — the attribution and
+grounding **wrapper URLs** that real search providers return instead of direct
+source URLs. A designated MCP search tool could find exactly the right source and
+still contribute zero evidence, because only the wrapper was ever fetched. An
+open-web allowlist did not help, and browser rendering could not recover it
+either: rendering is considered only after a static fetch has produced a page,
+and a redirect exits before that.
+
+The fix is not to hand redirect handling to the HTTP client — that would move
+egress decisions somewhere the allowlist and audit log cannot see them.
+
+1. **Automatic following stays off.** `redirect::Policy::none()` is retained.
+   LocalPilot resolves each hop itself, so every request it makes is one it
+   decided to make and logged.
+2. **Every hop is re-gated by the same decision the first hop passed.** A hop
+   requires a `Location`, resolves it against the URL that produced it (so a
+   relative target behaves as a browser would), accepts only `http`/`https`, and
+   then passes the destination through the shared `decide_destination` — the same
+   function the browser render gate uses, so static and rendered navigation
+   enforce one boundary instead of two drifting copies. A destination needing
+   confirmation is blocked: the grant in hand is the only authority, and a
+   redirect must never be the thing that widens it.
+3. **Internal addresses are refused ahead of the allowlist, except within one
+   host.** A cross-host hop to loopback, link-local, a private range, or an
+   unspecified address is refused unconditionally, so an open-web reach cannot
+   become an SSRF channel. A host that redirects *within itself* inherits the
+   permission it already had — continuing a conversation with a host already
+   being fetched grants no new reach.
+4. **Chains are bounded and loops are caught.** Five hops, with every visited URL
+   remembered so a cycle stops on detection rather than being walked to the
+   limit. Cooldown, pacing, timeouts, body bounds, redaction, and admission all
+   apply per hop, exactly as on a direct fetch.
+5. **Outcomes are distinct, not collapsed.** The audit log records
+   `redirect-followed`, `redirect-blocked`, `redirect-malformed`,
+   `redirect-cycle`, or `redirect-depth-exceeded` per hop, content-free, and the
+   retrieval account separates hops *followed* from candidates that *ended* at a
+   redirect — "we refused to go there" reads differently from "we went there and
+   it worked". The previous single `redirect-not-followed` decision is gone.
+6. **Evidence points at the page, provenance keeps the lead.** The locator is the
+   final fetched URL, because that is where the content is and where a reader
+   must land; the originally proposed URL is retained as redirect provenance.
+   No vendor host is special-cased — a grounding wrapper resolves because every
+   hop is revalidated, not because anyone is trusted.
+
 ## ADR-0099: Skill Discovery Is Review-Only — It Recommends, Never Registers Or Installs; Web Discovery Reuses The `/research` Egress With A Public GitHub Search Fallback
 
 Status: accepted. Closes LocalHub#41. Builds on the effective skill catalog

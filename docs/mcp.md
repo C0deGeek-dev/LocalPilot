@@ -72,8 +72,12 @@ tools = [{ server = "search", tool = "search" }]
 The named server must exist under `[mcp.servers]`. During a web-active
 research run each designated tool is called once per sub-question with the
 **redacted** query only; the URLs extracted from its results feed the same
-allowlist/disallowlist-gated, audited, no-redirect fetch path as
-model-proposed URLs — a search result is a lead, never evidence. Each search
+allowlist/disallowlist-gated, audited fetch path as model-proposed URLs — a
+search result is a lead, never evidence. A provider that returns an attribution
+or grounding wrapper URL rather than a direct source URL still works: the
+wrapper's redirect is followed, but only through LocalPilot's own policy, with
+every hop independently re-gated and audited and the final URL recorded as the
+evidence locator (ADR-0100, [security](07-security-and-privacy.md)). Each search
 call is itself audited (`decision=search…` lines), a tool that errors or
 rate-limits is skipped without failing the run, and the run's egress
 disclosure names every designated tool. The proposer parses the common result

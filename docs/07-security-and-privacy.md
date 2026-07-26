@@ -436,11 +436,22 @@ construction:
   statements). An allowed host is fetched (bounded bytes and timeouts); every
   other host is **skipped and logged**, never fetched. `disallowlist` beats
   the allowlist, `*` included (ADR-0068).
-- **Redirects are never followed.** The fetch client uses a no-redirect policy,
-  so an allowlisted host that returns a 3xx cannot bounce the request to a
-  non-allowlisted (or internal) host. A redirect is audited
-  (`decision=redirect-not-followed`) and yields no evidence — the allowlist is a
-  true egress boundary, not just a first-hop check.
+- **Redirects are followed only through the policy, never around it**
+  (ADR-0100). The HTTP client's automatic redirect following stays **off**, so no
+  hop can bypass the allowlist or the audit log. A 3xx is resolved by LocalPilot
+  itself: the `Location` is required and resolved against the URL that produced
+  it, only `http`/`https` destinations are accepted, and the destination is
+  re-gated by the same decision the first hop passed — so the allowlist remains a
+  true per-hop egress boundary rather than a first-hop check. A destination
+  needing confirmation counts as blocked: a redirect never widens the grant in
+  hand. A cross-host hop to a loopback, link-local, private-network, or
+  unspecified address is refused **unconditionally, ahead of the allowlist**, so
+  an open-web reach cannot be turned into an SSRF channel; a host redirecting
+  within *itself* inherits the permission it already had. Chains are bounded
+  (5 hops) and cycles are detected. Every hop is audited content-free with its
+  own outcome (`redirect-followed`, `redirect-blocked`, `redirect-malformed`,
+  `redirect-cycle`, `redirect-depth-exceeded`), and evidence records the final
+  URL as its locator while keeping the originally proposed URL as provenance.
 - **Only the sub-question reaches search servers and web hosts.** The
   outbound text is the sub-question passed through the shared workspace
   redactor — never gathered evidence, file contents, or memory. The redactor
