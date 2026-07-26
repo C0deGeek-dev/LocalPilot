@@ -9,8 +9,14 @@ on:
 # hosted ubuntu runner's free disk; the runner then wedges mid-run and dies
 # as "lost communication" with no logs. Line tables keep panic file:line in
 # failures at a fraction of the size. (The test profile inherits dev.)
+#
+# Incremental compilation is the other multi-gigabyte consumer of that disk,
+# and it buys nothing on a CI runner: every job is a cold tree, so the
+# incremental caches are written, never reused, and then thrown away with the
+# VM. Off everywhere.
 env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:
@@ -28,6 +34,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      # The hosted ubuntu image ships ~25 GB of preinstalled toolchains this
+      # build never touches, and the documented wedge here is the target dir
+      # outgrowing the free disk (see the workflow env note): the runner stops
+      # being able to write, loses communication, and the job dies at its
+      # ceiling with the log still on the dead VM. Reclaim the dead weight
+      # before anything builds. Everything removed is restorable by the image,
+      # nothing here is a build input, and the tool cache that holds the
+      # toolchain we *do* use is left alone.
+      - if: runner.os == 'Linux'
+        name: reclaim runner disk
+        shell: bash
+        run: |
+          echo "=== free disk before ==="; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/share/swift /usr/local/.ghcup 2>/dev/null || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "=== free disk after ==="; df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.82"
@@ -193,6 +217,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      # Same disk reclamation as the test job — instrumented builds are the
+      # largest consumer of the runner's free space in this workflow.
+      - name: reclaim runner disk
+        shell: bash
+        run: |
+          echo "=== free disk before ==="; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/share/swift /usr/local/.ghcup 2>/dev/null || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "=== free disk after ==="; df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.82"
