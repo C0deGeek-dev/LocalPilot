@@ -344,24 +344,19 @@ jobs:
       # from the measured baseline, raised deliberately, never lowered to
       # admit a regression.
       #
-      # Same containment as the ubuntu test job (see its nextest step for the
-      # full reasoning): bounded build *and* test concurrency plus a hard
-      # cgroup memory ceiling, because the instrumented build links are even
-      # heavier than the plain ones and this job wedged identically.
+      # One `--workspace` invocation is exactly the shape that wedges the
+      # hosted-ubuntu VM (see the test job's execution steps): the test job
+      # only went green once each package ran as its own nextest invocation.
+      # Apply the same isolation here — `--no-report` accumulates each
+      # package's profile data into the shared profile dir, and the floor is
+      # then evaluated once over the merged whole-workspace report, so the
+      # ratchet keeps its meaning. The corpus package runs serially because
+      # its tests each spawn a nested `cargo test`.
       - id: cov-nextest
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 35
         shell: bash
         run: |
-          cg=/sys/fs/cgroup/localpilot-coverage
-          if sudo mkdir -p "$cg" 2>/dev/null \
-             && echo 11G | sudo tee "$cg/memory.max" >/dev/null 2>&1 \
-             && echo 0 | sudo tee "$cg/memory.swap.max" >/dev/null 2>&1 \
-             && echo $$ | sudo tee "$cg/cgroup.procs" >/dev/null 2>&1; then
-            echo "memory ceiling: $cg memory.max=11G swap=0 (children inherit)"
-          else
-            echo "memory ceiling unavailable — running uncapped"
-          fi
           ( while true; do
               avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
               if [ "${avail:-9999999}" -lt 1000000 ]; then
@@ -371,9 +366,19 @@ jobs:
               sleep 5
             done ) >/dev/null 2>&1 & WATCHDOG=$!
           status=0
-          timeout -k 30s 25m cargo llvm-cov nextest --workspace --build-jobs 2 --test-threads 2 --fail-under-lines 75 > coverage-run.log 2>&1 || status=$?
+          cargo llvm-cov clean --workspace
+          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort); do
+            threads=2
+            if [ "$pkg" = "localpilot-harness" ]; then threads=1; fi
+            echo "=== coverage: $pkg (--test-threads $threads) ==="
+            timeout -k 30s 10m cargo llvm-cov nextest --no-report -p "$pkg" \
+              --build-jobs 2 --test-threads "$threads" >> coverage-run.log 2>&1 || status=$?
+          done
           kill "$WATCHDOG" 2>/dev/null || true
           exit "$status"
+      - name: coverage floor over the merged report
+        if: steps.cov-nextest.outcome == 'success'
+        run: cargo llvm-cov report --fail-under-lines 75
       - if: always()
         run: |
           tail -n 300 coverage-run.log || true
