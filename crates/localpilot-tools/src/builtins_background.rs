@@ -463,10 +463,10 @@ mod tests {
     use super::*;
 
     /// A command that prints a line and then stays alive well past any test
-    /// grace period. Every test that starts it also stops it, so the sleep only
-    /// has to outlast the assertions — it is long enough that a slow interpreter
-    /// start on a loaded machine cannot race the child's own lifetime, and short
-    /// enough that a child leaked by a panicking test cleans itself up.
+    /// grace period. The sleep is deliberately short: killing the shell does not
+    /// necessarily reap the `sleep` it spawned, so a longer-lived helper leaves
+    /// longer-lived orphans behind, and on a resource-starved CI runner that
+    /// pressure is itself a failure mode. It only has to outlast the assertions.
     fn stays_up() -> RunShellExecution {
         #[cfg(windows)]
         let (program, args) = (
@@ -475,13 +475,13 @@ mod tests {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                "Write-Output hello; Start-Sleep -Seconds 120".to_string(),
+                "Write-Output hello; Start-Sleep -Seconds 30".to_string(),
             ],
         );
         #[cfg(not(windows))]
         let (program, args) = (
             "/bin/sh".to_string(),
-            vec!["-c".to_string(), "printf 'hello\\n'; sleep 120".to_string()],
+            vec!["-c".to_string(), "printf 'hello\\n'; sleep 30".to_string()],
         );
         RunShellExecution::Direct { program, args }
     }
@@ -504,9 +504,11 @@ mod tests {
     /// how fast the machine can cold-start an interpreter. A two-second bound
     /// failed on a loaded CI runner where `powershell.exe` had not finished
     /// starting; a generous one still fails when the line never arrives, which
-    /// is the only failure this assertion is about.
+    /// is the only failure this assertion is about. It stays under the helper's
+    /// own lifetime so a timeout is reported as the missing line it is, rather
+    /// than as the child having exited underneath the poll.
     async fn wait_for_log(procs: &BackgroundProcesses, id: &str, needle: &str) -> bool {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             if procs.logs(id).is_some_and(|log| log.contains(needle)) {
                 return true;
