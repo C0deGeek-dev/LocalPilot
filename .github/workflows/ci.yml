@@ -261,10 +261,28 @@ jobs:
       # is the culprit. `binary(tools)` is the suspect — it holds the slowest
       # spawning tests, including the destructive-command prompt and the
       # timeout-and-reap path.
+      # The unit tests are where it wedges, so they are split the same way: the
+      # 72 that touch no process, then the two process-driving modules on their
+      # own. Whichever step lacks a completion timestamp is the answer, and the
+      # other two still report.
       - if: runner.os == 'Linux'
-        name: 'linux — tests: localpilot-tools (unit)'
-        timeout-minutes: 8
-        run: capped cargo nextest run -E 'package(localpilot-tools) and kind(lib)' --test-threads 2
+        name: 'linux — tests: localpilot-tools (unit, no process spawning)'
+        timeout-minutes: 6
+        run: |
+          capped cargo nextest run --test-threads 2 \
+            -E 'package(localpilot-tools) and kind(lib) and not (test(/builtins_shell/) or test(/builtins_background/))'
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-tools (unit, background registry)'
+        timeout-minutes: 6
+        run: |
+          capped cargo nextest run --test-threads 1 \
+            -E 'package(localpilot-tools) and kind(lib) and test(/builtins_background/)'
+      - if: runner.os == 'Linux'
+        name: 'linux — tests: localpilot-tools (unit, run_shell)'
+        timeout-minutes: 6
+        run: |
+          capped cargo nextest run --test-threads 1 \
+            -E 'package(localpilot-tools) and kind(lib) and test(/builtins_shell/)'
       - if: runner.os == 'Linux'
         name: 'linux — tests: localpilot-tools (spawn invariants, validate)'
         timeout-minutes: 6
