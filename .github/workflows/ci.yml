@@ -83,20 +83,45 @@ jobs:
       # hosted-ubuntu VM: neither a bash `timeout -k` (SIGKILL) nor a
       # step-level timeout fires — the runner worker itself stops making
       # progress until the job ceiling kills the job from the outside, logs
-      # included. The same commit passes the full suite in minutes on
-      # windows/macos runners and on a local Linux machine, so the trigger is
-      # resource pressure on the 4-vCPU VM: parallel linking of ~74 test
-      # binaries plus parallel test execution (some tests spawn nested cargo
-      # builds) starving memory until the VM thrashes to a standstill.
-      # Two levers: cap the build parallelism, and run a watchdog that kills
-      # the compile/link storm while the VM is still responsive — a fast,
-      # attributable failure with logs instead of a frozen corpse.
+      # included (the job then ends at exactly 55 minutes: the 45-minute
+      # ceiling plus GitHub's grace for an unresponsive runner). The same
+      # commit passes the full suite in ~9 minutes on windows/macos and on a
+      # local Linux machine, so the trigger is resource pressure on the
+      # 4-vCPU/16 GB VM.
+      #
+      # Capping `--build-jobs` alone did not stop it, because the storm is not
+      # only compilation: `localpilot-harness`'s first-party corpus tests each
+      # spawn a nested `cargo test` (tests/first_party.rs), and nextest
+      # defaults to one test thread per core — so four nested cargo builds can
+      # run on top of the main link storm, and the vendored LocalMind crates
+      # (which grew sharply on 2026-07-23, when the wedges became
+      # deterministic) build in this same workspace.
+      #
+      # Two independent levers, because prevention alone is unverifiable from
+      # the outside:
+      #   1. bound the concurrency that actually storms — build jobs *and*
+      #      test threads, so at most two nested cargo builds are ever live;
+      #   2. give the process tree a hard cgroup memory ceiling, so a residual
+      #      storm is OOM-killed *inside* the cgroup while the VM stays
+      #      responsive. That is what converts an unattributable frozen corpse
+      #      into a fast failure whose log survives.
       - id: nextest-linux
         if: runner.os == 'Linux'
         continue-on-error: true
         timeout-minutes: 25
         shell: bash
         run: |
+          # Best-effort: an older runner image without the memory controller
+          # delegated simply runs uncapped rather than failing the step.
+          cg=/sys/fs/cgroup/localpilot-nextest
+          if sudo mkdir -p "$cg" 2>/dev/null \
+             && echo 11G | sudo tee "$cg/memory.max" >/dev/null 2>&1 \
+             && echo 0 | sudo tee "$cg/memory.swap.max" >/dev/null 2>&1 \
+             && echo $$ | sudo tee "$cg/cgroup.procs" >/dev/null 2>&1; then
+            echo "memory ceiling: $cg memory.max=11G swap=0 (children inherit)"
+          else
+            echo "memory ceiling unavailable — running uncapped"
+          fi
           ( while true; do
               avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
               if [ "${avail:-9999999}" -lt 1000000 ]; then
@@ -106,13 +131,16 @@ jobs:
               sleep 5
             done ) >/dev/null 2>&1 & WATCHDOG=$!
           status=0
-          timeout -k 30s 20m cargo nextest run --workspace --build-jobs 2 > nextest-run.log 2>&1 || status=$?
+          timeout -k 30s 20m cargo nextest run --workspace --build-jobs 2 --test-threads 2 > nextest-run.log 2>&1 || status=$?
           kill "$WATCHDOG" 2>/dev/null || true
           exit "$status"
       - if: runner.os == 'Linux' && always()
         shell: bash
         run: |
           tail -n 300 nextest-run.log || true
+          echo "=== peak memory inside the capped cgroup ==="
+          cat /sys/fs/cgroup/localpilot-nextest/memory.peak 2>/dev/null || echo "(no cgroup cap this run)"
+          free -h || true
           echo "=== process table (oldest last) ==="
           ps -ef --sort=start_time | tail -n 30 || true
           echo "=== kernel hung-task / I/O traces ==="
@@ -178,14 +206,24 @@ jobs:
       # from the measured baseline, raised deliberately, never lowered to
       # admit a regression.
       #
-      # Same containment as the ubuntu test job (see its nextest step):
-      # capped build parallelism + a low-memory watchdog, because the
-      # instrumented build links are even heavier than the plain ones.
+      # Same containment as the ubuntu test job (see its nextest step for the
+      # full reasoning): bounded build *and* test concurrency plus a hard
+      # cgroup memory ceiling, because the instrumented build links are even
+      # heavier than the plain ones and this job wedged identically.
       - id: cov-nextest
         continue-on-error: true
         timeout-minutes: 30
         shell: bash
         run: |
+          cg=/sys/fs/cgroup/localpilot-coverage
+          if sudo mkdir -p "$cg" 2>/dev/null \
+             && echo 11G | sudo tee "$cg/memory.max" >/dev/null 2>&1 \
+             && echo 0 | sudo tee "$cg/memory.swap.max" >/dev/null 2>&1 \
+             && echo $$ | sudo tee "$cg/cgroup.procs" >/dev/null 2>&1; then
+            echo "memory ceiling: $cg memory.max=11G swap=0 (children inherit)"
+          else
+            echo "memory ceiling unavailable — running uncapped"
+          fi
           ( while true; do
               avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
               if [ "${avail:-9999999}" -lt 1000000 ]; then
@@ -195,12 +233,15 @@ jobs:
               sleep 5
             done ) >/dev/null 2>&1 & WATCHDOG=$!
           status=0
-          timeout -k 30s 25m cargo llvm-cov nextest --workspace --build-jobs 2 --fail-under-lines 75 > coverage-run.log 2>&1 || status=$?
+          timeout -k 30s 25m cargo llvm-cov nextest --workspace --build-jobs 2 --test-threads 2 --fail-under-lines 75 > coverage-run.log 2>&1 || status=$?
           kill "$WATCHDOG" 2>/dev/null || true
           exit "$status"
       - if: always()
         run: |
           tail -n 300 coverage-run.log || true
+          echo "=== peak memory inside the capped cgroup ==="
+          cat /sys/fs/cgroup/localpilot-coverage/memory.peak 2>/dev/null || echo "(no cgroup cap this run)"
+          free -h || true
           echo "=== process table (oldest last) ==="
           ps -ef --sort=start_time | tail -n 30 || true
           echo "=== kernel hung-task / I/O traces ==="
