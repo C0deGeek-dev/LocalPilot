@@ -463,7 +463,10 @@ mod tests {
     use super::*;
 
     /// A command that prints a line and then stays alive well past any test
-    /// grace period.
+    /// grace period. Every test that starts it also stops it, so the sleep only
+    /// has to outlast the assertions — it is long enough that a slow interpreter
+    /// start on a loaded machine cannot race the child's own lifetime, and short
+    /// enough that a child leaked by a panicking test cleans itself up.
     fn stays_up() -> RunShellExecution {
         #[cfg(windows)]
         let (program, args) = (
@@ -472,13 +475,13 @@ mod tests {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                "Write-Output hello; Start-Sleep -Seconds 30".to_string(),
+                "Write-Output hello; Start-Sleep -Seconds 120".to_string(),
             ],
         );
         #[cfg(not(windows))]
         let (program, args) = (
             "/bin/sh".to_string(),
-            vec!["-c".to_string(), "printf 'hello\\n'; sleep 30".to_string()],
+            vec!["-c".to_string(), "printf 'hello\\n'; sleep 120".to_string()],
         );
         RunShellExecution::Direct { program, args }
     }
@@ -495,8 +498,15 @@ mod tests {
         RunShellExecution::Direct { program, args }
     }
 
+    /// Poll until the drained log holds `needle`. The deadline is deliberately
+    /// generous rather than tight: what is under test is that the drain task
+    /// captures the child's output at all, and a tight bound instead measures
+    /// how fast the machine can cold-start an interpreter. A two-second bound
+    /// failed on a loaded CI runner where `powershell.exe` had not finished
+    /// starting; a generous one still fails when the line never arrives, which
+    /// is the only failure this assertion is about.
     async fn wait_for_log(procs: &BackgroundProcesses, id: &str, needle: &str) -> bool {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             if procs.logs(id).is_some_and(|log| log.contains(needle)) {
                 return true;
