@@ -95,7 +95,7 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 21);
+    assert_eq!(registry.names().len(), 22);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }

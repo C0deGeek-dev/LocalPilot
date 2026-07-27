@@ -753,6 +753,29 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
     }
   ],
   [
+    "delegate",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Input for [`Delegate`].",
+      "properties": {
+        "agent": {
+          "description": "Name of the agent to delegate to, as listed by `localpilot agents list`.",
+          "type": "string"
+        },
+        "task": {
+          "description": "The task to hand over. Be specific: the agent starts with an empty context and cannot see this conversation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "task"
+      ],
+      "title": "DelegateInput",
+      "type": "object"
+    }
+  ],
+  [
     "update_plan",
     {
       "$schema": "http://json-schema.org/draft-07/schema#",
