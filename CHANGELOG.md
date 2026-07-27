@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Releases now ship a wider set of prebuilt binaries, verified.** Alongside the
+  existing Linux x86-64, macOS Apple Silicon, and Windows x86-64 archives, a
+  release now carries a **static musl** build that runs on any Linux regardless
+  of glibc version, and a **Linux arm64** build. Each archive ships a SHA-256
+  beside it and the release carries a `manifest.json` indexing what exists.
+
+  Publishing happens once, only when every platform built, and refuses to run if
+  one is missing — previously each platform attached its own archive, so a broken
+  build produced a release that looked complete and was quietly missing a
+  platform. The checksums prove an archive was not corrupted in transit; they do
+  not prove who produced it, which needs signing.
+
 - **Subagents: delegate a bounded task to an agent you declare in a file.** A
   `*.agent.yaml` under `.localpilot/agents/` (project) or `~/.localpilot/agents/`
   (everywhere) declares a name, a model, the tools the agent may use, which parts
