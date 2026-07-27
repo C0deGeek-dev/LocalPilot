@@ -88,6 +88,8 @@ pub enum SlashAction {
     /// Manage skills: sources, installs, listing. The raw argument string is
     /// parsed by the shared `skills` command so the slash and CLI forms parse to
     /// and execute the same operations (LocalHub#40).
+    /// Inspect subagent definitions (`/agents [list|show <name>]`).
+    Agents(String),
     Skills(String),
     /// Manage background processes started this session.
     Background(BackgroundCommand),
@@ -214,6 +216,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         _ if name == "context" => parse_context(args),
         // `/skills …` captures its raw arguments; the host parses them with the
         // same command surface as `localpilot skills …` for exact parity.
+        _ if name == "agents" => SlashAction::Agents(args.to_string()),
         _ if name == "skills" => SlashAction::Skills(args.to_string()),
         _ if name == "bg" => parse_bg(args),
         _ if matches!(name, "quit" | "q") && args.is_empty() => SlashAction::Quit,
@@ -506,6 +509,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         )),
         SlashAction::Research(_) => state.apply(UiEvent::Notice(
             "/research is handled by the interactive host".to_string(),
+        )),
+        SlashAction::Agents(_) => state.apply(UiEvent::Notice(
+            "/agents is handled by the interactive host".to_string(),
         )),
         SlashAction::Skills(_) => state.apply(UiEvent::Notice(
             "/skills is handled by the interactive host".to_string(),
@@ -870,6 +876,24 @@ mod tests {
                 provider: Some("anthropic".to_string()),
                 model: Some("claude-x".to_string())
             })
+        );
+    }
+
+    #[test]
+    fn agents_slash_carries_its_arguments_to_the_host() {
+        // The TUI only routes; the host runs the same `agents` functions the CLI
+        // does, so the two surfaces cannot disagree about which agents exist.
+        assert_eq!(
+            parse_slash("/agents"),
+            Some(SlashAction::Agents(String::new()))
+        );
+        assert_eq!(
+            parse_slash("/agents list"),
+            Some(SlashAction::Agents("list".to_string()))
+        );
+        assert_eq!(
+            parse_slash("/agents show reviewer"),
+            Some(SlashAction::Agents("show reviewer".to_string()))
         );
     }
 

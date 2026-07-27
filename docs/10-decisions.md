@@ -35,7 +35,9 @@ should be a file, not a release. Four decisions make that safe.
    calls each declare theirs and are authorized individually, so delegation
    changes *who asks*, never *what is allowed*.
 
-3. **Bounded by default, and refusals are outcomes.** Subagents nest one level
+3. **Bounded by default, and refusals are outcomes.** A child's tool calls are
+   charged to the delegating turn's own per-turn ceiling, so delegation cannot be
+   used to slip past it. Subagents nest one level
    deep (a subagent cannot spawn one), a child with no usable tools is refused
    before it starts, and the caller receives a bounded summary rather than the
    child's transcript — a subagent that returns everything it read is worse than

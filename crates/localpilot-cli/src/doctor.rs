@@ -40,6 +40,10 @@ pub struct DoctorReport {
     /// from "ingestion enabled but nothing indexed" and "indexed without
     /// embeddings" — three states a bare empty doc search cannot explain.
     pub research_docs: Option<ResearchDocsStatus>,
+    /// Subagent definitions visible from the cwd: how many resolved, and every
+    /// file that failed to load. A definition that silently does not load is the
+    /// failure this line exists to make visible.
+    pub agents: AgentsStatus,
     /// Stable capability tokens this build advertises, so a wrapper can
     /// feature-detect against an older binary rather than guess from the version.
     pub capabilities: Vec<String>,
@@ -189,6 +193,40 @@ pub enum TrustState {
 
 /// Gather a diagnostics report from the current environment.
 #[must_use]
+/// Subagent-definition health for the cwd project.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentsStatus {
+    /// Effective definitions (after precedence).
+    pub resolved: usize,
+    /// Definitions shadowed by a higher-precedence file of the same name.
+    pub shadowed: usize,
+    /// `path: reason` for every file that could not be loaded.
+    pub errors: Vec<String>,
+}
+
+/// Resolve the definitions visible from the cwd. Best-effort and read-only.
+fn agents() -> AgentsStatus {
+    let Ok(cwd) = std::env::current_dir() else {
+        return AgentsStatus::default();
+    };
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let set = localpilot_agents::AgentSet::resolve(&localpilot_agents::AgentSet::standard_roots(
+        &cwd,
+        home.as_deref(),
+    ));
+    AgentsStatus {
+        resolved: set.agents().len(),
+        shadowed: set.shadowed().len(),
+        errors: set
+            .errors()
+            .iter()
+            .map(|e| format!("{}: {}", e.path.display(), e.reason))
+            .collect(),
+    }
+}
+
 pub fn report() -> DoctorReport {
     DoctorReport {
         version: env!("LOCALPILOT_VERSION").to_string(),
@@ -201,6 +239,7 @@ pub fn report() -> DoctorReport {
         mcp_servers: Vec::new(),
         memory_root: memory_root(),
         research_docs: research_docs(),
+        agents: agents(),
         capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
     }
@@ -332,6 +371,22 @@ pub fn render(report: &DoctorReport) -> String {
     for c in &report.config_paths {
         let state = if c.exists { "present" } else { "missing" };
         let _ = writeln!(s, "  {}: {} ({state})", c.label, c.path);
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "agents:");
+    let _ = writeln!(
+        s,
+        "  definitions: {} resolved, {} shadowed",
+        report.agents.resolved, report.agents.shadowed
+    );
+    if report.agents.errors.is_empty() {
+        let _ = writeln!(s, "  load errors: none");
+    } else {
+        let _ = writeln!(s, "  load errors:");
+        for error in &report.agents.errors {
+            let _ = writeln!(s, "    {error}");
+        }
     }
     let _ = writeln!(s);
 
@@ -835,6 +890,7 @@ mod tests {
                 doc_chunks: Some(0),
                 doc_vectors: Some(0),
             }),
+            agents: AgentsStatus::default(),
             capabilities: vec!["doctor-json".to_string(), "models-json".to_string()],
             tools: vec![
                 ToolStatus {

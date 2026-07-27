@@ -186,6 +186,8 @@ Rules:
 - the caller gets a bounded summary, not the child's transcript
 - a refusal (ceiling reached, no usable tools, unknown agent) comes back as
   readable output, not a failed call
+- the child's tool calls are charged to the delegating turn's own per-turn
+  ceiling, so delegation cannot be used to slip past it
 
 ### `search_definitions`
 

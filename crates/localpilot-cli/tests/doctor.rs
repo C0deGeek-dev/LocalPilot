@@ -13,8 +13,8 @@ mod mcp_env;
 mod output;
 
 use doctor::{
-    ConfigPath, DoctorReport, McpServerState, McpServerStatus, ProviderStatus, ToolStatus,
-    TrustState,
+    AgentsStatus, ConfigPath, DoctorReport, McpServerState, McpServerStatus, ProviderStatus,
+    ToolStatus, TrustState,
 };
 use localpilot_config::CredentialSource;
 
@@ -206,6 +206,7 @@ fn report() -> DoctorReport {
         mcp_servers: Vec::new(),
         memory_root: Some("<memory-root>".to_string()),
         research_docs: None,
+        agents: AgentsStatus::default(),
         capabilities: vec![
             "doctor-json".to_string(),
             "models-json".to_string(),

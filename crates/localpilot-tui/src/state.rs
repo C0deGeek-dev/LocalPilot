@@ -784,6 +784,10 @@ impl AppState {
             "Research a topic, local + web per config (/research [topic])",
         ),
         (
+            "agents",
+            "List or inspect subagent definitions (/agents [show <name>])",
+        ),
+        (
             "skills",
             "Manage skills: repos, install, list (/skills <subcommand>)",
         ),

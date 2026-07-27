@@ -1687,6 +1687,12 @@ impl SessionRuntime {
             .collect()
     }
 
+    /// Tool calls made during the most recent turn.
+    #[must_use]
+    pub fn turn_tool_calls(&self) -> usize {
+        self.turn_tool_calls
+    }
+
     /// Replace the system prompt this runtime opened with.
     ///
     /// Used when a runtime is built for a subagent: the registry-derived prompt
@@ -1919,6 +1925,8 @@ impl SessionRuntime {
         let mut stream_truncated_retries: u32 = 0;
         // Total tool calls executed this turn, bounded by the budget controller.
         let mut tool_calls_used = 0usize;
+        // Tool calls made by subagents this turn, folded into the count below.
+        let mut delegated_calls = 0usize;
         // Progress-aware ceiling: a productive turn extends to the hard max; a
         // turn detected as spinning stops at the soft start; the hard max always
         // stops the loop. Both reset per turn (these are fresh per `run_turn`).
@@ -2447,7 +2455,7 @@ impl SessionRuntime {
                         return self.stop(events, StopReason::NoProgress);
                     }
                 }
-                tool_calls_used += 1;
+                tool_calls_used += 1 + std::mem::take(&mut delegated_calls);
                 self.turn_tool_calls = tool_calls_used;
 
                 // Surface the task plan to the UI as the model updates it.
@@ -2592,6 +2600,7 @@ impl SessionRuntime {
                                     config: &self.config,
                                     depth: 0,
                                     cancel,
+                                    delegated_calls: std::sync::atomic::AtomicUsize::new(0),
                                 }
                             });
                             let ctx = ToolContext {
@@ -2604,7 +2613,7 @@ impl SessionRuntime {
                                     .as_ref()
                                     .map(|h| h as &dyn localpilot_tools::AgentHost),
                             };
-                            tokio::select! {
+                            let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
                                 result = self.tools.dispatch_gated(
                                     &active_call,
@@ -2613,7 +2622,16 @@ impl SessionRuntime {
                                     self.approver.as_ref(),
                                     &gates,
                                 ) => Some(result),
-                            }
+                            };
+                            // A delegating call is one call to this session, but
+                            // the child made its own. Charge them to this turn or
+                            // the per-turn ceiling stops meaning what it says
+                            // (ADR-0029).
+                            delegated_calls += host.as_ref().map_or(0, |h| {
+                                h.delegated_calls
+                                    .swap(0, std::sync::atomic::Ordering::Relaxed)
+                            });
+                            dispatched
                         }
                     }
                 };

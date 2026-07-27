@@ -1,6 +1,5 @@
 ---
 source: crates/localpilot-cli/tests/../src/doctor.rs
-assertion_line: 883
 expression: render_json(&fixture())
 ---
 {
@@ -85,6 +84,11 @@ expression: render_json(&fixture())
     "report_ingestion_enabled": false,
     "doc_chunks": 0,
     "doc_vectors": 0
+  },
+  "agents": {
+    "resolved": 0,
+    "shadowed": 0,
+    "errors": []
   },
   "capabilities": [
     "doctor-json",

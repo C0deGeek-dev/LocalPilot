@@ -464,7 +464,7 @@ enum AgentsCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, PartialEq)]
 enum ProjectSkillsCommand {
     /// List the effective skills (the global baseline overlaid by the project).
     List {

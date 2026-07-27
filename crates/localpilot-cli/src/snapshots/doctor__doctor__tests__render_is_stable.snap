@@ -13,6 +13,10 @@ config search paths:
   user: /config/localpilot/config.toml (missing)
   project: /work/.localpilot.toml (present)
 
+agents:
+  definitions: 0 resolved, 0 shadowed
+  load errors: none
+
 providers:
   local (local): credential LOCALPILOT_LOCAL_API_KEY [not set]; model (none); context window unknown; vision declared
   openai (openai): credential OPENAI_API_KEY [keychain]; base https://api.openai.com/v1; model (none); context window unknown

@@ -884,6 +884,11 @@ async fn run_slash(
                 )));
             }
         },
+        SlashAction::Agents(raw) => {
+            let mut output = Vec::new();
+            let result = run_agents_slash(host.cwd, &raw, &mut output);
+            apply_command_result(state, output, result);
+        }
         SlashAction::Skills(raw) => {
             let mut output = Vec::new();
             let result = run_skills_slash(host.cwd, &raw, &mut output).await;
@@ -911,6 +916,28 @@ async fn run_slash(
 /// treated as non-interactive: its impact is disclosed and, without `--yes`, it is
 /// refused rather than run unattended. A parse error surfaces clap's usage text as
 /// a notice instead of aborting the REPL.
+/// `/agents` — the same read-only surface as `localpilot agents`, so the TUI and
+/// the CLI cannot drift into two different answers about which agents exist.
+fn run_agents_slash(
+    cwd: &std::path::Path,
+    raw: &str,
+    out: &mut dyn std::io::Write,
+) -> anyhow::Result<()> {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    match tokens.as_slice() {
+        [] | ["list"] => crate::agents_cmd::list(cwd, false, out),
+        ["show", name] => crate::agents_cmd::show(cwd, name, false, out),
+        ["show"] => {
+            writeln!(out, "usage: /agents show <name>")?;
+            Ok(())
+        }
+        _ => {
+            writeln!(out, "usage: /agents [list | show <name>]")?;
+            Ok(())
+        }
+    }
+}
+
 async fn run_skills_slash(
     cwd: &std::path::Path,
     raw: &str,

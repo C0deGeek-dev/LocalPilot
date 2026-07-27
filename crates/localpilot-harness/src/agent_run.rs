@@ -75,6 +75,10 @@ pub struct AgentOutcome {
     pub tools: Vec<String>,
     /// Registered tools the definition asked for that the caller did not hold.
     pub narrowed: Vec<String>,
+    /// Tool calls the child made, so the caller can charge them to its own
+    /// per-turn ceiling — a delegating turn that ignored them would under-count
+    /// its real spend (ADR-0029).
+    pub tool_calls: usize,
     /// Why the child's turn ended.
     pub stop: String,
 }
@@ -199,6 +203,7 @@ pub async fn run_agent(
 
     let (events, _rx) = broadcast::channel(256);
     let stop = child.run_turn(task, &events, cancel).await;
+    let tool_calls = child.turn_tool_calls();
     let raw = child.last_assistant_text().unwrap_or_default();
     let (summary, truncated) = bound(&raw);
 
@@ -207,6 +212,7 @@ pub async fn run_agent(
         truncated,
         tools: grants.tools.clone(),
         narrowed: grants.narrowed.clone(),
+        tool_calls,
         stop: format!("{stop:?}"),
     })
 }
@@ -258,6 +264,10 @@ pub struct SessionAgentHost<'a> {
     pub config: &'a SessionConfig,
     pub depth: u32,
     pub cancel: &'a CancellationToken,
+    /// Tool calls made by children during this turn, drained by the caller into
+    /// its own per-turn count. An `AtomicUsize` because the host is reached
+    /// through a shared reference from inside a tool call.
+    pub delegated_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
@@ -304,6 +314,8 @@ impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
             };
             match run_agent(definition, task, &grants, ctx, self.cancel).await {
                 Ok(outcome) => {
+                    self.delegated_calls
+                        .fetch_add(outcome.tool_calls, std::sync::atomic::Ordering::Relaxed);
                     let mut text = outcome.summary;
                     if !outcome.narrowed.is_empty() {
                         text.push_str(&format!(
@@ -425,6 +437,21 @@ mod tests {
         assert!(truncated);
         assert!(summary.len() <= MAX_SUMMARY_BYTES + 32);
         assert!(summary.ends_with("[summary truncated]"));
+    }
+
+    #[test]
+    fn a_childs_tool_calls_are_reported_for_the_callers_ceiling() {
+        // The outcome carries the child's own count: a delegating turn that
+        // ignored it would under-count its real spend against ADR-0029.
+        let outcome = AgentOutcome {
+            summary: "done".to_string(),
+            truncated: false,
+            tools: vec!["read_file".to_string()],
+            narrowed: Vec::new(),
+            tool_calls: 7,
+            stop: "Done".to_string(),
+        };
+        assert_eq!(outcome.tool_calls, 7);
     }
 
     #[test]
