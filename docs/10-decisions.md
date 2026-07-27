@@ -2,6 +2,112 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0101: An MCP Server Gets A Configured Environment — Named Credentials By Reference, A Local Plaintext Escape Hatch, One Resolution Seam, And Exact-Value Redaction Coming Back
+
+Status: accepted. Closes LocalHub#43. Amends the credential-storage boundary in
+ADR-0042 and [`docs/07-security-and-privacy.md`](07-security-and-privacy.md);
+extends the canonical-redactor position in ADR-0011; bound by ADR-0007 (tri-platform
+tier-1) and ADR-0031 (reveal-never-grant).
+
+An MCP server entry accepted only `command` and `args`, so the child received
+nothing but LocalPilot's own inherited environment. A server needing
+configuration or a credential could only be set up by exporting the variable
+before LocalPilot started — outside the config file, outside the credential
+store, and invisible to `doctor`. Four decisions follow from fixing that.
+
+1. **Three entry forms, distinguishable at a glance, validated after the
+   merge.** A plain string is an ordinary value; `{ value = "..." }` is a
+   credential written literally into a local, git-ignored config file;
+   `{ credential = "alias" }` names an entry in the credential store and is the
+   recommended path. Validation runs on the *merged* configuration rather than
+   per file, and that ordering is load-bearing: config layers combine per key, so
+   a user file supplying `KEY = { credential = "a" }` and a project file
+   supplying `KEY = { value = "b" }` — each valid alone — merge into one entry
+   carrying both, which is precisely the shape that must be rejected. A per-file
+   check never sees it.
+
+   Two entries whose names differ only by ASCII case are also rejected. Windows
+   matches environment names case-insensitively and Linux/macOS do not, so such a
+   pair is one variable on one tier-1 platform and two on the others; every
+   possible resolution is wrong somewhere, and refusing the ambiguous
+   configuration is the only behaviour identical on all three (ADR-0007). For the
+   same reason the environment *layer* is documented rather than
+   "corrected": `LOCALPILOT_MCP__SERVERS__<server>__ENV__<VAR>` arrives
+   lower-cased, and that cannot be distinguished after the fact from a genuinely
+   lower-case key.
+
+2. **Generic credentials are separated from provider credentials structurally,
+   not by convention.** `localpilot credential set|list|delete` stores named
+   values in their own map on disk and under their own OS-keychain service, so
+   `credential set openai` cannot reach the key `localpilot login openai` stored,
+   whatever either is called. A naming prefix would have left the guarantee
+   resting on alias validation. The value is read from stdin, never taken as a
+   command-line argument, and never printed in full; there is deliberately no
+   command to reveal, export, or copy one afterwards. Listing keeps a name-only
+   index because the keychain exposes no enumeration API — the index holds names,
+   never values. Every on-disk field is additive, so a credential file written by
+   an earlier version still parses and its logins still resolve.
+
+3. **One resolution and spawn seam.** Session tool discovery, designated research
+   search, and the `doctor` probe each spawned servers independently, which is
+   how one policy becomes three that drift. They now share a resolver and a
+   spawn, and a test asserts the structural property so a fourth path that grows
+   its own spawn fails the suite. Resolution completes *before* anything starts:
+   a server whose credential is missing is never spawned, so the failure stays a
+   configuration error naming the variable and the alias instead of an obscure
+   fault from a server that came up without the value it needed. `doctor`
+   accordingly distinguishes command-unavailable, credential-missing,
+   startup-failure, and connected, reporting variable *names* and never values in
+   either rendering.
+
+4. **Inbound traffic is filtered against the exact values we handed out.** An MCP
+   server is an untrusted subprocess that can read its own environment, so any
+   credential given to one can come straight back — through the `initialize`
+   handshake, advertised `tools/list` metadata, a tool result, or a protocol
+   error. Only tool *output* was covered before, by the tool registry's
+   pattern-based redaction, and that layer detects credentials by shape and so
+   matches nothing issued from the credential store. Filtering now happens at the
+   transport, the one place all four surfaces pass through; anywhere higher would
+   have repeated the original omission by covering tool output and missing the
+   advertised tool descriptions that reach the model on every session. The walk
+   is recursive and rewrites object keys as well as values.
+
+   The two layers are complementary, not redundant: pattern detection catches
+   credentials by shape and cannot catch a store-issued value, while exact
+   matching catches the values we handed out and cannot catch anything else. Both
+   run (ADR-0011 keeps the pattern detector canonical).
+
+   Values shorter than **8 characters** are never matched verbatim. Below that a
+   "secret" occurs in ordinary prose, and blanking every occurrence would corrupt
+   the output the user is trying to read — a worse outcome than not matching a
+   value no credential system should have issued. The floor is the same order as
+   the pattern detector's own length floors, so the two layers agree on what is
+   too short to be credible.
+
+**Boundary, stated plainly.** Exact-value redaction is byte-for-byte, so a
+server that returns a credential transformed — base64-encoded, URL-encoded, split
+across two JSON fields — defeats it. This is a strong guarantee against
+accidental leakage and a weak one against a determined server. It is defence in
+depth, not a containment boundary; the permission engine and the effect
+declarations remain the actual boundary, and a configured environment grants no
+new tool permission and bypasses no existing gate (ADR-0031).
+
+**The amendment to ADR-0042.** That decision says a provider key never enters a
+config file, and that remains true: provider credentials stay config-free and are
+reachable only through `login`. The sensitive-literal form is a deliberate,
+documented exception for a *different* class of secret — one belonging to a
+third-party subprocess the user chose to run, in a project-local, git-ignored
+file. It receives identical runtime masking and identical inbound redaction to a
+store-backed credential; its only weaker property is plaintext at rest. The
+credential-store reference remains the recommended path and the documentation
+says so.
+
+**Rejected.** Automatic `.env` loading, `${VAR}` expansion in TOML, and per-tool
+environment configuration were all rejected as scope that would add implicit
+behaviour to a surface whose whole value is being explicit. Passing secrets as
+command-line arguments was rejected outright: argv is world-readable on every
+tier-1 platform.
+
 ## ADR-0100: Research Follows Redirects Through Its Own Policy — Every Hop Re-Gated And Audited, Automatic Following Still Off
 
 Status: accepted. Closes LocalHub#42. Amends the absolute no-follow boundary in

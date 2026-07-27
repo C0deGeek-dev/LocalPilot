@@ -153,7 +153,10 @@ Claude/ChatGPT *subscription* credentials — that is a provider terms violation
 **Where the key is stored.** On Windows, in the Credential Manager (built with
 the `keychain` feature). On macOS and Linux, and on any host without a keychain
 backend, in a `0600` file under the per-user directory beside `config.toml`
-(`credentials.json`). The key never enters the repo or a config file.
+(`credentials.json`). A provider key never enters the repo or a config file.
+(MCP servers may carry a sensitive literal in a project-local config file as an
+explicit, documented exception — see [mcp.md](mcp.md) and ADR-0101. Provider keys
+have no such exception.)
 
 **Resolution precedence.** When an API-key provider needs a credential it is
 resolved in order: a stored credential (keychain → fallback file) first, then

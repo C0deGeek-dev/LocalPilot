@@ -6,6 +6,49 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **An MCP server can be given its own environment, including credentials.** A
+  server entry accepted only `command` and `args`, so a server needing a setting
+  or an API key could only be configured by exporting the variable before
+  LocalPilot started — outside the config file, outside the credential store, and
+  invisible to `doctor`. `[mcp.servers.<name>.env]` now takes three deliberately
+  distinguishable forms: a plain string for ordinary values,
+  `{ credential = "alias" }` naming an entry in the credential store (the
+  recommended path — the config holds only the alias), and `{ value = "..." }`
+  for a credential written literally into a project-local, git-ignored file.
+  Configure nothing and inheritance behaves exactly as before.
+
+  New `localpilot credential set|list|delete` stores those named values beside
+  provider keys but in a separate namespace, so `credential set openai` cannot
+  overwrite what `localpilot login openai` stored — the separation is structural
+  rather than a naming convention. Values are read from stdin, never taken as
+  command-line arguments, never printed in full, and there is no command to
+  reveal, export, or copy one afterwards. `login` / `logout` are unchanged, and
+  credential files written by earlier versions still resolve.
+
+  A referenced credential that is not stored now prevents that server from
+  starting at all, so the failure stays a configuration error naming the variable
+  and the alias rather than an obscure fault from a server that came up without
+  the value it needed. `localpilot doctor` distinguishes command-unavailable,
+  credential-missing, startup-failure, and connected, and reports the configured
+  variable *names* — never values, in either its human or JSON output.
+
+  Session tool discovery, designated research search, and the `doctor` probe now
+  share one resolver and one spawn instead of each launching servers themselves.
+
+  Finally, anything an MCP server sends back is stripped of the credentials that
+  server was given. A server can read its own environment, so a credential could
+  previously be returned through the handshake, the tool descriptions it
+  advertises, a tool result, or a protocol error — and only tool output was
+  covered, by pattern-based redaction that cannot match a value issued from the
+  credential store. Filtering now happens at the transport, covering all four,
+  before anything reaches the model, a transcript, stored output, or a log.
+  Values shorter than 8 characters are left to pattern redaction, since matching
+  a short string verbatim would corrupt ordinary text. This is defence in depth,
+  not a containment boundary: a server that returns a credential encoded or split
+  across fields defeats byte-for-byte matching, and the permission engine remains
+  the actual boundary. Adding an environment grants no new tool permission.
+  (ADR-0101, LocalHub#43.)
+
 ## v2.4.0 - 2026-07-26
 
 Coordinated LocalX release.

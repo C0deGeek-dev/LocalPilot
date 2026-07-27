@@ -120,8 +120,11 @@ no environment variable (ADR-0042). The posture:
   Credential Manager (built with the `keychain` feature). On macOS and Linux, and
   on any host without a keychain backend, a `0600` file (`credentials.json`) under
   the per-user directory beside `config.toml`. (The macOS/Linux native keychains
-  are held back by an MSRV-incompatible dependency; see ADR-0042.) The key never
-  enters the repo or a config file.
+  are held back by an MSRV-incompatible dependency; see ADR-0042.) A **provider**
+  key never enters the repo or a config file. (MCP servers may carry a sensitive
+  literal in a project-local config file as a documented, explicit exception —
+  see "MCP server environments" below and ADR-0101. That exception does not
+  extend to provider keys.)
 - **Best-effort, never blocking.** A keychain that is absent or locked is a miss,
   not an error: the store falls back to the file and resolution falls through to
   the environment, so startup and a live session never depend on keychain
@@ -135,6 +138,53 @@ no environment variable (ADR-0042). The posture:
   environment variable → config. `localpilot doctor` reports the resolved *source*
   (`keychain` / `file` / `env` / `not set`), never the secret.
 - **To remove:** `localpilot logout <provider>` deletes it from every tier.
+
+## MCP Server Environments
+
+A configured MCP server may be given environment entries
+(`[mcp.servers.<name>.env]`, ADR-0101). The posture:
+
+- **Named credentials are the recommended path.** `localpilot credential set
+  <name>` stores a value in the same tiers as a provider key — OS keychain, else
+  a `0600` file — and the config holds only the alias. The value is read from
+  stdin, never taken as a command-line argument, never printed in full, and there
+  is no command to reveal, export, or copy it afterwards.
+- **Generic and provider credentials cannot collide.** They live in separate maps
+  on disk and under separate keychain services, so `credential set openai` and
+  `login openai` are independent whatever they are named. The separation is
+  structural, not a naming convention.
+- **The plaintext form is a deliberate, narrower exception.**
+  `KEY = { value = "..." }` puts a credential in a project-local, git-ignored
+  config file. It receives identical runtime masking and identical response
+  filtering to a stored credential; its only weaker property is plaintext at
+  rest. Provider keys have no equivalent — they remain config-free.
+- **A plain string is not a secret.** `KEY = "..."` is an ordinary value and is
+  *not* filtered out of server responses. The object forms are how a value is
+  declared sensitive.
+- **Secret discipline.** A resolved value is wrapped in `Secret` at resolution and
+  leaves the wrapper at exactly one audited point: the child process's
+  environment assignment. It is masked in `Debug`, `Display`, and serialization,
+  so it cannot reach a diagnostic, an error, or a log by accident.
+- **Responses are filtered against the exact values.** An MCP server can read its
+  own environment, so anything given to one can be returned — through the
+  handshake, advertised tool metadata, a tool result, or a protocol error. Every
+  inbound value is stripped of that server's credentials at the transport, before
+  reaching the model, transcripts, stored tool output, or logs. This runs
+  *underneath* the shared pattern-based redactor (ADR-0011), which catches
+  credentials by shape and therefore cannot catch a store-issued value; the two
+  layers are complementary and both run. Values shorter than 8 characters are
+  left to pattern redaction alone, because matching a short string verbatim would
+  corrupt ordinary text.
+- **This is defence in depth, not a boundary.** Exact matching is byte-for-byte,
+  so a server that returns a credential base64-encoded, URL-encoded, or split
+  across fields defeats it. It is a strong guarantee against accidental leakage
+  and a weak one against a determined server. The permission engine and the
+  declared effects remain the actual boundary: a configured environment grants no
+  new tool permission and bypasses no gate.
+- **A missing credential starts nothing.** A `{ credential = "..." }` entry that
+  does not resolve fails that server before any process is spawned. `doctor`
+  reports the variable and alias — never a value, in either its human or JSON
+  rendering.
 
 ## Shell Policy
 

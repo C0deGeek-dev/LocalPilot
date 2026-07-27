@@ -1,10 +1,15 @@
 //! Configuration loading and precedence.
 //!
 //! Precedence, highest first: CLI flags, environment variables, the project
-//! `.localpilot.toml`, the user config file, then built-in defaults. Credentials
-//! are never read from config files — only the *name* of the environment
-//! variable holding each is configured, and the value is resolved at use into a
-//! [`Secret`].
+//! `.localpilot.toml`, the user config file, then built-in defaults.
+//!
+//! *Provider* credentials are never read from config files — only the *name* of
+//! the environment variable holding each is configured, and the value is
+//! resolved at use into a [`Secret`]. A configured MCP server is the one
+//! documented exception: `[mcp.servers.<name>.env]` may carry a sensitive
+//! literal in a project-local file, which is parsed straight into a masked
+//! wrapper. The recommended form there names a credential-store entry instead,
+//! so the file holds only an alias.
 
 use std::path::{Path, PathBuf};
 

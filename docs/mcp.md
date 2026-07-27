@@ -25,10 +25,85 @@ command = "uvx"
 args = ["some-mcp-search-server"]
 ```
 
-Each entry is one server: `command` plus optional `args`. On startup LocalPilot
-spawns the process, performs the MCP handshake, and discovers its tools. A server
-that fails to start is skipped with a note on stderr — it never aborts the
-session.
+Each entry is one server: `command`, optional `args`, and an optional `env`
+table. On startup LocalPilot spawns the process, performs the MCP handshake, and
+discovers its tools. A server that fails to start is skipped with a note on
+stderr — it never aborts the session.
+
+### Server environment
+
+A server inherits LocalPilot's environment. Add an `env` table when it needs
+something more — a setting, or a credential it cannot otherwise be given:
+
+```toml
+[mcp.servers.ask_google]
+command = "npx"
+args = ["-y", "@gpriday/ask-google-mcp"]
+
+[mcp.servers.ask_google.env]
+GOOGLE_API_KEY = { credential = "google-api-key" }
+LOG_LEVEL = "info"
+```
+
+Store the credential once, then reference it by name:
+
+```console
+$ localpilot credential set google-api-key
+Paste the value for "google-api-key" and press Enter (stored secret, shown masked):
+stored credential "google-api-key" in the keychain (AIza…9xQ2)
+```
+
+The config file holds only the alias. The value is read from the credential
+store immediately before the server is spawned. This is the recommended way to
+give a server a credential.
+
+**Inheritance and precedence.** The child starts from the environment LocalPilot
+has, and each configured entry replaces any inherited variable of the same name.
+Everything else is inherited unchanged, so a variable you already export keeps
+working. Configure nothing and behaviour is exactly as it was.
+
+**A missing credential stops that server.** If `{ credential = "..." }` names
+something that is not stored, the server is not spawned at all — the failure
+stays a configuration problem instead of becoming a confusing runtime error from
+a server that started without the value it needed. Other servers are unaffected.
+`localpilot doctor` names the variable and the alias:
+
+```text
+ask_google (npx): credential missing; environment variable GOOGLE_API_KEY needs
+  the credential "google-api-key", which is not stored (add it with
+  `localpilot credential set google-api-key`) (args: 2; command available;
+  env: GOOGLE_API_KEY, LOG_LEVEL)
+```
+
+**The plaintext escape hatch.** A credential can also be written directly into a
+project-local, git-ignored `.localpilot.toml`:
+
+```toml
+[mcp.servers.ask_google.env]
+GOOGLE_API_KEY = { value = "..." }
+```
+
+The object form is what marks it sensitive. It gets the same runtime masking and
+the same response filtering as a stored credential; the only difference is that
+it sits in plaintext in the file. Prefer the credential store.
+
+> **Never use the plain-string form for a credential.** `KEY = "..."` is treated
+> as an ordinary, non-sensitive value: it is *not* filtered out of what the
+> server sends back. The object forms exist so you can say "this is a secret".
+
+**What comes back is filtered.** An MCP server is an untrusted subprocess that
+can read its own environment, so anything you give it can be returned — in the
+handshake, in the tool descriptions it advertises, in a tool result, or in an
+error. Every value LocalPilot receives from a server is stripped of the
+credentials that server was given, before any of it reaches the model, a
+transcript, stored output, or a log. Values shorter than 8 characters are left to
+the shared pattern-based redaction instead, because matching a short string
+verbatim would corrupt ordinary text. This is defence in depth rather than a
+containment boundary — see
+[07-security-and-privacy.md](07-security-and-privacy.md).
+
+Adding an environment grants a server no new tool permission and bypasses no
+gate; see [Permissions](#permissions) below.
 
 ### Tool name collisions
 

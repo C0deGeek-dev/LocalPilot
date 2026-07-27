@@ -283,8 +283,79 @@ engine.
 | --- | --- | --- | --- |
 | `command` | string | — | Command that launches the MCP server |
 | `args` | array of string | `[]` | Arguments to the command |
+| `env` | table | `{}` | Environment entries overlaid on the inherited environment when the server is spawned. See below. |
 
 See [mcp.md](mcp.md).
+
+### `[mcp.servers.<name>.env]`
+
+Each entry sets one environment variable for that server's process. The server
+starts from the environment LocalPilot itself has; a configured entry then
+replaces any inherited variable of the same name. Omit the table entirely and
+inheritance behaves exactly as before.
+
+There are three entry forms:
+
+```toml
+[mcp.servers.ask_google.env]
+# 1. A plain string: an ordinary, non-sensitive value.
+LOG_LEVEL = "info"
+
+# 2. A reference to the credential store — the recommended way to supply a
+#    credential. The config file holds only the alias.
+GOOGLE_API_KEY = { credential = "google-api-key" }
+
+# 3. A credential written literally into this file. An explicit escape hatch,
+#    not the recommended path.
+SERVICE_TOKEN = { value = "..." }
+```
+
+> **Do not put a credential in the plain-string form.** A plain string is treated
+> as non-sensitive: it is not filtered out of what the server sends back. Use
+> `{ credential = "..." }`, or `{ value = "..." }` if you must keep it in the
+> file. Both object forms are masked in diagnostics and stripped from the
+> server's responses; see [07-security-and-privacy.md](07-security-and-privacy.md).
+
+Store a credential with `localpilot credential set <name>` (below) and reference
+it by that name. If a referenced credential is not stored, that server is **not
+started** and `localpilot doctor` reports which variable and alias need
+attention.
+
+Rules the loader enforces:
+
+- Variable names must be a letter or underscore followed by letters, digits, or
+  underscores.
+- An entry may not set both `value` and `credential`, or neither. This is checked
+  **after** config layers are merged, so two individually valid files cannot
+  combine into a contradictory entry.
+- Two names in one server that differ only by case are rejected. Windows treats
+  them as one variable and Linux/macOS as two, so the configuration would mean
+  different things on different platforms.
+- Credential aliases may contain letters, digits, `.`, `-`, and `_`.
+
+Config layers merge **per key**: an `env` table in the project file overrides
+only the entries it names, leaving the user file's other entries in place.
+
+> **Caveat on the environment layer.** An entry set through
+> `LOCALPILOT_MCP__SERVERS__<server>__ENV__<VAR>` arrives **lower-cased**, so
+> exporting `…__ENV__GOOGLE_API_KEY` sets `google_api_key`. On Windows that is
+> the same variable; on Linux and macOS it is a different one. Prefer setting
+> per-server environments in a config file.
+
+### `localpilot credential`
+
+Named credentials an `[mcp.servers.<name>.env]` entry references. These are
+separate from provider API keys — `localpilot login` and `localpilot logout` are
+unchanged, and a generic credential and a provider of the same name never
+collide.
+
+| Command | Effect |
+| --- | --- |
+| `localpilot credential set <name>` | Read one value from stdin and store it in the OS keychain, or a `0600` fallback file. The value is never taken as a command-line argument and never printed in full. |
+| `localpilot credential list` | List stored credential names and where each is stored (`keychain` or `file`). Never shows values. |
+| `localpilot credential delete <name>` | Remove the credential from every storage tier. |
+
+There is deliberately no command to reveal, export, or copy a stored value.
 
 ### `[skills]`
 
