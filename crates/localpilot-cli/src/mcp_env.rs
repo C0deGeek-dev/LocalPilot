@@ -213,8 +213,7 @@ mod tests {
     {
         let dir = tempfile::tempdir()?;
         let resolved = resolve_environment(&server_with(Vec::new()), &store_at(&dir))?;
-        assert!(resolved.is_empty());
-        assert_eq!(resolved.len(), 0);
+        assert_eq!(resolved.names().count(), 0);
         assert_eq!(resolved.secrets().count(), 0);
         Ok(())
     }

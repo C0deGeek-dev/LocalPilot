@@ -118,19 +118,6 @@ impl ServerEnvironment {
         Self { entries }
     }
 
-    /// Whether the overlay adds nothing — the default, and the shape every
-    /// server configured before this existed still has.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// How many entries the overlay carries. Safe for diagnostics.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     /// The configured variable names, in order. Safe for diagnostics — a name is
     /// not a secret.
     pub fn names(&self) -> impl Iterator<Item = &str> {
