@@ -14,10 +14,14 @@
 use localpilot_dist::{Cache, ReleaseManifest, Version};
 
 /// A published release known to carry the manifest format this build reads.
-const BASE: &str = "https://github.com/C0deGeek-dev/LocalPilot/releases/download/v2.5.0";
+///
+/// Pinned rather than tracking "latest" so a failure means *this build* stopped
+/// reading a release it used to read — not that someone published something new.
+/// Bump it deliberately when the manifest format or the archive layout changes.
+const BASE: &str = "https://github.com/C0deGeek-dev/LocalPilot/releases/download/v2.6.0";
 /// A Linux archive is used regardless of host: extraction is platform-agnostic,
 /// and this test is about the distribution mechanics, not about running the
-/// binary. Windows 2.5.0 shipped a `.zip`, which predates the one-format change.
+/// binary. From 2.6.0 every target ships `.tar.gz`, so the choice is arbitrary.
 const TARGET: &str = "x86_64-unknown-linux-musl";
 
 #[tokio::test]

@@ -133,7 +133,7 @@ localpilot update            # fetch, verify, and install the newest release
 localpilot update --check    # only report whether one is available
 localpilot update --all      # install the whole stack at this binary's version
 localpilot version list      # what is installed, and which one would run
-localpilot version pin 2.5.0 # hold a version
+localpilot version pin 2.6.0 # hold a version
 localpilot version rollback  # go back to the previous installed version
 ```
 
@@ -225,29 +225,14 @@ rustup toolchain install stable-x86_64-pc-windows-msvc
 If you only need non-interactive commands (`ask`, `print`, `harness`, `memory`,
 `learning`), the gnu toolchain is fine.
 
-## Updating
+## The update notice
 
-```sh
-localpilot update          # check the repo and, on confirmation, reinstall
-localpilot update --check   # only report whether a newer release exists
-```
-
-`update` queries the project repository for the newest release tag, compares it
-to the running binary's embedded version, and on your confirmation reinstalls
-from source with the same feature set (`cargo install --git … --tag …`), using
-the MSVC toolchain on Windows when the TUI is built.
-
-The interactive REPL and the bare `localpilot` launch also do a best-effort,
-cached check (at most once a day) and show a notice when an update is available.
-Disable it with `LOCALPILOT_NO_UPDATE_CHECK=1`. The automatic check is off on the
+The interactive REPL and the bare `localpilot` launch do a best-effort, cached
+check (at most once a day) and show a notice when a newer release exists.
+**Nothing self-updates** — installing is always something you run. Disable the
+notice with `LOCALPILOT_NO_UPDATE_CHECK=1`. The automatic check is off on the
 `windows-gnu` toolchain (its TLS stack is unstable); `localpilot update` still
 works there.
-
-## From a release archive
-
-Each tagged release publishes per-platform archives that contain the
-`localpilot` binary plus `LICENSE-MIT`. Download the archive for your platform,
-extract it, and put the binary on your `PATH`.
 
 ## From crates.io
 
