@@ -165,6 +165,36 @@ Rules:
 
 Finds files by name pattern, respecting ignore files; capped results.
 
+### `search_definitions`
+
+Searches code and returns the **enclosing declaration** — function, type, module,
+or test — rather than matching lines. Each hit carries the declaration's symbol
+path, its signature with the body elided, and its file and line. Optional
+`language` and `kind` filters narrow the search.
+
+Use it for "where is X defined", "which function handles Y", "what implements Z".
+Use `search_text` for prose, configuration, non-code files, or when you want
+every matching line — for a query that is already narrow, `search_text` returns
+less. Use `find_files` to locate files by name.
+
+Rules:
+
+- same walk, ignore-file handling, and workspace scoping as `search_text`; the
+  permission engine decides containment, the tool only reports it
+- **text-first**: the literal/regex scan runs before any parsing, and only files
+  that already contain a match are parsed, so cost scales with hits rather than
+  repository size
+- **stateless**: no index, no cache, no store — nothing to ingest and nothing to
+  go stale. For questions that need a project-wide graph (callers, change impact)
+  use the code-graph commands instead
+- multiple matches inside one declaration collapse to one hit with a count
+- default 20 hits, hard cap 100; a cut result is marked truncated and says how
+  many more matched
+- never silently empty: an unsupported file type, a match outside any
+  declaration, or a reached scan ceiling is reported with the reason
+- languages come from the shared code-intelligence grammars; a file type without
+  a grammar is reported, not skipped in silence
+
 ### `read_tool_output`
 
 Reads back the full retained output of an earlier tool call that was truncated

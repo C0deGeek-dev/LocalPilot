@@ -2,6 +2,58 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0104: Declaration-Scoped Code Search Is A Stateless Tool That Reuses The Code-Intelligence Grammars
+
+Status: accepted. Extends the tool surface described in
+[`docs/05-tool-system.md`](05-tool-system.md); bound by ADR-0007 (tri-platform
+tier-1), ADR-0031 (reveal-never-grant), ADR-0036 (the adapter boundary: the host
+owns filesystem walking), and ADR-0070 (out-of-workspace read grants).
+
+The model's search surface was `find_files` (by name) and `search_text` (by
+line). Neither answers the question it most often has — *where is this defined* —
+so a broad query returned hundreds of call-site lines and provoked follow-up
+reads to find the one declaration among them. Four decisions follow.
+
+1. **A hit is a declaration, not a line.** `search_definitions` resolves every
+   text match to its enclosing function, type, module, or test and returns that
+   declaration's symbol path, signature with the body elided, and location.
+   Multiple matches inside one declaration collapse to a single hit with a count,
+   so a popular helper cannot crowd out every other result. Measured across this
+   workspace, a broad identifier costs 3–6× less output than the equivalent
+   `search_text` call. A query that is *already* narrow does not improve — the
+   signature line costs more than a trimmed source line when there are few of
+   them — and the tool's own description says so rather than leaving the model to
+   discover it.
+
+2. **Stateless, deliberately.** The tool parses on demand and keeps no index,
+   cache, or database. The indexed code graph answers project-wide questions
+   (callers, change impact) and pays for it with an ingest step and a staleness
+   surface; this answers per-file questions and is always current because it has
+   nothing to be stale. Two indexes over the same trees would drift and would
+   have to be invalidated in two places. Anything requiring persistence or
+   cross-file resolution stays with the code graph.
+
+3. **Text-first, because parsing is not free.** Parsing measured at roughly
+   2 MB/s in a debug build, so parsing every walked file would make a search cost
+   seconds and scale with repository size rather than with the number of results.
+   The cheap literal/regex scan therefore runs first and only files that already
+   contain a match are parsed. A search that finds nothing costs one pass over
+   the bytes and zero parses. This is a correctness property as much as a
+   performance one: it is what keeps the tool's cost proportional to the answer.
+
+4. **Grammars are reused, not vendored, and the host still owns the walk.** The
+   code-intelligence crate is already a path dependency through the vendored
+   submodule, so its grammars are already compiled into every build; the tool
+   adds no dependency and lives in the adapter crate that already holds both
+   sides. Vendoring would duplicate the grammars; shelling out to a separate
+   binary would add a runtime dependency the user may not have installed and
+   would move filesystem walking to the wrong side of ADR-0036. The walk, ignore
+   handling, and workspace scoping stay on the host side and use the same calls
+   the built-in search tools use, so ignore files and out-of-workspace read
+   grants behave identically and the permission engine — not the tool — decides
+   containment. If the vendored dependency is ever dropped, or stops exposing
+   per-file parsing, the fallback is to vendor a narrowed grammar subset.
+
 ## ADR-0101: An MCP Server Gets A Configured Environment — Named Credentials By Reference, A Local Plaintext Escape Hatch, One Resolution Seam, And Exact-Value Redaction Coming Back
 
 Status: accepted. Closes LocalHub#43. Amends the credential-storage boundary in

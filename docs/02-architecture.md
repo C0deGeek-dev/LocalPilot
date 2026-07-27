@@ -199,12 +199,17 @@ Owns:
 - accepted-memory retrieval for context injection
 - CLI-friendly wrappers around LocalMind review, memory, audit, and skill APIs
 - host-owned context-injection controls
+- the per-file declaration adapter and the `search_definitions` tool (ADR-0104):
+  the shared code-intelligence grammars are reached from here because this is the
+  only crate holding both sides, while the file walk, ignore handling, and
+  workspace scoping stay host-side per ADR-0036
 
 Must not own:
 
 - a second durable memory implementation
 - LocalMind core learning rules
 - SQLite schema details beyond calling LocalMind APIs
+- a second parsing stack, grammar registry, or language table
 
 Memory and learning must remain local-only by design.
 

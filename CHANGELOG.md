@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **New `search_definitions` tool: find declarations, not lines.** Asking "where
+  is this defined" through `search_text` returned every call site as a separate
+  line and usually needed a follow-up read to find the one declaration among
+  them. `search_definitions` resolves each match to its enclosing function, type,
+  module, or test and returns that declaration's symbol path, signature, and
+  location, with optional `language` and `kind` filters. Repeated matches inside
+  one declaration collapse to a single hit with a count. Measured across this
+  workspace a broad query returns 3–6× less output; a query that is already
+  narrow does not improve, and the tool says so — `search_text` remains the right
+  tool for prose, configuration, and "show me every matching line".
+
+  It keeps no index or cache, so there is nothing to ingest and nothing to go
+  stale, and it honours the same ignore files, workspace scoping, and permission
+  decisions as the existing search tools.
+
 - **An MCP server can be given its own environment, including credentials.** A
   server entry accepted only `command` and `args`, so a server needing a setting
   or an API key could only be configured by exporting the variable before

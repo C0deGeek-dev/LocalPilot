@@ -753,3 +753,184 @@ mod render_tests {
         );
     }
 }
+
+/// The safety tests the repository requires of every tool: an allow path, a deny
+/// path, a containment test that refuses an escape outside the workspace, and a
+/// malformed-input test. The tool never decides its own permission — it declares
+/// effects and the engine rules on them — so the allow/deny pair asserts the
+/// *declared effect*, which is the thing the engine acts on.
+#[cfg(test)]
+mod safety_tests {
+    use super::tests_support::plain;
+    use super::*;
+    use localpilot_sandbox::{Interactivity, Workspace};
+    use serde_json::json;
+    use std::fs;
+
+    fn context(workspace: &Workspace) -> ToolContext<'_> {
+        ToolContext {
+            workspace,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+        }
+    }
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("src")).expect("src");
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn inside_workspace() -> u8 { 1 }\n",
+        )
+        .expect("write");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        (dir, workspace)
+    }
+
+    #[tokio::test]
+    async fn allow_path_a_workspace_search_declares_an_in_workspace_read() {
+        let (_dir, workspace) = workspace();
+        let ctx = context(&workspace);
+        let effects = SearchDefinitions
+            .effects(&json!({ "query": "inside_workspace", "path": "src" }), &ctx)
+            .expect("effects resolve");
+        assert_eq!(effects.len(), 1);
+        assert!(
+            matches!(
+                effects[0],
+                Effect::ReadPath {
+                    inside_workspace: true,
+                    ..
+                }
+            ),
+            "a path under the root must declare an in-workspace read: {effects:?}"
+        );
+
+        let output = SearchDefinitions
+            .invoke(json!({ "query": "inside_workspace" }), &ctx)
+            .await
+            .expect("the search runs");
+        assert!(
+            output.text.contains("inside_workspace"),
+            "the declaration should be found: {}",
+            output.text
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_path_an_escape_declares_an_out_of_workspace_read() {
+        let (_dir, workspace) = workspace();
+        let ctx = context(&workspace);
+        let effects = SearchDefinitions
+            .effects(&json!({ "query": "x", "path": "../../elsewhere" }), &ctx)
+            .expect("effects resolve");
+        assert!(
+            matches!(
+                effects[0],
+                Effect::ReadPath {
+                    inside_workspace: false,
+                    ..
+                }
+            ),
+            "an escaping path must be declared out-of-workspace so the engine can refuse it: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn containment_is_the_engine_s_decision_and_the_tool_reports_it_faithfully() {
+        let (dir, workspace) = workspace();
+        // `Workspace::normalize` deliberately does not enforce containment —
+        // ADR-0070 lets the engine approve a read outside the root — so a tool
+        // must not invent its own check, or it would diverge from `search_text`
+        // and quietly refuse reads the user granted. What it must do is report
+        // containment truthfully, which is what the engine rules on.
+        assert!(workspace.contains(&dir.path().join("src/lib.rs")));
+        assert!(!workspace.contains(Path::new("..")));
+
+        let ctx = context(&workspace);
+        for (path, expected) in [("src", true), ("..", false), ("../..", false)] {
+            let effects = SearchDefinitions
+                .effects(&json!({ "query": "x", "path": path }), &ctx)
+                .expect("effects resolve");
+            assert!(
+                matches!(
+                    effects[0],
+                    Effect::ReadPath { inside_workspace, .. } if inside_workspace == expected
+                ),
+                "path {path:?} should report inside_workspace={expected}: {effects:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_input_is_refused_not_coerced() {
+        let (_dir, workspace) = workspace();
+        let ctx = context(&workspace);
+
+        // Wrong type for a typed field.
+        assert!(SearchDefinitions
+            .invoke(json!({ "query": 42 }), &ctx)
+            .await
+            .is_err());
+        // Missing the required field.
+        assert!(SearchDefinitions
+            .invoke(json!({ "path": "src" }), &ctx)
+            .await
+            .is_err());
+        // Not an object at all.
+        assert!(SearchDefinitions
+            .invoke(json!("query"), &ctx)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn the_tool_declares_itself_read_only_and_schema_generated() {
+        let schema = SearchDefinitions.schema();
+        assert!(
+            schema.get("properties").is_some(),
+            "the schema must be generated from the typed input, not hand-written"
+        );
+        // A read-only tool never declares a write or network effect.
+        let (_dir, workspace) = workspace();
+        let ctx = context(&workspace);
+        let effects = SearchDefinitions
+            .effects(&json!({ "query": "x" }), &ctx)
+            .expect("effects resolve");
+        assert!(
+            effects.iter().all(|e| matches!(e, Effect::ReadPath { .. })),
+            "read-only means read effects only: {effects:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_clamped_to_the_hard_ceiling() {
+        let (_dir, workspace) = workspace();
+        let ctx = context(&workspace);
+        let input = json!({ "query": "inside_workspace", "max_hits": 100_000 });
+        let parsed: SearchDefinitionsInput = serde_json::from_value(input.clone()).expect("parses");
+        let query = Query::build(&parsed).expect("builds");
+        assert_eq!(
+            query.limit, MAX_HITS,
+            "a caller must not be able to exceed the hard ceiling"
+        );
+        assert!(SearchDefinitions.invoke(input, &ctx).await.is_ok());
+    }
+
+    #[test]
+    fn a_zero_limit_is_clamped_up_rather_than_returning_nothing() {
+        let parsed: SearchDefinitionsInput =
+            serde_json::from_value(json!({ "query": "x", "max_hits": 0 })).expect("parses");
+        let query = Query::build(&parsed).expect("builds");
+        assert_eq!(query.limit, 1, "zero must not silently mean 'no results'");
+    }
+
+    #[test]
+    fn unused_helper_is_referenced() {
+        // Keeps the shared constructor honest: the safety tests use the same
+        // `Query` shape the contract tests do.
+        assert_eq!(plain("x").limit, DEFAULT_MAX_HITS);
+    }
+}

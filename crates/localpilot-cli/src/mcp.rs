@@ -66,6 +66,12 @@ impl McpTools {
         // turn spends a bounded number of tokens to find the right context.
         registry.register(Box::new(localpilot_localmind::KnowledgeExpand));
         registry.register(Box::new(localpilot_localmind::KnowledgeFetch));
+        // Structural code search, beside the text tools rather than instead of
+        // them: it answers "where is this defined" with the enclosing
+        // declaration, so a broad query costs a handful of signatures instead of
+        // hundreds of call-site lines. Stateless — it parses on demand and keeps
+        // nothing, so it needs no ingest and can never be stale.
+        registry.register(Box::new(localpilot_localmind::SearchDefinitions));
         // The agent can propose a durable lesson for human review as it works.
         // Enqueue-only — never a direct accepted-memory write.
         registry.register(Box::new(localpilot_localmind::Remember));
@@ -213,6 +219,7 @@ mod tests {
             "remember",
             "localmind_review_list",
             "localmind_memory_search",
+            "search_definitions",
         ] {
             assert!(
                 names.contains(&expected),
