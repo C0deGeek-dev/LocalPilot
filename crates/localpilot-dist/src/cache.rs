@@ -274,6 +274,14 @@ impl Cache {
         Version::parse(&text)
     }
 
+    /// Where the pin is recorded. Callers surface this because a rollback can
+    /// land on a release whose CLI predates `version pin`, leaving the file the
+    /// only way to undo it.
+    #[must_use]
+    pub fn pin_path(&self) -> PathBuf {
+        self.root.join(PIN_FILE)
+    }
+
     /// Pin a version, so the resolver stops preferring the newest.
     ///
     /// # Errors

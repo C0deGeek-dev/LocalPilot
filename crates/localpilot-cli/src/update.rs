@@ -634,8 +634,17 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
             cache.set_pin(&cached.version)?;
             writeln!(
                 out,
-                "rolled back to {} (pinned; `localpilot version pin --clear` to undo)",
+                "rolled back to {} (pinned)",
                 cached.version.to_dir_name()
+            )?;
+            writeln!(out, "to undo: localpilot version pin --clear")?;
+            // The version just rolled back to may predate `version pin` — in which
+            // case the command above does not exist there and the pin file is the
+            // only way out. Name it rather than leave the user stuck.
+            writeln!(
+                out,
+                "  (or delete {} if that release has no `version` command)",
+                cache.pin_path().display()
             )?;
             report_active(&cache, out)?;
         }
