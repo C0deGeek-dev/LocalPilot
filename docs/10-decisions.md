@@ -2,6 +2,67 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
+
+Status: accepted. Extends the release process in
+[`docs/09-release-plan.md`](09-release-plan.md) and the installation guide in
+[`docs/install.md`](install.md); bound by ADR-0007 (tri-platform tier-1). The
+ecosystem-wide rule lives in the hub's distribution policy.
+
+Installing meant `cargo install --git`: a Rust toolchain, a multi-minute compile,
+and no way back if a release misbehaved. For a stack meant to be usable by people
+who are not Rust developers, that is the barrier that matters. Five decisions.
+
+1. **A tag publishes verified archives, or it publishes nothing.** Every release
+   builds an archive per supported target, each with a SHA-256, plus a
+   `manifest.json` indexing the release. Publishing happens **once**, from a job
+   that requires the whole matrix to have succeeded and re-checks the staged files
+   against the expected targets. Previously each target attached its own archive,
+   so one broken build produced a release that looked complete and was silently
+   missing a platform — indistinguishable, to a downloader, from a good one. A
+   partial release is worse than a failed one.
+
+2. **Checksums are integrity, not authenticity — and every message says so.** A
+   digest published beside an archive in the same release proves the bytes were
+   not corrupted or truncated in transit. It does not prove origin: a party able
+   to alter the release can alter the digest. Only signing proves origin, and
+   these builds are not signed. Shipping checksums while implying otherwise would
+   be worse than shipping none, because it invites misplaced trust. Signing needs
+   key custody and, for a clean macOS experience, paid notarisation; it is an
+   explicit owner decision, not something to half-do.
+
+3. **Every version installs into its own directory.** Switching is a rename,
+   rollback is free, and the running binary is never the file being replaced —
+   the only shape that behaves identically on Windows, where a running executable
+   cannot be overwritten. A version becomes resolvable only when its marker file
+   exists, and the marker is written inside a staging directory that is then
+   renamed into place, so there is no window in which a half-written version can
+   be selected. An interrupted update leaves the previous version working.
+
+4. **Verify before extracting; the cache records rather than re-verifies.** The
+   order is download → verify against the manifest → extract to staging → commit
+   by rename. Nothing is executed and nothing becomes resolvable before the digest
+   matches. The cache then *stores* the verified digest in its marker instead of
+   re-hashing on every resolve: verification needs the bytes, which only the
+   downloader has, and startup should not pay for a check install already did.
+   Archive members are refused if they would escape the destination.
+
+5. **Resolution is pin → newest cached → running build, and never downgrades.**
+   A cached version wins only if it is strictly newer than the build asking,
+   because a developer running a fresh from-source build must not be silently
+   replaced by an older release sitting in the cache. A pin to a version that is
+   not installed does **not** fall through to "newest" — a pin is an instruction
+   not to move. Every resolution carries its reason, because "why am I running
+   this version" is the first question asked.
+
+One archive format — `.tar.gz` — is used on every platform including Windows,
+which has shipped `tar` since 2018. The `zip` crate no longer publishes a version
+compatible with this workspace's MSRV, and paying a dependency conflict to carry
+a second format and a second extractor was the worse trade. Releases before 2.6.0
+shipped a Windows `.zip`, so the updater's first installable Windows release is
+2.6.0; `install.md` says so.
+
+
 ## ADR-0103: Subagents Are Declarative Data With Containment By Construction
 
 Status: accepted. Extends the tool surface in

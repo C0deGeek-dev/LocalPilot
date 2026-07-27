@@ -3,6 +3,71 @@
 LocalPilot is a Rust-native, provider-neutral coding-agent harness for Windows,
 Linux, and macOS (all tier-1).
 
+## Prebuilt binary (no toolchain needed)
+
+Every release publishes an archive per platform, a `SHA256SUMS` file, and a
+`manifest.json` indexing the release. Download the archive for your platform from
+the [latest release](https://github.com/C0deGeek-dev/LocalPilot/releases/latest),
+check it against the published digest, unpack it, and put `localpilot` on your
+`PATH`.
+
+| Platform | Archive |
+|---|---|
+| Windows x86-64 | `localpilot-x86_64-pc-windows-msvc.tar.gz` |
+| Linux x86-64 (glibc) | `localpilot-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64 (static) | `localpilot-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `localpilot-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `localpilot-aarch64-apple-darwin.tar.gz` |
+
+Use the **musl** build on Alpine, in containers, or on any Linux whose glibc is
+older than the build host's — it is statically linked and does not care.
+
+```sh
+# Linux / macOS — verify before unpacking
+curl -LO https://github.com/C0deGeek-dev/LocalPilot/releases/latest/download/localpilot-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/C0deGeek-dev/LocalPilot/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf localpilot-x86_64-unknown-linux-gnu.tar.gz
+```
+
+```powershell
+# Windows — tar is built in
+Invoke-WebRequest -OutFile localpilot.tar.gz https://github.com/C0deGeek-dev/LocalPilot/releases/latest/download/localpilot-x86_64-pc-windows-msvc.tar.gz
+Invoke-WebRequest -OutFile SHA256SUMS https://github.com/C0deGeek-dev/LocalPilot/releases/latest/download/SHA256SUMS
+(Get-FileHash localpilot.tar.gz -Algorithm SHA256).Hash.ToLower()   # compare with SHA256SUMS
+tar -xzf localpilot.tar.gz
+```
+
+**What the checksum proves.** It proves the archive you downloaded is byte-for-byte
+what CI produced — it was not corrupted or truncated in transit. It does **not**
+prove who produced it: anyone able to alter the release could alter the checksum
+file too. Only a signature proves origin, and these builds are **not signed**.
+That is stated plainly here rather than left for you to assume.
+
+### Staying up to date
+
+```sh
+localpilot update            # fetch, verify, and install the newest release
+localpilot update --check    # only report whether one is available
+localpilot version list      # what is installed, and which one would run
+localpilot version pin 2.5.0 # hold a version
+localpilot version rollback  # go back to the previous installed version
+```
+
+`update` downloads the archive for your platform, checks it against the digest in
+the release manifest, and only then unpacks it. Each version installs into its own
+directory, so the running binary is never overwritten, an interrupted update
+leaves the previous version working, and `rollback` is instant.
+
+> Releases before 2.6.0 shipped a `.zip` on Windows. `update` reads `.tar.gz`, so
+> on Windows it can install 2.6.0 and later; for anything earlier, download by
+> hand or use `--from-source`.
+
+## From source
+
+Use this when you want to build from a working tree, or on a platform with no
+published archive — `update --from-source` also falls back here automatically.
+
 ## Requirements
 
 - The Rust toolchain (`cargo`, MSRV 1.82) from <https://rustup.rs>.
@@ -18,7 +83,7 @@ git clone --recurse-submodules https://github.com/C0deGeek-dev/LocalPilot.git
 git submodule update --init --recursive
 ```
 
-## From source (recommended)
+## Build and install
 
 ```sh
 # Linux / macOS

@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot update` no longer needs a Rust toolchain.** It downloads the
+  archive published for your platform, verifies it against the checksum in the
+  release manifest, and only then unpacks it. Building from source stays
+  available with `--from-source`, and is the automatic fallback on a platform
+  with no published build.
+
+  Each version installs into its own directory, so the running binary is never
+  overwritten and an interrupted update leaves the previous version working. New
+  `localpilot version list|pin|rollback` inspect and choose between installed
+  versions — rollback is a rename, not a download.
+
+  The checksum proves the archive was not corrupted in transit. It does not prove
+  who produced it; these builds are not signed, and the messages say so.
+
 ## v2.5.0 - 2026-07-27
 
 Coordinated LocalX release.
