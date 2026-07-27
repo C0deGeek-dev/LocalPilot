@@ -1747,6 +1747,7 @@ dependencies = [
  "localpilot-sandbox",
  "localpilot-store",
  "localpilot-tools",
+ "regex",
  "rusqlite",
  "schemars",
  "serde",

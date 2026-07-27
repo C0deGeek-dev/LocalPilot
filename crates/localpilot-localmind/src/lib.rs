@@ -14,6 +14,8 @@ mod chunk_store;
 mod codegraph;
 mod context_hook;
 mod context_prefix;
+mod defs;
+mod defs_tool;
 mod error;
 mod ingest;
 mod inspector;
@@ -48,6 +50,8 @@ pub use codegraph::{
     ExportFormat, SymbolReport,
 };
 pub use context_hook::{register_context_hook, LocalMindContext};
+pub use defs::{enclosing, DefKind, Definition, DefinitionParser, ParseOutcome, MAX_PARSE_BYTES};
+pub use defs_tool::SearchDefinitions;
 pub use ingest::{
     active_session, build_pack, cancel as ingest_cancel, compute_pack,
     context_for_prompt as ingest_context_for, exclude_path as ingest_exclude,
