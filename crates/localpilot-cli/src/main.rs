@@ -9,6 +9,7 @@ use localpilot_core::{Message, Role, SessionId};
 use localpilot_llm::{ModelEvent, ModelRequest, ProviderRegistry};
 use localpilot_store::Store;
 
+mod agents_cmd;
 mod context_inject;
 mod credential_cmd;
 mod doctor;
@@ -361,6 +362,11 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Subagent definitions: list and inspect the agents this project sees.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
     /// Project-local skills: list and read advisory skill modules.
     Skills {
         #[command(subcommand)]
@@ -441,6 +447,24 @@ enum HandoffCommand {
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
+enum AgentsCommand {
+    /// List every agent definition visible from this directory.
+    List {
+        /// Only project-local definitions; ignore the per-user global baseline.
+        #[arg(long)]
+        project: bool,
+    },
+    /// Show one agent's resolved definition, including its prompt parts.
+    Show {
+        /// Agent name.
+        name: String,
+        /// Only project-local definitions; ignore the per-user global baseline.
+        #[arg(long)]
+        project: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ProjectSkillsCommand {
     /// List the effective skills (the global baseline overlaid by the project).
     List {
@@ -1789,6 +1813,17 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 stdout.flush()?;
             }
         },
+        Command::Agents { command } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            match command {
+                AgentsCommand::List { project } => agents_cmd::list(&cwd, project, &mut stdout)?,
+                AgentsCommand::Show { name, project } => {
+                    agents_cmd::show(&cwd, &name, project, &mut stdout)?;
+                }
+            }
+            stdout.flush()?;
+        }
         Command::Skills { command } => {
             let cwd = std::env::current_dir()?;
             let mut stdout = io::stdout().lock();

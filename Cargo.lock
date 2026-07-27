@@ -1621,6 +1621,7 @@ dependencies = [
  "image",
  "indexmap",
  "insta",
+ "localpilot-agents",
  "localpilot-config",
  "localpilot-core",
  "localpilot-harness",
@@ -1651,6 +1652,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "localpilot-agents"
+version = "2.4.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.9",
 ]
 
 [[package]]
