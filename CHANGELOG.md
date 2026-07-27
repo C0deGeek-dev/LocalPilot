@@ -17,8 +17,11 @@ is SemVer-stable; the configuration schema stability policy is in
   `localpilot version list|pin|rollback` inspect and choose between installed
   versions — rollback is a rename, not a download.
 
-  The checksum proves the archive was not corrupted in transit. It does not prove
-  who produced it; these builds are not signed, and the messages say so.
+  Releases now also carry **build provenance**, signed keylessly through Sigstore,
+  so you can verify an archive came from this repository's build:
+  `gh attestation verify <archive> --repo C0deGeek-dev/LocalPilot`. There is no
+  signing key to trust. This is not OS-level code signing — macOS and Windows may
+  still warn about an unidentified developer.
 
 ## v2.5.0 - 2026-07-27
 

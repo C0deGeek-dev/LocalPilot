@@ -38,11 +38,29 @@ Invoke-WebRequest -OutFile SHA256SUMS https://github.com/C0deGeek-dev/LocalPilot
 tar -xzf localpilot.tar.gz
 ```
 
-**What the checksum proves.** It proves the archive you downloaded is byte-for-byte
-what CI produced — it was not corrupted or truncated in transit. It does **not**
-prove who produced it: anyone able to alter the release could alter the checksum
-file too. Only a signature proves origin, and these builds are **not signed**.
-That is stated plainly here rather than left for you to assume.
+### Verifying who built it
+
+The checksum proves the archive is byte-for-byte what CI produced — not corrupted
+or truncated. On its own it does not prove *origin*: anyone able to alter the
+release could alter the checksum beside it.
+
+Releases also carry **build provenance**, signed keylessly through Sigstore and
+recorded in its public transparency log. That binds each archive to the workflow,
+repository, and commit that built it:
+
+```sh
+gh attestation verify localpilot-x86_64-unknown-linux-gnu.tar.gz   --repo C0deGeek-dev/LocalPilot
+```
+
+A pass means GitHub's build system produced that exact archive from this
+repository. There is no signing key to trust, hold, or rotate — the workflow's own
+identity is the signer.
+
+**What this is not.** It is not OS-level code signing. macOS Gatekeeper will still
+warn about an unidentified developer, and Windows SmartScreen may still prompt —
+those need an Apple Developer ID and an EV certificate respectively, both paid
+annual accounts, and neither is in place. On macOS you may need
+`xattr -d com.apple.quarantine ./localpilot` after unpacking.
 
 ### Staying up to date
 

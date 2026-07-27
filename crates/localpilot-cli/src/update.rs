@@ -254,12 +254,18 @@ pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bo
     match localpilot_dist::install_release(&cache, &manifest, target, "localpilot", &base).await {
         Ok(dir) => {
             writeln!(out, "installed {tag} to {}", dir.display())?;
-            // The digest proves the bytes were not corrupted in transit. It does
-            // not prove who produced them; say so rather than implying more.
+            // Name the property that was actually checked. The digest proves the
+            // bytes are intact; origin comes from the release's build attestation,
+            // which this updater does not verify in-process — so point at the
+            // command that does, rather than implying it was already done.
             writeln!(
                 out,
-                "verified against the checksum published with the release \
-                 (integrity, not origin — these builds are not signed)"
+                "verified against the checksum published with the release (integrity)"
+            )?;
+            writeln!(
+                out,
+                "to confirm it was built by this repository: \
+                 gh attestation verify <archive> --repo C0deGeek-dev/LocalPilot"
             )?;
             let swept = cache.sweep(KEEP_VERSIONS, &running_and_pinned(&cache));
             if !swept.is_empty() {

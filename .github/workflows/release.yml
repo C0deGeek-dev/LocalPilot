@@ -102,6 +102,12 @@ jobs:
     needs: archives
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing: the workflow's own OIDC identity is the signer, so
+      # there is no key to hold, rotate, or leak.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
@@ -152,6 +158,21 @@ jobs:
       - name: aggregate checksums
         shell: bash
         run: cd staged && cat localpilot-*.sha256 > SHA256SUMS && cat SHA256SUMS
+      # Build provenance, signed keylessly through Sigstore and recorded in its
+      # public transparency log. This is what a checksum cannot do: it binds an
+      # archive to the workflow, repository, and commit that produced it, so a
+      # user can verify *origin* and not merely that a download was intact.
+      #
+      #   gh attestation verify <archive> --repo ${{ github.repository }}
+      #
+      # It is free and needs no key custody. It is **not** OS-level code signing:
+      # macOS Gatekeeper still wants an Apple Developer ID and Windows SmartScreen
+      # an EV certificate, both paid. Say so wherever this is surfaced.
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: staged/localpilot-*.tar.gz
+
       - name: extract release notes
         shell: bash
         run: |

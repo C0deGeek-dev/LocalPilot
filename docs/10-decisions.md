@@ -22,14 +22,23 @@ who are not Rust developers, that is the barrier that matters. Five decisions.
    missing a platform — indistinguishable, to a downloader, from a good one. A
    partial release is worse than a failed one.
 
-2. **Checksums are integrity, not authenticity — and every message says so.** A
-   digest published beside an archive in the same release proves the bytes were
-   not corrupted or truncated in transit. It does not prove origin: a party able
-   to alter the release can alter the digest. Only signing proves origin, and
-   these builds are not signed. Shipping checksums while implying otherwise would
-   be worse than shipping none, because it invites misplaced trust. Signing needs
-   key custody and, for a clean macOS experience, paid notarisation; it is an
-   explicit owner decision, not something to half-do.
+2. **Integrity from checksums, authenticity from keyless build provenance.** A
+   digest published beside an archive proves the bytes were not corrupted or
+   truncated; on its own it does not prove origin, because a party able to alter
+   the release can alter the digest. Origin therefore comes from **Sigstore-backed
+   build attestations** (`actions/attest-build-provenance`), which bind each
+   archive to the workflow, repository, and commit that produced it and record it
+   in a public transparency log. Verification is `gh attestation verify`.
+
+   Keyless was chosen over a self-managed signing key deliberately: the workflow's
+   OIDC identity is the signer, so there is no key to hold, rotate, or leak, and
+   nothing to distribute to users. It is also free, which is the constraint.
+
+   **This is not OS-level code signing.** macOS Gatekeeper still wants an Apple
+   Developer ID and Windows SmartScreen an EV certificate — both paid annual
+   accounts, neither in place. Every surface that mentions verification says which
+   of the two it provides, because claiming more than is true invites the
+   misplaced trust the whole decision exists to avoid.
 
 3. **Every version installs into its own directory.** Switching is a rename,
    rollback is free, and the running binary is never the file being replaced —
