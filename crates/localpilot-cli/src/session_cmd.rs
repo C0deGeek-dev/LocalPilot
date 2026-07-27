@@ -222,6 +222,9 @@ pub async fn build_runtime(
         Vec::new(),
     );
     runtime.set_broker(broker);
+    if let Some(agents) = crate::agents_cmd::session_agents(cwd) {
+        runtime.set_agents(agents);
+    }
     localpilot_harness::register_project_analysis_context(
         cwd,
         config.context.project_analysis,

@@ -2455,7 +2455,7 @@ impl SessionRuntime {
                         return self.stop(events, StopReason::NoProgress);
                     }
                 }
-                tool_calls_used += 1 + std::mem::take(&mut delegated_calls);
+                tool_calls_used += 1;
                 self.turn_tool_calls = tool_calls_used;
 
                 // Surface the task plan to the UI as the model updates it.
@@ -2637,6 +2637,16 @@ impl SessionRuntime {
                         }
                     }
                 };
+                // Fold in any calls a subagent made during the dispatch above. The
+                // per-call increment runs *before* dispatch, so this has to be
+                // charged after it returns — deferring it to the next iteration
+                // would lose the count entirely when `delegate` is the last call
+                // of a turn, which is the common case.
+                if delegated_calls > 0 {
+                    tool_calls_used += std::mem::take(&mut delegated_calls);
+                    self.turn_tool_calls = tool_calls_used;
+                }
+
                 // Safety-gate audit: a refusal to repair a destructive/external/
                 // irreversible/MCP tool is recorded even when readable errors are
                 // off, so the gate holding is always observable.

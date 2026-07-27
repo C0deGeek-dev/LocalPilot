@@ -994,6 +994,9 @@ fn build_runtime(
         Vec::new(),
     );
     runtime.set_broker(broker);
+    if let Some(agents) = crate::agents_cmd::session_agents(root) {
+        runtime.set_agents(agents);
+    }
     runtime
 }
 

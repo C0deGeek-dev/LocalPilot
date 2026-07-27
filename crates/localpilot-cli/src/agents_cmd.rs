@@ -24,6 +24,22 @@ pub fn home() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// Load the definitions a session may delegate to, or `None` when the project
+/// has none.
+///
+/// **Every** session path calls this — REPL, print, rpc, and harness. Wiring it
+/// at one seam is the point: a path that skipped it would advertise `delegate`
+/// and then answer "no agent definitions are loaded" in a workspace where
+/// `localpilot agents list` plainly shows them.
+#[must_use]
+pub fn session_agents(cwd: &Path) -> Option<std::sync::Arc<AgentSet>> {
+    let set = AgentSet::resolve(&AgentSet::standard_roots(cwd, home().as_deref()));
+    if set.agents().is_empty() {
+        return None;
+    }
+    Some(std::sync::Arc::new(set))
+}
+
 /// Print every effective agent, its origin, model, and tool count.
 ///
 /// # Errors
