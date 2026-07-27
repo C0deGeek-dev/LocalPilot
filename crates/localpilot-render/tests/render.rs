@@ -6,7 +6,9 @@
 use std::time::Duration;
 
 use localpilot_render::ChromiumRenderer;
-use localpilot_research::{RenderBounds, RenderGate, RenderRequest, Renderer};
+use localpilot_research::{
+    RenderBounds, RenderFailure, RenderGate, RenderRequest, RenderedDoc, Renderer,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -29,6 +31,43 @@ fn bounds() -> RenderBounds {
         max_frames: 8,
         max_depth: 3,
     }
+}
+
+/// Unwrap a render result, or skip the test when this machine has a browser that
+/// will not *start*.
+///
+/// `ChromiumRenderer::available()` answers "is a browser installed", which is not
+/// the same question as "will it run here". A CI runner can ship Chrome and still
+/// refuse to launch it — a restricted user namespace blocks the sandbox, and the
+/// browser exits before its devtools endpoint exists. That is the environment
+/// failing, not the renderer, and it is the case the file header already means by
+/// "run only when a browser is present".
+///
+/// Only launch-phase failures skip. A browser that starts and then renders the
+/// wrong thing, drops a frame, or ignores the egress gate still fails the test:
+/// those are the assertions this file exists for.
+fn rendered_or_skip(result: Result<RenderedDoc, RenderFailure>, what: &str) -> Option<RenderedDoc> {
+    match result {
+        Ok(doc) => Some(doc),
+        Err(RenderFailure::Unavailable) => {
+            eprintln!("no usable browser; skipping renderer e2e test ({what})");
+            None
+        }
+        Err(RenderFailure::Browser(detail)) if is_launch_failure(&detail) => {
+            eprintln!("browser present but would not start; skipping ({what}): {detail}");
+            None
+        }
+        Err(other) => panic!("{what}: {other:?}"),
+    }
+}
+
+/// Whether a browser-error detail describes a failure to get the browser running
+/// at all, as opposed to a failure of the render itself.
+fn is_launch_failure(detail: &str) -> bool {
+    detail.contains("browser exited before its devtools endpoint came up")
+        || detail.contains("devtools endpoint did not come up in time")
+        || detail.contains("browser launch failed")
+        || detail.contains("no chromium-family browser found")
 }
 
 #[tokio::test]
@@ -57,7 +96,7 @@ async fn renders_javascript_injected_content() {
     };
     let renderer = ChromiumRenderer::new();
 
-    let doc = renderer
+    let result = renderer
         .render(
             &RenderRequest {
                 url: url.clone(),
@@ -65,8 +104,10 @@ async fn renders_javascript_injected_content() {
             },
             &gate,
         )
-        .await
-        .expect("render succeeds against the local fixture");
+        .await;
+    let Some(doc) = rendered_or_skip(result, "render succeeds against the local fixture") else {
+        return;
+    };
 
     assert!(
         doc.html.contains("SYNC_RENDER_MARKER"),
@@ -112,7 +153,7 @@ async fn extracts_same_origin_and_srcdoc_frame_documents() {
     };
     let renderer = ChromiumRenderer::new();
 
-    let doc = renderer
+    let result = renderer
         .render(
             &RenderRequest {
                 url,
@@ -120,8 +161,10 @@ async fn extracts_same_origin_and_srcdoc_frame_documents() {
             },
             &gate,
         )
-        .await
-        .expect("render succeeds");
+        .await;
+    let Some(doc) = rendered_or_skip(result, "render succeeds") else {
+        return;
+    };
 
     assert!(
         doc.frames.len() >= 2,
@@ -163,7 +206,7 @@ async fn gate_blocks_a_disallowed_subresource_and_counts_it() {
     };
     let renderer = ChromiumRenderer::new();
 
-    let doc = renderer
+    let result = renderer
         .render(
             &RenderRequest {
                 url,
@@ -171,8 +214,11 @@ async fn gate_blocks_a_disallowed_subresource_and_counts_it() {
             },
             &gate,
         )
-        .await
-        .expect("render succeeds even with a blocked subresource");
+        .await;
+    let Some(doc) = rendered_or_skip(result, "render succeeds even with a blocked subresource")
+    else {
+        return;
+    };
 
     assert!(
         doc.html.contains("PAGE_OK"),

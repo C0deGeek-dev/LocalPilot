@@ -53,7 +53,7 @@ impl Browser {
     pub(crate) async fn launch(timeout: Duration) -> Result<Self, RenderError> {
         let exe = Self::discover().ok_or(RenderError::NoBrowser)?;
         let profile = tempfile::tempdir()?;
-        let child = tokio::process::Command::new(&exe)
+        let mut child = tokio::process::Command::new(&exe)
             .arg("--headless=new")
             .arg("--disable-gpu")
             .arg("--no-first-run")
@@ -76,7 +76,16 @@ impl Browser {
         // in the profile once the debug server is listening. Poll for it rather
         // than scraping stderr (locale- and format-stable across builds).
         let port_file = profile.path().join("DevToolsActivePort");
-        let ws_url = wait_for_devtools(&port_file, timeout).await?;
+        let ws_url = match wait_for_devtools(&port_file, &mut child, timeout).await {
+            Ok(url) => url,
+            Err(error) => {
+                // Reap before returning. `kill_on_drop` signals the child but does
+                // not wait for it, which leaves a zombie for the parent's lifetime
+                // — and a test runner counts that as a leaked process.
+                let _ = child.kill().await;
+                return Err(error);
+            }
+        };
         Ok(Self {
             child,
             ws_url,
@@ -93,8 +102,15 @@ impl Browser {
 /// Poll the `DevToolsActivePort` file until it holds the port and browser path,
 /// then compose the browser-endpoint WebSocket URL. The file's first line is the
 /// port; its second line is the `/devtools/browser/<id>` path.
+///
+/// The browser process is watched alongside the file. A browser that refuses to
+/// start — a blocked sandbox, a broken install, a profile it cannot write —
+/// exits immediately and never writes the file, and waiting out the full budget
+/// for a process that is already gone spends the whole render on a foregone
+/// conclusion and then reports it as slowness. Its exit is the answer.
 async fn wait_for_devtools(
     port_file: &std::path::Path,
+    child: &mut tokio::process::Child,
     timeout: Duration,
 ) -> Result<String, RenderError> {
     let deadline = Instant::now() + timeout;
@@ -111,6 +127,13 @@ async fn wait_for_devtools(
                     }
                 }
             }
+        }
+        // Checked after the file, so a browser that writes the port and exits in
+        // the same instant is still reported as a success.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(RenderError::Launch(format!(
+                "browser exited before its devtools endpoint came up ({status})"
+            )));
         }
         if Instant::now() >= deadline {
             return Err(RenderError::DevToolsTimeout);
