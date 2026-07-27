@@ -25,7 +25,7 @@ use localpilot_store::Store;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{SessionConfig, SessionRuntime};
+use crate::session::{RuntimeEvent, SessionConfig, SessionRuntime};
 
 /// How deeply subagents may nest. At depth 1 a subagent cannot itself spawn one:
 /// recursive delegation is the cheapest way to burn a budget with nothing to
@@ -98,6 +98,10 @@ pub struct AgentContext<'a> {
     /// The caller's approver. A child's asks are forwarded here, attributed to
     /// the agent, never answered by the child itself.
     pub approver: Arc<dyn Approver>,
+    /// The caller's event channel. A child's **token usage** is republished here
+    /// so a delegating turn's real cost is visible; nothing else from the child
+    /// is, because the caller's transcript is not the child's.
+    pub events: broadcast::Sender<RuntimeEvent>,
 }
 
 /// Check the ceilings that must hold *before* a child is built.
@@ -207,8 +211,24 @@ pub async fn run_agent(
     );
     child.replace_system_prompt(prompt);
 
-    let (events, _rx) = broadcast::channel(256);
+    // The child gets its own channel: its tool calls, plan updates, and stream
+    // deltas belong to its transcript, not the caller's. Only usage crosses
+    // over, so the caller's token counters include what it spent on delegation.
+    // Without this the child's usage events go to a receiver nobody reads and a
+    // delegating turn silently reports less than it cost.
+    let (events, mut child_rx) = broadcast::channel(256);
+    let caller_events = ctx.events.clone();
+    let usage_pump = tokio::spawn(async move {
+        while let Ok(event) = child_rx.recv().await {
+            if let RuntimeEvent::Usage(usage) = event {
+                let _ = caller_events.send(RuntimeEvent::Usage(usage));
+            }
+        }
+    });
+
     let stop = child.run_turn(task, &events, cancel).await;
+    drop(events);
+    let _ = usage_pump.await;
     let tool_calls = child.turn_tool_calls();
     let raw = child.last_assistant_text().unwrap_or_default();
     let (summary, truncated) = bound(&raw);
@@ -287,6 +307,8 @@ pub struct SessionAgentHost<'a> {
     pub cancel: &'a CancellationToken,
     /// The caller's approver; a child's asks are forwarded here, attributed.
     pub approver: Arc<dyn Approver>,
+    /// The caller's event channel; a child's usage is republished here.
+    pub events: broadcast::Sender<RuntimeEvent>,
     /// Tool calls made by children during this turn, drained by the caller into
     /// its own per-turn count. An `AtomicUsize` because the host is reached
     /// through a shared reference from inside a tool call.
@@ -335,6 +357,7 @@ impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
                 depth: self.depth,
                 max_depth: DEFAULT_MAX_DEPTH,
                 approver: Arc::clone(&self.approver),
+                events: self.events.clone(),
             };
             match run_agent(definition, task, &grants, ctx, self.cancel).await {
                 Ok(outcome) => {
@@ -401,6 +424,7 @@ mod tests {
             depth,
             max_depth: DEFAULT_MAX_DEPTH,
             approver: Arc::new(localpilot_sandbox::ScriptedApprover::always()),
+            events: broadcast::channel(8).0,
         }
     }
 
@@ -563,6 +587,51 @@ mod tests {
             inner.seen.lock().expect("lock").clone(),
             ["agent `explore`"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_childs_token_usage_reaches_the_callers_counters() {
+        // The caller's token display must include what delegation spent, or a
+        // delegating turn silently reports less than it cost. Only usage crosses
+        // over — the child's tool calls and stream deltas belong to its own
+        // transcript, not the caller's.
+        let (caller_tx, mut caller_rx) = broadcast::channel(16);
+        let (child_tx, mut child_rx) = broadcast::channel(16);
+
+        let forwarded = caller_tx.clone();
+        let pump = tokio::spawn(async move {
+            while let Ok(event) = child_rx.recv().await {
+                if let RuntimeEvent::Usage(usage) = event {
+                    let _ = forwarded.send(RuntimeEvent::Usage(usage));
+                }
+            }
+        });
+
+        let usage = localpilot_core::TokenUsage {
+            input_tokens: 120,
+            output_tokens: 34,
+        };
+        let _ = child_tx.send(RuntimeEvent::Usage(usage));
+        let _ = child_tx.send(RuntimeEvent::Plan(Vec::new()));
+        drop(child_tx);
+        let _ = pump.await;
+
+        let mut seen = Vec::new();
+        while let Ok(event) = caller_rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "exactly the usage event crosses over: {seen:?}"
+        );
+        match &seen[0] {
+            RuntimeEvent::Usage(u) => {
+                assert_eq!(u.input_tokens, 120);
+                assert_eq!(u.output_tokens, 34);
+            }
+            other => panic!("expected usage, got {other:?}"),
+        }
     }
 
     #[test]

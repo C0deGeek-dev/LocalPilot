@@ -190,7 +190,10 @@ Rules:
 - a refusal (ceiling reached, no usable tools, unknown agent) comes back as
   readable output, not a failed call
 - the child's tool calls are charged to the delegating turn's own per-turn
-  ceiling, so delegation cannot be used to slip past it
+  ceiling, so delegation cannot be used to slip past it, and its token usage is
+  republished to the caller so a delegating turn reports what it really cost.
+  Nothing else from the child crosses over — its tool calls and stream output
+  belong to its transcript, not the caller's
 
 ### `search_definitions`
 

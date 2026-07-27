@@ -2601,6 +2601,7 @@ impl SessionRuntime {
                                     depth: 0,
                                     cancel,
                                     approver: Arc::clone(&self.approver),
+                                    events: events.clone(),
                                     delegated_calls: std::sync::atomic::AtomicUsize::new(0),
                                 }
                             });

@@ -37,7 +37,11 @@ should be a file, not a release. Four decisions make that safe.
 
 3. **Bounded by default, and refusals are outcomes.** A child's tool calls are
    charged to the delegating turn's own per-turn ceiling, so delegation cannot be
-   used to slip past it. Subagents nest one level
+   used to slip past it, and its token usage is republished to the caller so a
+   delegating turn reports what it really cost. Child tokens are deliberately
+   *not* added to the caller's context estimate: the child's messages are not in
+   the caller's history — only its bounded summary is — so counting them there
+   would compact a context that is not actually large. Subagents nest one level
    deep (a subagent cannot spawn one), a child with no usable tools is refused
    before it starts, and the caller receives a bounded summary rather than the
    child's transcript — a subagent that returns everything it read is worse than
