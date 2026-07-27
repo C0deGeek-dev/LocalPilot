@@ -96,10 +96,12 @@ mod tests {
     use super::*;
 
     fn definition(tools: &[&str]) -> AgentDefinition {
-        let list = tools
-            .iter()
-            .map(|t| format!("  - '{t}'\n"))
-            .collect::<String>();
+        let mut list = String::new();
+        for tool in tools {
+            list.push_str("  - '");
+            list.push_str(tool);
+            list.push_str("'\n");
+        }
         let text = format!(
             "format_version: 1\nname: probe\ndescription: d\nprompt: p\ntools:\n{}",
             if list.is_empty() {

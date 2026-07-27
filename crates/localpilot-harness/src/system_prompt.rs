@@ -4,6 +4,7 @@
 //! runtime contracts and the currently registered tool names; provider-specific
 //! adapters still supply the formal JSON schemas.
 
+use localpilot_agents::PromptParts;
 use localpilot_tools::ToolRegistry;
 
 /// Build the agent-mode system prompt for the active tool registry.
@@ -16,6 +17,24 @@ pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String
     let mut names = tools.names();
     names.sort_unstable();
     build_prompt_with(&names, marker_enabled)
+}
+
+/// Build a prompt from a *subset* of the sections the main session uses.
+///
+/// A subagent runs a narrow task with a narrow tool set, and guidance it cannot
+/// act on is context it pays for and nothing else: an agent with two read-only
+/// tools has no use for editing guidance or shell discipline. Selecting
+/// [`PromptParts::all`] reproduces [`agent_system_prompt`] exactly, which is
+/// what keeps the two paths from drifting.
+#[must_use]
+pub fn composed_system_prompt(
+    tools: &ToolRegistry,
+    marker_enabled: bool,
+    parts: PromptParts,
+) -> String {
+    let mut names = tools.names();
+    names.sort_unstable();
+    compose(&names, marker_enabled, parts)
 }
 
 /// The cue, appended only when a knowledge-base search tool is registered, that
@@ -101,6 +120,102 @@ fn build_prompt(names: &[&str]) -> String {
 
 /// Render the prompt, optionally adding the `NEED:` marker convention.
 fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
+    compose(names, marker_enabled, PromptParts::all())
+}
+
+/// The agent-mode opening. Always present when `include_base` is on; it is the
+/// only section that establishes what the model is.
+const BASE_SECTION: &str = "You are LocalPilot's coding agent running in agent mode.
+
+Work inside the current workspace. Read relevant files before changing them,
+prefer precise edits over broad rewrites, and verify changes with the smallest
+useful command before you finish.";
+
+/// Which write tool to reach for, and the modular-file preference.
+const EDITING_SECTION: &str = "To change an existing file, default to
+`replace_in_file` (replace an exact block of old text with new text — it may
+span multiple lines); use `apply_patch` for changes across several files or
+that create and delete files. Reserve `write_file` for a brand-new file or a
+full rewrite of one file — do not use it to make a small edit.
+
+Split a large implementation across several small, focused files rather than
+emitting one enormous file — modular files read better and keep each tool call
+small enough to send reliably. Treat 'keep it in one file' as a preference, not
+a hard rule: split a web app into separate HTML, CSS, and JS files once one file
+would grow too large.";
+
+/// Permission-profile framing and commit etiquette. Turning this off is a
+/// deliberate choice a definition has to make explicitly.
+const SAFETY_SECTION: &str = "Respect the
+permission profile: reads, writes, commands, and network effects may be denied
+or require approval.
+
+Even when running under `bypass` (which grants technical allow-all on commands
+and file effects), do not commit or push changes unless the user explicitly asks
+for it — `bypass` lifts the permission gate, but does not imply permission to
+mutate history or share work without being told to.";
+
+/// Inspect-before-launch.
+const LOOK_BEFORE_LAUNCH_SECTION: &str =
+    "Look before you launch. If a task names an existing target you can reach — a URL,
+a running service, a `host:port` — inspect or probe it first (for example fetch or
+curl it) before assuming you must create or launch your own. Only stand up your
+own server, or scaffold a competing entry page, if that target turns out to be
+absent.";
+
+/// The tool-use loop and shell discipline.
+const TOOL_LOOP_SECTION: &str = "Tool use loop:
+- inspect before acting;
+- call one or more tools with valid JSON inputs;
+- read tool results, including error results;
+- repair malformed or incomplete tool calls instead of repeating them;
+- continue until the task is complete, blocked by a concrete reason, or the user
+  cancels.
+
+Shell discipline. For a multiline or heavily-quoted command, do not fight inline
+quote escaping across the shell-to-interpreter boundary: write the body to a
+script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a command
+fails the same way twice, stop and change approach rather than re-sending it — a
+repeated identical error will keep failing. If a needed command-line tool is
+missing, say so plainly and surface the gap instead of silently working around
+it.";
+
+/// The closing instruction. Always present: without it a model has no contract
+/// for how to end a turn.
+const CLOSING_SECTION: &str =
+    "Keep reasoning separate from the final answer. When no more tool calls are
+needed, respond with a concise final answer that states what changed and how it
+was verified. If stuck, say exactly what blocks progress.";
+
+/// Assemble the selected sections plus the tool list and its cues.
+fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if parts.include_base {
+        sections.push(BASE_SECTION.to_string());
+    }
+    if parts.include_editing_guidance {
+        sections.push(EDITING_SECTION.to_string());
+    }
+    if parts.include_safety {
+        sections.push(SAFETY_SECTION.to_string());
+    }
+    sections.push(tools_section(names, marker_enabled));
+    if parts.include_look_before_launch {
+        sections.push(LOOK_BEFORE_LAUNCH_SECTION.to_string());
+    }
+    if parts.include_tool_instructions {
+        sections.push(TOOL_LOOP_SECTION.to_string());
+    }
+    sections.push(CLOSING_SECTION.to_string());
+    sections.join(
+        "
+
+",
+    )
+}
+
+/// The available-tools line plus every cue gated on a registered tool name.
+fn tools_section(names: &[&str], marker_enabled: bool) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
     } else {
@@ -134,58 +249,7 @@ fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
         ""
     };
     format!(
-        "\
-You are LocalPilot's coding agent running in agent mode.
-
-Work inside the current workspace. Read relevant files before changing them,
-prefer precise edits over broad rewrites, and verify changes with the smallest
-useful command before you finish. To change an existing file, default to
-`replace_in_file` (replace an exact block of old text with new text — it may
-span multiple lines); use `apply_patch` for changes across several files or
-that create and delete files. Reserve `write_file` for a brand-new file or a
-full rewrite of one file — do not use it to make a small edit. Respect the
-permission profile: reads, writes, commands, and network effects may be denied
-or require approval.
-
-Split a large implementation across several small, focused files rather than
-emitting one enormous file — modular files read better and keep each tool call
-small enough to send reliably. Treat 'keep it in one file' as a preference, not
-a hard rule: split a web app into separate HTML, CSS, and JS files once one file
-would grow too large.
-
-Even when running under `bypass` (which grants technical allow-all on commands
-and file effects), do not commit or push changes unless the user explicitly asks
-for it — `bypass` lifts the permission gate, but does not imply permission to
-mutate history or share work without being told to.
-
-Use tools when local information or side effects are needed. Available tools:
-{tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}
-
-Look before you launch. If a task names an existing target you can reach — a URL,
-a running service, a `host:port` — inspect or probe it first (for example fetch or
-curl it) before assuming you must create or launch your own. Only stand up your
-own server, or scaffold a competing entry page, if that target turns out to be
-absent.
-
-Tool use loop:
-- inspect before acting;
-- call one or more tools with valid JSON inputs;
-- read tool results, including error results;
-- repair malformed or incomplete tool calls instead of repeating them;
-- continue until the task is complete, blocked by a concrete reason, or the user
-  cancels.
-
-Shell discipline. For a multiline or heavily-quoted command, do not fight inline
-quote escaping across the shell-to-interpreter boundary: write the body to a
-script file (`.py`, `.ps1`, or `.sh`) and run that file instead. If a command
-fails the same way twice, stop and change approach rather than re-sending it — a
-repeated identical error will keep failing. If a needed command-line tool is
-missing, say so plainly and surface the gap instead of silently working around
-it.
-
-Keep reasoning separate from the final answer. When no more tool calls are
-needed, respond with a concise final answer that states what changed and how it
-was verified. If stuck, say exactly what blocks progress.",
+        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}",
         tools = names.join(", ")
     )
 }
@@ -371,6 +435,134 @@ mod tests {
         assert!(
             prompt.contains("missing"),
             "missing the absent-tool guidance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    /// Every sentence the pre-split prompt opened a paragraph with. The
+    /// all-parts composition must still contain all of them: the split changed
+    /// where paragraph boundaries fall, never what the model is told.
+    const ORIGINAL_OPENERS: &[&str] = &[
+        "You are LocalPilot's coding agent running in agent mode.",
+        "Work inside the current workspace.",
+        "To change an existing file, default to",
+        "Respect the\npermission profile:",
+        "Split a large implementation",
+        "Even when running under `bypass`",
+        "Use tools when local information or side effects are needed.",
+        "Look before you launch.",
+        "Tool use loop:",
+        "Shell discipline.",
+        "Keep reasoning separate from the final answer.",
+    ];
+
+    fn all_parts(names: &[&str]) -> String {
+        compose(names, false, PromptParts::all())
+    }
+
+    #[test]
+    fn selecting_every_part_keeps_all_of_the_original_guidance() {
+        let prompt = all_parts(&["read_file", "write_file"]);
+        for opener in ORIGINAL_OPENERS {
+            assert!(
+                prompt.contains(opener),
+                "the split dropped guidance that used to be present: {opener:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_path_and_the_all_parts_composition_are_the_same_bytes() {
+        let names = ["read_file", "search_text"];
+        assert_eq!(
+            build_prompt_with(&names, false),
+            all_parts(&names),
+            "the main session must go through exactly the same composition as a \
+             subagent that selects everything, or the two paths will drift"
+        );
+    }
+
+    #[test]
+    fn a_narrow_agent_drops_the_guidance_it_cannot_act_on() {
+        let parts = PromptParts {
+            include_editing_guidance: false,
+            include_tool_instructions: false,
+            ..PromptParts::all()
+        };
+        let prompt = compose(&["read_file"], false, parts);
+        assert!(
+            !prompt.contains("replace_in_file"),
+            "editing guidance dropped"
+        );
+        assert!(
+            !prompt.contains("Shell discipline"),
+            "shell discipline dropped"
+        );
+        assert!(
+            prompt.contains("Respect the\npermission profile"),
+            "safety is still on: {prompt}"
+        );
+        assert!(
+            prompt.contains("Available tools: read_file"),
+            "the tool list is never optional: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_closing_contract_and_the_tool_list_are_never_droppable() {
+        // Every part off that can be off.
+        let parts = PromptParts {
+            include_base: false,
+            include_editing_guidance: false,
+            include_safety: false,
+            include_tool_instructions: false,
+            include_look_before_launch: false,
+        };
+        let prompt = compose(&["read_file"], false, parts);
+        assert!(
+            prompt.contains("Keep reasoning separate"),
+            "a model with no closing contract has no way to end a turn: {prompt}"
+        );
+        assert!(prompt.contains("Available tools: read_file"), "{prompt}");
+        assert!(
+            !prompt.contains("agent mode"),
+            "base really is off: {prompt}"
+        );
+    }
+
+    #[test]
+    fn turning_safety_off_removes_exactly_the_safety_text() {
+        let parts = PromptParts {
+            include_safety: false,
+            ..PromptParts::all()
+        };
+        let prompt = compose(&["run_shell"], false, parts);
+        assert!(!prompt.contains("permission profile"), "{prompt}");
+        assert!(!prompt.contains("bypass"), "{prompt}");
+        assert!(
+            prompt.contains("Tool use loop"),
+            "unrelated parts stay: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_cues_still_gate_on_registered_tool_names_after_the_split() {
+        let with = all_parts(&["knowledge_search"]);
+        assert!(with.contains("searchable knowledge base"));
+        let without = all_parts(&["read_file"]);
+        assert!(!without.contains("searchable knowledge base"));
+    }
+
+    #[test]
+    fn sections_are_separated_by_exactly_one_blank_line() {
+        let prompt = all_parts(&["read_file"]);
+        assert!(
+            !prompt.contains("\n\n\n"),
+            "joining introduced a triple newline: {prompt:?}"
         );
     }
 }

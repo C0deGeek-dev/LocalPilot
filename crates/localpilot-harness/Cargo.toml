@@ -25,6 +25,7 @@ localpilot-quota = { path = "../localpilot-quota" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-store = { path = "../localpilot-store" }
+localpilot-agents = { path = "../localpilot-agents" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-verify = { path = "../localpilot-verify" }
 localx-eval-core = { workspace = true }

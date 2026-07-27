@@ -1700,6 +1700,7 @@ dependencies = [
  "futures",
  "indexmap",
  "insta",
+ "localpilot-agents",
  "localpilot-config",
  "localpilot-core",
  "localpilot-llm",
