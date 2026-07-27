@@ -369,6 +369,54 @@ mod tests {
         assert!(extract(b"not a gzip stream at all", dir.path()).is_err());
     }
 
+    #[tokio::test]
+    async fn an_archive_this_build_cannot_extract_leaves_the_cache_untouched() {
+        // The real case this guards: a release older than the one-format change
+        // published a `.zip` for Windows. Attempting it must fail cleanly rather
+        // than leaving a half-written version, and must not disturb whatever is
+        // already installed.
+        let temp = tempfile::tempdir().expect("tmp");
+        let cache = crate::Cache::new(temp.path().join("tool"));
+
+        // Seed an existing install, which must survive the failed attempt.
+        let existing = Version::parse("1.0.0").expect("parses");
+        let staged = cache.stage(&existing).expect("stage");
+        let exe = if cfg!(windows) { "tool.exe" } else { "tool" };
+        std::fs::write(staged.join(exe), b"old").expect("write");
+        cache
+            .commit(
+                &existing,
+                &staged,
+                &InstallMarker {
+                    marker_version: MARKER_VERSION,
+                    version: "1.0.0".to_string(),
+                    target: "t".to_string(),
+                    sha256: "0".repeat(64),
+                    executable: exe.to_string(),
+                },
+            )
+            .expect("seed");
+
+        // Not a gzip stream at all — stands in for the zip case.
+        let payload = b"PK not a tarball";
+        let version = Version::parse("2.0.0").expect("parses");
+        let staged = cache.stage(&version).expect("stage");
+        let outcome = extract(payload, &staged);
+        assert!(outcome.is_err(), "an unreadable archive must fail");
+        let _ = std::fs::remove_dir_all(&staged);
+
+        let installed: Vec<String> = cache
+            .installed()
+            .iter()
+            .map(|c| c.version.to_dir_name())
+            .collect();
+        assert_eq!(
+            installed,
+            ["1.0.0"],
+            "the previously installed version must be untouched and still the only one"
+        );
+    }
+
     #[test]
     fn find_executable_returns_none_when_absent() {
         let dir = tempfile::tempdir().expect("tmp");

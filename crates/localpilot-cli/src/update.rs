@@ -118,7 +118,7 @@ fn now_unix() -> u64 {
 /// # Errors
 /// Returns an error only if writing output or running the installer fails; a
 /// failed network check is reported, not returned.
-pub async fn run(check_only: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+pub async fn run(check_only: bool, from_source: bool, out: &mut dyn Write) -> anyhow::Result<()> {
     let current = current_version();
     match newer_release().await {
         Ok(Some(tag)) => {
@@ -130,6 +130,15 @@ pub async fn run(check_only: bool, out: &mut dyn Write) -> anyhow::Result<()> {
             if !confirm(&format!("update to {tag} now?"))? {
                 writeln!(out, "cancelled")?;
                 return Ok(());
+            }
+            // Prefer the published binary: it needs no toolchain and takes
+            // seconds. Compiling stays available, and is the automatic fallback
+            // when a platform has no published archive.
+            if !from_source && install_binary(&tag, out).await? {
+                return Ok(());
+            }
+            if !from_source {
+                writeln!(out, "falling back to building from source")?;
             }
             reinstall(&tag, out)?;
         }
@@ -178,6 +187,221 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     Ok(answer.trim().eq_ignore_ascii_case("y"))
+}
+
+// --- version cache ----------------------------------------------------------
+
+/// Base URL of a release's downloadable assets.
+fn release_assets_url(tag: &str) -> String {
+    format!("{REPO_URL}/releases/download/{tag}")
+}
+
+/// The install cache for this tool, when the platform reports a data directory.
+fn cache() -> Option<localpilot_dist::Cache> {
+    localpilot_dist::Cache::default_root("localpilot").map(localpilot_dist::Cache::new)
+}
+
+/// Install a released binary into the version cache, verifying it first.
+///
+/// This is the path that does **not** need a Rust toolchain. The from-source
+/// reinstall stays available for a target with no published archive and for
+/// anyone who prefers it.
+///
+/// # Errors
+/// Returns an error only if output cannot be written; a failed install is
+/// reported and leaves the previously installed version untouched.
+pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bool> {
+    let Some(cache) = cache() else {
+        writeln!(
+            out,
+            "no per-user data directory on this platform; use --from-source"
+        )?;
+        return Ok(false);
+    };
+    let target = localpilot_dist::current_target();
+    if target.is_empty() {
+        writeln!(
+            out,
+            "this platform has no published build; use --from-source to compile it"
+        )?;
+        return Ok(false);
+    }
+
+    let base = release_assets_url(tag);
+    writeln!(out, "fetching {tag} manifest…")?;
+    let manifest_bytes = match localpilot_dist::download(&format!("{base}/manifest.json")).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            writeln!(out, "no manifest for {tag} ({error}); use --from-source")?;
+            return Ok(false);
+        }
+    };
+    let manifest = match String::from_utf8(manifest_bytes)
+        .map_err(|e| e.to_string())
+        .and_then(|text| localpilot_dist::ReleaseManifest::parse(&text).map_err(|e| e.to_string()))
+    {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            writeln!(
+                out,
+                "manifest for {tag} is unusable ({error}); use --from-source"
+            )?;
+            return Ok(false);
+        }
+    };
+
+    writeln!(out, "downloading and verifying {target}…")?;
+    match localpilot_dist::install_release(&cache, &manifest, target, "localpilot", &base).await {
+        Ok(dir) => {
+            writeln!(out, "installed {tag} to {}", dir.display())?;
+            // The digest proves the bytes were not corrupted in transit. It does
+            // not prove who produced them; say so rather than implying more.
+            writeln!(
+                out,
+                "verified against the checksum published with the release \
+                 (integrity, not origin — these builds are not signed)"
+            )?;
+            let swept = cache.sweep(KEEP_VERSIONS, &running_and_pinned(&cache));
+            if !swept.is_empty() {
+                let names: Vec<String> = swept
+                    .iter()
+                    .map(localpilot_dist::Version::to_dir_name)
+                    .collect();
+                writeln!(out, "removed older cached version(s): {}", names.join(", "))?;
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            writeln!(out, "install failed: {error}")?;
+            writeln!(out, "the previously installed version is untouched")?;
+            Ok(false)
+        }
+    }
+}
+
+/// How many cached versions to keep, beyond the running and pinned ones. Two is
+/// enough to roll back once without keeping every release ever installed.
+const KEEP_VERSIONS: usize = 2;
+
+/// Versions the sweep must never remove.
+fn running_and_pinned(cache: &localpilot_dist::Cache) -> Vec<localpilot_dist::Version> {
+    let mut protected = Vec::new();
+    if let Some(running) = localpilot_dist::Version::parse(current_version()) {
+        protected.push(running);
+    }
+    if let Some(pinned) = cache.pin() {
+        protected.push(pinned);
+    }
+    protected
+}
+
+/// List installed versions and say which one would run, and why.
+///
+/// # Errors
+/// Returns an error only if output cannot be written.
+pub fn list_versions(out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(cache) = cache() else {
+        writeln!(out, "no per-user data directory on this platform")?;
+        return Ok(());
+    };
+    let running = localpilot_dist::Version::parse(current_version());
+    let installed = cache.installed();
+    if installed.is_empty() {
+        writeln!(out, "no installed versions (running {})", current_version())?;
+    } else {
+        for cached in &installed {
+            writeln!(
+                out,
+                "  {}  {}  {}",
+                cached.version.to_dir_name(),
+                cached.marker.target,
+                cached.dir.display()
+            )?;
+        }
+    }
+    if let Some(running) = running {
+        let resolution = localpilot_dist::resolve(&cache, &running);
+        writeln!(
+            out,
+            "\nwould run {} — {}",
+            resolution.version.to_dir_name(),
+            resolution.reason.explain()
+        )?;
+    }
+    Ok(())
+}
+
+/// Pin a version so the resolver stops preferring the newest, or clear the pin.
+///
+/// # Errors
+/// Returns an error only if output cannot be written.
+pub fn set_pin(version: Option<&str>, out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(cache) = cache() else {
+        writeln!(out, "no per-user data directory on this platform")?;
+        return Ok(());
+    };
+    match version {
+        None => {
+            cache.clear_pin()?;
+            writeln!(out, "pin cleared; the newest installed version will run")?;
+        }
+        Some(text) => {
+            let Some(version) = localpilot_dist::Version::parse(text) else {
+                writeln!(out, "{text:?} is not a version like 2.5.0")?;
+                return Ok(());
+            };
+            if cache.get(&version).is_none()
+                && localpilot_dist::Version::parse(current_version()).as_ref() != Some(&version)
+            {
+                writeln!(
+                    out,
+                    "{} is not installed; pinning it anyway would leave nothing to run",
+                    version.to_dir_name()
+                )?;
+                return Ok(());
+            }
+            cache.set_pin(&version)?;
+            writeln!(out, "pinned to {}", version.to_dir_name())?;
+        }
+    }
+    Ok(())
+}
+
+/// Switch to an older installed version — a pin, not a download.
+///
+/// # Errors
+/// Returns an error only if output cannot be written.
+pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(cache) = cache() else {
+        writeln!(out, "no per-user data directory on this platform")?;
+        return Ok(());
+    };
+    let running = localpilot_dist::Version::parse(current_version());
+    let installed = cache.installed();
+    // The newest version strictly older than what would run now.
+    let previous = installed.iter().find(|cached| {
+        running
+            .as_ref()
+            .is_some_and(|running| cached.version.key() < running.key())
+    });
+    match previous {
+        Some(cached) => {
+            cache.set_pin(&cached.version)?;
+            writeln!(
+                out,
+                "rolled back to {} (pinned; `localpilot version pin --clear` to undo)",
+                cached.version.to_dir_name()
+            )?;
+        }
+        None => {
+            writeln!(
+                out,
+                "nothing to roll back to — no older version is installed"
+            )?;
+            writeln!(out, "installed versions: `localpilot version list`")?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

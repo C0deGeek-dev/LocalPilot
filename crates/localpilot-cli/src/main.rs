@@ -107,6 +107,15 @@ enum Command {
         /// Only report whether an update is available; do not install.
         #[arg(long)]
         check: bool,
+        /// Compile from source instead of installing the published binary.
+        /// Needed on a platform with no published build.
+        #[arg(long)]
+        from_source: bool,
+    },
+    /// Inspect and choose between installed versions.
+    Version {
+        #[command(subcommand)]
+        command: VersionCommand,
     },
     /// Initialize project-local harness state (.localpilot.toml + .gitignore).
     Init {
@@ -444,6 +453,22 @@ enum HandoffCommand {
         /// The handoff id (see the writer's output).
         id: String,
     },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum VersionCommand {
+    /// List installed versions and say which one would run, and why.
+    List,
+    /// Hold a version, so a newer install does not take over.
+    Pin {
+        /// The version to pin, e.g. `2.5.0`.
+        version: Option<String>,
+        /// Remove the pin instead of setting one.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Switch back to the newest installed version older than this one.
+    Rollback,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -1308,9 +1333,21 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             )
             .await?;
         }
-        Command::Update { check } => {
+        Command::Version { command } => {
             let mut stdout = io::stdout().lock();
-            update::run(check, &mut stdout).await?;
+            match command {
+                VersionCommand::List => update::list_versions(&mut stdout)?,
+                VersionCommand::Pin { version, clear } => {
+                    let requested = if clear { None } else { version.as_deref() };
+                    update::set_pin(requested, &mut stdout)?;
+                }
+                VersionCommand::Rollback => update::rollback(&mut stdout)?,
+            }
+            stdout.flush()?;
+        }
+        Command::Update { check, from_source } => {
+            let mut stdout = io::stdout().lock();
+            update::run(check, from_source, &mut stdout).await?;
         }
         Command::Init { git } => {
             let summary = harness_cmd::init(&std::env::current_dir()?, git)?;

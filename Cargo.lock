@@ -1715,6 +1715,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.9",
+ "tokio",
 ]
 
 [[package]]
