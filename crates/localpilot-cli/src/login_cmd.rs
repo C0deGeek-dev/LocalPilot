@@ -245,7 +245,7 @@ async fn validate(info: &ProviderInfo, key: &Secret) -> anyhow::Result<bool> {
 
 /// Mask a credential for display: keep a short head and tail, hide the middle.
 /// Short keys are fully masked.
-fn mask(key: &str) -> String {
+pub(crate) fn mask(key: &str) -> String {
     let key = key.trim();
     if key.len() <= 8 {
         return "*".repeat(key.len().max(1));

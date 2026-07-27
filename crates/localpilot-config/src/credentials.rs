@@ -15,15 +15,24 @@
 //! audited keychain/file write calls in this module, whose sole purpose is to
 //! persist it; the file is owner-only on unix and lives in the user profile.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use localpilot_core::Secret;
 use serde::{Deserialize, Serialize};
 
-/// The keychain service name namespacing every stored credential.
+/// The keychain service name namespacing every stored *provider* credential.
 #[cfg(feature = "keychain")]
 const SERVICE: &str = "localpilot";
+
+/// The keychain service name namespacing every stored *generic* credential.
+///
+/// A separate service rather than a prefixed entry name: the keychain is a flat
+/// namespace under one service, so a distinct service is what makes a generic
+/// credential structurally unable to collide with a provider id — no alias
+/// charset has to hold the line.
+#[cfg(feature = "keychain")]
+const GENERIC_SERVICE: &str = "localpilot-credential";
 
 /// Which tier a resolved credential came from. Reported by `doctor`; it never
 /// carries the value itself.
@@ -169,6 +178,128 @@ impl CredentialStore {
         Ok(removed)
     }
 
+    /// The stored secret for the generic credential `name`, or `None`.
+    ///
+    /// Generic credentials share the store's tiers but not its namespace: this
+    /// never returns a provider credential, so `credential set openai` and
+    /// `login openai` are independent.
+    #[must_use]
+    pub fn generic_get(&self, name: &str) -> Option<Secret> {
+        self.generic_lookup(name).map(|(secret, _)| secret)
+    }
+
+    /// Like [`generic_get`](Self::generic_get), but also reports the tier.
+    #[must_use]
+    pub fn generic_lookup(&self, name: &str) -> Option<(Secret, CredentialSource)> {
+        #[cfg(feature = "keychain")]
+        {
+            if let Some(secret) = keychain_get_scoped(GENERIC_SERVICE, name) {
+                return Some((secret, CredentialSource::Keychain));
+            }
+        }
+        let store = self.read_store()?;
+        store
+            .generic
+            .get(name)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (Secret::new(value.clone()), CredentialSource::File))
+    }
+
+    /// Store `secret` for the generic credential `name`, preferring the OS
+    /// keychain and falling back to the `0600` file. Returns the accepting tier.
+    ///
+    /// # Errors
+    /// [`CredentialError`] when neither tier can store it.
+    pub fn generic_set(
+        &self,
+        name: &str,
+        secret: &Secret,
+    ) -> Result<CredentialSource, CredentialError> {
+        #[cfg(feature = "keychain")]
+        {
+            if keychain_set_scoped(GENERIC_SERVICE, name, secret).is_ok() {
+                // Record the name so `generic_list` can see a keychain-backed
+                // credential, and drop any stale file-tier copy of the same name
+                // so the two tiers cannot disagree.
+                self.mutate_store(|store| {
+                    store.generic.remove(name);
+                    store.generic_keychain.insert(name.to_string());
+                })?;
+                return Ok(CredentialSource::Keychain);
+            }
+        }
+        self.mutate_store(|store| {
+            store.generic_keychain.remove(name);
+            // `expose` is the audited exposure point: the file store exists to
+            // persist the credential, and the file itself is the secret.
+            store
+                .generic
+                .insert(name.to_string(), secret.expose().to_string());
+        })?;
+        Ok(CredentialSource::File)
+    }
+
+    /// Remove the generic credential `name` from every storage tier. Returns
+    /// whether anything was removed.
+    ///
+    /// # Errors
+    /// [`CredentialError::Io`] when rewriting the fallback file fails.
+    pub fn generic_delete(&self, name: &str) -> Result<bool, CredentialError> {
+        let mut removed = false;
+        #[cfg(feature = "keychain")]
+        {
+            if keychain_delete_scoped(GENERIC_SERVICE, name) {
+                removed = true;
+            }
+        }
+        if self.file_path.is_some() {
+            let mut changed = false;
+            self.mutate_store(|store| {
+                changed = store.generic.remove(name).is_some();
+                changed |= store.generic_keychain.remove(name);
+            })?;
+            removed |= changed;
+        }
+        Ok(removed)
+    }
+
+    /// Every stored generic credential as `(name, tier)`, sorted by name.
+    ///
+    /// Reports names and tiers only — never values. There is deliberately no API
+    /// that returns a stored value for display, export, or copy.
+    #[must_use]
+    pub fn generic_list(&self) -> Vec<(String, CredentialSource)> {
+        let Some(store) = self.read_store() else {
+            return Vec::new();
+        };
+        let mut entries: Vec<(String, CredentialSource)> = store
+            .generic_keychain
+            .into_iter()
+            .map(|name| (name, CredentialSource::Keychain))
+            .chain(
+                store
+                    .generic
+                    .into_keys()
+                    .map(|name| (name, CredentialSource::File)),
+            )
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries
+    }
+
+    /// Read the fallback file, or `None` when there is no path or no readable file.
+    fn read_store(&self) -> Option<FileStore> {
+        read_file_store(self.file_path.as_ref()?)
+    }
+
+    /// Apply `change` to the fallback file, creating it when absent.
+    fn mutate_store(&self, change: impl FnOnce(&mut FileStore)) -> Result<(), CredentialError> {
+        let path = self.file_path.as_ref().ok_or(CredentialError::NoUserDir)?;
+        let mut store = read_file_store(path).unwrap_or_default();
+        change(&mut store);
+        write_file_store(path, &store)
+    }
+
     fn file_get(&self, provider_id: &str) -> Option<Secret> {
         let path = self.file_path.as_ref()?;
         let store = read_file_store(path)?;
@@ -212,10 +343,27 @@ impl CredentialStore {
 
 /// The on-disk fallback store: a flat map of provider id to credential. Stored
 /// raw (it is the secret), protected by file mode and location, never redacted.
+///
+/// Generic credentials live in their own fields rather than sharing
+/// `providers`, so a generic credential and a provider id with the same visible
+/// name cannot collide — the separation is structural, not a naming convention
+/// something could later forge. Every field is `#[serde(default)]`, so a file
+/// written by an earlier version still parses and its providers still resolve.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileStore {
     #[serde(default)]
     providers: BTreeMap<String, String>,
+    /// Generic credentials whose value lives in this file.
+    #[serde(default)]
+    generic: BTreeMap<String, String>,
+    /// Names of generic credentials whose value lives in the OS keychain.
+    ///
+    /// The keychain exposes no enumeration API, so listing them requires an
+    /// index. Only the *name* is recorded here — never the value — which is what
+    /// lets `generic_list` report a keychain-backed credential without the file
+    /// tier ever holding its secret.
+    #[serde(default)]
+    generic_keychain: BTreeSet<String>,
 }
 
 /// Read and parse the fallback file, or `None` when it is missing or unreadable.
@@ -261,13 +409,23 @@ fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), CredentialError> {
 }
 
 #[cfg(feature = "keychain")]
-fn keychain_entry(provider_id: &str) -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(SERVICE, provider_id)
+fn keychain_get(provider_id: &str) -> Option<Secret> {
+    keychain_get_scoped(SERVICE, provider_id)
 }
 
 #[cfg(feature = "keychain")]
-fn keychain_get(provider_id: &str) -> Option<Secret> {
-    let entry = keychain_entry(provider_id).ok()?;
+fn keychain_set(provider_id: &str, secret: &Secret) -> Result<(), CredentialError> {
+    keychain_set_scoped(SERVICE, provider_id, secret)
+}
+
+#[cfg(feature = "keychain")]
+fn keychain_delete(provider_id: &str) -> bool {
+    keychain_delete_scoped(SERVICE, provider_id)
+}
+
+#[cfg(feature = "keychain")]
+fn keychain_get_scoped(service: &str, id: &str) -> Option<Secret> {
+    let entry = keyring::Entry::new(service, id).ok()?;
     match entry.get_password() {
         Ok(value) if !value.trim().is_empty() => Some(Secret::new(value)),
         _ => None,
@@ -275,8 +433,8 @@ fn keychain_get(provider_id: &str) -> Option<Secret> {
 }
 
 #[cfg(feature = "keychain")]
-fn keychain_set(provider_id: &str, secret: &Secret) -> Result<(), CredentialError> {
-    let entry = keychain_entry(provider_id)
+fn keychain_set_scoped(service: &str, id: &str, secret: &Secret) -> Result<(), CredentialError> {
+    let entry = keyring::Entry::new(service, id)
         .map_err(|error| CredentialError::Keychain(error.to_string()))?;
     entry
         .set_password(secret.expose())
@@ -284,8 +442,8 @@ fn keychain_set(provider_id: &str, secret: &Secret) -> Result<(), CredentialErro
 }
 
 #[cfg(feature = "keychain")]
-fn keychain_delete(provider_id: &str) -> bool {
-    keychain_entry(provider_id)
+fn keychain_delete_scoped(service: &str, id: &str) -> bool {
+    keyring::Entry::new(service, id)
         .and_then(|entry| entry.delete_credential())
         .is_ok()
 }
@@ -339,6 +497,67 @@ mod tests {
         assert!(store.file_get("anthropic").is_none());
         // A second delete is a clean `false`, not an error.
         assert!(!store.file_delete("anthropic").unwrap());
+    }
+
+    /// A credential file written before generic credentials existed carries only
+    /// `providers`. It must still parse and still resolve — the generic fields
+    /// are additive, so an upgrade never costs a user their stored logins.
+    #[test]
+    fn a_credential_file_from_an_earlier_version_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        std::fs::write(&path, r#"{"providers":{"anthropic":"sk-existing-value"}}"#).unwrap();
+        let store = CredentialStore::with_file(Some(path));
+
+        assert_eq!(
+            store.file_get("anthropic").map(|s| s.expose().to_string()),
+            Some("sk-existing-value".to_string())
+        );
+        // No generic credentials, and reading them does not disturb the providers.
+        assert!(store.generic_list().is_empty());
+        store
+            .generic_set("added-later", &Secret::new("generic-value"))
+            .unwrap();
+        assert_eq!(
+            store.file_get("anthropic").map(|s| s.expose().to_string()),
+            Some("sk-existing-value".to_string())
+        );
+    }
+
+    /// The file tier keeps generic credentials in their own map, so a generic
+    /// name and a provider id may be identical without either being reachable
+    /// through the other's accessors.
+    #[test]
+    fn generic_and_provider_namespaces_are_separate_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        store
+            .file_set("openai", &Secret::new("provider-value"))
+            .unwrap();
+        store
+            .generic_set("openai", &Secret::new("generic-value"))
+            .unwrap();
+
+        assert_eq!(
+            store.file_get("openai").map(|s| s.expose().to_string()),
+            Some("provider-value".to_string())
+        );
+        assert_eq!(
+            store.generic_get("openai").map(|s| s.expose().to_string()),
+            Some("generic-value".to_string())
+        );
+        // `generic_list` reports the generic entry only, with its tier.
+        assert_eq!(
+            store.generic_list(),
+            vec![("openai".to_string(), CredentialSource::File)]
+        );
+        // Removing the generic entry leaves the provider credential intact.
+        assert!(store.generic_delete("openai").unwrap());
+        assert!(store.generic_get("openai").is_none());
+        assert_eq!(
+            store.file_get("openai").map(|s| s.expose().to_string()),
+            Some("provider-value".to_string())
+        );
     }
 
     #[test]

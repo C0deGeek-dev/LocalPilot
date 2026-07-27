@@ -10,6 +10,7 @@ use localpilot_llm::{ModelEvent, ModelRequest, ProviderRegistry};
 use localpilot_store::Store;
 
 mod context_inject;
+mod credential_cmd;
 mod doctor;
 mod eval_cmd;
 mod handoff_cmd;
@@ -74,6 +75,12 @@ enum Command {
     Logout {
         /// Provider id whose stored credential to remove.
         provider: String,
+    },
+    /// Manage named credentials for configured MCP servers to reference from
+    /// `[mcp.servers.<name>.env]`. Separate from provider `login` credentials.
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommand,
     },
     /// List the models configured local servers actually have loaded.
     Models {
@@ -392,6 +399,28 @@ enum Command {
         /// (the gated self-improvement loop, ADR-0034). Omit for the read-only report.
         #[command(subcommand)]
         patch: Option<propose_patch::ProposePatchCommand>,
+    },
+}
+
+/// Named credentials an MCP server entry can reference. Distinct from provider
+/// `login` credentials: they share the store's tiers but not its namespace, so
+/// the same visible name can exist in both without either overwriting the other.
+#[derive(Debug, Subcommand)]
+enum CredentialCommand {
+    /// Read one value from stdin and store it under `name`. The value is never
+    /// taken as a command-line argument and is never printed in full.
+    Set {
+        /// Name an `[mcp.servers.<name>.env]` entry references as
+        /// `{ credential = "<name>" }`.
+        name: String,
+    },
+    /// List stored credential names and where each is stored. Never shows values —
+    /// there is no command to reveal, export, or copy one.
+    List,
+    /// Remove a stored credential from every storage tier.
+    Delete {
+        /// The credential name to remove.
+        name: String,
     },
 }
 
@@ -1192,6 +1221,11 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Logout { provider } => {
             login_cmd::logout(&provider)?;
         }
+        Command::Credential { command } => match command {
+            CredentialCommand::Set { name } => credential_cmd::set(&name)?,
+            CredentialCommand::List => credential_cmd::list()?,
+            CredentialCommand::Delete { name } => credential_cmd::delete(&name)?,
+        },
         Command::Rpc {
             model,
             provider,

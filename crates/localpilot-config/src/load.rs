@@ -158,7 +158,11 @@ fn is_portable_env_name(name: &str) -> bool {
 
 /// Whether `alias` is a portable credential-store alias. The conservative set
 /// keeps an alias usable as an OS keychain entry name on every tier-1 platform.
-fn is_portable_credential_alias(alias: &str) -> bool {
+///
+/// Public so the `credential` CLI validates against this exact rule rather than
+/// a second copy that could drift from what config accepts.
+#[must_use]
+pub fn is_portable_credential_alias(alias: &str) -> bool {
     !alias.is_empty()
         && alias
             .chars()
