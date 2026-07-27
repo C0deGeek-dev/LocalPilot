@@ -17,6 +17,8 @@ is SemVer-stable; the configuration schema stability policy is in
   caller's profile, so delegation changes who asks, never what is allowed. Agents
   nest one level deep, a child returns a bounded summary rather than its
   transcript, and every refusal is readable output that says what to do instead.
+  A permission ask raised inside an agent is forwarded to you with the agent
+  named, so you are never asked to approve a command you cannot place.
 
 - **New `search_definitions` tool: find declarations, not lines.** Asking "where
   is this defined" through `search_text` returned every call site as a separate

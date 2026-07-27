@@ -180,6 +180,9 @@ Rules:
   the entry is reported as narrowed
 - the child's permission engine carries the **calling session's own profile**;
   delegation changes who asks, never what is allowed
+- a permission ask raised inside a child is **forwarded to the caller's approver**,
+  prefixed with the agent's name (for example `agent verify: cargo test`). A child never
+  answers its own asks, and it cannot talk its way past a refusal
 - `delegate` itself declares no effect: the child's tool calls each declare their
   own and are authorized individually
 - subagents nest one level deep by default — a subagent cannot spawn another

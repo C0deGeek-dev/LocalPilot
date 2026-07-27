@@ -44,7 +44,10 @@ should be a file, not a release. Four decisions make that safe.
    no subagent, because the entire reason to delegate is that the caller's
    context stays clean. Every refusal is readable output that says what to do
    instead, never a panic or a failed tool call. A child never answers its own
-   permission asks: unanswered asks deny, fail-closed.
+   permission asks — they are forwarded to the caller's approver with the agent
+   named in the prompt. Attribution is not cosmetic: without it a user is asked to
+   approve a command they did not issue and cannot place, which is worse than
+   refusing.
 
 4. **Subagents are not skills.** A skill is text the model may read; loading one
    grants nothing. A subagent is an execution with authority. They share no

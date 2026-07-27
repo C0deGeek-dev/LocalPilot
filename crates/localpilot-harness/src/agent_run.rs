@@ -95,6 +95,9 @@ pub struct AgentContext<'a> {
     /// The caller's nesting depth; the child runs at `depth + 1`.
     pub depth: u32,
     pub max_depth: u32,
+    /// The caller's approver. A child's asks are forwarded here, attributed to
+    /// the agent, never answered by the child itself.
+    pub approver: Arc<dyn Approver>,
 }
 
 /// Check the ceilings that must hold *before* a child is built.
@@ -192,7 +195,10 @@ pub async fn run_agent(
         Arc::clone(&ctx.provider),
         child_tools,
         engine,
-        Box::new(DenyingApprover) as Box<dyn Approver>,
+        Box::new(AttributedApprover {
+            inner: ctx.approver,
+            agent: definition.name.clone(),
+        }) as Box<dyn Approver>,
         Store::open(ctx.store_root),
         ctx.workspace.clone(),
         RecoveryEngine::new(RecoveryBudget::default()),
@@ -233,19 +239,34 @@ fn bound(text: &str) -> (String, bool) {
     (format!("{}\n… [summary truncated]", &text[..cut]), true)
 }
 
-/// A child's approver. A subagent never answers its own permission asks: an
-/// unanswered ask denies, fail-closed, exactly as a headless session does.
-/// Routing asks to the caller's UI attributed to the child is the next step and
-/// is deliberately not faked here — silently auto-approving would be the one
-/// behaviour that turns delegation into an escalation.
-struct DenyingApprover;
+/// A child's approver: the caller's own, with the agent named in the prompt.
+///
+/// A subagent never answers its own permission asks — that would make delegation
+/// an escalation path. It also cannot simply have them denied: an agent that
+/// needs a shell or a write would be dead under any profile that prompts, which
+/// is most of them. So the ask is **forwarded to the caller's approver**, which
+/// is a human at the TUI or whatever the host wired.
+///
+/// Attribution is not cosmetic. Without it the user is asked to approve a command
+/// they did not ask for and cannot place — the prompt has to say *which agent*
+/// wants it, or forwarding is worse than refusing.
+struct AttributedApprover {
+    inner: Arc<dyn Approver>,
+    agent: String,
+}
 
-impl Approver for DenyingApprover {
-    fn approve<'a>(
-        &'a self,
-        _request: &'a localpilot_sandbox::PermissionRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-        Box::pin(async { false })
+impl Approver for AttributedApprover {
+    fn approve<'b>(
+        &'b self,
+        request: &'b localpilot_sandbox::PermissionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'b>> {
+        let mut attributed = request.clone();
+        attributed.detail = if attributed.detail.is_empty() {
+            format!("agent `{}`", self.agent)
+        } else {
+            format!("agent `{}`: {}", self.agent, attributed.detail)
+        };
+        Box::pin(async move { self.inner.approve(&attributed).await })
     }
 }
 
@@ -264,6 +285,8 @@ pub struct SessionAgentHost<'a> {
     pub config: &'a SessionConfig,
     pub depth: u32,
     pub cancel: &'a CancellationToken,
+    /// The caller's approver; a child's asks are forwarded here, attributed.
+    pub approver: Arc<dyn Approver>,
     /// Tool calls made by children during this turn, drained by the caller into
     /// its own per-turn count. An `AtomicUsize` because the host is reached
     /// through a shared reference from inside a tool call.
@@ -311,6 +334,7 @@ impl localpilot_tools::AgentHost for SessionAgentHost<'_> {
                 config: self.config,
                 depth: self.depth,
                 max_depth: DEFAULT_MAX_DEPTH,
+                approver: Arc::clone(&self.approver),
             };
             match run_agent(definition, task, &grants, ctx, self.cancel).await {
                 Ok(outcome) => {
@@ -376,6 +400,7 @@ mod tests {
             config,
             depth,
             max_depth: DEFAULT_MAX_DEPTH,
+            approver: Arc::new(localpilot_sandbox::ScriptedApprover::always()),
         }
     }
 
@@ -452,6 +477,92 @@ mod tests {
             stop: "Done".to_string(),
         };
         assert_eq!(outcome.tool_calls, 7);
+    }
+
+    /// Records every request it is asked about, so a test can assert what the
+    /// user would have been shown.
+    #[derive(Default)]
+    struct RecordingApprover {
+        seen: std::sync::Mutex<Vec<String>>,
+        answer: bool,
+    }
+
+    impl Approver for RecordingApprover {
+        fn approve<'b>(
+            &'b self,
+            request: &'b localpilot_sandbox::PermissionRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'b>> {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(request.detail.clone());
+            }
+            let answer = self.answer;
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn request(detail: &str) -> localpilot_sandbox::PermissionRequest {
+        localpilot_sandbox::PermissionRequest {
+            tool: "run_shell".to_string(),
+            effect: localpilot_sandbox::Effect::RunCommand(
+                localpilot_sandbox::CommandClass::Unknown,
+            ),
+            interactivity: localpilot_sandbox::Interactivity::Interactive,
+            trusted: false,
+            detail: detail.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_childs_ask_reaches_the_caller_named_by_agent() {
+        let inner = Arc::new(RecordingApprover {
+            answer: true,
+            ..RecordingApprover::default()
+        });
+        let approver = AttributedApprover {
+            inner: Arc::clone(&inner) as Arc<dyn Approver>,
+            agent: "verify".to_string(),
+        };
+
+        assert!(
+            approver.approve(&request("cargo test")).await,
+            "the caller's answer is what decides — the child never answers itself"
+        );
+        let seen = inner.seen.lock().expect("lock").clone();
+        assert_eq!(
+            seen,
+            ["agent `verify`: cargo test"],
+            "the prompt must name the agent, or the user is asked to approve              something they cannot place"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_by_the_caller_is_the_childs_answer() {
+        let inner = Arc::new(RecordingApprover::default()); // answer: false
+        let approver = AttributedApprover {
+            inner: inner as Arc<dyn Approver>,
+            agent: "verify".to_string(),
+        };
+        assert!(
+            !approver.approve(&request("rm -rf /")).await,
+            "a child cannot talk its way past the caller's refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_with_no_detail_still_names_the_agent() {
+        let inner = Arc::new(RecordingApprover {
+            answer: true,
+            ..RecordingApprover::default()
+        });
+        let approver = AttributedApprover {
+            inner: Arc::clone(&inner) as Arc<dyn Approver>,
+            agent: "explore".to_string(),
+        };
+        approver.approve(&request("")).await;
+        assert_eq!(
+            inner.seen.lock().expect("lock").clone(),
+            ["agent `explore`"]
+        );
     }
 
     #[test]

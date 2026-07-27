@@ -568,7 +568,7 @@ pub struct SessionRuntime {
     /// Shared + swappable so an interactive host can change the permission
     /// profile while a turn is in flight; every tool call snapshots it fresh.
     engine: PermissionEngineHandle,
-    approver: Box<dyn Approver>,
+    approver: Arc<dyn Approver>,
     store: Store,
     workspace: localpilot_sandbox::Workspace,
     recovery: RecoveryEngine,
@@ -681,7 +681,7 @@ impl SessionRuntime {
             provider,
             tools,
             engine: PermissionEngineHandle::new(engine),
-            approver,
+            approver: Arc::from(approver),
             store,
             workspace,
             recovery,
@@ -2600,6 +2600,7 @@ impl SessionRuntime {
                                     config: &self.config,
                                     depth: 0,
                                     cancel,
+                                    approver: Arc::clone(&self.approver),
                                     delegated_calls: std::sync::atomic::AtomicUsize::new(0),
                                 }
                             });
