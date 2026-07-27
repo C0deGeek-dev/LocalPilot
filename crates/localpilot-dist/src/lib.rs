@@ -14,12 +14,16 @@
 
 mod cache;
 mod error;
+mod install;
 mod manifest;
 mod resolve;
 mod version;
 
 pub use cache::{Cache, CachedVersion, InstallMarker, MARKER_VERSION};
 pub use error::DistError;
+pub use install::{
+    download, escapes_destination, extract, find_executable, install_release, sha256_hex, verify,
+};
 pub use manifest::{current_target, Artifact, ReleaseManifest, MANIFEST_VERSION};
 pub use resolve::{newer_installed, resolve, Reason, Resolution};
 pub use version::{Channel, Version};

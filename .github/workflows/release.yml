@@ -38,7 +38,7 @@ jobs:
             ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            ext: zip
+            ext: tar.gz
     steps:
       - uses: actions/checkout@v6
         with:
@@ -77,7 +77,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/localpilot | Out-Null
           Copy-Item target/${{ matrix.target }}/release/localpilot.exe dist/localpilot/
           Copy-Item LICENSE-MIT, README.md, CHANGELOG.md dist/localpilot/
-          Compress-Archive -Path dist/localpilot/* -DestinationPath localpilot-${{ matrix.target }}.zip
+          tar -C dist -czf localpilot-${{ matrix.target }}.tar.gz localpilot
       # Digest computed where the bytes are produced, so it covers exactly what
       # was archived. It proves a download was not corrupted or truncated; it
       # does not prove origin — only signing does that, and this repo does not
@@ -135,11 +135,10 @@ jobs:
           {
             printf '{\n  "manifest_version": 1,\n  "tool": "localpilot",\n  "version": "%s",\n  "artifacts": [\n' "$version"
             first=1
-            for archive in localpilot-*.tar.gz localpilot-*.zip; do
+            for archive in localpilot-*.tar.gz; do
               [ -e "$archive" ] || continue
               target="${archive#localpilot-}"
               target="${target%.tar.gz}"
-              target="${target%.zip}"
               digest=$(cut -d' ' -f1 < "$archive.sha256")
               size=$(wc -c < "$archive" | tr -d ' ')
               [ $first -eq 1 ] || printf ',\n'
@@ -164,6 +163,5 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             staged/localpilot-*.tar.gz
-            staged/localpilot-*.zip
             staged/SHA256SUMS
             staged/manifest.json
