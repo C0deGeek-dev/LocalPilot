@@ -572,6 +572,9 @@ pub struct SessionRuntime {
     store: Store,
     workspace: localpilot_sandbox::Workspace,
     recovery: RecoveryEngine,
+    /// Subagent definitions this session may delegate to. `None` means the host
+    /// wired none, and `delegate` reports itself unavailable.
+    agents: Option<std::sync::Arc<localpilot_agents::AgentSet>>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -696,6 +699,7 @@ impl SessionRuntime {
             summarizer: None,
             rule_engine,
             named_targets: Vec::new(),
+            agents: None,
             broker: None,
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
@@ -1081,6 +1085,7 @@ impl SessionRuntime {
             trusted: self.config.trusted,
             retention: Some(&retention),
             processes: Some(self.background.as_ref()),
+            agents: None,
         };
         let engine = self.engine.snapshot();
         let result = self
@@ -1155,6 +1160,11 @@ impl SessionRuntime {
     /// When the broker learns, the graduated tools from prior sessions are seeded
     /// from the local, disposable store so a common need is advertised from turn
     /// one (ADR-0012). Best-effort: a missing or unreadable record is ignored.
+    /// Attach the subagent definitions this session may delegate to.
+    pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
+        self.agents = Some(agents);
+    }
+
     pub fn set_broker(&mut self, broker: Option<Broker>) {
         if let Some(broker) = &broker {
             if broker.learning_enabled() {
@@ -1675,6 +1685,47 @@ impl SessionRuntime {
                 input_schema,
             })
             .collect()
+    }
+
+    /// Replace the system prompt this runtime opened with.
+    ///
+    /// Used when a runtime is built for a subagent: the registry-derived prompt
+    /// the constructor produces is the *host* half, and the agent's own
+    /// instructions have to be appended before the first turn runs.
+    pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
+        let message = Message::text(Role::System, prompt.into());
+        match self.messages.first_mut() {
+            Some(first) if first.role == Role::System => *first = message,
+            _ => self.messages.insert(0, message),
+        }
+        self.history_generation = self.history_generation.wrapping_add(1);
+    }
+
+    /// The text of the most recent assistant message, if any.
+    ///
+    /// A subagent's answer is read back this way rather than by handing the
+    /// caller the child's transcript — the point of delegating is that the
+    /// caller's context does not grow with the child's working notes.
+    #[must_use]
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    )
+            })
+            .filter(|text| !text.trim().is_empty())
     }
 
     fn append(&mut self, message: Message) {
@@ -2521,17 +2572,38 @@ impl SessionRuntime {
                                 active_input,
                             );
                             let retention = StoreRetention(&self.store);
+                            let gates = self.hooks.gates();
+                            // Snapshot per call: a mid-turn profile swap through
+                            // the shared handle applies from the next tool call.
+                            let engine = self.engine.snapshot();
+                            // Delegation borrows the session's own collaborators
+                            // so a child is built *from* them: its tools are a
+                            // filtered copy of this registry and its engine
+                            // carries this profile, which is what makes
+                            // containment structural rather than a check.
+                            let host = self.agents.as_ref().map(|agents| {
+                                crate::agent_run::SessionAgentHost {
+                                    agents,
+                                    provider: Arc::clone(&self.provider),
+                                    parent_tools: &self.tools,
+                                    parent_engine: &engine,
+                                    workspace: &self.workspace,
+                                    store_root: self.workspace.root(),
+                                    config: &self.config,
+                                    depth: 0,
+                                    cancel,
+                                }
+                            });
                             let ctx = ToolContext {
                                 workspace: &self.workspace,
                                 interactivity: self.config.interactivity,
                                 trusted: self.config.trusted,
                                 retention: Some(&retention),
                                 processes: Some(self.background.as_ref()),
+                                agents: host
+                                    .as_ref()
+                                    .map(|h| h as &dyn localpilot_tools::AgentHost),
                             };
-                            let gates = self.hooks.gates();
-                            // Snapshot per call: a mid-turn profile swap through
-                            // the shared handle applies from the next tool call.
-                            let engine = self.engine.snapshot();
                             tokio::select! {
                                 () = cancel.cancelled() => None,
                                 result = self.tools.dispatch_gated(

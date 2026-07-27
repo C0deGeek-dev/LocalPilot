@@ -1110,6 +1110,7 @@ mod tests {
             trusted: true,
             retention: None,
             processes: None,
+            agents: None,
         };
         let read = vec![Effect::ReadPath {
             inside_workspace: true,
@@ -1155,6 +1156,7 @@ mod tests {
             trusted: false,
             retention: None,
             processes: None,
+            agents: None,
         };
         let call = ToolCall::new(
             ToolUseId::from("c1"),

@@ -165,6 +165,28 @@ Rules:
 
 Finds files by name pattern, respecting ignore files; capped results.
 
+### `delegate`
+
+Hands a bounded, self-contained task to a **subagent** — a child session with its
+own context window, its own prompt, and its own narrower tool set — and returns
+that agent's summary. Agents are declared in `*.agent.yaml` files; list them with
+`localpilot agents list`.
+
+Rules:
+
+- the child's tools are a **filter of the calling session's registry**, so its
+  set is a subset by construction: `effective = parent's tools ∩ the definition's
+  list`. A definition naming a tool the session does not hold does not gain it —
+  the entry is reported as narrowed
+- the child's permission engine carries the **calling session's own profile**;
+  delegation changes who asks, never what is allowed
+- `delegate` itself declares no effect: the child's tool calls each declare their
+  own and are authorized individually
+- subagents nest one level deep by default — a subagent cannot spawn another
+- the caller gets a bounded summary, not the child's transcript
+- a refusal (ceiling reached, no usable tools, unknown agent) comes back as
+  readable output, not a failed call
+
 ### `search_definitions`
 
 Searches code and returns the **enclosing declaration** — function, type, module,

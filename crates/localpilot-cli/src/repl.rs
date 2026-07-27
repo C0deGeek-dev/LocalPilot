@@ -91,7 +91,7 @@ impl Approver for TuiApprover {
     fn approve<'a>(
         &'a self,
         request: &'a PermissionRequest,
-    ) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let (reply, answer) = oneshot::channel();
         let sent = self.tx.send(ApprovalCall {
             request: describe(request),
@@ -269,6 +269,14 @@ pub async fn run_chat(
     );
     timer.mark("runtime (store + workspace)");
     runtime.set_broker(broker);
+    // Subagent definitions are discovered once per session: the project overlay
+    // plus the per-user global baseline, same precedence as skills.
+    let agents = std::sync::Arc::new(localpilot_agents::AgentSet::resolve(
+        &localpilot_agents::AgentSet::standard_roots(&cwd, crate::agents_cmd::home().as_deref()),
+    ));
+    if !agents.agents().is_empty() {
+        runtime.set_agents(agents);
+    }
     // Hand the runtime the built provider map so `/model` switches are a lookup.
     runtime.set_registry(provider_registry);
     // Best-effort: resolve the active provider's image-input capability (config

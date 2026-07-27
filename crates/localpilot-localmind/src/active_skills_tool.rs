@@ -156,6 +156,7 @@ mod tests {
             trusted: true,
             retention: None,
             processes: None,
+            agents: None,
         }
     }
 

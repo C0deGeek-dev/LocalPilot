@@ -46,7 +46,7 @@ pub use repair::{
     ToolInputValidationResult,
 };
 pub use schema_intent::{field_intent, is_repair_exempt, INTENT_KEY};
-pub use tool::{GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
+pub use tool::{AgentHost, GateVerdict, OutputRetention, Tool, ToolContext, ToolGate, ToolOutput};
 pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,
     MalformedClass, SchemaIssue,

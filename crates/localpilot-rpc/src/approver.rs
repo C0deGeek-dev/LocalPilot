@@ -99,7 +99,7 @@ impl Approver for RpcApprover {
     fn approve<'a>(
         &'a self,
         request: &'a PermissionRequest,
-    ) -> Pin<Box<dyn Future<Output = bool> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let ask_id = format!("ask-{}", EventId::new());
         let (sender, receiver) = oneshot::channel();
         self.registry.register(ask_id.clone(), sender);

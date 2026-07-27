@@ -774,6 +774,7 @@ mod safety_tests {
             trusted: true,
             retention: None,
             processes: None,
+            agents: None,
         }
     }
 

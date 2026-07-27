@@ -19,6 +19,31 @@ pub struct ToolContext<'a> {
     /// starts and manages. `None` disables background processes (the host wired
     /// no registry), and `run_background` reports them as unavailable.
     pub processes: Option<&'a crate::builtins_background::BackgroundProcesses>,
+    /// The host that can run a subagent for `delegate`. `None` means this
+    /// session has no delegation surface (no definitions loaded, or a host that
+    /// wired none), and `delegate` reports itself unavailable rather than
+    /// failing obscurely.
+    pub agents: Option<&'a dyn AgentHost>,
+}
+
+/// The host side of delegation.
+///
+/// A tool cannot spawn a session by itself — it has no provider, no registry,
+/// and no permission engine. The host implements this and hands it in through
+/// [`ToolContext`], exactly as it does for output retention and background
+/// processes, so `delegate` stays an ordinary tool with no special path through
+/// the registry.
+pub trait AgentHost: Send + Sync {
+    /// Every agent this session can delegate to: `(name, description)`.
+    fn available(&self) -> Vec<(String, String)>;
+
+    /// Run `agent` against `task` and resolve to its bounded summary, or to a
+    /// message explaining why it could not run.
+    fn run<'a>(
+        &'a self,
+        agent: &'a str,
+        task: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
 /// A tighten-only gate consulted after the permission engine for every tool

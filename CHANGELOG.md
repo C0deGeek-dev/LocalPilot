@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Subagents: delegate a bounded task to an agent you declare in a file.** A
+  `*.agent.yaml` under `.localpilot/agents/` (project) or `~/.localpilot/agents/`
+  (everywhere) declares a name, a model, the tools the agent may use, which parts
+  of the system prompt it wants, and its instructions. The model reaches them
+  through a new `delegate` tool; `localpilot agents list|show` inspects them.
+
+  An agent's tools are always a **subset of the calling session's** — the child's
+  registry is filtered from the caller's own and its permission engine carries the
+  caller's profile, so delegation changes who asks, never what is allowed. Agents
+  nest one level deep, a child returns a bounded summary rather than its
+  transcript, and every refusal is readable output that says what to do instead.
+
 - **New `search_definitions` tool: find declarations, not lines.** Asking "where
   is this defined" through `search_text` returned every call site as a separate
   line and usually needed a follow-up read to find the one declaration among

@@ -327,12 +327,12 @@ impl PermissionEngineHandle {
 ///
 /// `approve` is asynchronous so an interactive front-end can suspend the turn
 /// while it prompts the user, without blocking the executor.
-pub trait Approver {
+pub trait Approver: Send + Sync {
     /// Resolve to `true` to approve the requested effect.
     fn approve<'a>(
         &'a self,
         request: &'a PermissionRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 }
 
 /// A test approver scripted with fixed responses, in order.
@@ -366,7 +366,7 @@ impl Approver for ScriptedApprover {
     fn approve<'a>(
         &'a self,
         _request: &'a PermissionRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         let decision = self
             .responses
             .lock()

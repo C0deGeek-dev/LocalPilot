@@ -6,6 +6,7 @@
 //! engine layers on top of the permission engine and never bypasses it.
 #![forbid(unsafe_code)]
 
+pub mod agent_run;
 mod brief;
 mod claim;
 mod compaction;

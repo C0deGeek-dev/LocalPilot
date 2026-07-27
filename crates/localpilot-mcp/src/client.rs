@@ -279,6 +279,7 @@ mod tests {
             trusted: true,
             retention: None,
             processes: None,
+            agents: None,
         };
         let input = json!({ "url": "https://example.test" });
         let output = tool.invoke(input.clone(), &context).await.unwrap();

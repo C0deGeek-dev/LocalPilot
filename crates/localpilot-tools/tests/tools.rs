@@ -33,6 +33,7 @@ fn ctx(ws: &Workspace, interactivity: Interactivity, trusted: bool) -> ToolConte
         trusted,
         retention: None,
         processes: None,
+        agents: None,
     }
 }
 
@@ -1217,7 +1218,7 @@ impl localpilot_sandbox::Approver for RecordingApprover {
     fn approve<'a>(
         &'a self,
         request: &'a localpilot_sandbox::PermissionRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         self.requests.lock().unwrap().push(request.clone());
         Box::pin(async { true })
     }
@@ -1461,6 +1462,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
         trusted: true,
         retention: Some(&retention),
         processes: None,
+        agents: None,
     };
 
     let result = dispatch(

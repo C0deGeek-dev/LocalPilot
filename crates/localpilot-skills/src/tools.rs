@@ -370,6 +370,7 @@ mod tests {
             trusted,
             retention: None,
             processes: None,
+            agents: None,
         }
     }
 

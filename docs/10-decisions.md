@@ -2,6 +2,60 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0103: Subagents Are Declarative Data With Containment By Construction
+
+Status: accepted. Extends the tool surface in
+[`docs/05-tool-system.md`](05-tool-system.md) and the harness runtime in
+[`docs/06-harness-spec.md`](06-harness-spec.md); bound by ADR-0007
+(tri-platform), ADR-0020/ADR-0027 (skills are read-only advisory prompt
+modules), ADR-0029 (per-turn ceilings), ADR-0031 (reveal-never-grant), and
+ADR-0097 (user-global baseline plus project overlay).
+
+A specialised agent — review this diff, run the tests, explore this subsystem —
+should be a file, not a release. Four decisions make that safe.
+
+1. **A definition is data, and only data.** A `*.agent.yaml` names a model, an
+   upper bound on tools, which prompt sections it wants, and its instructions.
+   Its prompt supports a closed placeholder vocabulary; an unknown placeholder or
+   an unknown field is a **load-time error**, not text passed through. A typo in
+   a field name is the difference between "this agent has three tools" and "this
+   agent has every tool", so silence is the wrong default. Discovery mirrors the
+   skill precedence exactly (project shadows global, native outranks
+   cross-harness) and the shadowed definition stays listable, so a user can see
+   why their file is not the one running.
+
+2. **Containment is structural, not a check.** The child's registry is produced
+   by **filtering the parent's own registry**, and its permission engine is
+   constructed with the **parent's own profile**. Filtering can only remove, so a
+   child cannot hold a tool its parent lacked, and no runtime guard has to be
+   remembered for that to stay true. Two failures are kept distinct: a name that
+   is not a registered tool at all fails at load, while one the parent simply
+   lacks is reported as narrowing — conflating them would make a typo look like a
+   permission decision. `delegate` declares no effect of its own; the child's
+   calls each declare theirs and are authorized individually, so delegation
+   changes *who asks*, never *what is allowed*.
+
+3. **Bounded by default, and refusals are outcomes.** Subagents nest one level
+   deep (a subagent cannot spawn one), a child with no usable tools is refused
+   before it starts, and the caller receives a bounded summary rather than the
+   child's transcript — a subagent that returns everything it read is worse than
+   no subagent, because the entire reason to delegate is that the caller's
+   context stays clean. Every refusal is readable output that says what to do
+   instead, never a panic or a failed tool call. A child never answers its own
+   permission asks: unanswered asks deny, fail-closed.
+
+4. **Subagents are not skills.** A skill is text the model may read; loading one
+   grants nothing. A subagent is an execution with authority. They share no
+   loader, no registry, and no file format, so nothing can drift from "advisory
+   prompt module" into "thing that can run commands".
+
+The system prompt was split into named sections to support this: a narrow agent
+should not pay context for guidance it cannot act on. The main session selects
+every section through the same composer, so the two paths cannot drift, and the
+tool list and closing contract are not selectable — a model with no tool list has
+nothing to call, and one with no closing contract has no way to end a turn.
+
+
 ## ADR-0104: Declaration-Scoped Code Search Is A Stateless Tool That Reuses The Code-Intelligence Grammars
 
 Status: accepted. Extends the tool surface described in

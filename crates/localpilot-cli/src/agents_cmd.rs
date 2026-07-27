@@ -12,13 +12,13 @@ use localpilot_agents::{AgentSet, DiscoveredAgent};
 /// Resolve the definitions visible from `cwd`, including the per-user global
 /// baseline unless `project_only`.
 fn resolve(cwd: &Path, project_only: bool) -> AgentSet {
-    let home = if project_only { None } else { dirs_home() };
+    let home = if project_only { None } else { home() };
     AgentSet::resolve(&AgentSet::standard_roots(cwd, home.as_deref()))
 }
 
 /// The user's home directory, when the platform reports one. Absent is normal
 /// (some CI images), and only costs the global scopes.
-fn dirs_home() -> Option<std::path::PathBuf> {
+pub fn home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)

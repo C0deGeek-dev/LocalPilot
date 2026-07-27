@@ -8,8 +8,8 @@ use serde_json::Value;
 use crate::contract::{Confirmation, Reversibility};
 
 use crate::builtins::{
-    AppendFile, ApplyPatch, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff, GitLog,
-    GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
+    AppendFile, ApplyPatch, Delegate, EditFile, Fetch, FindFiles, GitAdd, GitCommit, GitDiff,
+    GitLog, GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
     SearchText, UpdatePlan, WriteFile,
 };
 use crate::builtins_background::RunBackground;
@@ -28,7 +28,7 @@ const CONTEXT_TAIL_BYTES: usize = 2 * 1024;
 /// through the permission engine before invoking a tool and redacts every output,
 /// so neither the model nor the harness can reach a side effect another way.
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<std::sync::Arc<dyn Tool>>,
     /// Provenance of each tool, kept in lockstep with `tools`, so the catalog
     /// projection can discriminate a builtin from a specific MCP server's tool.
     sources: Vec<ToolSource>,
@@ -68,6 +68,7 @@ impl ToolRegistry {
         registry.register(Box::new(GitAdd));
         registry.register(Box::new(GitRestore));
         registry.register(Box::new(GitCommit));
+        registry.register(Box::new(Delegate));
         registry.register(Box::new(UpdatePlan));
         registry
     }
@@ -81,7 +82,7 @@ impl ToolRegistry {
     /// source feeds the catalog projection and the content fingerprint; it does
     /// not change dispatch or permission behaviour in any way.
     pub fn register_from(&mut self, tool: Box<dyn Tool>, source: ToolSource) {
-        self.tools.push(tool);
+        self.tools.push(std::sync::Arc::from(tool));
         self.sources.push(source);
     }
 
@@ -119,6 +120,26 @@ impl ToolRegistry {
             .zip(&self.sources)
             .find(|(tool, _)| tool.name() == name)
             .is_some_and(|(_, source)| matches!(source, ToolSource::Mcp(_)))
+    }
+
+    /// A registry holding only the named tools, sharing the same tool instances.
+    ///
+    /// This is how a child session's tool set is built: by **filtering the
+    /// parent's own registry**, never by assembling a new one from the catalog.
+    /// The distinction is the whole containment story — filtering can only ever
+    /// remove, so a child cannot end up with a tool its parent did not hold, and
+    /// no runtime check has to be remembered for that to stay true.
+    #[must_use]
+    pub fn narrowed(&self, keep: &[String]) -> Self {
+        let mut tools = Vec::new();
+        let mut sources = Vec::new();
+        for (tool, source) in self.tools.iter().zip(&self.sources) {
+            if keep.iter().any(|name| name == tool.name()) {
+                tools.push(std::sync::Arc::clone(tool));
+                sources.push(source.clone());
+            }
+        }
+        Self { tools, sources }
     }
 
     /// The registered tool names.
@@ -452,5 +473,47 @@ mod catalog_tests {
         assert_eq!(delta.removed, vec!["gone".to_string()]);
         assert!(delta.added.is_empty());
         assert!(after.catalog().get("gone").is_none());
+    }
+}
+
+#[cfg(test)]
+mod narrowing_tests {
+    use super::*;
+
+    #[test]
+    fn narrowing_can_only_remove() {
+        let full = ToolRegistry::with_builtins();
+        let all: Vec<String> = full.names().iter().map(|n| (*n).to_string()).collect();
+
+        // A name the registry does not hold cannot be conjured into existence.
+        let mut asked = all.clone();
+        asked.push("teleport".to_string());
+        let narrowed = full.narrowed(&asked);
+        assert_eq!(
+            narrowed.names().len(),
+            all.len(),
+            "asking for an unheld tool must not add one"
+        );
+        assert!(!narrowed.names().contains(&"teleport"));
+
+        // Every narrowing is a subset of the source registry.
+        let subset = full.narrowed(&["read_file".to_string(), "search_text".to_string()]);
+        assert_eq!(subset.names().len(), 2);
+        for name in subset.names() {
+            assert!(full.names().contains(&name), "{name} was not in the parent");
+        }
+    }
+
+    #[test]
+    fn narrowing_to_nothing_yields_an_empty_registry() {
+        let full = ToolRegistry::with_builtins();
+        assert!(full.narrowed(&[]).names().is_empty());
+    }
+
+    #[test]
+    fn a_narrowed_registry_keeps_each_tools_provenance() {
+        let full = ToolRegistry::with_builtins();
+        let narrowed = full.narrowed(&["read_file".to_string()]);
+        assert_eq!(narrowed.specs().len(), 1, "the spec projection still works");
     }
 }

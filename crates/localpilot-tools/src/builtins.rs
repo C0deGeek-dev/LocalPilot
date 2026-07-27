@@ -2099,3 +2099,85 @@ mod tests {
         );
     }
 }
+
+// --- delegate ---------------------------------------------------------------
+
+/// Input for [`Delegate`].
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DelegateInput {
+    /// Name of the agent to delegate to, as listed by `localpilot agents list`.
+    agent: String,
+    /// The task to hand over. Be specific: the agent starts with an empty
+    /// context and cannot see this conversation.
+    task: String,
+}
+
+/// Hand a bounded piece of work to a subagent and get back its summary.
+///
+/// Declares no effect of its own: the child's own tool calls each declare their
+/// effects and are authorized by the child's permission engine, which carries
+/// this session's profile. Delegation therefore cannot be a way to perform an
+/// effect that would otherwise have been refused — it changes *who* asks, never
+/// *what is allowed*.
+pub struct Delegate;
+
+#[async_trait]
+impl Tool for Delegate {
+    fn name(&self) -> &'static str {
+        "delegate"
+    }
+    fn contract(&self) -> ToolContract {
+        read_only_contract("Hand a bounded task to a subagent and return its summary.")
+    }
+    fn approval_detail(&self, input: &Value) -> String {
+        string_field_detail(input, "task")
+    }
+    fn description(&self) -> &'static str {
+        "Delegate a bounded, self-contained task to a subagent, which runs in its own context \
+         with its own narrower tool set and returns a summary. Use it to keep this conversation \
+         clean when a task needs a lot of reading to produce a small answer. Do NOT delegate work \
+         that is cheaper to do directly, work that needs this conversation's context (the agent \
+         cannot see it), or work you would have to re-explain in full. List available agents with \
+         `localpilot agents list`."
+    }
+    fn schema(&self) -> Value {
+        schema_for::<DelegateInput>()
+    }
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        // The child's calls carry their own effects through the child's engine.
+        Ok(Vec::new())
+    }
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: DelegateInput = parse_input(&input)?;
+        let Some(host) = ctx.agents else {
+            return Ok(ToolOutput::ok(
+                "delegation is not available in this session: no agent definitions are loaded.                  Do the work directly."
+                    .to_string(),
+            ));
+        };
+        let agent = input.agent.trim();
+        if agent.is_empty() || input.task.trim().is_empty() {
+            return Err(ToolError::InvalidInput(
+                "both `agent` and `task` are required".to_string(),
+            ));
+        }
+        let available = host.available();
+        if !available.iter().any(|(name, _)| name == agent) {
+            let names: Vec<&str> = available.iter().map(|(n, _)| n.as_str()).collect();
+            return Err(ToolError::InvalidInput(if names.is_empty() {
+                format!("no agent named {agent:?}; this session has no agent definitions")
+            } else {
+                format!(
+                    "no agent named {agent:?}; available agents are {}",
+                    names.join(", ")
+                )
+            }));
+        }
+        match host.run(agent, &input.task).await {
+            Ok(summary) => Ok(cap(summary)),
+            // A refused or failed delegation is information the model should
+            // reason about, not a tool crash: it comes back as readable output.
+            Err(reason) => Ok(ToolOutput::ok(format!("delegation did not run: {reason}"))),
+        }
+    }
+}
