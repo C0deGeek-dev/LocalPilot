@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
 
-use localpilot_core::Secret;
+use localpilot_core::{is_exact_redactable, redact_exact, Secret};
 
 use crate::error::McpError;
 
@@ -52,6 +52,15 @@ pub trait Transport: Send + Sync {
 pub struct StdioTransport {
     inner: AsyncMutex<StdioInner>,
     next_id: AtomicU64,
+    /// The credentials this server was handed, for the inbound exact-value pass.
+    ///
+    /// An MCP server is an untrusted subprocess that can read its own
+    /// environment, so anything we gave it can come back — in the handshake, in
+    /// advertised tool metadata, in a tool result, or in a protocol error. Every
+    /// inbound value is filtered against this set before it can reach the model,
+    /// a transcript, tool-output storage, or a log. Empty for every server that
+    /// configures no environment, which is the default and costs nothing.
+    secrets: Vec<Secret>,
 }
 
 struct StdioInner {
@@ -195,7 +204,65 @@ impl StdioTransport {
                 stdout: BufReader::new(stdout),
             }),
             next_id: AtomicU64::new(1),
+            // Only values long enough to match verbatim are kept; a short one
+            // would blank unrelated text wherever it happened to occur.
+            secrets: environment
+                .secrets()
+                .filter(|secret| is_exact_redactable(secret))
+                .cloned()
+                .collect(),
         })
+    }
+}
+
+impl StdioTransport {
+    /// Strip every configured credential from an inbound value, recursively.
+    ///
+    /// Applied at the transport rather than at each caller, because that is the
+    /// one place every inbound message passes through: the `initialize`
+    /// handshake, `tools/list` metadata, and `tools/call` results all arrive
+    /// here. Filtering further up would cover tool output — which the tool
+    /// registry already redacts by pattern — and miss the handshake and the
+    /// advertised tool descriptions entirely.
+    fn redact_inbound(&self, value: &mut Value) {
+        if self.secrets.is_empty() {
+            return;
+        }
+        redact_value(value, &self.secrets);
+    }
+}
+
+/// Walk `value` and redact every string it contains, at any depth. Object *keys*
+/// are rewritten too: a server can put a credential in a key as easily as in a
+/// value.
+fn redact_value(value: &mut Value, secrets: &[Secret]) {
+    match value {
+        Value::String(text) => {
+            if let std::borrow::Cow::Owned(redacted) = redact_exact(text, secrets) {
+                *text = redacted;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_value(item, secrets);
+            }
+        }
+        Value::Object(map) => {
+            let needs_key_rewrite = map
+                .keys()
+                .any(|key| matches!(redact_exact(key, secrets), std::borrow::Cow::Owned(_)));
+            if needs_key_rewrite {
+                let rebuilt = map
+                    .iter()
+                    .map(|(key, item)| (redact_exact(key, secrets).into_owned(), item.clone()))
+                    .collect();
+                *map = rebuilt;
+            }
+            for item in map.values_mut() {
+                redact_value(item, secrets);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -250,9 +317,16 @@ impl Transport for StdioTransport {
                 continue;
             }
             if let Some(error) = value.get("error") {
-                return Err(McpError::Protocol(error.to_string()));
+                // A protocol error is server-authored text like any other, and
+                // is one of the four inbound surfaces a credential can ride out
+                // on. Filter it exactly as a result is filtered.
+                return Err(McpError::Protocol(
+                    redact_exact(&error.to_string(), &self.secrets).into_owned(),
+                ));
             }
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            let mut result = value.get("result").cloned().unwrap_or(Value::Null);
+            self.redact_inbound(&mut result);
+            return Ok(result);
         }
     }
 

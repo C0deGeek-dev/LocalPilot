@@ -21,7 +21,9 @@ pub use error::CoreError;
 pub use id::{EventId, MessageId, SessionId, ToolUseId, TurnId};
 pub use message::{ContentBlock, Message, MessageMetadata, Role};
 pub use search::{word_overlap, Locator};
-pub use secret::Secret;
+pub use secret::{
+    is_exact_redactable, redact_exact, Secret, MIN_EXACT_REDACTION_LEN, REDACTED_EXACT,
+};
 pub use summary::{
     StructuredSummary, SummaryBudget, SummarySection, SummarySectionKind, SummarySource,
     SummarySourceKind, STRUCTURED_SUMMARY_SCHEMA_VERSION,

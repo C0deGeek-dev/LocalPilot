@@ -66,10 +66,16 @@ fn env_probe_child() {
                     .collect()
             })
             .unwrap_or_default();
+        // Report each value *reversed*. The transport now strips configured
+        // credentials from everything a server sends back, so a child that
+        // echoed them verbatim would have them redacted before this test could
+        // check them — the secrecy guarantee would mask the delivery bug this
+        // test exists to catch. Reversing proves the exact bytes arrived while
+        // matching no needle.
         let seen: BTreeMap<String, Option<String>> = names
             .into_iter()
             .map(|name| {
-                let value = std::env::var(&name).ok();
+                let value = std::env::var(&name).ok().map(reversed);
                 (name, value)
             })
             .collect();
@@ -84,6 +90,16 @@ fn env_probe_child() {
         );
         let _ = stdout.flush();
     }
+}
+
+/// Reverse a string; see the note in the probe child.
+fn reversed(value: String) -> String {
+    value.chars().rev().collect()
+}
+
+/// The value the child should report for `expected`, i.e. reversed.
+fn echoed(expected: &str) -> Option<Option<String>> {
+    Some(Some(reversed(expected.to_string())))
 }
 
 /// Spawn the probe child with `environment` overlaid and ask it what it sees.
@@ -156,31 +172,25 @@ async fn a_child_receives_every_configured_entry_form_and_keeps_its_inheritance(
     // Every configured form arrives, whatever its sensitivity: the distinction
     // governs redaction, never delivery.
     assert_eq!(
-        seen.get("LOCALPILOT_TEST_PLAIN"),
-        Some(&Some("plain-value".to_string()))
+        seen.get("LOCALPILOT_TEST_PLAIN").cloned(),
+        echoed("plain-value")
     );
     assert_eq!(
-        seen.get("LOCALPILOT_TEST_LITERAL"),
-        Some(&Some("sensitive-literal-value".to_string()))
+        seen.get("LOCALPILOT_TEST_LITERAL").cloned(),
+        echoed("sensitive-literal-value")
     );
     assert_eq!(
-        seen.get("LOCALPILOT_TEST_CREDENTIAL"),
-        Some(&Some("resolved-credential-value".to_string()))
+        seen.get("LOCALPILOT_TEST_CREDENTIAL").cloned(),
+        echoed("resolved-credential-value")
     );
     // A configured entry replaces the inherited variable of the same name. The
     // spelling is identical on purpose: a case-differing pair would replace on
     // Windows and add a second variable on Linux/macOS, so configuration refuses
     // it and this assertion stays portable.
-    assert_eq!(
-        seen.get(OVERRIDDEN),
-        Some(&Some("overlay-value".to_string()))
-    );
+    assert_eq!(seen.get(OVERRIDDEN).cloned(), echoed("overlay-value"));
     // An unrelated inherited variable survives: the overlay adds to the
     // environment, it does not replace it.
-    assert_eq!(
-        seen.get(INHERITED_ONLY),
-        Some(&Some("inherited-value".to_string()))
-    );
+    assert_eq!(seen.get(INHERITED_ONLY).cloned(), echoed("inherited-value"));
 }
 
 #[tokio::test]
@@ -191,8 +201,5 @@ async fn an_empty_overlay_leaves_inheritance_untouched() {
 
     // The shape every server configured before per-server environments existed
     // still has: plain inheritance, nothing added, nothing removed.
-    assert_eq!(
-        seen.get(INHERITED_ONLY),
-        Some(&Some("inherited-value".to_string()))
-    );
+    assert_eq!(seen.get(INHERITED_ONLY).cloned(), echoed("inherited-value"));
 }
