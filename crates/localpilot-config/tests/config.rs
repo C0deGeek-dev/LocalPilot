@@ -9,7 +9,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use localpilot_config::{load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy};
+use localpilot_config::{
+    load, AutoFix, Cadence, CliOverrides, ConfigPaths, LookupPolicy, McpEnvEntry,
+};
 use proptest::prelude::*;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -23,6 +25,7 @@ const ENV_KEYS: &[&str] = &[
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
     "LOCALPILOT_PROVIDER__DEFAULT",
+    "LOCALPILOT_MCP__SERVERS__FILES__ENV__FROM_ENV_LAYER",
 ];
 
 struct TestEnv {
@@ -469,6 +472,254 @@ fn mcp_servers_parse_with_command_and_args() -> TestResult {
         let server = cfg.mcp.servers.get("files").expect("server present");
         assert_eq!(server.command, "my-mcp-server");
         assert_eq!(server.args, vec!["--root".to_string(), ".".to_string()]);
+        // A server that configures no environment keeps plain inheritance.
+        assert!(server.env.is_empty());
+        Ok(())
+    })
+}
+
+/// Load `project` (and optionally `user`) and return the error message, asserting
+/// the load failed. Keeps the rejection tests to one line of setup each.
+fn env_rejection(user: Option<&str>, project: &str) -> TestResult<String> {
+    let mut message = String::new();
+    isolated(|jail| {
+        let user = user
+            .map(|body| write(jail, "user.toml", body))
+            .transpose()?;
+        let project = write(jail, "project.toml", project)?;
+        let paths = ConfigPaths {
+            user,
+            project: Some(project),
+        };
+        match load(&paths, &CliOverrides::default()) {
+            Ok(_) => return Err("expected the environment entry to be rejected".into()),
+            Err(error) => message = error.to_string(),
+        }
+        Ok(())
+    })?;
+    Ok(message)
+}
+
+#[test]
+fn mcp_env_parses_plain_sensitive_and_credential_forms() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[mcp.servers.files]\n\
+             command = \"my-mcp-server\"\n\n\
+             [mcp.servers.files.env]\n\
+             LOG_LEVEL = \"info\"\n\
+             SERVICE_TOKEN = { value = \"literal-token-value\" }\n\
+             SERVICE_KEY = { credential = \"my-alias\" }\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        let env = &cfg.mcp.servers.get("files").expect("server present").env;
+
+        assert_eq!(
+            env.get("LOG_LEVEL"),
+            Some(&McpEnvEntry::Plain("info".to_string()))
+        );
+        let Some(McpEnvEntry::Object(token)) = env.get("SERVICE_TOKEN") else {
+            panic!("SERVICE_TOKEN should parse as the object form");
+        };
+        assert_eq!(
+            token.value.as_ref().map(|v| v.secret().expose()),
+            Some("literal-token-value")
+        );
+        assert!(token.credential.is_none());
+        let Some(McpEnvEntry::Object(key)) = env.get("SERVICE_KEY") else {
+            panic!("SERVICE_KEY should parse as the object form");
+        };
+        assert_eq!(key.credential.as_deref(), Some("my-alias"));
+        assert!(key.value.is_none());
+        Ok(())
+    })
+}
+
+/// The reason environment entries are validated *after* the precedence merge
+/// rather than while each file is parsed. Config layers combine per key, so each
+/// file below is valid on its own and only the merged entry is contradictory —
+/// a per-file check would never see it.
+#[test]
+fn mcp_env_entry_merged_from_two_valid_layers_is_rejected() -> TestResult {
+    let message = env_rejection(
+        Some(
+            "[mcp.servers.files]\n\
+             command = \"my-mcp-server\"\n\n\
+             [mcp.servers.files.env]\n\
+             SERVICE_KEY = { credential = \"my-alias\" }\n",
+        ),
+        "[mcp.servers.files.env]\n\
+         SERVICE_KEY = { value = \"literal-token-value\" }\n",
+    )?;
+    assert!(
+        message.contains("SERVICE_KEY") && message.contains("both"),
+        "expected a both-forms rejection naming the variable, got: {message}"
+    );
+    assert!(
+        !message.contains("literal-token-value"),
+        "the rejection must not echo the configured value: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_env_rejects_both_value_and_credential_in_one_entry() -> TestResult {
+    let message = env_rejection(
+        None,
+        "[mcp.servers.files]\n\
+         command = \"my-mcp-server\"\n\n\
+         [mcp.servers.files.env]\n\
+         SERVICE_KEY = { value = \"literal-token-value\", credential = \"my-alias\" }\n",
+    )?;
+    assert!(message.contains("both"), "got: {message}");
+    assert!(!message.contains("literal-token-value"), "got: {message}");
+    Ok(())
+}
+
+#[test]
+fn mcp_env_rejects_an_object_setting_neither_form() -> TestResult {
+    let message = env_rejection(
+        None,
+        "[mcp.servers.files]\n\
+         command = \"my-mcp-server\"\n\n\
+         [mcp.servers.files.env]\n\
+         SERVICE_KEY = {}\n",
+    )?;
+    assert!(message.contains("neither"), "got: {message}");
+    Ok(())
+}
+
+#[test]
+fn mcp_env_rejects_non_portable_variable_names() -> TestResult {
+    for name in ["1LEADING_DIGIT", "HAS-DASH", "HAS SPACE", ""] {
+        let message = env_rejection(
+            None,
+            &format!(
+                "[mcp.servers.files]\n\
+                 command = \"my-mcp-server\"\n\n\
+                 [mcp.servers.files.env]\n\
+                 \"{name}\" = \"value\"\n"
+            ),
+        )?;
+        assert!(
+            message.contains("portable environment variable name"),
+            "{name} should be rejected, got: {message}"
+        );
+    }
+    Ok(())
+}
+
+/// Windows matches environment names case-insensitively and unix does not, so a
+/// pair differing only by case is one variable on one tier-1 platform and two on
+/// the others. The config is ambiguous; reject it rather than behave differently
+/// per host.
+#[test]
+fn mcp_env_rejects_names_differing_only_by_case() -> TestResult {
+    let message = env_rejection(
+        None,
+        "[mcp.servers.files]\n\
+         command = \"my-mcp-server\"\n\n\
+         [mcp.servers.files.env]\n\
+         SERVICE_KEY = \"upper\"\n\
+         service_key = \"lower\"\n",
+    )?;
+    assert!(message.contains("differ only by case"), "got: {message}");
+    Ok(())
+}
+
+#[test]
+fn mcp_env_rejects_an_invalid_credential_alias() -> TestResult {
+    let message = env_rejection(
+        None,
+        "[mcp.servers.files]\n\
+         command = \"my-mcp-server\"\n\n\
+         [mcp.servers.files.env]\n\
+         SERVICE_KEY = { credential = \"bad alias/with slash\" }\n",
+    )?;
+    assert!(message.contains("credential alias"), "got: {message}");
+    Ok(())
+}
+
+/// Per-key overlay across layers: the project file replaces the entry it names
+/// and leaves the user file's other entries in place (it does not replace the
+/// whole map). The environment layer reaches a nested entry by path.
+#[test]
+fn mcp_env_layers_merge_per_key() -> TestResult {
+    isolated(|jail| {
+        let user = write(
+            jail,
+            "user.toml",
+            "[mcp.servers.files]\n\
+             command = \"my-mcp-server\"\n\n\
+             [mcp.servers.files.env]\n\
+             KEPT_FROM_USER = \"user\"\n\
+             OVERRIDDEN = \"user\"\n",
+        )?;
+        let project = write(
+            jail,
+            "project.toml",
+            "[mcp.servers.files.env]\n\
+             OVERRIDDEN = \"project\"\n",
+        )?;
+        std::env::set_var(
+            "LOCALPILOT_MCP__SERVERS__FILES__ENV__FROM_ENV_LAYER",
+            "env-layer",
+        );
+        let paths = ConfigPaths {
+            user: Some(user),
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        let env = &cfg.mcp.servers.get("files").expect("server present").env;
+
+        let plain = |key: &str| match env.get(key) {
+            Some(McpEnvEntry::Plain(value)) => value.clone(),
+            other => panic!("{key} should be a plain entry, got {other:?}"),
+        };
+        // Present only in the lower layer — survives the higher layer's table.
+        assert_eq!(plain("KEPT_FROM_USER"), "user");
+        // Present in both — the higher layer wins for that key alone.
+        assert_eq!(plain("OVERRIDDEN"), "project");
+        // `Env::split("__")` makes a nested entry reachable by path — but the
+        // env provider lower-cases every key it produces, so the entry arrives
+        // as `from_env_layer`, not the `FROM_ENV_LAYER` that was exported. On
+        // Windows that is the same variable; on Linux/macOS it is a different
+        // one. Pinned here so the trap is visible rather than surprising, and
+        // documented as a caveat on the environment layer.
+        assert!(env.get("FROM_ENV_LAYER").is_none());
+        assert_eq!(plain("from_env_layer"), "env-layer");
+        Ok(())
+    })
+}
+
+/// A sensitive literal must not surface through `Debug` on the *whole* config
+/// tree, not merely on the leaf type — a future `#[derive(Debug)]` on an
+/// enclosing wrapper is exactly how such a value would quietly come back.
+#[test]
+fn debug_output_never_reveals_a_sensitive_literal() -> TestResult {
+    isolated(|jail| {
+        let project = write(
+            jail,
+            "project.toml",
+            "[mcp.servers.files]\n\
+             command = \"my-mcp-server\"\n\n\
+             [mcp.servers.files.env]\n\
+             SERVICE_TOKEN = { value = \"literal-token-value\" }\n",
+        )?;
+        let paths = ConfigPaths {
+            user: None,
+            project: Some(project),
+        };
+        let cfg = load(&paths, &CliOverrides::default())?;
+        assert!(!format!("{cfg:?}").contains("literal-token-value"));
+        // Serialization is a diagnostic path here, and masks too.
+        assert!(!serde_json::to_string(&cfg)?.contains("literal-token-value"));
         Ok(())
     })
 }

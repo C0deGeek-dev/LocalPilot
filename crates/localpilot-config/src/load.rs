@@ -13,7 +13,7 @@ use figment::Figment;
 use localpilot_core::Secret;
 
 use crate::error::ConfigError;
-use crate::schema::{CheckConfig, Config, Mode, PermissionProfile, ProviderAuth};
+use crate::schema::{CheckConfig, Config, McpEnvEntry, Mode, PermissionProfile, ProviderAuth};
 
 /// The file locations a load should consider. Either may be `None` (absent).
 #[derive(Debug, Clone, Default)]
@@ -77,7 +77,92 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
     let mut config: Config = figment.extract().map_err(ConfigError::from)?;
     synthesize_env_providers(&mut config);
     validate_checks(&config.harness.checks)?;
+    // Deliberately after the merge: layers combine per key, so an entry can be
+    // invalid only once every layer has been applied (see `validate_mcp_env`).
+    validate_mcp_env(&config.mcp)?;
     Ok(config)
+}
+
+/// Validate every `[mcp.servers.<name>.env]` entry.
+///
+/// This runs on the *merged* configuration, never per file, and that ordering is
+/// load-bearing rather than incidental. Config layers combine per key, so a user
+/// file supplying `KEY = { credential = "a" }` and a project file supplying
+/// `KEY = { value = "b" }` — each perfectly valid alone — merge into one entry
+/// carrying both. Only a post-merge check ever sees that.
+///
+/// Messages name the server and the variable, never a configured value.
+fn validate_mcp_env(mcp: &crate::schema::McpConfig) -> Result<(), ConfigError> {
+    for (server, config) in &mcp.servers {
+        let mut folded: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+        for (name, entry) in &config.env {
+            if !is_portable_env_name(name) {
+                return Err(ConfigError::InvalidMcpEnv(format!(
+                    "server {server:?}: {name:?} is not a portable environment variable name \
+                     (expected a letter or underscore followed by letters, digits, or underscores)"
+                )));
+            }
+            // Windows matches environment names case-insensitively while unix does
+            // not, so two entries differing only by case mean different things per
+            // platform. Reject the ambiguity rather than resolve it differently on
+            // each host (ADR-0007 is behaviour parity, not source parity).
+            let key = name.to_ascii_uppercase();
+            if let Some(previous) = folded.insert(key, name.as_str()) {
+                return Err(ConfigError::InvalidMcpEnv(format!(
+                    "server {server:?}: {previous:?} and {name:?} differ only by case, which is \
+                     one variable on Windows and two on Linux/macOS — use a single spelling"
+                )));
+            }
+
+            let McpEnvEntry::Object(object) = entry else {
+                continue;
+            };
+            match (&object.value, &object.credential) {
+                (Some(_), Some(_)) => {
+                    return Err(ConfigError::InvalidMcpEnv(format!(
+                        "server {server:?}: {name:?} sets both \"value\" and \"credential\" — \
+                         set exactly one (note that separate config layers merge per key, so \
+                         each may come from a different file)"
+                    )))
+                }
+                (None, None) => {
+                    return Err(ConfigError::InvalidMcpEnv(format!(
+                        "server {server:?}: {name:?} sets neither \"value\" nor \"credential\""
+                    )))
+                }
+                (None, Some(alias)) if !is_portable_credential_alias(alias) => {
+                    return Err(ConfigError::InvalidMcpEnv(format!(
+                        "server {server:?}: {name:?} names an invalid credential alias \
+                         (expected letters, digits, \".\", \"-\", or \"_\")"
+                    )))
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a portable environment-variable name: a letter or
+/// underscore followed by letters, digits, or underscores. Deliberately narrower
+/// than any single platform allows, so a name that works on one tier-1 host
+/// works on all three.
+fn is_portable_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `alias` is a portable credential-store alias. The conservative set
+/// keeps an alias usable as an OS keychain entry name on every tier-1 platform.
+fn is_portable_credential_alias(alias: &str) -> bool {
+    !alias.is_empty()
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// Validate the ratified quality-gate checks: each needs a non-empty name and

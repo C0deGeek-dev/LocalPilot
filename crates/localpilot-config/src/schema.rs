@@ -5,6 +5,7 @@
 //! provider can carry namespaced settings the core does not yet model.
 
 use indexmap::IndexMap;
+use localpilot_core::Secret;
 use serde::{Deserialize, Serialize};
 
 /// The full resolved configuration.
@@ -749,6 +750,105 @@ pub struct McpServerConfig {
     /// Arguments passed to the command.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment entries overlaid on the inherited environment when the server
+    /// is spawned. Empty by default, which preserves plain inheritance.
+    #[serde(default)]
+    pub env: IndexMap<String, McpEnvEntry>,
+}
+
+/// One `[mcp.servers.<name>.env]` entry.
+///
+/// Three forms, deliberately distinguishable at a glance in the file:
+///
+/// ```toml
+/// LOG_LEVEL      = "info"                      # ordinary, non-sensitive
+/// SERVICE_TOKEN  = { value = "..." }           # sensitive literal, local file only
+/// SERVICE_KEY    = { credential = "my-alias" } # credential-store reference (recommended)
+/// ```
+///
+/// The object form is parsed permissively — an entry may carry both `value` and
+/// `credential`, or neither — because rejecting those shapes is a *post-merge*
+/// concern. Config layers merge per key, so two individually-valid layers (one
+/// supplying `credential`, another `value`) combine into an entry carrying both;
+/// validating during deserialization would never see it. `validate_mcp_env`
+/// runs after the merge and owns every rejection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum McpEnvEntry {
+    /// A plain string: an ordinary, non-sensitive value.
+    Plain(String),
+    /// The object form: a sensitive literal or a credential reference.
+    Object(McpEnvObject),
+}
+
+/// The object form of an [`McpEnvEntry`]. Exactly one field must be set; the
+/// check lives in `validate_mcp_env` (see the type-level note above).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpEnvObject {
+    /// A credential written literally into the config file. Marked sensitive by
+    /// being written this way, and masked everywhere except the audited spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<SensitiveLiteral>,
+    /// The name of an entry in the generic credential store. The config holds
+    /// only this alias; the value resolves immediately before the spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
+/// A credential written literally into a local config file.
+///
+/// Wraps [`Secret`], so `Debug` and `Display` mask the value. `Serialize` masks
+/// it too: the only place this type is serialized is figment's defaults layer,
+/// which always carries an *empty* server map, so masking costs nothing real and
+/// keeps a populated config out of any serialization-based diagnostic. That does
+/// mean serializing a populated config is lossy — config serialization is a
+/// diagnostic path here, never a persistence one.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SensitiveLiteral(Secret);
+
+/// What `Debug`, `Display`, and `Serialize` render instead of the value.
+const SENSITIVE_LITERAL_MASK: &str = "***";
+
+impl SensitiveLiteral {
+    /// Wrap a literal read from configuration.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Secret::new(value))
+    }
+
+    /// Borrow the wrapped secret. Callers that unwrap it further are the audited
+    /// points a configured credential leaves the wrapper.
+    #[must_use]
+    pub fn secret(&self) -> &Secret {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SensitiveLiteral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SensitiveLiteral")
+            .field(&SENSITIVE_LITERAL_MASK)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for SensitiveLiteral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SENSITIVE_LITERAL_MASK)
+    }
+}
+
+impl Serialize for SensitiveLiteral {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(SENSITIVE_LITERAL_MASK)
+    }
+}
+
+impl<'de> Deserialize<'de> for SensitiveLiteral {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
+    }
 }
 
 /// Which provider is active by default.

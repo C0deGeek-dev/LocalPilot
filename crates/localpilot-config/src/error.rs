@@ -21,4 +21,9 @@ pub enum ConfigError {
     /// name).
     #[error("invalid quality-gate check: {0}")]
     InvalidCheck(String),
+
+    /// A `[mcp.servers.<name>.env]` entry is invalid. The message names the
+    /// server and variable but never echoes a configured value.
+    #[error("invalid MCP server environment: {0}")]
+    InvalidMcpEnv(String),
 }

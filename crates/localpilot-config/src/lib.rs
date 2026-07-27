@@ -27,11 +27,11 @@ pub use load::{
 pub use schema::{
     AutoFix, Cadence, CheckConfig, CompactionConfig, CompactionMode, Config, ContextConfig,
     DiscoveryConfig, DocsConfig, GuidanceConfig, HarnessConfig, HistoryConfig, HistoryPersistence,
-    IngestConfig, IngestMode, LookupPolicy, McpConfig, McpServerConfig, MemoryConfig, Mode,
-    PermissionProfile, PermissionsConfig, ProviderAuth, ProviderConfig, ProviderSelection,
-    QuotaAutoResume, QuotaConfig, RenderMode, RepairMode, ResearchConfig, ResearchMcpConfig,
-    ResearchMcpTool, ResearchRenderConfig, ResearchWebConfig, ResolvedRails, RuleSeverity,
-    SelfImprovementConfig, SkillsConfig, StorageConfig, ToolsConfig,
-    DEFAULT_HEADLESS_TOOL_BUDGET_MAX, DEFAULT_HEADLESS_TURN_TIMEOUT_SECS,
+    IngestConfig, IngestMode, LookupPolicy, McpConfig, McpEnvEntry, McpEnvObject, McpServerConfig,
+    MemoryConfig, Mode, PermissionProfile, PermissionsConfig, ProviderAuth, ProviderConfig,
+    ProviderSelection, QuotaAutoResume, QuotaConfig, RenderMode, RepairMode, ResearchConfig,
+    ResearchMcpConfig, ResearchMcpTool, ResearchRenderConfig, ResearchWebConfig, ResolvedRails,
+    RuleSeverity, SelfImprovementConfig, SensitiveLiteral, SkillsConfig, StorageConfig,
+    ToolsConfig, DEFAULT_HEADLESS_TOOL_BUDGET_MAX, DEFAULT_HEADLESS_TURN_TIMEOUT_SECS,
     DEFAULT_INTERACTIVE_TOOL_BUDGET_MAX,
 };
