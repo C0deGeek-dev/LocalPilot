@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.6.0 - 2026-07-27
+
+Coordinated LocalX release.
+
 - **Security: updated `tar` to 0.4.45** (RUSTSEC-2026-0067, RUSTSEC-2026-0068).
   This is the crate that unpacks downloaded release archives, so both advisories
   sit directly on the update path: one lets `unpack_in` chmod arbitrary
