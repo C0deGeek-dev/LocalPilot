@@ -122,8 +122,16 @@ pub fn activate(
     running: &Version,
 ) -> Result<Option<PathBuf>, DistError> {
     let resolution = resolve(cache, running);
-    let Some(executable) = resolution.executable else {
-        return Ok(None);
+    let executable = match resolution.executable {
+        Some(executable) => executable,
+        // The resolver declines to hand off to the version already running, which
+        // is right for *execution* and wrong for `PATH`: when that same version is
+        // installed, the cached copy is the canonical one, and `bin/` should point
+        // at it rather than at whatever happened to bootstrap it.
+        None => match cache.get(running) {
+            Some(cached) => cached.executable(),
+            None => return Ok(None),
+        },
     };
     place(bin_dir, tool, &executable).map(Some)
 }
@@ -242,6 +250,31 @@ mod tests {
             std::fs::read_to_string(&placed).expect("read"),
             "two",
             "the newest cached version should be the one on PATH"
+        );
+    }
+
+    #[test]
+    fn activate_publishes_the_cached_copy_of_the_running_version() {
+        let temp = tempfile::tempdir().expect("temp");
+        let cache = Cache::new(temp.path().join("tool"));
+        seed(&cache, "2.0.0", "cached");
+
+        // The bootstrap installer puts a binary on PATH before the cache exists,
+        // so bin/ and the cache hold the same version from different sources.
+        let bin = temp.path().join("shared-bin");
+        let bootstrapped = temp.path().join("bootstrapped");
+        write(&bootstrapped, "bootstrapped");
+        place(&bin, "tool", &bootstrapped).expect("bootstrap");
+
+        let running = Version::parse("2.0.0").expect("version");
+        let placed = activate(&cache, &bin, "tool", &running)
+            .expect("activate")
+            .expect("the same version is installed, so it is the canonical copy");
+
+        assert_eq!(
+            std::fs::read_to_string(&placed).expect("read"),
+            "cached",
+            "PATH should point at the cache's copy, not at whatever bootstrapped it"
         );
     }
 

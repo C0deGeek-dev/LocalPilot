@@ -22,6 +22,9 @@ pub enum Reason {
     NewestCached,
     /// No pin and nothing cached — the build that is executing.
     Running,
+    /// The newest cached version is the one already running. Nothing to switch
+    /// to, and nothing is stale.
+    SameAsRunning,
     /// A cached version exists but is older than the running build, so the
     /// running build wins. Prevents a stale cache silently downgrading someone
     /// who installed a newer build from source.
@@ -39,6 +42,7 @@ impl Reason {
             }
             Reason::NewestCached => "newest installed version".to_string(),
             Reason::Running => "no installed versions; running this build".to_string(),
+            Reason::SameAsRunning => "the installed version matches this build".to_string(),
             Reason::RunningIsNewer => "this build is newer than anything installed".to_string(),
         }
     }
@@ -98,6 +102,11 @@ pub fn resolve(cache: &Cache, running: &Version) -> Resolution {
             version: newest.version.clone(),
             executable: Some(newest.executable()),
             reason: Reason::NewestCached,
+        },
+        Some(installed) if installed.version.key() == running.key() => Resolution {
+            version: running.clone(),
+            executable: None,
+            reason: Reason::SameAsRunning,
         },
         Some(_) => Resolution {
             version: running.clone(),

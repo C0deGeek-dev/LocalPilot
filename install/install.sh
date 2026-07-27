@@ -125,15 +125,22 @@ if [ "$mode" = binary ]; then
     cp "$binary" "$bin/localpilot"
 
     echo
-    echo "installing the rest of the stack at the same version ..."
+    echo "installing the stack ..."
     # `update --all` arrived in 2.6.0. Installing an older release is legitimate
     # (--version), and it must not look like the whole install failed: localpilot
-    # is on disk and working either way.
+    # is on disk and working either way. It also owns the PATH advice, so the
+    # fallback below is the only place this script gives its own.
     if ! "$bin/localpilot" update --all; then
         echo
         echo "note: this release cannot install the rest of the stack itself."
         echo "      localpilot is installed; for localmind, localbox, and localbench"
         echo "      install 2.6.0 or later, then run: localpilot update --all"
+        case ":$PATH:" in
+            *":$bin:"*) ;;
+            *) echo
+               echo "add this directory to PATH:"
+               echo "    export PATH=\"$bin:\$PATH\"   (add to your shell profile)" ;;
+        esac
     fi
 
     echo
@@ -141,12 +148,6 @@ if [ "$mode" = binary ]; then
     echo "    $bin/localpilot doctor"
     echo "authenticity of the downloaded archives (needs the GitHub CLI):"
     echo "    gh attestation verify $archive --repo $REPO"
-    case ":$PATH:" in
-        *":$bin:"*) ;;
-        *) echo
-           echo "add this directory to PATH:"
-           echo "    export PATH=\"$bin:\$PATH\"   (add to your shell profile)" ;;
-    esac
     exit 0
 fi
 

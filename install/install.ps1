@@ -98,16 +98,23 @@ if ($mode -eq 'binary') {
         Copy-Item $binary.FullName (Join-Path $bin 'localpilot.exe') -Force
 
         Write-Host ""
-        Write-Host "installing the rest of the stack at the same version ..."
+        Write-Host "installing the stack ..."
         # `update --all` arrived in 2.6.0. Installing an older release is
         # legitimate (-Version), and it must not look like the whole install
-        # failed: localpilot is on disk and working either way.
+        # failed: localpilot is on disk and working either way. It also owns the
+        # PATH advice, so the fallback below is the only place this script gives
+        # its own.
         & (Join-Path $bin 'localpilot.exe') update --all
         if ($LASTEXITCODE -ne 0) {
             Write-Host ""
             Write-Host "note: this release cannot install the rest of the stack itself."
             Write-Host "      localpilot is installed; for localmind, localbox, and localbench"
             Write-Host "      install 2.6.0 or later, then run: localpilot update --all"
+            if (($env:PATH -split ';') -notcontains $bin) {
+                Write-Host ""
+                Write-Host "add this directory to PATH:"
+                Write-Host "    setx PATH `"`$env:PATH;$bin`"   (new terminals only)"
+            }
         }
 
         Write-Host ""
@@ -115,11 +122,6 @@ if ($mode -eq 'binary') {
         Write-Host "    $bin\localpilot.exe doctor"
         Write-Host "authenticity of the downloaded archives (needs the GitHub CLI):"
         Write-Host "    gh attestation verify $archive --repo $repo"
-        if (($env:PATH -split ';') -notcontains $bin) {
-            Write-Host ""
-            Write-Host "add this directory to PATH:"
-            Write-Host "    setx PATH `"`$env:PATH;$bin`"   (new terminals only)"
-        }
     } finally {
         Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
     }
