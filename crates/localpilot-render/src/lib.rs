@@ -97,13 +97,24 @@ impl Renderer for ChromiumRenderer {
 }
 
 /// Launch, navigate, settle, and extract the rendered main document. Every
+/// The fraction of a render's budget the browser may spend starting up.
+///
+/// Launch used to be handed the *whole* budget, which left the outer wall-clock
+/// bound expiring at the same instant as the launch deadline — so one failure
+/// surfaced as either a launch error or a bare timeout depending on which won the
+/// race, and the same broken environment reported two different causes. Bounding
+/// launch below the whole budget makes the specific error win every time. A
+/// browser that is going to start does so in well under a second; this costs a
+/// working render nothing.
+const LAUNCH_BUDGET_DIVISOR: u32 = 2;
+
 /// browser request is gated; blocked requests are counted so an incomplete DOM
 /// is reported, not presented as complete.
 async fn render_page(
     request: &RenderRequest,
     gate: &dyn RenderGate,
 ) -> Result<RenderedDoc, RenderError> {
-    let browser = Browser::launch(request.bounds.timeout).await?;
+    let browser = Browser::launch(request.bounds.timeout / LAUNCH_BUDGET_DIVISOR).await?;
     let (client, mut events) = cdp::connect(browser.ws_url()).await?;
 
     // Attach to a fresh page target with a flattened session, then enable the
