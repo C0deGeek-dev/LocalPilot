@@ -12,6 +12,7 @@ members = [
     "crates/localpilot-mcp",
     "crates/localpilot-skills",
     "crates/localpilot-agents",
+    "crates/localpilot-dist",
     "crates/localpilot-recovery",
     "crates/localpilot-rpc",
     "crates/localpilot-quota",

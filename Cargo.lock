@@ -1624,6 +1624,7 @@ dependencies = [
  "localpilot-agents",
  "localpilot-config",
  "localpilot-core",
+ "localpilot-dist",
  "localpilot-harness",
  "localpilot-llm",
  "localpilot-localmind",
@@ -1690,6 +1691,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.9",
  "uuid",
+]
+
+[[package]]
+name = "localpilot-dist"
+version = "2.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.9",
 ]
 
 [[package]]
