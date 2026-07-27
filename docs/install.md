@@ -3,7 +3,71 @@
 LocalPilot is a Rust-native, provider-neutral coding-agent harness for Windows,
 Linux, and macOS (all tier-1).
 
-## Prebuilt binary (no toolchain needed)
+## Quick install
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+No Rust toolchain needed. The script downloads the prebuilt `localpilot` for your
+platform, **checks it against the published SHA-256 before unpacking it**, and
+then uses it to install the rest of the stack.
+
+### What it installs
+
+Four tools, all at the same version: **`localpilot`** (the agent harness),
+**`localmind`** (the learning and memory engine), **`localbox`** (the local-model
+launcher), and **`localbench`** (the benchmark runner).
+
+They are cut as a set — one version, one tag — and only tested together, so the
+installer treats them as a set. A stack assembled from different releases is a
+configuration nobody has run.
+
+### Putting them on `PATH`
+
+Everything lands in one directory, and the installer prints it:
+
+| Platform | Directory |
+|---|---|
+| Linux / macOS | `~/.local/share/localx/bin` (or `$XDG_DATA_HOME/localx/bin`) |
+| Windows | `%LOCALAPPDATA%\localx\bin` |
+
+```sh
+export PATH="$HOME/.local/share/localx/bin:$PATH"   # add to your shell profile
+```
+
+That entry never changes. Updates, pins, and rollbacks swap what the directory
+points at, so `PATH` is something you set once.
+
+### Reading a script before you run it
+
+Piping a script from the internet into a shell runs whatever is at that URL. If
+you would rather look first — a reasonable habit, not paranoia:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh
+less install.sh
+sh install.sh
+```
+
+### Options
+
+```sh
+sh install.sh --version 2.6.0   # a specific release instead of the latest
+sh install.sh --from-source     # compile instead (needs a checkout and cargo)
+```
+
+Run inside a LocalPilot checkout, the script builds **that working tree** rather
+than downloading a release — a developer running the installer in their own clone
+means their code. Pass `--binary` to override that.
+
+## Prebuilt binary, by hand
 
 Every release publishes an archive per platform, a `SHA256SUMS` file, and a
 `manifest.json` indexing the release. Download the archive for your platform from
@@ -67,6 +131,7 @@ annual accounts, and neither is in place. On macOS you may need
 ```sh
 localpilot update            # fetch, verify, and install the newest release
 localpilot update --check    # only report whether one is available
+localpilot update --all      # install the whole stack at this binary's version
 localpilot version list      # what is installed, and which one would run
 localpilot version pin 2.5.0 # hold a version
 localpilot version rollback  # go back to the previous installed version
@@ -76,6 +141,14 @@ localpilot version rollback  # go back to the previous installed version
 the release manifest, and only then unpacks it. Each version installs into its own
 directory, so the running binary is never overwritten, an interrupted update
 leaves the previous version working, and `rollback` is instant.
+
+Every one of these commands also refreshes the executable in the `bin` directory
+on your `PATH`, so a pin or a rollback takes effect in your shell rather than only
+in `version list`.
+
+`update --all` re-installs the whole stack at the running binary's version — the
+command to reach for after a manual install, or when a tool is missing. It does
+not check for a newer release; update `localpilot` first, then run it.
 
 > Releases before 2.6.0 shipped a `.zip` on Windows. `update` reads `.tar.gz`, so
 > on Windows it can install 2.6.0 and later; for anything earlier, download by

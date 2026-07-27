@@ -12,6 +12,7 @@
 //! into.
 #![forbid(unsafe_code)]
 
+mod activate;
 mod cache;
 mod error;
 mod install;
@@ -19,6 +20,7 @@ mod manifest;
 mod resolve;
 mod version;
 
+pub use activate::{activate, bin_dir, executable_name, place};
 pub use cache::{Cache, CachedVersion, InstallMarker, MARKER_VERSION};
 pub use error::DistError;
 pub use install::{

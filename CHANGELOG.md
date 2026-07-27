@@ -6,6 +6,29 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **One-line install, no toolchain.** `install/install.sh` and
+  `install/install.ps1` now install prebuilt binaries when run standalone:
+
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
+  ```
+
+  The script downloads the archive for your platform, checks it against the
+  published `SHA256SUMS` **before unpacking**, and then hands off to the binary to
+  install the rest of the stack — `localmind`, `localbox`, and `localbench` — at
+  the same version. The tools are cut as a set and only tested together, so they
+  are installed as a set; `localpilot update --all` re-runs it.
+
+  Run inside a checkout the scripts still build that working tree, because a
+  developer running the installer in their own clone means their code. `--binary`
+  and `--from-source` force either mode.
+
+- **Installed versions are now reachable from your shell.** Every train tool's
+  executable is published into one directory (`~/.local/share/localx/bin`, or
+  `%LOCALAPPDATA%\localx\bin`), which is the single entry to add to `PATH`.
+  `update`, `version pin`, and `version rollback` refresh it, so switching
+  versions takes effect where you type rather than only in `version list`.
+
 - **`localpilot update` no longer needs a Rust toolchain.** It downloads the
   archive published for your platform, verifies it against the checksum in the
   release manifest, and only then unpacks it. Building from source stays

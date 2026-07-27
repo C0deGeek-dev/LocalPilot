@@ -55,22 +55,23 @@ against a model endpoint you control.
 
 ## Quick start
 
-You need Rust, Git, and a C compiler. Clone with the LocalMind submodule:
-
-```sh
-git clone --recurse-submodules https://github.com/C0deGeek-dev/LocalPilot.git
-cd LocalPilot
-```
-
-Install the full terminal build:
-
 ```sh
 # Linux / macOS
-./install/install.sh
-
-# Windows PowerShell
-./install/install.ps1
+curl -fsSL https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.sh | sh
 ```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/C0deGeek-dev/LocalPilot/main/install/install.ps1 | iex
+```
+
+No toolchain needed. This downloads the prebuilt binary for your platform, checks
+it against the published SHA-256 before unpacking, and installs the whole stack —
+`localpilot`, `localmind`, `localbox`, and `localbench` — at one version. The
+installer prints the directory to add to `PATH`.
+
+Prefer to read the script first, or build from a checkout? See
+[docs/install.md](docs/install.md).
 
 Check the environment:
 

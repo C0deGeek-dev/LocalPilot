@@ -111,6 +111,11 @@ enum Command {
         /// Needed on a platform with no published build.
         #[arg(long)]
         from_source: bool,
+        /// Install every tool in the release train at this binary's version, not
+        /// just this one. The tools are cut together and are only tested
+        /// together. Does not check for a newer release.
+        #[arg(long)]
+        all: bool,
     },
     /// Inspect and choose between installed versions.
     Version {
@@ -1345,9 +1350,13 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
             stdout.flush()?;
         }
-        Command::Update { check, from_source } => {
+        Command::Update {
+            check,
+            from_source,
+            all,
+        } => {
             let mut stdout = io::stdout().lock();
-            update::run(check, from_source, &mut stdout).await?;
+            update::run(check, from_source, all, &mut stdout).await?;
         }
         Command::Init { git } => {
             let summary = harness_cmd::init(&std::env::current_dir()?, git)?;

@@ -118,8 +118,22 @@ fn now_unix() -> u64 {
 /// # Errors
 /// Returns an error only if writing output or running the installer fails; a
 /// failed network check is reported, not returned.
-pub async fn run(check_only: bool, from_source: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+pub async fn run(
+    check_only: bool,
+    from_source: bool,
+    all: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     let current = current_version();
+    if all {
+        // `--all` means "make the stack match this binary". It deliberately does
+        // not ask about a newer release: the user picked a version by installing
+        // it, and the bootstrap installer runs this with stdin bound to a pipe,
+        // where a confirmation prompt reads EOF and cancels.
+        let tag = current_tag();
+        writeln!(out, "installing the stack at {tag} ...")?;
+        return install_stack(&tag, out).await;
+    }
     match newer_release().await {
         Ok(Some(tag)) => {
             writeln!(out, "update available: {tag}  (current: {current})")?;
@@ -134,16 +148,81 @@ pub async fn run(check_only: bool, from_source: bool, out: &mut dyn Write) -> an
             // Prefer the published binary: it needs no toolchain and takes
             // seconds. Compiling stays available, and is the automatic fallback
             // when a platform has no published archive.
-            if !from_source && install_binary(&tag, out).await? {
-                return Ok(());
+            let installed = !from_source && install_binary(&tag, out).await?;
+            if !installed {
+                if !from_source {
+                    writeln!(out, "falling back to building from source")?;
+                }
+                reinstall(&tag, out)?;
             }
-            if !from_source {
-                writeln!(out, "falling back to building from source")?;
-            }
-            reinstall(&tag, out)?;
         }
-        Ok(None) => writeln!(out, "up to date ({current})")?,
+        Ok(None) => {
+            writeln!(out, "up to date ({current})")?;
+        }
         Err(error) => writeln!(out, "update check failed: {error}")?,
+    }
+    Ok(())
+}
+
+/// The release tag matching the running build, for installing companions at the
+/// version this binary was cut with.
+fn current_tag() -> String {
+    localpilot_dist::Version::parse(current_version()).map_or_else(
+        || current_version().to_string(),
+        |v| format!("v{}", v.to_dir_name()),
+    )
+}
+
+/// Install the release train at `tag`.
+///
+/// The train cuts every tool to one version, so a stack assembled from different
+/// tags is a configuration nobody tested. A tool that fails to install is
+/// reported and skipped rather than aborting the others — a partial stack the
+/// user can see beats an install that stops halfway without saying where.
+async fn install_stack(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    let mut failed = Vec::new();
+    for (tool, repo) in TRAIN {
+        if !install_tool(tool, repo, tag, out).await? {
+            failed.push(*tool);
+        }
+    }
+    if failed.is_empty() {
+        writeln!(out, "\nthe stack is installed at {tag}")?;
+    } else {
+        writeln!(
+            out,
+            "\ninstalled at {tag}, except: {}. Re-run `localpilot update --all` to retry.",
+            failed.join(", ")
+        )?;
+    }
+    path_notice(out)
+}
+
+/// Tell the user how to reach the executables, when the directory holding them is
+/// not already on `PATH`.
+fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
+    let Some(bin) = shared_bin_dir() else {
+        return Ok(());
+    };
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == bin));
+    if on_path {
+        return Ok(());
+    }
+    writeln!(out, "\nadd this directory to PATH to use them:")?;
+    writeln!(out, "    {}", bin.display())?;
+    if cfg!(windows) {
+        writeln!(
+            out,
+            "    setx PATH \"$env:PATH;{}\"   (PowerShell, new terminals only)",
+            bin.display()
+        )?;
+    } else {
+        writeln!(
+            out,
+            "    export PATH=\"{}:$PATH\"   (add to your shell profile)",
+            bin.display()
+        )?;
     }
     Ok(())
 }
@@ -192,13 +271,93 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 // --- version cache ----------------------------------------------------------
 
 /// Base URL of a release's downloadable assets.
-fn release_assets_url(tag: &str) -> String {
-    format!("{REPO_URL}/releases/download/{tag}")
+fn release_assets_url(repo_url: &str, tag: &str) -> String {
+    // `REPO_URL` carries the `.git` suffix cargo wants; the releases path does
+    // not, and GitHub is stricter about it on some routes than others.
+    let repo = repo_url.trim_end_matches(".git");
+    format!("{repo}/releases/download/{tag}")
+}
+
+/// The `owner/name` a repository URL points at, for the attestation hint.
+fn repo_slug(repo_url: &str) -> &str {
+    repo_url
+        .trim_end_matches(".git")
+        .rsplit_once("github.com/")
+        .map_or("C0deGeek-dev/LocalPilot", |(_, slug)| slug)
 }
 
 /// The install cache for this tool, when the platform reports a data directory.
 fn cache() -> Option<localpilot_dist::Cache> {
-    localpilot_dist::Cache::default_root("localpilot").map(localpilot_dist::Cache::new)
+    tool_cache("localpilot")
+}
+
+/// The install cache for any train tool.
+fn tool_cache(tool: &str) -> Option<localpilot_dist::Cache> {
+    localpilot_dist::Cache::default_root(tool).map(localpilot_dist::Cache::new)
+}
+
+/// The tools one release train cuts together.
+///
+/// They share a version and a tag by construction, so installing them as a set is
+/// the only way to avoid a skew none of them can detect on its own — a mismatched
+/// store schema between an installed CLI and the engine it talks to fails
+/// silently, not loudly.
+const TRAIN: &[(&str, &str)] = &[
+    ("localpilot", "https://github.com/C0deGeek-dev/LocalPilot"),
+    ("localmind", "https://github.com/C0deGeek-dev/LocalMind"),
+    ("localbox", "https://github.com/C0deGeek-dev/LocalBox"),
+    ("localbench", "https://github.com/C0deGeek-dev/LocalBench"),
+];
+
+/// The one directory every train tool's executable is published into, so a user
+/// adds a single entry to `PATH` rather than one per tool.
+#[must_use]
+pub fn shared_bin_dir() -> Option<std::path::PathBuf> {
+    localpilot_dist::Cache::default_root("localx").map(|root| localpilot_dist::bin_dir(&root))
+}
+
+/// Point `<bin>/<tool>` at whatever the resolver now chooses, so a version switch
+/// is visible to the shell rather than only to `version list`.
+///
+/// Only this tool has a running build in this process. The resolver's
+/// strictly-newer rule exists to stop a stale cache downgrading a from-source
+/// build — a protection that is meaningful for `localpilot` and meaningless for
+/// the companions, where the pin (or the newest install) is the whole answer.
+fn activate(
+    cache: &localpilot_dist::Cache,
+    tool: &str,
+    out: &mut dyn Write,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let Some(bin) = shared_bin_dir() else {
+        return Ok(None);
+    };
+    let placed = if tool == "localpilot" {
+        let Some(running) = localpilot_dist::Version::parse(current_version()) else {
+            return Ok(None);
+        };
+        localpilot_dist::activate(cache, &bin, tool, &running)
+    } else {
+        let chosen = cache
+            .pin()
+            .and_then(|pinned| cache.get(&pinned))
+            .or_else(|| cache.newest());
+        match chosen {
+            Some(cached) => localpilot_dist::place(&bin, tool, &cached.executable()).map(Some),
+            None => Ok(None),
+        }
+    };
+    match placed {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            // The payload is installed and resolvable; only the PATH-visible copy
+            // failed. Say which half worked so the fix is obvious.
+            writeln!(
+                out,
+                "installed, but could not update {tool} on PATH: {error}"
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 /// Install a released binary into the version cache, verifying it first.
@@ -211,7 +370,22 @@ fn cache() -> Option<localpilot_dist::Cache> {
 /// Returns an error only if output cannot be written; a failed install is
 /// reported and leaves the previously installed version untouched.
 pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bool> {
-    let Some(cache) = cache() else {
+    install_tool("localpilot", REPO_URL, tag, out).await
+}
+
+/// Install one train tool's published archive at `tag`, verifying it first and
+/// then making it the version on `PATH`.
+///
+/// # Errors
+/// Returns an error only if output cannot be written; a failed install is
+/// reported and leaves the previously installed version untouched.
+pub async fn install_tool(
+    tool: &str,
+    repo_url: &str,
+    tag: &str,
+    out: &mut dyn Write,
+) -> anyhow::Result<bool> {
+    let Some(cache) = tool_cache(tool) else {
         writeln!(
             out,
             "no per-user data directory on this platform; use --from-source"
@@ -227,8 +401,8 @@ pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bo
         return Ok(false);
     }
 
-    let base = release_assets_url(tag);
-    writeln!(out, "fetching {tag} manifest…")?;
+    let base = release_assets_url(repo_url, tag);
+    writeln!(out, "{tool}: fetching {tag} manifest…")?;
     let manifest_bytes = match localpilot_dist::download(&format!("{base}/manifest.json")).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -250,10 +424,10 @@ pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bo
         }
     };
 
-    writeln!(out, "downloading and verifying {target}…")?;
-    match localpilot_dist::install_release(&cache, &manifest, target, "localpilot", &base).await {
+    writeln!(out, "{tool}: downloading and verifying {target}…")?;
+    match localpilot_dist::install_release(&cache, &manifest, target, tool, &base).await {
         Ok(dir) => {
-            writeln!(out, "installed {tag} to {}", dir.display())?;
+            writeln!(out, "{tool}: installed {tag} to {}", dir.display())?;
             // Name the property that was actually checked. The digest proves the
             // bytes are intact; origin comes from the release's build attestation,
             // which this updater does not verify in-process — so point at the
@@ -265,9 +439,13 @@ pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bo
             writeln!(
                 out,
                 "to confirm it was built by this repository: \
-                 gh attestation verify <archive> --repo C0deGeek-dev/LocalPilot"
+                 gh attestation verify <archive> --repo {}",
+                repo_slug(repo_url)
             )?;
-            let swept = cache.sweep(KEEP_VERSIONS, &running_and_pinned(&cache));
+            if let Some(path) = activate(&cache, tool, out)? {
+                writeln!(out, "{tool}: on PATH at {}", path.display())?;
+            }
+            let swept = cache.sweep(KEEP_VERSIONS, &protected(&cache, tool));
             if !swept.is_empty() {
                 let names: Vec<String> = swept
                     .iter()
@@ -285,15 +463,29 @@ pub async fn install_binary(tag: &str, out: &mut dyn Write) -> anyhow::Result<bo
     }
 }
 
+/// Refresh the `PATH`-visible executable after a change to what should run, and
+/// say where it landed. A pin that only `version list` can see is not a pin.
+fn report_active(cache: &localpilot_dist::Cache, out: &mut dyn Write) -> anyhow::Result<()> {
+    if let Some(path) = activate(cache, "localpilot", out)? {
+        writeln!(out, "active binary: {}", path.display())?;
+    }
+    Ok(())
+}
+
 /// How many cached versions to keep, beyond the running and pinned ones. Two is
 /// enough to roll back once without keeping every release ever installed.
 const KEEP_VERSIONS: usize = 2;
 
 /// Versions the sweep must never remove.
-fn running_and_pinned(cache: &localpilot_dist::Cache) -> Vec<localpilot_dist::Version> {
+///
+/// The running version is only ours to protect for our own cache; another tool's
+/// running version is not something this process can know.
+fn protected(cache: &localpilot_dist::Cache, tool: &str) -> Vec<localpilot_dist::Version> {
     let mut protected = Vec::new();
-    if let Some(running) = localpilot_dist::Version::parse(current_version()) {
-        protected.push(running);
+    if tool == "localpilot" {
+        if let Some(running) = localpilot_dist::Version::parse(current_version()) {
+            protected.push(running);
+        }
     }
     if let Some(pinned) = cache.pin() {
         protected.push(pinned);
@@ -350,6 +542,7 @@ pub fn set_pin(version: Option<&str>, out: &mut dyn Write) -> anyhow::Result<()>
         None => {
             cache.clear_pin()?;
             writeln!(out, "pin cleared; the newest installed version will run")?;
+            report_active(&cache, out)?;
         }
         Some(text) => {
             let Some(version) = localpilot_dist::Version::parse(text) else {
@@ -368,6 +561,7 @@ pub fn set_pin(version: Option<&str>, out: &mut dyn Write) -> anyhow::Result<()>
             }
             cache.set_pin(&version)?;
             writeln!(out, "pinned to {}", version.to_dir_name())?;
+            report_active(&cache, out)?;
         }
     }
     Ok(())
@@ -398,6 +592,7 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
                 "rolled back to {} (pinned; `localpilot version pin --clear` to undo)",
                 cached.version.to_dir_name()
             )?;
+            report_active(&cache, out)?;
         }
         None => {
             writeln!(
