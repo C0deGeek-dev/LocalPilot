@@ -27,7 +27,14 @@ impl RenderGate for OriginGate {
 fn bounds() -> RenderBounds {
     RenderBounds {
         settle: Duration::from_millis(400),
-        timeout: Duration::from_secs(15),
+        // Deliberately generous, and not a claim about what a real render should
+        // be allowed. These tests assert *what the renderer produces*, so the
+        // budget only needs to be larger than the slowest machine that runs them;
+        // a shared CI runner starting a cold browser is far slower than a
+        // developer's, and a tight bound here turns that into a failure about
+        // nothing. A browser that cannot start is caught in milliseconds by its
+        // own exit, so patience costs nothing in the case that actually breaks.
+        timeout: Duration::from_secs(60),
         max_frames: 8,
         max_depth: 3,
     }
