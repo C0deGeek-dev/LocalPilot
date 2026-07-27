@@ -28,6 +28,21 @@ use localpilot_dist::Version;
 /// Returns an error if the repository cannot be reached or parsed.
 pub async fn newer_release() -> anyhow::Result<Option<String>> {
     let current = Version::parse(current_version());
+    Ok(match (latest_release().await?, current) {
+        (Some((latest, name)), Some(cur)) if latest.key() > cur.key() => Some(name),
+        // Unparseable local version: surface the latest tag so the user can decide.
+        (Some((_, name)), None) => Some(name),
+        _ => None,
+    })
+}
+
+/// The newest release tag the repository publishes, whatever the running version
+/// is. `newer_release` filters this; callers that need "the current release"
+/// rather than "an upgrade" use it directly.
+///
+/// # Errors
+/// Returns an error if the repository cannot be reached or parsed.
+pub async fn latest_release() -> anyhow::Result<Option<(Version, String)>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
@@ -55,12 +70,7 @@ pub async fn newer_release() -> anyhow::Result<Option<String>> {
         }
     }
 
-    Ok(match (best, current) {
-        (Some((latest, name)), Some(cur)) if latest.key() > cur.key() => Some(name),
-        // Unparseable local version: surface the latest tag so the user can decide.
-        (Some((_, name)), None) => Some(name),
-        _ => None,
-    })
+    Ok(best)
 }
 
 /// A best-effort, cached "update available" notice for app startup. Checks the
@@ -130,7 +140,9 @@ pub async fn run(
         // not ask about a newer release: the user picked a version by installing
         // it, and the bootstrap installer runs this with stdin bound to a pipe,
         // where a confirmation prompt reads EOF and cancels.
-        let tag = current_tag();
+        let Some(tag) = stack_tag(out).await? else {
+            return Ok(());
+        };
         writeln!(out, "installing the stack at {tag} ...")?;
         return install_stack(&tag, out).await;
     }
@@ -164,13 +176,34 @@ pub async fn run(
     Ok(())
 }
 
-/// The release tag matching the running build, for installing companions at the
-/// version this binary was cut with.
-fn current_tag() -> String {
-    localpilot_dist::Version::parse(current_version()).map_or_else(
-        || current_version().to_string(),
-        |v| format!("v{}", v.to_dir_name()),
-    )
+/// The tag to install the stack from.
+///
+/// A release build names its own version. A build from source is stamped with a
+/// commit description, which is not a tag anyone published — asking for it would
+/// produce a 404 per tool. Those fall back to the newest published release, which
+/// is what "install the stack" means from a working tree.
+async fn stack_tag(out: &mut dyn Write) -> anyhow::Result<Option<String>> {
+    if let Some(version) = localpilot_dist::Version::parse(current_version()) {
+        return Ok(Some(format!("v{}", version.to_dir_name())));
+    }
+    match latest_release().await {
+        Ok(Some((_, tag))) => {
+            writeln!(
+                out,
+                "this build ({}) is not a release; using the newest published release",
+                current_version()
+            )?;
+            Ok(Some(tag))
+        }
+        Ok(None) => {
+            writeln!(out, "no published release to install the stack from")?;
+            Ok(None)
+        }
+        Err(error) => {
+            writeln!(out, "could not reach the release list: {error}")?;
+            Ok(None)
+        }
+    }
 }
 
 /// Install the release train at `tag`.
@@ -188,6 +221,18 @@ async fn install_stack(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     }
     if failed.is_empty() {
         writeln!(out, "\nthe stack is installed at {tag}")?;
+    } else if failed.len() == TRAIN.len() {
+        // "installed, except: <everything>" reads as partial success. Nothing
+        // landed, so say that, and do not point at a PATH entry holding nothing.
+        writeln!(
+            out,
+            "\nnothing was installed: no tool published a usable {tag} build for this platform."
+        )?;
+        writeln!(
+            out,
+            "check `localpilot update --check`, or install from source."
+        )?;
+        return Ok(());
     } else {
         writeln!(
             out,

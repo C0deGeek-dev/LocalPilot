@@ -64,12 +64,36 @@ who are not Rust developers, that is the barrier that matters. Five decisions.
    not to move. Every resolution carries its reason, because "why am I running
    this version" is the first question asked.
 
+6. **The resolved version is published to a `PATH`-visible directory.** A
+   resolver whose answer reaches only a `list` command is reporting, not
+   resolving: before this, `pin` and `rollback` changed what the tool *said* it
+   would run and not what ran. Every train tool's executable is now copied into
+   one shared `bin/` directory — one `PATH` entry for the whole stack — refreshed
+   after any change to the cache. A copy rather than a symlink (a privilege or
+   developer mode on Windows) or a hard link (cannot cross volumes), and replaced
+   by **rename-then-copy**, because Windows refuses to overwrite a running
+   executable but does permit renaming one aside.
+
+7. **The stack installs as a set; the installer script is only a bootstrap.** The
+   release train cuts every tool to one version and one tag, and they are tested
+   only together, so `update --all` installs all of them at one tag rather than
+   each tool carrying its own updater. Version skew between a CLI and the engine
+   it talks to fails silently, which is exactly the failure independent updaters
+   would make easy to reach.
+
+   The install scripts therefore fetch and verify **one** binary and hand off to
+   it. Reimplementing the cache layout and marker rules in shell *and* PowerShell
+   would be two more implementations of an on-disk contract that already has one —
+   and a script users pipe into a shell unread should stay short enough to read.
+
 One archive format — `.tar.gz` — is used on every platform including Windows,
 which has shipped `tar` since 2018. The `zip` crate no longer publishes a version
 compatible with this workspace's MSRV, and paying a dependency conflict to carry
 a second format and a second extractor was the worse trade. Releases before 2.6.0
 shipped a Windows `.zip`, so the updater's first installable Windows release is
-2.6.0; `install.md` says so.
+2.6.0; `install.md` says so. The bootstrap has the mirror-image constraint:
+`update --all` first exists in 2.6.0, so installing an older release leaves the
+companions uninstalled — the script reports that plainly rather than failing.
 
 
 ## ADR-0103: Subagents Are Declarative Data With Containment By Construction
