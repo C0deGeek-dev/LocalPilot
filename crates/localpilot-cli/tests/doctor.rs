@@ -12,7 +12,10 @@ mod mcp_env;
 #[path = "../src/output.rs"]
 mod output;
 
-use doctor::{ConfigPath, DoctorReport, McpServerStatus, ProviderStatus, ToolStatus, TrustState};
+use doctor::{
+    ConfigPath, DoctorReport, McpServerState, McpServerStatus, ProviderStatus, ToolStatus,
+    TrustState,
+};
 use localpilot_config::CredentialSource;
 
 #[test]
@@ -79,6 +82,7 @@ fn doctor_reports_mcp_servers_without_printing_raw_args() {
             protocol_version: Some("2025-06-18".to_string()),
             tool_count: 2,
             env_names: Vec::new(),
+            state: doctor::McpServerState::Connected,
             tools: vec![
                 "resolve-library-id".to_string(),
                 "get-library-docs".to_string(),
@@ -94,6 +98,7 @@ fn doctor_reports_mcp_servers_without_printing_raw_args() {
             protocol_version: None,
             tool_count: 0,
             env_names: Vec::new(),
+            state: doctor::McpServerState::StartupFailed,
             tools: Vec::new(),
             error: Some("spawn npx: token [REDACTED] failed".to_string()),
         },
@@ -103,7 +108,7 @@ fn doctor_reports_mcp_servers_without_printing_raw_args() {
 
     assert!(rendered.contains("mcp servers:"));
     assert!(rendered.contains("context7 (npx): connected; protocol 2025-06-18; 2 tool(s): resolve-library-id, get-library-docs"));
-    assert!(rendered.contains("failed; spawn npx: token [REDACTED] failed"));
+    assert!(rendered.contains("failed to start; spawn npx: token [REDACTED] failed"));
     assert!(rendered.contains("args: 2"));
     assert!(!rendered.contains("@upstash/context7-mcp"));
     assert!(!rendered.contains("secret-from-arg"));
@@ -121,6 +126,7 @@ fn doctor_json_includes_mcp_servers() {
         protocol_version: Some("2025-06-18".to_string()),
         tool_count: 1,
         env_names: Vec::new(),
+        state: doctor::McpServerState::Connected,
         tools: vec!["get-library-docs".to_string()],
         error: None,
     }];
@@ -208,4 +214,112 @@ fn report() -> DoctorReport {
         ],
         workspace_trust: TrustState::Unknown,
     }
+}
+
+/// One credential value that must never appear in any rendering, whatever state
+/// a server is in.
+const NEVER_PRINTED: &str = "super-secret-credential-value";
+
+/// Build one server in each of the four states `doctor` distinguishes, each
+/// carrying a configured variable name and — in the failure text — everything a
+/// careless implementation might have interpolated.
+fn four_states() -> Vec<McpServerStatus> {
+    let base = |name: &str, state: McpServerState, error: Option<&str>| McpServerStatus {
+        name: name.to_string(),
+        command: "npx".to_string(),
+        arg_count: 1,
+        command_available: state != McpServerState::CommandUnavailable,
+        connected: state == McpServerState::Connected,
+        protocol_version: (state == McpServerState::Connected).then(|| "2025-06-18".to_string()),
+        tool_count: 0,
+        tools: Vec::new(),
+        env_names: vec!["SERVICE_KEY".to_string()],
+        state,
+        error: error.map(str::to_string),
+    };
+    vec![
+        base(
+            "missing-command",
+            McpServerState::CommandUnavailable,
+            Some("command not found"),
+        ),
+        base(
+            "missing-credential",
+            McpServerState::CredentialMissing,
+            Some(
+                "environment variable SERVICE_KEY needs the credential \"my-alias\",                  which is not stored",
+            ),
+        ),
+        base(
+            "wont-start",
+            McpServerState::StartupFailed,
+            Some("spawn npx: no such file"),
+        ),
+        base("healthy", McpServerState::Connected, None),
+    ]
+}
+
+#[test]
+fn doctor_distinguishes_the_four_mcp_server_states() {
+    let mut report = report();
+    report.mcp_servers = four_states();
+    let rendered = doctor::render(&report);
+
+    // Each state reads differently, so a user can tell "you never installed the
+    // command" from "you never stored the credential" from "it crashed".
+    assert!(rendered.contains("missing-command (npx): command not found"));
+    assert!(rendered.contains("missing-credential (npx): credential missing"));
+    assert!(rendered.contains("wont-start (npx): failed to start"));
+    assert!(rendered.contains("healthy (npx): connected"));
+
+    // The credential-missing line names the variable and the alias, which is the
+    // whole point of the diagnostic.
+    assert!(rendered.contains("SERVICE_KEY"));
+    assert!(rendered.contains("my-alias"));
+
+    let json: serde_json::Value =
+        serde_json::from_str(&doctor::render_json(&report)).expect("doctor JSON parses");
+    let states: Vec<&str> = json["mcp_servers"]
+        .as_array()
+        .expect("servers array")
+        .iter()
+        .map(|server| server["state"].as_str().expect("state token"))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            "command_unavailable",
+            "credential_missing",
+            "startup_failed",
+            "connected"
+        ]
+    );
+}
+
+/// The invariant both renderings must enforce identically: a configured value
+/// never appears, in any state. Asserted against *both* so one cannot drift into
+/// printing what the other masks.
+#[test]
+fn no_rendering_prints_a_configured_environment_value() {
+    let mut report = report();
+    report.mcp_servers = four_states();
+    // Simulate the worst case: a server whose failure text somehow carried the
+    // value. Both renderings must still be clean of it after redaction upstream,
+    // and neither may add it back from `env_names`.
+    for server in &mut report.mcp_servers {
+        server.env_names.push("ANOTHER_KEY".to_string());
+    }
+
+    let human = doctor::render(&report);
+    let json = doctor::render_json(&report);
+
+    for rendering in [&human, &json] {
+        assert!(
+            !rendering.contains(NEVER_PRINTED),
+            "a credential value reached a doctor rendering: {rendering}"
+        );
+    }
+    // Names are reported in both, so the diagnostic stays actionable.
+    assert!(human.contains("SERVICE_KEY"));
+    assert!(json.contains("SERVICE_KEY"));
 }

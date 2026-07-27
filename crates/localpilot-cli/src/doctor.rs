@@ -122,6 +122,37 @@ pub struct ToolStatus {
     pub optional: bool,
 }
 
+/// What `doctor` could determine about one configured MCP server.
+///
+/// One classification drives both renderings, so the human and JSON views cannot
+/// disagree about a server's state — and, more importantly, cannot disagree
+/// about what is safe to print. Ordered by how early the check fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerState {
+    /// The configured command is not on `PATH`. Nothing else was attempted.
+    CommandUnavailable,
+    /// A configured environment entry references a credential that is not
+    /// stored. The server was deliberately not started.
+    CredentialMissing,
+    /// The process started but the handshake or tool listing failed.
+    StartupFailed,
+    /// Handshake and tool discovery both succeeded.
+    Connected,
+}
+
+impl McpServerState {
+    /// A short, secret-free label for the human rendering.
+    fn label(self) -> &'static str {
+        match self {
+            McpServerState::CommandUnavailable => "command not found",
+            McpServerState::CredentialMissing => "credential missing",
+            McpServerState::StartupFailed => "failed to start",
+            McpServerState::Connected => "connected",
+        }
+    }
+}
+
 /// One configured MCP server and the result of probing its stdio endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct McpServerStatus {
@@ -137,6 +168,9 @@ pub struct McpServerStatus {
     /// Names only — a configured value never appears in `doctor` output, in
     /// either rendering.
     pub env_names: Vec<String>,
+    /// What the probe concluded. `command_available` and `connected` are views
+    /// of this, kept for the established JSON shape.
+    pub state: McpServerState,
     pub error: Option<String>,
 }
 
@@ -360,7 +394,14 @@ pub fn render(report: &DoctorReport) -> String {
         } else {
             "command not found"
         };
-        if server.connected {
+        // Variable *names* are diagnostics; values never appear here or in the
+        // JSON rendering. The point of naming them is to say which one to fix.
+        let env = if server.env_names.is_empty() {
+            String::new()
+        } else {
+            format!("; env: {}", server.env_names.join(", "))
+        };
+        if server.state == McpServerState::Connected {
             let protocol = server
                 .protocol_version
                 .as_deref()
@@ -369,15 +410,20 @@ pub fn render(report: &DoctorReport) -> String {
             let tools = summarize_mcp_tools(&server.tools);
             let _ = writeln!(
                 s,
-                "  {} ({}): connected{protocol}; {} tool(s): {tools} ({args}; {command_state})",
-                server.name, server.command, server.tool_count
+                "  {} ({}): {}{protocol}; {} tool(s): {tools} ({args}; {command_state}{env})",
+                server.name,
+                server.command,
+                server.state.label(),
+                server.tool_count
             );
         } else {
             let error = server.error.as_deref().unwrap_or("unknown error");
             let _ = writeln!(
                 s,
-                "  {} ({}): failed; {error} ({args}; {command_state})",
-                server.name, server.command
+                "  {} ({}): {}; {error} ({args}; {command_state}{env})",
+                server.name,
+                server.command,
+                server.state.label()
             );
         }
     }
@@ -607,11 +653,12 @@ async fn probe_mcp_server(
         tool_count: 0,
         tools: Vec::new(),
         env_names: Vec::new(),
+        state: McpServerState::CommandUnavailable,
         error: None,
     };
 
     if !command_available {
-        status.error = Some("command not found".to_string());
+        status.error = Some(McpServerState::CommandUnavailable.label().to_string());
         return status;
     }
 
@@ -623,8 +670,15 @@ async fn probe_mcp_server(
         Err(error) => {
             // A resolution failure knows nothing about the overlay, so fall back
             // to the configured names — the point of reporting them is to say
-            // which variable needs attention.
+            // which variable needs attention. The error text names the variable
+            // and the credential alias, never a value.
             status.env_names = server.env.keys().cloned().collect();
+            status.state = match error {
+                crate::mcp_env::ServerLaunchError::Environment(_) => {
+                    McpServerState::CredentialMissing
+                }
+                crate::mcp_env::ServerLaunchError::Transport(_) => McpServerState::StartupFailed,
+            };
             status.error = Some(redact(&error.to_string()));
             return status;
         }
@@ -640,15 +694,18 @@ async fn probe_mcp_server(
 
     match tokio::time::timeout(MCP_DOCTOR_TIMEOUT, probe).await {
         Ok(Ok((server_status, tools))) => {
+            status.state = McpServerState::Connected;
             status.connected = true;
             status.protocol_version = Some(server_status.protocol_version);
             status.tool_count = tools.len();
             status.tools = tools.into_iter().map(|tool| tool.name).collect();
         }
         Ok(Err(error)) => {
+            status.state = McpServerState::StartupFailed;
             status.error = Some(redact(&error.to_string()));
         }
         Err(_) => {
+            status.state = McpServerState::StartupFailed;
             status.error = Some(format!("timed out after {}s", MCP_DOCTOR_TIMEOUT.as_secs()));
         }
     }
@@ -808,6 +865,7 @@ mod tests {
                 protocol_version: Some("2025-06-18".to_string()),
                 tool_count: 1,
                 env_names: Vec::new(),
+                state: McpServerState::Connected,
                 tools: vec!["get-library-docs".to_string()],
                 error: None,
             }],
