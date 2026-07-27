@@ -14,7 +14,7 @@ use std::time::Duration;
 use localpilot_config::{
     redact::redact, CliOverrides, ConfigPaths, CredentialSource, ProviderAuth,
 };
-use localpilot_mcp::{McpClient, StdioTransport, Transport};
+use localpilot_mcp::McpClient;
 use serde::Serialize;
 
 const MCP_DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -133,6 +133,10 @@ pub struct McpServerStatus {
     pub protocol_version: Option<String>,
     pub tool_count: usize,
     pub tools: Vec<String>,
+    /// Names of the environment variables this server is configured to receive.
+    /// Names only — a configured value never appears in `doctor` output, in
+    /// either rendering.
+    pub env_names: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -574,8 +578,9 @@ async fn mcp_servers() -> Vec<McpServerStatus> {
         return Vec::new();
     };
     let mut statuses = Vec::new();
+    let store = localpilot_config::CredentialStore::user();
     for (name, server) in &config.mcp.servers {
-        statuses.push(probe_mcp_server(name, &server.command, &server.args).await);
+        statuses.push(probe_mcp_server(name, server, &store).await);
     }
     statuses
 }
@@ -585,17 +590,23 @@ fn resolved_config() -> Option<localpilot_config::Config> {
     localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default()).ok()
 }
 
-async fn probe_mcp_server(name: &str, command: &str, args: &[String]) -> McpServerStatus {
+async fn probe_mcp_server(
+    name: &str,
+    server: &localpilot_config::McpServerConfig,
+    store: &localpilot_config::CredentialStore,
+) -> McpServerStatus {
+    let command = server.command.as_str();
     let command_available = command_available(command);
     let mut status = McpServerStatus {
         name: name.to_string(),
         command: command.to_string(),
-        arg_count: args.len(),
+        arg_count: server.args.len(),
         command_available,
         connected: false,
         protocol_version: None,
         tool_count: 0,
         tools: Vec::new(),
+        env_names: Vec::new(),
         error: None,
     };
 
@@ -604,8 +615,23 @@ async fn probe_mcp_server(name: &str, command: &str, args: &[String]) -> McpServ
         return status;
     }
 
+    // Launch through the same seam a live session uses, so `doctor` cannot report
+    // a server as healthy that the session would refuse to start (or the
+    // reverse). Names are safe to report; values never leave the overlay.
+    let (transport, environment) = match crate::mcp_env::spawn_server(server, store) {
+        Ok(launched) => launched,
+        Err(error) => {
+            // A resolution failure knows nothing about the overlay, so fall back
+            // to the configured names — the point of reporting them is to say
+            // which variable needs attention.
+            status.env_names = server.env.keys().cloned().collect();
+            status.error = Some(redact(&error.to_string()));
+            return status;
+        }
+    };
+    status.env_names = environment.names().map(str::to_string).collect();
+
     let probe = async {
-        let transport: Arc<dyn Transport> = Arc::new(StdioTransport::spawn(command, args)?);
         let client = McpClient::new(Arc::clone(&transport));
         let server_status = client.initialize().await?;
         let tools = client.list_tools().await?;
@@ -781,6 +807,7 @@ mod tests {
                 connected: true,
                 protocol_version: Some("2025-06-18".to_string()),
                 tool_count: 1,
+                env_names: Vec::new(),
                 tools: vec!["get-library-docs".to_string()],
                 error: None,
             }],

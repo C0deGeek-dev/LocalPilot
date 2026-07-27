@@ -22,6 +22,7 @@ mod learning_cmd;
 mod logging;
 mod login_cmd;
 mod mcp;
+mod mcp_env;
 mod memory_cmd;
 mod models_cmd;
 mod output;

@@ -14,6 +14,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as AsyncMutex;
 
+use localpilot_core::Secret;
+
 use crate::error::McpError;
 
 /// Windows `CREATE_NO_WINDOW`: give the server its own invisible console
@@ -61,13 +63,98 @@ struct StdioInner {
     stdout: BufReader<ChildStdout>,
 }
 
+/// One resolved environment entry for an MCP server.
+///
+/// The value is always wrapped, sensitive or not, so no entry can reach a log or
+/// a `Debug` render by accident. `sensitive` records whether the value came from
+/// the credential store or an explicit sensitive literal — that subset is what
+/// inbound responses are filtered against, since only a secret is worth the
+/// exact-match pass.
+#[derive(Clone)]
+pub struct ResolvedEnvEntry {
+    /// The environment variable name.
+    pub name: String,
+    /// The resolved value.
+    pub value: Secret,
+    /// Whether the value must be treated as a credential.
+    pub sensitive: bool,
+}
+
+impl std::fmt::Debug for ResolvedEnvEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The name and the sensitivity flag are safe to show; the value never is.
+        f.debug_struct("ResolvedEnvEntry")
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
+}
+
+/// A fully resolved environment overlay for one MCP server.
+///
+/// Deliberately config-agnostic: this crate never reads configuration or the
+/// credential store, it receives an already-resolved overlay. That keeps the
+/// resolution policy (which entry form means what, what a missing credential
+/// does) in one place in the CLI instead of splitting it across layers.
+#[derive(Debug, Clone, Default)]
+pub struct ServerEnvironment {
+    entries: Vec<ResolvedEnvEntry>,
+}
+
+impl ServerEnvironment {
+    /// Build an overlay from resolved entries.
+    #[must_use]
+    pub fn new(entries: Vec<ResolvedEnvEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// Whether the overlay adds nothing — the default, and the shape every
+    /// server configured before this existed still has.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many entries the overlay carries. Safe for diagnostics.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The configured variable names, in order. Safe for diagnostics — a name is
+    /// not a secret.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.name.as_str())
+    }
+
+    /// The sensitive values, for the inbound exact-value redaction pass.
+    pub fn secrets(&self) -> impl Iterator<Item = &Secret> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.sensitive)
+            .map(|entry| &entry.value)
+    }
+}
+
 impl StdioTransport {
-    /// Spawn `command` with `args` and connect to it over stdio.
+    /// Spawn `command` with `args` and connect to it over stdio, overlaying
+    /// `environment` on the environment this process passes to the child.
+    ///
+    /// The child starts from the inherited environment; each configured entry
+    /// then replaces any inherited variable of the same name. Note that "same
+    /// name" is the platform's own predicate — Windows matches environment names
+    /// case-insensitively, Linux and macOS do not — which is why configuration
+    /// refuses entries that differ only by case.
     ///
     /// # Errors
     /// Returns [`McpError::Transport`] if the process cannot be spawned or its
     /// stdio cannot be captured.
-    pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        environment: &ServerEnvironment,
+    ) -> Result<Self, McpError> {
         let mut builder = Command::new(command);
         builder
             .args(args)
@@ -75,6 +162,12 @@ impl StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // The single audited point a configured credential leaves its wrapper.
+        // Everything upstream keeps it inside `Secret`; everything downstream
+        // filters it back out of whatever the server sends us.
+        for entry in &environment.entries {
+            builder.env(&entry.name, entry.value.expose());
+        }
         // An MCP server lives for the whole session next to the interactive
         // TUI. Isolate it from the user's terminal: on Windows a shared
         // console would let it read `CONIN$` (stealing keystrokes) or re-cook

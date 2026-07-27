@@ -1,5 +1,6 @@
 ---
 source: crates/localpilot-cli/src/doctor.rs
+assertion_line: 825
 expression: render_json(&fixture())
 ---
 {
@@ -73,6 +74,7 @@ expression: render_json(&fixture())
       "tools": [
         "get-library-docs"
       ],
+      "env_names": [],
       "error": null
     }
   ],

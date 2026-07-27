@@ -17,7 +17,9 @@ mod transport;
 pub use client::{McpClient, McpServerStatus, McpTool, McpToolDescriptor};
 pub use error::McpError;
 pub use results::{extract_candidate_urls, SearchCallError, SearchProposals};
-pub use transport::{ScriptedTransport, StdioTransport, Transport};
+pub use transport::{
+    ResolvedEnvEntry, ScriptedTransport, ServerEnvironment, StdioTransport, Transport,
+};
 
 /// The MCP protocol version this client speaks.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";

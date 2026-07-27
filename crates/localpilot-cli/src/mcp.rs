@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
-use localpilot_config::{Config, McpServerConfig, ToolsConfig};
-use localpilot_mcp::{McpClient, McpError, McpTool, McpToolDescriptor, StdioTransport, Transport};
+use localpilot_config::{Config, CredentialStore, McpServerConfig, ToolsConfig};
+use localpilot_mcp::{McpClient, McpTool, McpToolDescriptor, Transport};
 use localpilot_sandbox::Effect;
 use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
+
+use crate::mcp_env::{spawn_server, ServerLaunchError};
 
 /// Connected MCP servers and the tools they advertise. The server processes stay
 /// alive for as long as this value is held, so a single connection backs many
@@ -160,9 +162,8 @@ pub fn install_broker(tools: &ToolsConfig, registry: &mut ToolRegistry) -> Optio
 
 async fn connect(
     server: &McpServerConfig,
-) -> Result<Vec<(McpToolDescriptor, Arc<dyn Transport>)>, McpError> {
-    let transport: Arc<dyn Transport> =
-        Arc::new(StdioTransport::spawn(&server.command, &server.args)?);
+) -> Result<Vec<(McpToolDescriptor, Arc<dyn Transport>)>, ServerLaunchError> {
+    let (transport, _environment) = spawn_server(server, &CredentialStore::user())?;
     let client = McpClient::new(Arc::clone(&transport));
     client.initialize().await?;
     let descriptors = client.list_tools().await?;

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use localpilot_config::{CliOverrides, Config, ConfigPaths};
+use localpilot_config::{CliOverrides, Config, ConfigPaths, CredentialStore};
 use localpilot_core::{Message, Role};
 use localpilot_llm::{ModelEvent, ModelProvider, ModelRequest, ProviderRegistry};
 use localpilot_mcp::{extract_candidate_urls, McpClient, SearchCallError};
@@ -821,8 +821,8 @@ async fn connect_search_tools(
             )?;
             continue;
         };
-        let transport = match localpilot_mcp::StdioTransport::spawn(&server.command, &server.args) {
-            Ok(transport) => Arc::new(transport) as Arc<dyn localpilot_mcp::Transport>,
+        let transport = match crate::mcp_env::spawn_server(server, &CredentialStore::user()) {
+            Ok((transport, _environment)) => transport,
             Err(error) => {
                 writeln!(out, "  search tool {label}: failed to start — {error}")?;
                 continue;

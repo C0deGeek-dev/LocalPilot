@@ -2,8 +2,12 @@
 #[path = "../src/doctor.rs"]
 mod doctor;
 
-// `doctor` references `crate::output::OutputFormat`; include the same module so the
-// standalone test build of `doctor.rs` resolves it (it is otherwise the bin crate's).
+// `doctor` references `crate::output::OutputFormat` and `crate::mcp_env`; include
+// the same modules so the standalone test build of `doctor.rs` resolves them
+// (they are otherwise the bin crate's).
+#[allow(dead_code)]
+#[path = "../src/mcp_env.rs"]
+mod mcp_env;
 #[allow(dead_code)]
 #[path = "../src/output.rs"]
 mod output;
@@ -74,6 +78,7 @@ fn doctor_reports_mcp_servers_without_printing_raw_args() {
             connected: true,
             protocol_version: Some("2025-06-18".to_string()),
             tool_count: 2,
+            env_names: Vec::new(),
             tools: vec![
                 "resolve-library-id".to_string(),
                 "get-library-docs".to_string(),
@@ -88,6 +93,7 @@ fn doctor_reports_mcp_servers_without_printing_raw_args() {
             connected: false,
             protocol_version: None,
             tool_count: 0,
+            env_names: Vec::new(),
             tools: Vec::new(),
             error: Some("spawn npx: token [REDACTED] failed".to_string()),
         },
@@ -114,6 +120,7 @@ fn doctor_json_includes_mcp_servers() {
         connected: true,
         protocol_version: Some("2025-06-18".to_string()),
         tool_count: 1,
+        env_names: Vec::new(),
         tools: vec!["get-library-docs".to_string()],
         error: None,
     }];

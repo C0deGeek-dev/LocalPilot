@@ -14,10 +14,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+localpilot-core = { path = "../localpilot-core" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-tools = { path = "../localpilot-tools" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-localpilot-core = { path = "../localpilot-core" }
