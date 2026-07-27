@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.5.0 - 2026-07-27
+
+Coordinated LocalX release.
+
 - **Releases now ship a wider set of prebuilt binaries, verified.** Alongside the
   existing Linux x86-64, macOS Apple Silicon, and Windows x86-64 archives, a
   release now carries a **static musl** build that runs on any Linux regardless
