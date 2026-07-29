@@ -19,6 +19,11 @@ path = "src/main.rs"
 # --features tui,learning --bin localpilot`; a default-feature run finds fewer of them.
 test = true
 
+[[example]]
+name = "interaction_lab"
+path = "examples/interaction_lab.rs"
+required-features = ["tui"]
+
 [features]
 # The interactive `chat` REPL links crossterm. It is opt-in so the default
 # binary (doctor/ask/print/harness/memory/export) links no terminal backend and
@@ -106,4 +111,6 @@ assert_cmd = { workspace = true }
 crossterm = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
 wiremock = { workspace = true }
