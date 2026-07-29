@@ -43,6 +43,13 @@ terminal profile's potentially saturated ANSI colors. `NO_COLOR` disables the
 palette while retaining non-color focus, selection, success, and error cues.
 These environment-only controls do not extend the stable TOML schema.
 
+The branch host uses the same resolved provider vision capability as the inline
+host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
+as an atomic placeholder; the encoded image is sent only with that submitted
+turn and is never written to prompt history. Provider declarations may set
+`supports_vision = true`, while `[discovery] vision_probe = true` enables the
+existing best-effort local-server capability probe.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

@@ -22,8 +22,13 @@ is SemVer-stable; the configuration schema stability policy is in
   submits through the existing `SessionRuntime`, streams stable timeline items,
   shows a live response-byte counter, denies tool approvals safely, and keeps an
   ordered visible pending-prompt queue. Escape cancels the current turn and then
-  drains that queue in submission order. Mouse routing, search/pickers and
-  detailed conversation surfaces remain branch work; the temporary selector is
+  drains that queue in submission order. The full-screen host also supports
+  application-owned drag selection/copy, wheel and page navigation, draggable
+  scrollbar navigation, precise composer clicks, boundary-aware history,
+  reverse and timeline search, fuzzy slash/file completion, atomic compact
+  multiline paste, and clipboard-image placeholders whose bytes stay out of
+  prompt history. Detailed pickers/conversation surfaces, accessibility and the
+  remaining terminal matrix remain branch work; the temporary selector is
   removed when feature parity is accepted.
 
 ## v2.6.0 - 2026-07-27

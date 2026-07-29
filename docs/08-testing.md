@@ -34,8 +34,9 @@ not need a real console:
 - `cargo test -p localpilot-terminal-ui` covers stable content anchors,
   mixed framed/collapsed/pinned projection equivalence, 10k-item visible-row
   virtualization, grapheme/display-width editing, selection fidelity, lifecycle
-  routing, held/new-output state, and 120x30/80x24/40x20 Ratatui `TestBackend`
-  frames across semantic themes and no-color mode.
+  routing, held/new-output state, atomic text/image editor units, completion and
+  search overlays, and 120x30/80x24/40x20 Ratatui `TestBackend` frames across
+  semantic themes and no-color mode.
 - Default-theme frame tests also lock the screenshot-measured application
   canvas, filled prompt/composer surfaces, one-edge composer focus, neutral
   scrollbar, outer margins, pending-prompt label, and identical in-flow/pinned
@@ -45,8 +46,9 @@ not need a real console:
   ANSI terminal-mode ordering, best-effort workspace Git metadata, and recorded
   RuntimeEvent replay through FollowBottom and Held viewport states. Host-state
   tests also cover plain-submit versus newline, Escape cancellation, ordered
-  pending typeahead, trust-gate Ctrl+C precedence, approval denial and local
-  prompt timestamps.
+  pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
+  timestamps, async workspace-file completion, reverse/timeline search routing,
+  mouse selection/scrollbar gestures and isolated clipboard-image attachments.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.
