@@ -795,6 +795,14 @@ impl AppState {
         ("quit", "Exit LocalPilot"),
     ];
 
+    /// The shipped interactive command catalog. Full-screen hosts adapt this
+    /// product-semantic source into their own picker model so command names and
+    /// descriptions cannot drift between the rollback and replacement UIs.
+    #[must_use]
+    pub const fn slash_commands() -> &'static [(&'static str, &'static str)] {
+        Self::SLASH_COMMANDS
+    }
+
     /// Matching suggestions for `query` (e.g. "/se" or "/"). A query is matched on
     /// the command name after the leading slash; "/" (or an empty query) lists
     /// every command.

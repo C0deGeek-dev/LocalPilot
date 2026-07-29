@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::editor::{EditorSnapshot, SubmittedInput};
+use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
 use crate::{
     sanitize_text, ActivityState, Editor, ItemId, ItemKind, SemanticRole, StyledRange, TextStyle,
@@ -112,12 +112,39 @@ pub enum InputAction {
     DeleteWordLeft,
     DeleteToLineStart,
     DeleteToLineEnd,
+    AcceptCompletion,
     Submit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InputOverlay {
     ReverseHistory(ReverseHistoryState),
+    Completion(CompletionState),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionState {
+    token: EditorToken,
+    items: Vec<CompletionItem>,
+    selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionCommand {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletionItem {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CompletionView<'a> {
+    pub items: &'a [CompletionItem],
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +264,7 @@ pub struct AppModel {
     pub stream_bytes: usize,
     pub dialog: Option<DialogState>,
     input_overlay: Option<InputOverlay>,
+    command_catalog: Vec<CompletionCommand>,
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
     active_tools: BTreeMap<String, ItemId>,
@@ -276,6 +304,7 @@ impl AppModel {
             stream_bytes: 0,
             dialog: None,
             input_overlay: None,
+            command_catalog: Vec::new(),
             active_assistant: None,
             active_reasoning: None,
             active_tools: BTreeMap::new(),
@@ -329,6 +358,7 @@ impl AppModel {
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 self.editor.insert(&text);
+                self.refresh_or_open_completion();
                 AppCommand::None
             }
             InputAction::Paste(text) if self.focus == Focus::Composer => {
@@ -403,6 +433,7 @@ impl AppModel {
                 self.editor.delete_to_line_end();
                 AppCommand::None
             }
+            InputAction::AcceptCompletion => AppCommand::None,
             InputAction::Submit if self.focus == Focus::Composer => self
                 .editor
                 .submit()
@@ -560,12 +591,34 @@ impl AppModel {
         self.input_overlay.is_some()
     }
 
+    #[must_use]
+    pub(crate) fn completion(&self) -> Option<CompletionView<'_>> {
+        let Some(InputOverlay::Completion(state)) = &self.input_overlay else {
+            return None;
+        };
+        Some(CompletionView {
+            items: &state.items,
+            selected: state.selected,
+        })
+    }
+
     fn dismiss_input_overlay(&mut self) {
         self.input_overlay = None;
     }
 
     pub fn seed_history(&mut self, history: Vec<String>) {
         self.editor.seed_history(history);
+    }
+
+    pub fn set_command_catalog(&mut self, commands: impl IntoIterator<Item = CompletionCommand>) {
+        self.command_catalog = commands
+            .into_iter()
+            .map(|command| CompletionCommand {
+                name: sanitize_text(&command.name),
+                description: sanitize_text(&command.description),
+            })
+            .filter(|command| !command.name.is_empty())
+            .collect();
     }
 
     /// Add one submitted prompt at its stable transcript position. The host
@@ -636,6 +689,9 @@ impl AppModel {
     }
 
     fn handle_overlay_input(&mut self, action: InputAction) -> AppCommand {
+        if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
+            return self.handle_completion_input(action);
+        }
         match action {
             InputAction::Escape => self.dismiss_input_overlay(),
             InputAction::Submit => {
@@ -682,9 +738,108 @@ impl AppModel {
             | InputAction::MoveTextEnd
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd
+            | InputAction::AcceptCompletion => {}
+        }
+        AppCommand::None
+    }
+
+    fn handle_completion_input(&mut self, action: InputAction) -> AppCommand {
+        match action {
+            InputAction::Escape => self.dismiss_input_overlay(),
+            InputAction::Submit | InputAction::AcceptCompletion => self.accept_completion(),
+            InputAction::MoveUp => self.move_completion(-1),
+            InputAction::MoveDown => self.move_completion(1),
+            InputAction::Insert(text) => {
+                self.editor.insert(&text);
+                self.refresh_or_open_completion();
+            }
+            InputAction::Paste(text) => {
+                self.editor.insert_paste(text);
+                self.refresh_or_open_completion();
+            }
+            InputAction::Backspace => {
+                self.editor.backspace();
+                self.refresh_or_open_completion();
+            }
+            InputAction::Delete => {
+                self.editor.delete();
+                self.refresh_or_open_completion();
+            }
+            InputAction::MoveLeft => {
+                self.editor.move_left();
+                self.refresh_or_open_completion();
+            }
+            InputAction::MoveRight => {
+                self.editor.move_right();
+                self.refresh_or_open_completion();
+            }
+            InputAction::MoveWordLeft => {
+                self.editor.move_word_left();
+                self.refresh_or_open_completion();
+            }
+            InputAction::MoveWordRight => {
+                self.editor.move_word_right();
+                self.refresh_or_open_completion();
+            }
+            InputAction::CancelOrExit
+            | InputAction::OpenReverseHistory
+            | InputAction::NavigateTimeline(_)
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd => {}
         }
         AppCommand::None
+    }
+
+    fn refresh_or_open_completion(&mut self) {
+        let Some(token) = self.editor.slash_token() else {
+            if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
+                self.dismiss_input_overlay();
+            }
+            return;
+        };
+        if self.command_catalog.is_empty() {
+            return;
+        }
+        let items = completion_items(&self.command_catalog, &token.query);
+        self.input_overlay = Some(InputOverlay::Completion(CompletionState {
+            token,
+            items,
+            selected: 0,
+        }));
+    }
+
+    fn move_completion(&mut self, delta: isize) {
+        let Some(InputOverlay::Completion(state)) = &mut self.input_overlay else {
+            return;
+        };
+        let len = state.items.len();
+        if len == 0 {
+            return;
+        }
+        state.selected = if delta < 0 {
+            state.selected.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (state.selected + 1) % len
+        };
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(InputOverlay::Completion(state)) = self.input_overlay.take() else {
+            return;
+        };
+        let Some(item) = state.items.get(state.selected) else {
+            return;
+        };
+        self.editor
+            .replace_range(state.token.range, &format!("/{}", item.name));
     }
 
     fn reverse_history_index(&self) -> Option<usize> {
@@ -823,6 +978,55 @@ impl AppModel {
     }
 }
 
+fn completion_items(catalog: &[CompletionCommand], query: &str) -> Vec<CompletionItem> {
+    let mut matches = catalog
+        .iter()
+        .enumerate()
+        .filter_map(|(order, command)| {
+            fuzzy_score(&command.name, query).map(|score| (score, order, command))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(score, order, _)| (*score, *order));
+    matches
+        .into_iter()
+        .map(|(_, _, command)| CompletionItem {
+            name: command.name.clone(),
+            description: command.description.clone(),
+        })
+        .collect()
+}
+
+fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let candidate = candidate.to_lowercase();
+    let query = query.to_lowercase();
+    let candidate_chars = candidate.chars().collect::<Vec<_>>();
+    let mut search_from = 0;
+    let mut first = None;
+    let mut previous = None;
+    let mut gaps = 0usize;
+    for needle in query.chars() {
+        let relative = candidate_chars[search_from..]
+            .iter()
+            .position(|character| *character == needle)?;
+        let found = search_from + relative;
+        first.get_or_insert(found);
+        if let Some(previous) = previous {
+            gaps = gaps.saturating_add(found.saturating_sub(previous + 1));
+        }
+        previous = Some(found);
+        search_from = found + 1;
+    }
+    let prefix_penalty = usize::from(!candidate.starts_with(&query)).saturating_mul(10_000);
+    Some(
+        prefix_penalty
+            .saturating_add(first.unwrap_or_default().saturating_mul(100))
+            .saturating_add(gaps),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +1047,13 @@ mod tests {
             },
             TerminalCapabilities::default(),
         )
+    }
+
+    fn command(name: &str, description: &str) -> CompletionCommand {
+        CompletionCommand {
+            name: name.to_string(),
+            description: description.to_string(),
+        }
     }
 
     #[test]
@@ -1094,6 +1305,73 @@ mod tests {
         assert!(!cancel.has_input_overlay());
         assert!(!cancel.exit_armed);
         assert!(!cancel.exit_requested);
+    }
+
+    #[test]
+    fn slash_completion_fuzzy_filters_and_accepts_without_submitting() {
+        let mut app = model();
+        app.set_command_catalog([
+            command("model", "Switch model"),
+            command("knowledge", "Query knowledge"),
+            command("compact", "Compact context"),
+        ]);
+        assert_eq!(
+            app.handle_input(InputAction::Insert("/knw".to_string()), 80),
+            AppCommand::None
+        );
+        let completion = app.completion().expect("completion");
+        assert_eq!(completion.items.len(), 1);
+        assert_eq!(completion.items[0].name, "knowledge");
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "/knowledge");
+        assert!(!app.has_input_overlay());
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("closed-picker Enter should submit");
+        };
+        assert_eq!(submitted.prompt, "/knowledge");
+    }
+
+    #[test]
+    fn slash_completion_navigation_accept_keys_and_escape_are_contained() {
+        let mut app = model();
+        app.set_command_catalog([
+            command("model", "Switch model"),
+            command("memory", "Inspect memory"),
+            command("remote", "Remote command fixture"),
+        ]);
+        let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        assert_eq!(app.completion().expect("completion").items[0].name, "model");
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.completion().expect("completion").selected, 1);
+        let _ = app.handle_input(InputAction::AcceptCompletion, 80);
+        assert_eq!(app.editor.text(), "/memory");
+
+        app.editor.replace_draft("");
+        let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert_eq!(app.editor.text(), "/mo");
+        assert!(!app.has_input_overlay());
+    }
+
+    #[test]
+    fn completion_escape_precedes_busy_work_interrupt() {
+        let mut app = model();
+        app.set_command_catalog([command("model", "Switch model")]);
+        app.begin_work();
+        let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        assert!(app.has_input_overlay());
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(
+            app.handle_input(InputAction::Escape, 80),
+            AppCommand::CancelWork
+        );
     }
 
     #[test]

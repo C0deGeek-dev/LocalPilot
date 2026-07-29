@@ -22,9 +22,9 @@ use crossterm::terminal::{
 };
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
-    render, AppCommand, AppModel, ColorSupport, ContentPoint, Header, HitMap, InputAction, ItemId,
-    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, SubmittedInput,
-    TerminalCapabilities, Theme, TimelineNavigation,
+    render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
+    InputAction, ItemId, KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState,
+    SubmittedInput, TerminalCapabilities, Theme, TimelineNavigation,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -100,6 +100,12 @@ pub(crate) async fn run(
     let mut terminal = Terminal::new(backend).context("initialize full-screen terminal")?;
     terminal.clear().context("clear full-screen terminal")?;
     let mut app = AppModel::new(header, capabilities);
+    app.set_command_catalog(localpilot_tui::AppState::slash_commands().iter().map(
+        |(name, description)| CompletionCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+        },
+    ));
     apply_host_preferences(&mut app);
     for event in startup_events {
         app.apply_runtime(map_runtime_event(event));
@@ -845,11 +851,13 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Char('r') if ctrl && !alt => Some(InputAction::OpenReverseHistory),
         KeyCode::Char('u') if ctrl && !alt => Some(InputAction::DeleteToLineStart),
         KeyCode::Char('w') if ctrl && !alt => Some(InputAction::DeleteWordLeft),
+        KeyCode::Char('y') if ctrl && !alt => Some(InputAction::AcceptCompletion),
         KeyCode::Char(character) if !ctrl && !alt => {
             Some(InputAction::Insert(character.to_string()))
         }
         KeyCode::Enter if alt || shift => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Enter => Some(InputAction::Submit),
+        KeyCode::Tab => Some(InputAction::AcceptCompletion),
         KeyCode::Esc => Some(InputAction::Escape),
         KeyCode::Backspace => Some(InputAction::Backspace),
         KeyCode::Delete => Some(InputAction::Delete),
@@ -1266,6 +1274,16 @@ mod tests {
                 KeyCode::Char('r'),
                 KeyModifiers::CONTROL,
                 InputAction::OpenReverseHistory,
+            ),
+            (
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL,
+                InputAction::AcceptCompletion,
+            ),
+            (
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+                InputAction::AcceptCompletion,
             ),
         ];
         for (code, modifiers, expected) in cases {

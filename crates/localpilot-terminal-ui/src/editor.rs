@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::sanitize_text;
@@ -42,6 +44,12 @@ pub(crate) struct EditorSnapshot {
     text: String,
     cursor: usize,
     pastes: Vec<ActivePaste>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditorToken {
+    pub range: Range<usize>,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +114,35 @@ impl Editor {
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_pastes.clear();
+    }
+
+    #[must_use]
+    pub(crate) fn slash_token(&self) -> Option<EditorToken> {
+        if !self.text.starts_with('/') || self.cursor == 0 {
+            return None;
+        }
+        let before = &self.text[..self.cursor];
+        if before.contains(char::is_whitespace) {
+            return None;
+        }
+        let end = self.text[self.cursor..]
+            .find(char::is_whitespace)
+            .map_or(self.text.len(), |offset| self.cursor + offset);
+        Some(EditorToken {
+            range: 0..end,
+            query: before[1..].to_string(),
+        })
+    }
+
+    pub(crate) fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        let replacement = sanitize_text(replacement);
+        let start = self.delete_range_atomic(range.start, range.end);
+        self.shift_pastes_at_or_after(start, replacement.len());
+        self.text.insert_str(start, &replacement);
+        self.cursor = start.saturating_add(replacement.len());
     }
 
     #[must_use]
@@ -917,5 +954,42 @@ mod tests {
         editor.insert_paste("one\ntwo\nthree");
         assert_eq!(editor.text(), "one\ntwo\nthree");
         assert!(editor.pastes.is_empty());
+    }
+
+    #[test]
+    fn slash_tokens_are_only_the_leading_unspaced_command_word() {
+        let mut editor = Editor::default();
+        editor.insert("/knw suffix");
+        editor.move_text_start();
+        editor.move_right();
+        editor.move_right();
+        editor.move_right();
+        editor.move_right();
+        assert_eq!(
+            editor.slash_token(),
+            Some(EditorToken {
+                range: 0..4,
+                query: "knw".to_string(),
+            })
+        );
+
+        editor.move_text_end();
+        assert!(editor.slash_token().is_none());
+        editor.replace_draft("prefix /knw");
+        assert!(editor.slash_token().is_none());
+    }
+
+    #[test]
+    fn token_replacement_expands_across_any_intersected_paste_unit() {
+        let mut editor = Editor::default();
+        editor.insert("x");
+        editor.insert_paste(twelve_line_paste());
+        let inside_paste = 2;
+        editor.insert("y");
+
+        editor.replace_range(0..inside_paste, "z");
+        assert_eq!(editor.text(), "zy");
+        assert!(editor.pastes.is_empty());
+        assert_eq!(editor.cursor(), 1);
     }
 }

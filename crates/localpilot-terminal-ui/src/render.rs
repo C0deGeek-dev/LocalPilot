@@ -21,6 +21,12 @@ pub struct TabHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionHit {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbarGeometry {
     pub track: Rect,
     pub thumb: Option<Rect>,
@@ -114,6 +120,7 @@ pub struct HitMap {
     pub tabs: Vec<TabHit>,
     pub timeline: Rect,
     pub timeline_rows: Vec<TimelineRowHit>,
+    pub completion_rows: Vec<CompletionHit>,
     pub scrollbar: ScrollbarGeometry,
     pub composer: Rect,
     pub editor_width: u16,
@@ -155,6 +162,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             tabs: Vec::new(),
             timeline: Rect::default(),
             timeline_rows: Vec::new(),
+            completion_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -163,7 +171,11 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     };
 
     let tabs = render_tabs(frame, layout.tabs, app);
-    let (scrollbar, timeline_rows) = render_timeline(frame, layout, app);
+    let (scrollbar, mut timeline_rows) = render_timeline(frame, layout, app);
+    let (completion_area, completion_rows) = render_completion(frame, layout.timeline_content, app);
+    if let Some(completion_area) = completion_area {
+        timeline_rows.retain(|hit| hit.y < completion_area.y);
+    }
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
@@ -173,11 +185,102 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         tabs,
         timeline: layout.timeline_content,
         timeline_rows,
+        completion_rows,
         scrollbar,
         composer: layout.composer_content,
         editor_width,
         composer_scroll,
     }
+}
+
+fn render_completion(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+) -> (Option<Rect>, Vec<CompletionHit>) {
+    let Some(completion) = app.completion() else {
+        return (None, Vec::new());
+    };
+    let visible = completion
+        .items
+        .len()
+        .clamp(1, 8)
+        .min(usize::from(area.height));
+    if visible == 0 {
+        return (None, Vec::new());
+    }
+    let height = u16::try_from(visible).unwrap_or(area.height);
+    let picker = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(height),
+        area.width,
+        height,
+    );
+    frame.render_widget(Clear, picker);
+    frame.render_widget(
+        Block::default().style(theme(app).ui(UiRole::Surface)),
+        picker,
+    );
+
+    if completion.items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No matching commands").style(theme(app).ui(UiRole::Muted)),
+            picker,
+        );
+        return (Some(picker), Vec::new());
+    }
+
+    let start = completion
+        .selected
+        .saturating_add(1)
+        .saturating_sub(visible);
+    let mut hits = Vec::with_capacity(visible);
+    for (offset, (index, item)) in completion
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .enumerate()
+    {
+        let row = Rect::new(
+            picker.x,
+            picker
+                .y
+                .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
+            picker.width,
+            1,
+        );
+        let selected = index == completion.selected;
+        let prefix = if selected { "❯ " } else { "  " };
+        let label = format!("/{name}", name = item.name);
+        let fixed =
+            UnicodeWidthStr::width(prefix).saturating_add(UnicodeWidthStr::width(label.as_str()));
+        let description_budget = usize::from(row.width).saturating_sub(fixed.saturating_add(2));
+        let description = truncate_end(
+            &item.description,
+            u16::try_from(description_budget).unwrap_or(u16::MAX),
+        );
+        let gap = usize::from(row.width)
+            .saturating_sub(fixed.saturating_add(UnicodeWidthStr::width(description.as_str())));
+        let line = Line::from(vec![
+            Span::styled(
+                prefix,
+                if selected {
+                    theme(app).ui(UiRole::Focus)
+                } else {
+                    theme(app).ui(UiRole::Muted)
+                },
+            ),
+            Span::styled(label, theme(app).ui(UiRole::Foreground)),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(description, theme(app).ui(UiRole::Muted)),
+        ])
+        .style(theme(app).ui(UiRole::Surface));
+        line.render(row, frame.buffer_mut());
+        hits.push(CompletionHit { index, area: row });
+    }
+    (Some(picker), hits)
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Vec<TabHit> {
@@ -796,6 +899,13 @@ fn footer_state(app: &AppModel) -> String {
     if app.reverse_search().is_some() {
         return "history search · type to filter · Esc keep match".to_string();
     }
+    if let Some(completion) = app.completion() {
+        let detail = completion
+            .items
+            .get(completion.selected)
+            .map_or("command completion", |item| item.description.as_str());
+        return format!("{detail} · ↑↓ navigate · Enter/Tab accept · Esc close");
+    }
     match (app.work, app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
         (crate::WorkState::Idle, false) if held && new_output => {
@@ -1413,6 +1523,39 @@ mod tests {
         let line = buffer_line(terminal.backend().buffer(), layout.composer_content.y);
         assert!(line.contains("(history-search)`this': remember this prompt"));
         assert!(footer_state(&app).contains("Esc keep match"));
+    }
+
+    #[test]
+    fn command_completion_floats_above_composer_and_reports_candidate_hits() {
+        let mut app = model();
+        app.set_command_catalog([
+            crate::CompletionCommand {
+                name: "model".to_string(),
+                description: "Switch provider or model".to_string(),
+            },
+            crate::CompletionCommand {
+                name: "memory".to_string(),
+                description: "Inspect memory".to_string(),
+            },
+        ]);
+        let _ = app.handle_input(crate::InputAction::Insert("/mo".to_string()), 76);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw completion");
+        let hit_map = hit_map.expect("hit map");
+        assert_eq!(hit_map.completion_rows.len(), 2);
+        assert!(hit_map
+            .completion_rows
+            .iter()
+            .all(|hit| hit.area.bottom() <= hit_map.frame.expect("layout").status.y));
+        let selected = buffer_line(
+            terminal.backend().buffer(),
+            hit_map.completion_rows[0].area.y,
+        );
+        assert!(selected.contains("❯ /model"));
+        assert!(selected.contains("Switch provider or model"));
     }
 
     #[test]

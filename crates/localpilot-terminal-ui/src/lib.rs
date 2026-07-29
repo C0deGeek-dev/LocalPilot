@@ -16,13 +16,13 @@ mod theme;
 mod timeline;
 
 pub use app::{
-    AppCommand, AppModel, ColorSupport, DialogState, Focus, Header, InputAction, KeyboardSupport,
-    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities,
-    TimelineNavigation, WorkState,
+    AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, Focus, Header, InputAction,
+    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId,
+    TerminalCapabilities, TimelineNavigation, WorkState,
 };
 pub use editor::{Editor, EditorRow, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
-pub use render::{render, HitMap, ScrollbarGeometry, TabHit, TimelineRowHit};
+pub use render::{render, CompletionHit, HitMap, ScrollbarGeometry, TabHit, TimelineRowHit};
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
