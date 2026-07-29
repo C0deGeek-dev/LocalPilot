@@ -198,6 +198,7 @@ pub struct AppModel {
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
     active_tools: BTreeMap<String, ItemId>,
+    active_insert_before: Option<ItemId>,
 }
 
 impl AppModel {
@@ -235,6 +236,7 @@ impl AppModel {
             active_assistant: None,
             active_reasoning: None,
             active_tools: BTreeMap::new(),
+            active_insert_before: None,
         }
     }
 
@@ -311,17 +313,17 @@ impl AppModel {
             RuntimeUpdate::Text(text) => {
                 self.stream_bytes = self.stream_bytes.saturating_add(text.len());
                 if !self.append_active(self.active_assistant, &text) {
-                    self.active_assistant = self.timeline.push(ItemKind::Assistant, text);
+                    self.active_assistant = self.push_runtime_item(ItemKind::Assistant, text);
                 }
             }
             RuntimeUpdate::Reasoning(text) => {
                 self.stream_bytes = self.stream_bytes.saturating_add(text.len());
                 if !self.append_active(self.active_reasoning, &text) {
-                    self.active_reasoning = self.timeline.push(ItemKind::Reasoning, text);
+                    self.active_reasoning = self.push_runtime_item(ItemKind::Reasoning, text);
                 }
             }
             RuntimeUpdate::ToolStarted { id, name } => {
-                if let Some(item) = self.timeline.push(ItemKind::Tool, name) {
+                if let Some(item) = self.push_runtime_item(ItemKind::Tool, name) {
                     let _ = self
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
@@ -350,7 +352,7 @@ impl AppModel {
                     let _ = self.timeline.set_activity(item, Some(activity));
                     self.style_activity(item, activity);
                 } else if let Some(item) =
-                    self.timeline.push(ItemKind::Tool, format!("{name}{text}"))
+                    self.push_runtime_item(ItemKind::Tool, format!("{name}{text}"))
                 {
                     let activity = if is_error {
                         ActivityState::Error
@@ -369,7 +371,7 @@ impl AppModel {
                 self.context_usage = Some((used, limit));
             }
             RuntimeUpdate::Warning(message) | RuntimeUpdate::QuotaPaused(message) => {
-                let _ = self.timeline.push(ItemKind::Notice, message);
+                let _ = self.push_runtime_item(ItemKind::Notice, message);
             }
             RuntimeUpdate::Plan(plan) => {
                 self.plan = plan
@@ -382,13 +384,12 @@ impl AppModel {
             }
             RuntimeUpdate::Recovery(state) => {
                 if state != RecoveryState::Healthy {
-                    let _ = self
-                        .timeline
-                        .push(ItemKind::Notice, format!("recovery: {state:?}"));
+                    let _ =
+                        self.push_runtime_item(ItemKind::Notice, format!("recovery: {state:?}"));
                 }
             }
             RuntimeUpdate::ToolStuck { name, count } => {
-                let _ = self.timeline.push(
+                let _ = self.push_runtime_item(
                     ItemKind::Notice,
                     format!("tool {name} stopped after {count} repeated failures"),
                 );
@@ -399,6 +400,7 @@ impl AppModel {
                 self.active_assistant = None;
                 self.active_reasoning = None;
                 self.active_tools.clear();
+                self.active_insert_before = None;
             }
         }
     }
@@ -411,6 +413,12 @@ impl AppModel {
         self.active_reasoning = None;
         self.active_tools.clear();
         self.stream_bytes = 0;
+        self.active_insert_before = None;
+    }
+
+    pub fn begin_work_before(&mut self, item: Option<ItemId>) {
+        self.begin_work();
+        self.active_insert_before = item;
     }
 
     pub fn seed_history(&mut self, history: Vec<String>) {
@@ -429,6 +437,12 @@ impl AppModel {
         let id = self.timeline.push(ItemKind::User, text)?;
         let _ = self.timeline.set_trailing(id, trailing);
         let _ = self.timeline.set_pending(id, pending);
+        if pending
+            && matches!(self.work, WorkState::Busy { .. })
+            && self.active_insert_before.is_none()
+        {
+            self.active_insert_before = Some(id);
+        }
         Some(id)
     }
 
@@ -465,8 +479,21 @@ impl AppModel {
         self.dialog = None;
     }
 
+    pub fn disarm_exit(&mut self) {
+        self.exit_armed = false;
+    }
+
     fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
         active.is_some_and(|id| self.timeline.append_text(id, text))
+    }
+
+    fn push_runtime_item(&mut self, kind: ItemKind, text: impl Into<String>) -> Option<ItemId> {
+        let text = text.into();
+        if let Some(before) = self.active_insert_before {
+            self.timeline.insert_before(before, kind, text)
+        } else {
+            self.timeline.push(kind, text)
+        }
     }
 
     fn style_active_transcript(&mut self) {
@@ -703,6 +730,59 @@ mod tests {
                 .trailing
                 .as_deref(),
             Some("12:34")
+        );
+    }
+
+    #[test]
+    fn queued_prompts_stay_after_their_own_active_response() {
+        let mut app = model();
+        let active = app
+            .append_prompt("active", Some("12:00".to_string()), false)
+            .expect("active");
+        app.begin_work();
+        app.apply_runtime(RuntimeUpdate::Text("first ".to_string()));
+        let queued_a = app
+            .append_prompt("queued a", Some("12:01".to_string()), true)
+            .expect("queued a");
+        let queued_b = app
+            .append_prompt("queued b", Some("12:02".to_string()), true)
+            .expect("queued b");
+        app.apply_runtime(RuntimeUpdate::Text("response".to_string()));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool".to_string(),
+            name: "inspect".to_string(),
+        });
+
+        let ids = app
+            .timeline
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids[0], active);
+        assert_eq!(ids[ids.len() - 2..], [queued_a, queued_b]);
+        assert_eq!(app.timeline.items()[1].text, "first response");
+
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        assert!(app.activate_prompt(queued_a));
+        app.begin_work_before(Some(queued_b));
+        app.apply_runtime(RuntimeUpdate::Text("answer a".to_string()));
+        let texts = app
+            .timeline
+            .items()
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "active",
+                "first response",
+                "inspect",
+                "queued a",
+                "answer a",
+                "queued b"
+            ]
         );
     }
 

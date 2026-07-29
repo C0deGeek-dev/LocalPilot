@@ -17,9 +17,14 @@ is SemVer-stable; the configuration schema stability policy is in
   grapheme/display-width editor geometry, a provider-neutral runtime-
   event adapter, transactional terminal restore, and contextual Ctrl+C handling:
   copy selected text, cancel active work when no text is selected, and exit only
-  on a consecutive second press. Runtime submission, interaction routing and
-  detailed conversation surfaces are still branch work; the temporary selector
-  is removed when feature parity is accepted.
+  on a consecutive second press. The branch host now draws before workspace
+  projections, restores the workspace-trust gate and durable prompt history,
+  submits through the existing `SessionRuntime`, streams stable timeline items,
+  shows a live response-byte counter, denies tool approvals safely, and keeps an
+  ordered visible pending-prompt queue. Escape cancels the current turn and then
+  drains that queue in submission order. Mouse routing, search/pickers and
+  detailed conversation surfaces remain branch work; the temporary selector is
+  removed when feature parity is accepted.
 
 ## v2.6.0 - 2026-07-27
 

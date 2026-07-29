@@ -106,6 +106,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 serde_yaml = "=0.9.34"
 thiserror = "=2.0.9"
+time = { version = "=0.3.37", features = ["local-offset"] }
 toml = "=0.8.23"
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }

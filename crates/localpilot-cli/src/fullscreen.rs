@@ -1,7 +1,9 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
+use std::collections::VecDeque;
 use std::io::{self, Stdout, Write};
 use std::panic;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -17,24 +19,42 @@ use crossterm::terminal::{
     self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use localpilot_harness::{ModelHealth, RuntimeEvent, StopReason};
+use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
-    render, AppCommand, AppModel, ColorSupport, Header, InputAction, KeyboardSupport, PlanEntry,
-    RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities, Theme,
+    render, AppCommand, AppModel, ColorSupport, Header, InputAction, ItemId, KeyboardSupport,
+    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities, Theme,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{is_cancel, is_key_action};
+use crate::repl::ApprovalCall;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn run(
+pub(crate) struct HostContext<'a> {
+    pub(crate) runtime: &'a mut SessionRuntime,
+    pub(crate) approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
+    pub(crate) cwd: &'a Path,
+    pub(crate) history: &'a localpilot_store::PromptHistory,
+    pub(crate) trust_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedPrompt {
+    text: String,
+    item_id: ItemId,
+}
+
+pub(crate) async fn run(
     header: Header,
     startup_events: impl IntoIterator<Item = RuntimeEvent>,
+    context: HostContext<'_>,
 ) -> Result<()> {
     install_panic_restore_hook();
     let (mut modes, capabilities) = TerminalModes::enter()?;
@@ -46,7 +66,18 @@ pub(crate) fn run(
     for event in startup_events {
         app.apply_runtime(map_runtime_event(event));
     }
-    let result = run_idle_loop(&mut terminal, &mut app);
+    if context.trust_required {
+        app.require_workspace_trust(context.cwd.display().to_string());
+    }
+    // Seat an immediately useful frame before reading even the bounded global
+    // history store. Workspace scans stay out of this startup seam entirely.
+    let _ = draw_synchronized(&mut terminal, &app)?;
+    let history_entries = context.history.load();
+    app.seed_history(localpilot_store::project_texts(
+        &history_entries,
+        context.cwd,
+    ));
+    let result = run_event_loop(&mut terminal, &mut app, context).await;
     let _ = terminal.show_cursor();
     drop(terminal);
     modes.restore();
@@ -69,16 +100,32 @@ fn apply_host_preferences(app: &mut AppModel) {
     }
 }
 
-fn run_idle_loop(
+async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
+    context: HostContext<'_>,
 ) -> Result<()> {
+    let HostContext {
+        runtime,
+        approval_rx,
+        cwd,
+        history,
+        trust_required: _,
+    } = context;
+    let mut queue = VecDeque::new();
     while !app.exit_requested {
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
             continue;
         }
-        match event::read().context("read full-screen terminal event")? {
+        let next = event::read().context("read full-screen terminal event")?;
+        if app.workspace_trust_pending() {
+            if handle_trust_event(app, next, cwd) {
+                break;
+            }
+            continue;
+        }
+        match next {
             Event::Key(key) if is_key_action(key) => {
                 let Some(action) = map_key(key) else {
                     continue;
@@ -86,7 +133,33 @@ fn run_idle_loop(
                 match app.handle_input(action, hit_map.editor_width) {
                     AppCommand::Exit => break,
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
-                    AppCommand::None | AppCommand::CancelWork | AppCommand::Submit(_) => {}
+                    AppCommand::Submit(prompt) => {
+                        let Some(item_id) =
+                            app.append_prompt(prompt.clone(), Some(local_prompt_time()), false)
+                        else {
+                            continue;
+                        };
+                        persist_prompt(app, history, cwd, &prompt);
+                        if drive_prompt_chain(
+                            terminal,
+                            app,
+                            runtime,
+                            approval_rx,
+                            QueuedPrompt {
+                                text: prompt,
+                                item_id,
+                            },
+                            &mut queue,
+                            history,
+                            cwd,
+                            hit_map.editor_width,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
+                    }
+                    AppCommand::None | AppCommand::CancelWork => {}
                 }
             }
             Event::Paste(text) => {
@@ -100,6 +173,271 @@ fn run_idle_loop(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_prompt_chain(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    first: QueuedPrompt,
+    queue: &mut VecDeque<QueuedPrompt>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    mut editor_width: u16,
+) -> Result<bool> {
+    let mut current = Some(first);
+    while let Some(prompt) = current {
+        let _ = app.activate_prompt(prompt.item_id);
+        app.begin_work_before(queue.front().map(|queued| queued.item_id));
+        if drive_turn(
+            terminal,
+            app,
+            runtime,
+            approval_rx,
+            &prompt.text,
+            editor_width,
+            queue,
+            history,
+            cwd,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+        editor_width = draw_synchronized(terminal, app)?.editor_width;
+        current = queue.pop_front();
+    }
+    Ok(false)
+}
+
+fn handle_trust_event(app: &mut AppModel, event: Event, cwd: &Path) -> bool {
+    let Event::Key(key) = event else {
+        if matches!(event, Event::Paste(_)) {
+            app.disarm_exit();
+        }
+        return false;
+    };
+    if !is_key_action(key) {
+        return false;
+    }
+    if !is_cancel(key) {
+        app.disarm_exit();
+    }
+    match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+            crate::trust::remember(cwd);
+            app.clear_dialog();
+            false
+        }
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => true,
+        _ if is_cancel(key) => matches!(
+            app.handle_input(InputAction::CancelOrExit, 1),
+            AppCommand::Exit
+        ),
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
+async fn drive_turn(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompt: &str,
+    initial_editor_width: u16,
+    queue: &mut VecDeque<QueuedPrompt>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+) -> Result<bool> {
+    let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
+    let cancel = CancellationToken::new();
+    let operation = runtime.run_turn(prompt, &events, &cancel);
+    tokio::pin!(operation);
+    let mut pending: Option<oneshot::Sender<bool>> = None;
+    let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
+    let mut editor_width = initial_editor_width;
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                for _ in 0..64 {
+                    if !event::poll(Duration::ZERO).context("poll full-screen turn input")? {
+                        break;
+                    }
+                    let next = event::read().context("read full-screen turn input")?;
+                    let exit = if pending.is_some() {
+                        handle_approval_event(app, next, &mut pending, &cancel)
+                    } else {
+                        handle_turn_event(
+                            app,
+                            next,
+                            &cancel,
+                            editor_width,
+                            queue,
+                            history,
+                            cwd,
+                        )
+                    };
+                    if exit {
+                        cancel.cancel();
+                        deny_pending(app, &mut pending);
+                        return Ok(true);
+                    }
+                }
+                editor_width = draw_synchronized(terminal, app)?.editor_width;
+            }
+            reason = &mut operation => {
+                drain_runtime_events(app, &mut rx);
+                app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
+                deny_pending(app, &mut pending);
+                let _ = draw_synchronized(terminal, app)?;
+                return Ok(false);
+            }
+            Some(call) = approval_rx.recv(), if pending.is_none() => {
+                app.request_approval(
+                    call.request.tool,
+                    call.request.target,
+                    call.request.risk_class,
+                );
+                pending = Some(call.reply);
+            }
+            received = rx.recv() => {
+                match received {
+                    Ok(event) => app.apply_runtime(map_runtime_event(event)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {}
+                }
+            }
+        }
+    }
+}
+
+fn handle_turn_event(
+    app: &mut AppModel,
+    event: Event,
+    cancel: &CancellationToken,
+    editor_width: u16,
+    queue: &mut VecDeque<QueuedPrompt>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+) -> bool {
+    match event {
+        Event::Key(key) if is_key_action(key) => {
+            let Some(action) = map_key(key) else {
+                return false;
+            };
+            match app.handle_input(action, editor_width) {
+                AppCommand::Exit => {
+                    cancel.cancel();
+                    true
+                }
+                AppCommand::CancelWork => {
+                    cancel.cancel();
+                    false
+                }
+                AppCommand::Copy(text) => {
+                    copy_to_clipboard(app, text);
+                    false
+                }
+                AppCommand::Submit(prompt) => {
+                    if let Some(item_id) =
+                        app.append_prompt(prompt.clone(), Some(local_prompt_time()), true)
+                    {
+                        persist_prompt(app, history, cwd, &prompt);
+                        queue.push_back(QueuedPrompt {
+                            text: prompt,
+                            item_id,
+                        });
+                    }
+                    false
+                }
+                AppCommand::None => false,
+            }
+        }
+        Event::Paste(text) => {
+            let _ = app.handle_input(InputAction::Insert(text), editor_width);
+            false
+        }
+        Event::FocusGained
+        | Event::FocusLost
+        | Event::Mouse(_)
+        | Event::Resize(_, _)
+        | Event::Key(_) => false,
+    }
+}
+
+fn persist_prompt(
+    app: &mut AppModel,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    prompt: &str,
+) {
+    if let Err(error) = history.append(prompt, &[], cwd) {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "prompt history could not be saved: {error}"
+        )));
+    }
+}
+
+fn handle_approval_event(
+    app: &mut AppModel,
+    event: Event,
+    pending: &mut Option<oneshot::Sender<bool>>,
+    cancel: &CancellationToken,
+) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if !is_key_action(key) {
+        return false;
+    }
+    if is_cancel(key) {
+        let command = app.handle_input(InputAction::CancelOrExit, 1);
+        deny_pending(app, pending);
+        cancel.cancel();
+        return command == AppCommand::Exit;
+    }
+    let answer = match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(true),
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(false),
+        _ => None,
+    };
+    if let Some(answer) = answer {
+        if let Some(reply) = pending.take() {
+            let _ = reply.send(answer);
+        }
+        app.clear_dialog();
+    }
+    false
+}
+
+fn deny_pending(app: &mut AppModel, pending: &mut Option<oneshot::Sender<bool>>) {
+    if let Some(reply) = pending.take() {
+        let _ = reply.send(false);
+    }
+    app.clear_dialog();
+}
+
+fn drain_runtime_events(app: &mut AppModel, rx: &mut broadcast::Receiver<RuntimeEvent>) {
+    loop {
+        match rx.try_recv() {
+            Ok(event) => app.apply_runtime(map_runtime_event(event)),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                break
+            }
+        }
+    }
+}
+
+fn local_prompt_time() -> String {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!("{:02}:{:02}", now.hour(), now.minute())
 }
 
 fn copy_to_clipboard(app: &mut AppModel, text: String) {
@@ -139,6 +477,8 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
             Some(InputAction::Insert(character.to_string()))
         }
         KeyCode::Enter if alt || shift => Some(InputAction::Insert("\n".to_string())),
+        KeyCode::Enter => Some(InputAction::Submit),
+        KeyCode::Esc => Some(InputAction::InterruptWork),
         KeyCode::Backspace => Some(InputAction::Backspace),
         KeyCode::Delete => Some(InputAction::Delete),
         KeyCode::Left => Some(InputAction::MoveLeft),
@@ -321,12 +661,159 @@ mod tests {
         }
     }
 
+    fn app() -> AppModel {
+        AppModel::new(
+            Header {
+                version: "0".to_string(),
+                provider: "fixture".to_string(),
+                model: "fixture-model".to_string(),
+                workspace: "fixture-workspace".to_string(),
+                branch: Some("fixture-branch".to_string()),
+                workspace_dirty: Some(true),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
+                session_id: "fixture-session".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        )
+    }
+
     #[test]
     fn ctrl_c_maps_to_contextual_interrupt_handling() {
         assert_eq!(
             map_key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(InputAction::CancelOrExit)
         );
+    }
+
+    #[test]
+    fn enter_submits_and_escape_maps_to_work_interrupt() {
+        assert_eq!(
+            map_key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(InputAction::Submit)
+        );
+        assert_eq!(
+            map_key(press(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(InputAction::InterruptWork)
+        );
+        assert_eq!(
+            map_key(press(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(InputAction::Insert("\n".to_string()))
+        );
+    }
+
+    #[test]
+    fn active_turn_queues_typeahead_and_escape_cancels_real_token() {
+        let mut app = app();
+        app.begin_work();
+        app.editor.insert("next prompt");
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cwd = Path::new("fixture");
+        let mut queue = VecDeque::new();
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            cwd,
+        ));
+        assert!(app.editor.text().is_empty());
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.front().expect("queued").text, "next prompt");
+        assert!(
+            app.timeline
+                .item(queue.front().expect("queued").item_id)
+                .expect("queued item")
+                .pending
+        );
+        assert!(!cancel.is_cancelled());
+
+        app.editor.insert("third prompt");
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            cwd,
+        ));
+        assert_eq!(
+            queue
+                .iter()
+                .map(|queued| queued.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["next prompt", "third prompt"]
+        );
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            cwd,
+        ));
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: true
+            }
+        );
+    }
+
+    #[test]
+    fn approval_denial_resolves_reply_and_clears_dialog() {
+        let mut app = app();
+        app.begin_work();
+        app.request_approval("write_file", "fixture", "write");
+        let (reply, mut answer) = oneshot::channel();
+        let mut pending = Some(reply);
+        let cancel = CancellationToken::new();
+
+        assert!(!handle_approval_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
+            &mut pending,
+            &cancel,
+        ));
+        assert_eq!(answer.try_recv(), Ok(false));
+        assert!(app.dialog.is_none());
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn trust_dialog_preserves_double_ctrl_c_exit_contract() {
+        let mut app = app();
+        app.require_workspace_trust("fixture");
+        let cwd = Path::new("fixture");
+        let ctrl_c = || Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd));
+        assert!(app.workspace_trust_pending());
+        assert!(!handle_trust_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('x'), KeyModifiers::NONE)),
+            cwd,
+        ));
+        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd));
+        assert!(handle_trust_event(&mut app, ctrl_c(), cwd));
+    }
+
+    #[test]
+    fn prompt_timestamp_is_local_hh_mm_shape() {
+        let value = local_prompt_time();
+        assert_eq!(value.len(), 5);
+        assert_eq!(value.as_bytes()[2], b':');
+        assert!(value[..2].parse::<u8>().is_ok_and(|hour| hour < 24));
+        assert!(value[3..].parse::<u8>().is_ok_and(|minute| minute < 60));
     }
 
     #[test]
@@ -384,19 +871,7 @@ mod tests {
     fn runtime_event_replay_follows_bottom_or_preserves_a_held_content_anchor() {
         use std::fmt::Write as _;
 
-        let header = Header {
-            version: "0".to_string(),
-            provider: "fixture".to_string(),
-            model: "fixture-model".to_string(),
-            workspace: "fixture-workspace".to_string(),
-            branch: Some("fixture-branch".to_string()),
-            workspace_dirty: Some(true),
-            mode: "agent".to_string(),
-            profile: "default".to_string(),
-            session_id: "fixture-session".to_string(),
-            session_name: None,
-        };
-        let mut seed = AppModel::new(header, TerminalCapabilities::default());
+        let mut seed = app();
         seed.begin_work();
         let mut seed_text = String::new();
         for number in 0..80 {

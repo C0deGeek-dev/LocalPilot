@@ -43,7 +43,10 @@ not need a real console:
 - `cargo test -p localpilot --features tui,learning --bin localpilot` covers the
   Crossterm host selector, provider-neutral runtime-event mapping, key mapping,
   ANSI terminal-mode ordering, best-effort workspace Git metadata, and recorded
-  RuntimeEvent replay through FollowBottom and Held viewport states.
+  RuntimeEvent replay through FollowBottom and Held viewport states. Host-state
+  tests also cover plain-submit versus newline, Escape cancellation, ordered
+  pending typeahead, trust-gate Ctrl+C precedence, approval denial and local
+  prompt timestamps.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.

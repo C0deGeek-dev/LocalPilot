@@ -172,6 +172,12 @@ It depends on Ratatui's backend-neutral APIs but not Crossterm, the harness,
 providers, the store, or the CLI. `localpilot-cli` owns the Crossterm alternate-
 buffer lifecycle, raw event and clipboard adapters, and maps the existing
 provider-neutral runtime/approval/cancellation streams into terminal UI actions.
+Its async event pump mirrors the established inline runtime seam: each turn owns
+one broadcast receiver and cancellation token, approvals are deny-safe, and
+terminal input is drained in bounded batches. Prompts submitted during a turn
+are visible stable timeline items marked pending; cancelling with Escape ends
+the current turn before those prompts run in order. Runtime output is inserted
+before later pending prompts, so visible and provider transcript order agree.
 
 `localpilot-tui` is the legacy inline rollback during the transition. It owns:
 

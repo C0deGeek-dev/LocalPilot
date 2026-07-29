@@ -102,9 +102,9 @@ fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
-struct ApprovalCall {
-    request: ApprovalRequest,
-    reply: oneshot::Sender<bool>,
+pub(crate) struct ApprovalCall {
+    pub(crate) request: ApprovalRequest,
+    pub(crate) reply: oneshot::Sender<bool>,
 }
 
 /// Host context needed by slash commands that leave pure UI state and run CLI
@@ -359,15 +359,19 @@ pub async fn run_chat(
         }),
     };
     timer.mark("update check");
-    // The full-screen model has no consumer for the inline host's eager
-    // `@`-mention file list, prompt-history projection, or knowledge-index
-    // startup. Enter its first frame before those synchronous workspace walks;
+    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    // The full-screen model loads its bounded prompt history only after drawing
+    // a first frame and has no consumer yet for the inline host's eager
+    // `@`-mention file list or knowledge-index startup. Enter before those
+    // synchronous workspace walks;
     // large directories (notably a user's home directory) must never look like
     // a hung, blank launch. The shared provider/runtime initialization above is
     // still authoritative for both hosts.
     if chat_ui == ChatUi::Fullscreen {
         timer.mark("READY — entering full-screen TUI");
         let git = workspace_git_status(&cwd);
+        let trust_required = !matches!(profile, Profile::Bypass | Profile::Unrestricted)
+            && !crate::trust::is_trusted(&cwd);
         let result = crate::fullscreen::run(
             localpilot_terminal_ui::Header {
                 version: header.version.clone(),
@@ -382,7 +386,15 @@ pub async fn run_chat(
                 session_name: header.session_name.clone(),
             },
             std::iter::empty(),
-        );
+            crate::fullscreen::HostContext {
+                runtime: &mut runtime,
+                approval_rx: &mut approval_rx,
+                cwd: &cwd,
+                history: &history,
+                trust_required,
+            },
+        )
+        .await;
         crate::context_inject::close_out(&cwd, runtime.session_id());
         return result;
     }
@@ -416,7 +428,6 @@ pub async fn run_chat(
     // restart, scoped to this project (Ctrl-T views all projects). The store
     // honours the `[history] persistence` opt-out; when off it loads nothing and
     // appends nothing. A read never fails the session — the load is tolerant.
-    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
     let history_entries = history.load();
     state.seed_input_history(
         recall_entries(localpilot_store::project_entries(&history_entries, &cwd)),

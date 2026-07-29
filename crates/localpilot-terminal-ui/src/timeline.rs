@@ -311,6 +311,32 @@ impl Timeline {
         Some(id)
     }
 
+    /// Insert a new item immediately before an existing stable item. This is
+    /// used when streamed output must remain attached to the active prompt
+    /// while later user prompts are already visible as pending.
+    pub fn insert_before(
+        &mut self,
+        before: ItemId,
+        kind: ItemKind,
+        text: impl Into<String>,
+    ) -> Option<ItemId> {
+        let index = self.item_positions.get(&before).copied()?;
+        let raw = self.next_id?;
+        let id = ItemId(raw);
+        self.next_id = raw.checked_add(1);
+        let text = sanitize_text(&text.into());
+        self.items.insert(index, TimelineItem::new(id, kind, text));
+        for position in index..self.items.len() {
+            self.item_positions
+                .insert(self.items[position].id, position);
+        }
+        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+            self.new_content.set(true);
+        }
+        self.invalidate_layout();
+        Some(id)
+    }
+
     pub fn append_text(&mut self, id: ItemId, text: &str) -> bool {
         let Some(index) = self.item_positions.get(&id).copied() else {
             return false;
@@ -1073,6 +1099,33 @@ mod tests {
         assert_ne!(timeline.rows(20), ordinary);
         assert!(timeline.set_pending(prompt, false));
         assert!(!timeline.item(prompt).expect("prompt").pending);
+    }
+
+    #[test]
+    fn insertion_before_pending_prompt_preserves_every_stable_id() {
+        let mut timeline = Timeline::new();
+        let active = timeline.push(ItemKind::User, "active").expect("active");
+        let pending = timeline.push(ItemKind::User, "pending").expect("pending");
+        assert!(timeline.set_pending(pending, true));
+
+        let response = timeline
+            .insert_before(pending, ItemKind::Assistant, "response")
+            .expect("response");
+        assert_eq!(
+            timeline
+                .items()
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![active, response, pending]
+        );
+        assert_eq!(timeline.item(active).expect("active").text, "active");
+        assert_eq!(timeline.item(pending).expect("pending").text, "pending");
+        assert!(timeline.append_text(response, " tail"));
+        assert_eq!(
+            timeline.item(response).expect("response").text,
+            "response tail"
+        );
     }
 
     #[test]
