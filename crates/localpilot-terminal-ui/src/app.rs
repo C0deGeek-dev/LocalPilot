@@ -1,6 +1,30 @@
 use std::collections::BTreeMap;
 
-use crate::{sanitize_text, Editor, ItemId, ItemKind, Timeline};
+use crate::presentation::semantic_ranges;
+use crate::{
+    sanitize_text, ActivityState, Editor, ItemId, ItemKind, SemanticRole, StyledRange, TextStyle,
+    Theme, Timeline,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TabId {
+    Session,
+    Plan,
+    Activity,
+    Settings,
+}
+
+impl TabId {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Session => "Session",
+            Self::Plan => "Plan",
+            Self::Activity => "Activity",
+            Self::Settings => "Settings",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -140,6 +164,9 @@ pub enum RuntimeUpdate {
 pub struct AppModel {
     pub header: Header,
     pub capabilities: TerminalCapabilities,
+    pub theme: Theme,
+    pub tabs: Vec<TabId>,
+    pub active_tab: TabId,
     pub timeline: Timeline,
     pub editor: Editor,
     pub focus: Focus,
@@ -168,6 +195,9 @@ impl AppModel {
         Self {
             header,
             capabilities,
+            theme: Theme::Default,
+            tabs: vec![TabId::Session],
+            active_tab: TabId::Session,
             timeline: Timeline::new(),
             editor: Editor::default(),
             focus: Focus::Composer,
@@ -181,6 +211,24 @@ impl AppModel {
             active_reasoning: None,
             active_tools: BTreeMap::new(),
         }
+    }
+
+    /// Installs only tabs backed by a real LocalPilot surface, preserving the
+    /// caller's order and ignoring duplicates. Session is the safe fallback.
+    pub fn set_tabs(&mut self, tabs: impl IntoIterator<Item = TabId>) {
+        let mut unique = Vec::new();
+        for tab in tabs {
+            if !unique.contains(&tab) {
+                unique.push(tab);
+            }
+        }
+        if unique.is_empty() {
+            unique.push(TabId::Session);
+        }
+        if !unique.contains(&self.active_tab) {
+            self.active_tab = unique[0];
+        }
+        self.tabs = unique;
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
@@ -246,6 +294,9 @@ impl AppModel {
             }
             RuntimeUpdate::ToolStarted { id, name } => {
                 if let Some(item) = self.timeline.push(ItemKind::Tool, name) {
+                    let _ = self
+                        .timeline
+                        .set_activity(item, Some(ActivityState::Running));
                     self.active_tools.insert(id, item);
                 }
             }
@@ -263,8 +314,23 @@ impl AppModel {
                 };
                 if let Some(item) = self.active_tools.remove(&id) {
                     let _ = self.timeline.append_text(item, &text);
-                } else {
-                    let _ = self.timeline.push(ItemKind::Tool, format!("{name}{text}"));
+                    let activity = if is_error {
+                        ActivityState::Error
+                    } else {
+                        ActivityState::Success
+                    };
+                    let _ = self.timeline.set_activity(item, Some(activity));
+                    self.style_activity(item, activity);
+                } else if let Some(item) =
+                    self.timeline.push(ItemKind::Tool, format!("{name}{text}"))
+                {
+                    let activity = if is_error {
+                        ActivityState::Error
+                    } else {
+                        ActivityState::Success
+                    };
+                    let _ = self.timeline.set_activity(item, Some(activity));
+                    self.style_activity(item, activity);
                 }
             }
             RuntimeUpdate::Usage {
@@ -300,6 +366,7 @@ impl AppModel {
                 );
             }
             RuntimeUpdate::Stopped(_) => {
+                self.style_active_transcript();
                 self.work = WorkState::Idle;
                 self.active_assistant = None;
                 self.active_reasoning = None;
@@ -319,6 +386,39 @@ impl AppModel {
 
     fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
         active.is_some_and(|id| self.timeline.append_text(id, text))
+    }
+
+    fn style_active_transcript(&mut self) {
+        for id in [self.active_assistant, self.active_reasoning]
+            .into_iter()
+            .flatten()
+        {
+            let Some(item) = self.timeline.item(id) else {
+                continue;
+            };
+            let styles = semantic_ranges(item.kind, &item.text);
+            let _ = self.timeline.set_styles(id, styles);
+        }
+    }
+
+    fn style_activity(&mut self, id: ItemId, activity: ActivityState) {
+        let Some(end_byte) = self.timeline.item(id).map(|item| item.text.len()) else {
+            return;
+        };
+        let role = match activity {
+            ActivityState::Running => SemanticRole::Tool,
+            ActivityState::Success => SemanticRole::Success,
+            ActivityState::Error => SemanticRole::Error,
+        };
+        let styles = (end_byte > 0)
+            .then_some(StyledRange {
+                start_byte: 0,
+                end_byte,
+                style: TextStyle::new(role),
+            })
+            .into_iter()
+            .collect();
+        let _ = self.timeline.set_styles(id, styles);
     }
 
     fn cancel_or_exit(&mut self) -> AppCommand {
@@ -458,5 +558,51 @@ mod tests {
         assert_eq!(app.timeline.items().len(), 1);
         assert_eq!(app.timeline.items()[0].id, id);
         assert_eq!(app.timeline.items()[0].text, "hello world");
+    }
+
+    #[test]
+    fn truthful_tab_configuration_preserves_order_and_removes_duplicates() {
+        let mut app = model();
+        app.set_tabs([TabId::Activity, TabId::Session, TabId::Activity]);
+        assert_eq!(app.tabs, vec![TabId::Activity, TabId::Session]);
+        assert_eq!(app.active_tab, TabId::Session);
+
+        app.set_tabs([]);
+        assert_eq!(app.tabs, vec![TabId::Session]);
+        assert_eq!(app.active_tab, TabId::Session);
+    }
+
+    #[test]
+    fn completed_output_gains_semantic_styles_and_tools_remain_compact() {
+        let mut app = model();
+        app.begin_work();
+        app.apply_runtime(RuntimeUpdate::Text(
+            "# Result\nUse `cargo test` and [docs](https://example.test).".to_string(),
+        ));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-1".to_string(),
+            name: "inspect".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "tool-1".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            output: "detail one\ndetail two".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+
+        let assistant = &app.timeline.items()[0];
+        assert!(assistant
+            .styles
+            .iter()
+            .any(|span| span.style.role == SemanticRole::Heading));
+        assert!(assistant
+            .styles
+            .iter()
+            .any(|span| span.style.role == SemanticRole::Code));
+        let tool = &app.timeline.items()[1];
+        assert_eq!(tool.activity, Some(ActivityState::Success));
+        assert!(!tool.expanded);
+        assert_eq!(app.timeline.rows(80)[2].text, "inspect completed");
     }
 }

@@ -20,7 +20,7 @@ use crossterm::terminal::{
 use localpilot_harness::{ModelHealth, RuntimeEvent, StopReason};
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, Header, InputAction, KeyboardSupport, PlanEntry,
-    RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities,
+    RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities, Theme,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -28,6 +28,7 @@ use ratatui::Terminal;
 use crate::key_input::{is_cancel, is_key_action};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
 
@@ -41,6 +42,7 @@ pub(crate) fn run(
     let mut terminal = Terminal::new(backend).context("initialize full-screen terminal")?;
     terminal.clear().context("clear full-screen terminal")?;
     let mut app = AppModel::new(header, capabilities);
+    apply_host_preferences(&mut app);
     for event in startup_events {
         app.apply_runtime(map_runtime_event(event));
     }
@@ -49,6 +51,22 @@ pub(crate) fn run(
     drop(terminal);
     modes.restore();
     result
+}
+
+fn apply_host_preferences(app: &mut AppModel) {
+    let Some(value) = std::env::var_os(CHAT_THEME_ENV) else {
+        return;
+    };
+    let Ok(value) = value.into_string() else {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "{CHAT_THEME_ENV} contains non-Unicode text; using the default theme"
+        )));
+        return;
+    };
+    match value.parse::<Theme>() {
+        Ok(theme) => app.theme = theme,
+        Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+    }
 }
 
 fn run_idle_loop(
@@ -290,6 +308,7 @@ fn install_panic_restore_hook() {
 mod tests {
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
     use localpilot_core::TokenUsage;
+    use localpilot_terminal_ui::{ViewportAnchor, WorkState};
 
     use super::*;
 
@@ -359,5 +378,79 @@ mod tests {
             let mouse = text.find("?1000l").expect("mouse disable");
             assert!(keyboard < paste && paste < mouse && mouse < alternate);
         }
+    }
+
+    #[test]
+    fn runtime_event_replay_follows_bottom_or_preserves_a_held_content_anchor() {
+        use std::fmt::Write as _;
+
+        let header = Header {
+            version: "0".to_string(),
+            provider: "fixture".to_string(),
+            model: "fixture-model".to_string(),
+            workspace: "fixture-workspace".to_string(),
+            session_id: "fixture-session".to_string(),
+            session_name: None,
+        };
+        let mut seed = AppModel::new(header, TerminalCapabilities::default());
+        seed.begin_work();
+        let mut seed_text = String::new();
+        for number in 0..80 {
+            writeln!(&mut seed_text, "seed {number:03}").expect("write fixture text");
+        }
+        seed.apply_runtime(RuntimeUpdate::Text(seed_text));
+        seed.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+
+        let script = || {
+            vec![
+                RuntimeEvent::Text("stream 001\n".to_string()),
+                RuntimeEvent::Text("stream 002\nSTREAM_TAIL".to_string()),
+                RuntimeEvent::Usage(TokenUsage {
+                    input_tokens: 12,
+                    output_tokens: 34,
+                }),
+                RuntimeEvent::ToolStarted {
+                    id: "fixture-tool".to_string(),
+                    name: "inspect".to_string(),
+                },
+                RuntimeEvent::ToolFinished {
+                    id: "fixture-tool".to_string(),
+                    name: "inspect".to_string(),
+                    is_error: false,
+                    output: "detail one\ndetail two".to_string(),
+                },
+                RuntimeEvent::Stopped(StopReason::Done),
+            ]
+        };
+
+        let mut following = seed.clone();
+        following.begin_work();
+        for event in script() {
+            following.apply_runtime(map_runtime_event(event));
+        }
+        let bottom = following.timeline.view(40, 8);
+        assert!(bottom.rows.iter().any(|row| row.text == "STREAM_TAIL"));
+        assert!(bottom
+            .rows
+            .iter()
+            .any(|row| row.text == "inspect completed"));
+        assert_eq!(following.usage, Some((12, 34)));
+        assert_eq!(following.work, WorkState::Idle);
+
+        let mut held = seed;
+        held.timeline.scroll_by(-12, 40, 8);
+        let ViewportAnchor::Held(anchor) = held.timeline.viewport else {
+            panic!("seed must be held away from bottom");
+        };
+        held.begin_work();
+        for event in script() {
+            held.apply_runtime(map_runtime_event(event));
+        }
+        let held_view = held.timeline.view(31, 6);
+        assert_eq!(
+            held_view.rows.first().map(|row| row.item_id),
+            Some(anchor.item_id)
+        );
+        assert_eq!(held.timeline.viewport, ViewportAnchor::Held(anchor));
     }
 }
