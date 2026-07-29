@@ -646,19 +646,29 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
     let area = inset_chrome(area);
     let state = footer_state(app);
     let shortcuts = "? help · / commands";
-    let context = format!(
-        "{} · {} → {}",
-        app.header.mode, app.header.profile, app.header.model
-    );
+    let context = if matches!(app.work, crate::WorkState::Busy { .. }) {
+        app.header.model.clone()
+    } else {
+        format!(
+            "{} · {} → {}",
+            app.header.mode, app.header.profile, app.header.model
+        )
+    };
+    let busy = matches!(app.work, crate::WorkState::Busy { .. });
     let theme = theme(app);
     let text = if narrow {
         format!(
             "{}\n{}",
             truncate_end(&state, area.width),
-            two_sided(shortcuts, &context, area.width)
+            two_sided(if busy { "" } else { shortcuts }, &context, area.width)
         )
     } else {
-        two_sided(&format!("{state} · {shortcuts}"), &context, area.width)
+        let left = if busy {
+            state.clone()
+        } else {
+            format!("{state} · {shortcuts}")
+        };
+        two_sided(&left, &context, area.width)
     };
     frame.render_widget(Paragraph::new(text).style(theme.ui(UiRole::Muted)), area);
     if let Some(offset) = state.find("● Working") {
@@ -1251,6 +1261,9 @@ mod tests {
         let footer = buffer_line(buffer, layout.footer.y);
 
         assert!(footer.contains("● Working · 8.9 KiB · Esc interrupt"));
+        assert!(footer.trim_end().ends_with("model"));
+        assert!(!footer.contains("agent · default"));
+        assert!(!footer.contains("? help"));
         assert_eq!(
             buffer[(layout.footer.x + 1, layout.footer.y)].style().fg,
             ThemeResolver::new(Theme::Default, ColorSupport::Color)
