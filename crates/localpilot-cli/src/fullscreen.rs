@@ -20,6 +20,7 @@ use crossterm::terminal::{
     self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
+use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
@@ -31,8 +32,8 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::key_input::{is_cancel, is_key_action};
-use crate::repl::ApprovalCall;
+use crate::key_input::{is_cancel, is_clipboard_image_key, is_key_action};
+use crate::repl::{ApprovalCall, ClipboardImageRead};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
@@ -52,13 +53,38 @@ pub(crate) struct HostContext<'a> {
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
+    pub(crate) config: &'a localpilot_config::Config,
     pub(crate) trust_required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct QueuedPrompt {
     text: String,
+    attachments: Vec<ContentBlock>,
     item_id: ItemId,
+}
+
+impl std::fmt::Debug for QueuedPrompt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueuedPrompt")
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .field(
+                "attachments",
+                &format_args!("<{} redacted>", self.attachments.len()),
+            )
+            .field("item_id", &self.item_id)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageCapabilitySnapshot {
+    provider_id: String,
+    vision_capable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +207,13 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
     command_catalog
 }
 
+fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) -> Vec<ContentBlock> {
+    images
+        .into_iter()
+        .map(|image| ContentBlock::image(image.media_type, image.data))
+        .collect()
+}
+
 fn apply_host_preferences(app: &mut AppModel) {
     let Some(value) = std::env::var_os(CHAT_THEME_ENV) else {
         return;
@@ -197,6 +230,70 @@ fn apply_host_preferences(app: &mut AppModel) {
     }
 }
 
+async fn attach_clipboard_image_idle(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    quiet_when_absent: bool,
+) {
+    if app.has_input_overlay() {
+        return;
+    }
+    let provider_id = runtime.active_provider_id().to_string();
+    if !runtime.active_accepts_images() {
+        let resolved = crate::repl::resolved_image_support(config, Some(&provider_id)).await;
+        runtime.set_image_support_override(resolved);
+    }
+    let capability = ImageCapabilitySnapshot {
+        provider_id,
+        vision_capable: runtime.active_accepts_images(),
+    };
+    attach_clipboard_image_with_capability(app, &capability, quiet_when_absent);
+}
+
+fn attach_clipboard_image_with_capability(
+    app: &mut AppModel,
+    capability: &ImageCapabilitySnapshot,
+    quiet_when_absent: bool,
+) {
+    if app.has_input_overlay() {
+        return;
+    }
+    if !capability.vision_capable {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            crate::repl::image_unsupported_notice(&capability.provider_id),
+        ));
+        return;
+    }
+    let image = match crate::repl::read_clipboard_image() {
+        Ok(ClipboardImageRead::Missing) => {
+            if !quiet_when_absent {
+                app.apply_runtime(RuntimeUpdate::Warning(
+                    "no image on the clipboard".to_string(),
+                ));
+            }
+            return;
+        }
+        Ok(ClipboardImageRead::Image(image)) => image,
+        Err(message) => {
+            app.apply_runtime(RuntimeUpdate::Warning(message));
+            return;
+        }
+    };
+    let crate::repl::CapturedClipboardImage {
+        media_type,
+        data,
+        byte_len,
+        width,
+        height,
+    } = image;
+    if app.attach_image(media_type, data, byte_len).is_some() {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "attached {width}×{height} image"
+        )));
+    }
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -209,6 +306,7 @@ async fn run_event_loop(
         cwd,
         history,
         ingest,
+        config,
         trust_required: _,
     } = context;
     let mut queue = VecDeque::new();
@@ -237,6 +335,10 @@ async fn run_event_loop(
         }
         match next {
             Event::Key(key) if is_key_action(key) => {
+                if is_clipboard_image_key(key) {
+                    attach_clipboard_image_idle(app, runtime, config, false).await;
+                    continue;
+                }
                 let Some(action) = map_key(key) else {
                     continue;
                 };
@@ -245,13 +347,20 @@ async fn run_event_loop(
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
                     AppCommand::Submit(submitted) => {
                         let Some(item_id) = app.append_prompt(
-                            submitted.prompt.clone(),
+                            submitted.display.clone(),
                             Some(local_prompt_time()),
                             false,
                         ) else {
                             continue;
                         };
                         persist_prompt(app, history, cwd, &submitted);
+                        let attachments = image_content_blocks(submitted.images);
+                        if !attachments.is_empty() {
+                            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                                "sending {} image(s) with this prompt",
+                                attachments.len()
+                            )));
+                        }
                         if drive_prompt_chain(
                             terminal,
                             app,
@@ -259,6 +368,7 @@ async fn run_event_loop(
                             approval_rx,
                             QueuedPrompt {
                                 text: submitted.prompt,
+                                attachments,
                                 item_id,
                             },
                             &mut queue,
@@ -277,7 +387,11 @@ async fn run_event_loop(
                 }
             }
             Event::Paste(text) => {
-                let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                if text.trim().is_empty() {
+                    attach_clipboard_image_idle(app, runtime, config, true).await;
+                } else {
+                    let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                }
             }
             Event::FocusGained
             | Event::FocusLost
@@ -312,6 +426,7 @@ async fn drive_prompt_chain(
             runtime,
             approval_rx,
             &prompt.text,
+            &prompt.attachments,
             queue,
             history,
             cwd,
@@ -368,6 +483,7 @@ async fn drive_turn(
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     prompt: &str,
+    attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedPrompt>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
@@ -376,7 +492,14 @@ async fn drive_turn(
 ) -> Result<bool> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
-    let operation = runtime.run_turn(prompt, &events, &cancel);
+    // Snapshot immediately before the turn borrows the runtime. Mid-turn image
+    // paste can then use the exact active provider without racing a model switch
+    // or attempting a second mutable borrow for capability discovery.
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
     tokio::pin!(operation);
     let mut pending: Option<oneshot::Sender<bool>> = None;
     let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
@@ -411,6 +534,7 @@ async fn drive_turn(
                                 queue,
                                 history,
                                 cwd,
+                                &image_capability,
                             ),
                         }
                     };
@@ -452,6 +576,7 @@ async fn drive_turn(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the live input router threads each state owner explicitly
 fn handle_turn_event(
     app: &mut AppModel,
     event: Event,
@@ -460,9 +585,14 @@ fn handle_turn_event(
     queue: &mut VecDeque<QueuedPrompt>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
+    image_capability: &ImageCapabilitySnapshot,
 ) -> bool {
     match event {
         Event::Key(key) if is_key_action(key) => {
+            if is_clipboard_image_key(key) {
+                attach_clipboard_image_with_capability(app, image_capability, false);
+                return false;
+            }
             let Some(action) = map_key(key) else {
                 return false;
             };
@@ -480,12 +610,22 @@ fn handle_turn_event(
                     false
                 }
                 AppCommand::Submit(submitted) => {
-                    if let Some(item_id) =
-                        app.append_prompt(submitted.prompt.clone(), Some(local_prompt_time()), true)
-                    {
+                    if let Some(item_id) = app.append_prompt(
+                        submitted.display.clone(),
+                        Some(local_prompt_time()),
+                        true,
+                    ) {
                         persist_prompt(app, history, cwd, &submitted);
+                        let attachments = image_content_blocks(submitted.images);
+                        if !attachments.is_empty() {
+                            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                                "sending {} image(s) with this prompt",
+                                attachments.len()
+                            )));
+                        }
                         queue.push_back(QueuedPrompt {
                             text: submitted.prompt,
+                            attachments,
                             item_id,
                         });
                     }
@@ -495,7 +635,11 @@ fn handle_turn_event(
             }
         }
         Event::Paste(text) => {
-            let _ = app.handle_input(InputAction::Paste(text), editor_width);
+            if text.trim().is_empty() {
+                attach_clipboard_image_with_capability(app, image_capability, true);
+            } else {
+                let _ = app.handle_input(InputAction::Paste(text), editor_width);
+            }
             false
         }
         Event::FocusGained
@@ -1134,6 +1278,13 @@ mod tests {
         )
     }
 
+    fn image_capability(vision_capable: bool) -> ImageCapabilitySnapshot {
+        ImageCapabilitySnapshot {
+            provider_id: "fixture".to_string(),
+            vision_capable,
+        }
+    }
+
     #[test]
     fn ctrl_c_maps_to_contextual_interrupt_handling() {
         assert_eq!(
@@ -1543,6 +1694,7 @@ mod tests {
             &mut queue,
             &history,
             cwd,
+            &image_capability(false),
         ));
         assert!(app.editor.text().is_empty());
         assert_eq!(queue.len(), 1);
@@ -1564,6 +1716,7 @@ mod tests {
             &mut queue,
             &history,
             cwd,
+            &image_capability(false),
         ));
         assert_eq!(
             queue
@@ -1581,6 +1734,7 @@ mod tests {
             &mut queue,
             &history,
             cwd,
+            &image_capability(false),
         ));
         assert!(cancel.is_cancelled());
         assert_eq!(
@@ -1614,6 +1768,7 @@ mod tests {
             &mut queue,
             &history,
             temp.path(),
+            &image_capability(false),
         ));
         assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
         assert!(queue.is_empty());
@@ -1626,12 +1781,71 @@ mod tests {
             &mut queue,
             &history,
             temp.path(),
+            &image_capability(false),
         ));
         assert_eq!(queue.front().expect("queued paste").text, payload);
         let entry = history.load().pop().expect("stored paste");
         assert_eq!(entry.text, "[Paste #1 - 12 lines]");
         assert_eq!(entry.pastes.len(), 1);
         assert_eq!(expand_history_entry(&entry), payload);
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn queued_image_prompts_keep_isolated_blocks_and_persist_no_image_bytes() {
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(Some(
+            temp.path().join("prompt-history.jsonl"),
+        ));
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+
+        for (number, secret) in [(1, "IMAGE_SECRET_ONE"), (2, "IMAGE_SECRET_TWO")] {
+            app.editor.insert(&format!("inspect {number} "));
+            let placeholder = app
+                .attach_image("image/png", secret, number * 1024)
+                .expect("attach fixture image");
+            assert!(!handle_turn_event(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &cancel,
+                80,
+                &mut queue,
+                &history,
+                temp.path(),
+                &image_capability(true),
+            ));
+            let queued = queue.back().expect("queued image prompt");
+            assert_eq!(queued.text, format!("inspect {number}"));
+            assert_eq!(queued.attachments.len(), 1);
+            let ContentBlock::Image { data, .. } = &queued.attachments[0] else {
+                panic!("image content block");
+            };
+            assert_eq!(data, secret);
+            let timeline_prompt = app.timeline.item(queued.item_id).expect("timeline prompt");
+            assert!(timeline_prompt.text.contains(&placeholder));
+        }
+
+        assert_eq!(queue.len(), 2);
+        assert!(!format!("{queue:?}").contains("IMAGE_SECRET"));
+        assert_eq!(
+            app.timeline
+                .items()
+                .iter()
+                .filter(|item| item.text == "sending 1 image(s) with this prompt")
+                .count(),
+            2
+        );
+        let stored = std::fs::read_to_string(temp.path().join("prompt-history.jsonl"))
+            .expect("stored history");
+        assert!(!stored.contains("IMAGE_SECRET_ONE"));
+        assert!(!stored.contains("IMAGE_SECRET_TWO"));
+        let entries = history.load();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.pastes.is_empty()));
+        assert!(entries.iter().all(|entry| entry.text.contains("[image #")));
         assert!(!cancel.is_cancelled());
     }
 
@@ -1665,6 +1879,24 @@ mod tests {
             .find("WorkspaceFileIndex::start(context.cwd.to_path_buf())")
             .expect("async workspace index start");
         assert!(first_frame < index_start);
+    }
+
+    #[test]
+    fn active_turn_snapshots_image_capability_before_runtime_borrow() {
+        let source = include_str!("fullscreen.rs");
+        let snapshot = source
+            .find("let image_capability = ImageCapabilitySnapshot")
+            .expect("capability snapshot");
+        let turn = source
+            .find("let operation = runtime.run_turn_with_attachments")
+            .expect("attachment turn");
+        assert!(snapshot < turn);
+
+        let mut app = app();
+        attach_clipboard_image_with_capability(&mut app, &image_capability(false), false);
+        assert!(app.timeline.items().iter().any(|item| item
+            .text
+            .contains("current model is not known to accept images")));
     }
 
     #[test]

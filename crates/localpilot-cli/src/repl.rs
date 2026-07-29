@@ -412,6 +412,7 @@ pub async fn run_chat(
                 cwd: &cwd,
                 history: &history,
                 ingest: &config.ingest,
+                config: &config,
                 trust_required,
             },
         )
@@ -2130,6 +2131,75 @@ fn insert_paste(state: &mut AppState, text: String) {
 /// provider request limits (~5 MB encoded ≈ ~3.7 MB of image bytes).
 const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
 
+pub(crate) struct CapturedClipboardImage {
+    pub(crate) media_type: &'static str,
+    pub(crate) data: String,
+    pub(crate) byte_len: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl std::fmt::Debug for CapturedClipboardImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CapturedClipboardImage")
+            .field("media_type", &self.media_type)
+            .field(
+                "data",
+                &format_args!("<{} bytes redacted>", self.data.len()),
+            )
+            .field("byte_len", &self.byte_len)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+pub(crate) enum ClipboardImageRead {
+    Missing,
+    Image(CapturedClipboardImage),
+}
+
+pub(crate) fn image_unsupported_notice(provider_id: &str) -> String {
+    format!(
+        "the current model is not known to accept images. To paste images, set \
+         `supports_vision = true` for provider '{provider_id}' in .localpilot.toml, or enable \
+         `[discovery] vision_probe = true` to auto-detect a local vision server."
+    )
+}
+
+pub(crate) fn read_clipboard_image() -> Result<ClipboardImageRead, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(error) if clipboard_error_is_missing_image(&error) => {
+            return Ok(ClipboardImageRead::Missing);
+        }
+        Err(error) => return Err(format!("couldn't read the clipboard image: {error}")),
+    };
+    let width = image.width;
+    let height = image.height;
+    let png = encode_png(&image)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    validate_image_base64_size(data.len())?;
+    Ok(ClipboardImageRead::Image(CapturedClipboardImage {
+        media_type: "image/png",
+        data,
+        byte_len: png.len(),
+        width,
+        height,
+    }))
+}
+
+fn validate_image_base64_size(encoded_len: usize) -> Result<(), String> {
+    if encoded_len > MAX_IMAGE_BASE64_BYTES {
+        Err("clipboard image is too large to attach".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Read an image from the OS clipboard and attach it to the next prompt as a
 /// placeholder. Best effort: an unsupported model, an absent image, or an
 /// encode/oversize failure surfaces as a notice and never disturbs the session.
@@ -2152,61 +2222,30 @@ async fn attach_clipboard_image(
     if !runtime.active_accepts_images() {
         // Still not known to accept images: refuse rather than send one blind to
         // a text-only model, and name both levers that enable it.
-        state.apply(UiEvent::Notice(format!(
-            "the current model is not known to accept images. To paste images, set \
-             `supports_vision = true` for provider '{}' in .localpilot.toml, or enable \
-             `[discovery] vision_probe = true` to auto-detect a local vision server.",
-            runtime.active_provider_id()
+        state.apply(UiEvent::Notice(image_unsupported_notice(
+            runtime.active_provider_id(),
         )));
         return;
     }
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(error) => {
-            state.apply(UiEvent::Notice(format!("clipboard unavailable: {error}")));
-            return;
-        }
-    };
-    let image = match clipboard.get_image() {
-        Ok(image) => image,
-        Err(error) => {
-            if clipboard_error_is_missing_image(&error) {
-                // Genuinely nothing to paste (e.g. an empty text paste): stay
-                // quiet on the empty-paste probe path, but still tell a
-                // deliberate Ctrl+V there was no image.
-                if !quiet_when_absent {
-                    state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
-                }
-            } else {
-                // A real read failure is never swallowed — this is the "nothing
-                // happened, no message" case users hit when a paste-routed image
-                // fails to decode.
-                state.apply(UiEvent::Notice(format!(
-                    "couldn't read the clipboard image: {error}"
-                )));
+    let image = match read_clipboard_image() {
+        Ok(ClipboardImageRead::Missing) => {
+            if !quiet_when_absent {
+                state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
             }
             return;
         }
-    };
-    let width = image.width;
-    let height = image.height;
-    let png = match encode_png(&image) {
-        Ok(png) => png,
+        Ok(ClipboardImageRead::Image(image)) => image,
         Err(message) => {
             state.apply(UiEvent::Notice(message));
             return;
         }
     };
-    let data = base64::engine::general_purpose::STANDARD.encode(&png);
-    if data.len() > MAX_IMAGE_BASE64_BYTES {
-        state.apply(UiEvent::Notice(
-            "clipboard image is too large to attach".to_string(),
-        ));
-        return;
-    }
-    let placeholder = state.register_image("image/png", data, png.len());
+    let placeholder = state.register_image(image.media_type, image.data, image.byte_len);
     state.insert_input(&placeholder);
-    state.apply(UiEvent::Notice(format!("attached {width}×{height} image")));
+    state.apply(UiEvent::Notice(format!(
+        "attached {}×{} image",
+        image.width, image.height
+    )));
 }
 
 /// Whether a clipboard read error means "there is simply no image on the
@@ -2527,7 +2566,7 @@ fn sandbox_profile(profile: UiProfile) -> Profile {
 /// declaration as the sole gate) when no such provider is configured. The probe
 /// runs only when `[discovery] vision_probe` is on **and** config did not already
 /// declare the capability (a declaration wins, so no probe is needed).
-async fn resolved_image_support(
+pub(crate) async fn resolved_image_support(
     config: &localpilot_config::Config,
     provider_id: Option<&str>,
 ) -> Option<bool> {
@@ -2866,6 +2905,29 @@ mod tests {
                 description: "decode failed".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn clipboard_image_base64_limit_accepts_boundary_and_rejects_oversize() {
+        assert_eq!(validate_image_base64_size(MAX_IMAGE_BASE64_BYTES), Ok(()));
+        assert_eq!(
+            validate_image_base64_size(MAX_IMAGE_BASE64_BYTES + 1),
+            Err("clipboard image is too large to attach".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_clipboard_debug_never_contains_base64() {
+        let image = CapturedClipboardImage {
+            media_type: "image/png",
+            data: "SECRET_CLIPBOARD_BASE64".to_string(),
+            byte_len: 12,
+            width: 2,
+            height: 3,
+        };
+        let debug = format!("{image:?}");
+        assert!(!debug.contains("SECRET_CLIPBOARD_BASE64"));
+        assert!(debug.contains("23 bytes redacted"));
     }
 
     fn test_header() -> Header {

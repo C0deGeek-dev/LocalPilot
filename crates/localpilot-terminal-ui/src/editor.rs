@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -14,28 +15,99 @@ pub struct EditorRow {
     pub end_byte: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PasteUnit {
     pub placeholder: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for PasteUnit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasteUnit")
+            .field("placeholder", &self.placeholder)
+            .field(
+                "content",
+                &format_args!("<{} bytes redacted>", self.content.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub placeholder: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl fmt::Debug for ImageAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageAttachment")
+            .field("placeholder", &self.placeholder)
+            .field("media_type", &self.media_type)
+            .field(
+                "data",
+                &format_args!("<{} bytes redacted>", self.data.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct SubmittedInput {
     pub shown: String,
+    pub display: String,
     pub prompt: String,
     pub pastes: Vec<PasteUnit>,
+    pub images: Vec<ImageAttachment>,
+}
+
+impl fmt::Debug for SubmittedInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubmittedInput")
+            .field(
+                "shown",
+                &format_args!("<{} bytes redacted>", self.shown.len()),
+            )
+            .field(
+                "display",
+                &format_args!("<{} bytes redacted>", self.display.len()),
+            )
+            .field(
+                "prompt",
+                &format_args!("<{} bytes redacted>", self.prompt.len()),
+            )
+            .field("pastes", &self.pastes)
+            .field("images", &self.images)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ActivePaste {
-    start: usize,
-    unit: PasteUnit,
+enum AtomicPayload {
+    Paste(PasteUnit),
+    Image(ImageAttachment),
 }
 
-impl ActivePaste {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveUnit {
+    start: usize,
+    payload: AtomicPayload,
+}
+
+impl ActiveUnit {
+    fn placeholder(&self) -> &str {
+        match &self.payload {
+            AtomicPayload::Paste(paste) => &paste.placeholder,
+            AtomicPayload::Image(image) => &image.placeholder,
+        }
+    }
+
     fn end(&self) -> usize {
-        self.start.saturating_add(self.unit.placeholder.len())
+        self.start.saturating_add(self.placeholder().len())
     }
 }
 
@@ -43,7 +115,7 @@ impl ActivePaste {
 pub(crate) struct EditorSnapshot {
     text: String,
     cursor: usize,
-    pastes: Vec<ActivePaste>,
+    units: Vec<ActiveUnit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,9 +133,10 @@ pub struct Editor {
     history_index: Option<usize>,
     history_draft: String,
     history_draft_cursor: usize,
-    history_draft_pastes: Vec<ActivePaste>,
-    pastes: Vec<ActivePaste>,
+    history_draft_units: Vec<ActiveUnit>,
+    units: Vec<ActiveUnit>,
     paste_sequence: usize,
+    image_sequence: usize,
 }
 
 impl Editor {
@@ -100,20 +173,20 @@ impl Editor {
         EditorSnapshot {
             text: self.text.clone(),
             cursor: self.cursor,
-            pastes: self.pastes.clone(),
+            units: self.units.clone(),
         }
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
         self.text = snapshot.text;
         self.cursor = snapshot.cursor.min(self.text.len());
-        self.pastes = snapshot.pastes;
+        self.units = snapshot.units;
         self.normalize_cursor();
         self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
-        self.history_draft_pastes.clear();
+        self.history_draft_units.clear();
     }
 
     #[must_use]
@@ -165,7 +238,7 @@ impl Editor {
         self.preferred_column = None;
         let replacement = sanitize_text(replacement);
         let start = self.delete_range_atomic(range.start, range.end);
-        self.shift_pastes_at_or_after(start, replacement.len());
+        self.shift_units_at_or_after(start, replacement.len());
         self.text.insert_str(start, &replacement);
         self.cursor = start.saturating_add(replacement.len());
     }
@@ -213,12 +286,12 @@ impl Editor {
         self.text = sanitize_text(&text.into());
         self.cursor = cursor.min(self.text.len());
         self.normalize_cursor();
-        self.pastes.clear();
+        self.units.clear();
         self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
-        self.history_draft_pastes.clear();
+        self.history_draft_units.clear();
     }
 
     #[must_use]
@@ -246,7 +319,7 @@ impl Editor {
                 row.end_byte,
                 usize::from(column),
             );
-            self.snap_cursor_to_nearest_paste_boundary();
+            self.snap_cursor_to_nearest_unit_boundary();
             self.preferred_column = None;
         }
     }
@@ -256,8 +329,8 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         let text = sanitize_text(text);
-        self.snap_cursor_out_of_paste(true);
-        self.shift_pastes_at_or_after(self.cursor, text.len());
+        self.snap_cursor_out_of_unit(true);
+        self.shift_units_at_or_after(self.cursor, text.len());
         self.text.insert_str(self.cursor, &text);
         self.cursor += text.len();
     }
@@ -273,21 +346,59 @@ impl Editor {
         self.fork_recall_on_edit();
         self.normalize_cursor();
         self.preferred_column = None;
-        self.snap_cursor_out_of_paste(true);
+        self.snap_cursor_out_of_unit(true);
         self.paste_sequence = self.paste_sequence.saturating_add(1);
         let placeholder = format!("[Paste #{} - {lines} lines]", self.paste_sequence);
         let start = self.cursor;
-        self.shift_pastes_at_or_after(start, placeholder.len());
+        self.shift_units_at_or_after(start, placeholder.len());
         self.text.insert_str(start, &placeholder);
         self.cursor = start.saturating_add(placeholder.len());
-        self.pastes.push(ActivePaste {
+        self.units.push(ActiveUnit {
             start,
-            unit: PasteUnit {
+            payload: AtomicPayload::Paste(PasteUnit {
                 placeholder,
                 content: text,
-            },
+            }),
         });
-        self.pastes.sort_by_key(|paste| paste.start);
+        self.units.sort_by_key(|unit| unit.start);
+    }
+
+    pub(crate) fn insert_image(
+        &mut self,
+        media_type: impl Into<String>,
+        data: impl Into<String>,
+        byte_len: usize,
+    ) -> String {
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        self.snap_cursor_out_of_unit(true);
+        self.image_sequence = self.image_sequence.saturating_add(1);
+        let media_type = sanitize_text(&media_type.into());
+        let label = media_type
+            .rsplit('/')
+            .next()
+            .unwrap_or("image")
+            .to_uppercase();
+        let placeholder = format!(
+            "[image #{} · {label} {}]",
+            self.image_sequence,
+            human_byte_size(byte_len)
+        );
+        let start = self.cursor;
+        self.shift_units_at_or_after(start, placeholder.len());
+        self.text.insert_str(start, &placeholder);
+        self.cursor = start.saturating_add(placeholder.len());
+        self.units.push(ActiveUnit {
+            start,
+            payload: AtomicPayload::Image(ImageAttachment {
+                placeholder: placeholder.clone(),
+                media_type,
+                data: data.into(),
+            }),
+        });
+        self.units.sort_by_key(|unit| unit.start);
+        placeholder
     }
 
     pub fn backspace(&mut self) {
@@ -295,7 +406,7 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         if let Some((start, end)) = self
-            .pastes
+            .units
             .iter()
             .find(|paste| self.cursor > paste.start && self.cursor <= paste.end())
             .map(|paste| (paste.start, paste.end()))
@@ -315,7 +426,7 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         if let Some((start, end)) = self
-            .pastes
+            .units
             .iter()
             .find(|paste| self.cursor >= paste.start && self.cursor < paste.end())
             .map(|paste| (paste.start, paste.end()))
@@ -333,7 +444,7 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         if let Some(start) = self
-            .pastes
+            .units
             .iter()
             .find(|paste| self.cursor > paste.start && self.cursor <= paste.end())
             .map(|paste| paste.start)
@@ -350,10 +461,10 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         if let Some(end) = self
-            .pastes
+            .units
             .iter()
             .find(|paste| self.cursor >= paste.start && self.cursor < paste.end())
-            .map(ActivePaste::end)
+            .map(ActiveUnit::end)
         {
             self.cursor = end;
             return;
@@ -387,25 +498,32 @@ impl Editor {
         if self.text.trim().is_empty() {
             return None;
         }
-        let prompt = self.expanded_text();
+        let display = self.projected_text(false);
+        let prompt = self.projected_text(true).trim().to_string();
         let shown = std::mem::take(&mut self.text);
-        let pastes = std::mem::take(&mut self.pastes)
-            .into_iter()
-            .map(|paste| paste.unit)
-            .collect();
+        let mut pastes = Vec::new();
+        let mut images = Vec::new();
+        for unit in std::mem::take(&mut self.units) {
+            match unit.payload {
+                AtomicPayload::Paste(paste) => pastes.push(paste),
+                AtomicPayload::Image(image) => images.push(image),
+            }
+        }
         self.cursor = 0;
         self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
-        self.history_draft_pastes.clear();
-        if self.history.last() != Some(&prompt) {
-            self.history.push(prompt.clone());
+        self.history_draft_units.clear();
+        if self.history.last() != Some(&display) {
+            self.history.push(display.clone());
         }
         Some(SubmittedInput {
             shown,
+            display,
             prompt,
             pastes,
+            images,
         })
     }
 
@@ -414,7 +532,7 @@ impl Editor {
         let rows = self.visual_rows(width);
         let row = &rows[cursor_row(&rows, self.cursor)];
         self.cursor = row.start_byte;
-        self.snap_cursor_out_of_paste(false);
+        self.snap_cursor_out_of_unit(false);
         self.preferred_column = None;
     }
 
@@ -423,7 +541,7 @@ impl Editor {
         let rows = self.visual_rows(width);
         let row = &rows[cursor_row(&rows, self.cursor)];
         self.cursor = row.end_byte;
-        self.snap_cursor_out_of_paste(true);
+        self.snap_cursor_out_of_unit(true);
         self.preferred_column = None;
     }
 
@@ -452,14 +570,14 @@ impl Editor {
     pub fn move_word_left(&mut self) {
         self.normalize_cursor();
         self.cursor = previous_word_start(&self.text, self.cursor);
-        self.snap_cursor_out_of_paste(false);
+        self.snap_cursor_out_of_unit(false);
         self.preferred_column = None;
     }
 
     pub fn move_word_right(&mut self) {
         self.normalize_cursor();
         self.cursor = next_word_end(&self.text, self.cursor);
-        self.snap_cursor_out_of_paste(true);
+        self.snap_cursor_out_of_unit(true);
         self.preferred_column = None;
     }
 
@@ -500,7 +618,7 @@ impl Editor {
         let target = &rows[to];
         self.cursor =
             byte_at_display_column(&self.text, target.start_byte, target.end_byte, column);
-        self.snap_cursor_to_nearest_paste_boundary();
+        self.snap_cursor_to_nearest_unit_boundary();
     }
 
     fn line_start(&self) -> usize {
@@ -525,12 +643,12 @@ impl Editor {
             None => {
                 self.history_draft = self.text.clone();
                 self.history_draft_cursor = self.cursor;
-                self.history_draft_pastes = std::mem::take(&mut self.pastes);
+                self.history_draft_units = std::mem::take(&mut self.units);
                 self.history.len() - 1
             }
         };
         self.text = self.history[index].clone();
-        self.pastes.clear();
+        self.units.clear();
         self.cursor = self.text.len();
         self.history_index = Some(index);
     }
@@ -542,13 +660,13 @@ impl Editor {
         };
         if index + 1 < self.history.len() {
             self.text = self.history[index + 1].clone();
-            self.pastes.clear();
+            self.units.clear();
             self.cursor = self.text.len();
             self.history_index = Some(index + 1);
         } else {
             self.text = std::mem::take(&mut self.history_draft);
             self.cursor = self.history_draft_cursor.min(self.text.len());
-            self.pastes = std::mem::take(&mut self.history_draft_pastes);
+            self.units = std::mem::take(&mut self.history_draft_units);
             self.history_draft_cursor = 0;
             self.history_index = None;
         }
@@ -558,57 +676,52 @@ impl Editor {
         if self.history_index.take().is_some() {
             self.history_draft.clear();
             self.history_draft_cursor = 0;
-            self.history_draft_pastes.clear();
+            self.history_draft_units.clear();
         }
     }
 
-    fn expanded_text(&self) -> String {
-        let extra = self
-            .pastes
-            .iter()
-            .map(|paste| {
-                paste
-                    .unit
-                    .content
-                    .len()
-                    .saturating_sub(paste.unit.placeholder.len())
-            })
-            .sum::<usize>();
-        let mut expanded = String::with_capacity(self.text.len().saturating_add(extra));
+    fn projected_text(&self, remove_images: bool) -> String {
+        let mut projected = String::with_capacity(self.text.len());
         let mut copied = 0;
-        for paste in &self.pastes {
-            let end = paste.end();
-            if paste.start < copied
+        for unit in &self.units {
+            let end = unit.end();
+            if unit.start < copied
                 || end > self.text.len()
-                || self.text.get(paste.start..end) != Some(paste.unit.placeholder.as_str())
+                || self.text.get(unit.start..end) != Some(unit.placeholder())
             {
                 continue;
             }
-            expanded.push_str(&self.text[copied..paste.start]);
-            expanded.push_str(&paste.unit.content);
+            projected.push_str(&self.text[copied..unit.start]);
+            match &unit.payload {
+                AtomicPayload::Paste(paste) => projected.push_str(&paste.content),
+                AtomicPayload::Image(image) if !remove_images => {
+                    projected.push_str(&image.placeholder);
+                }
+                AtomicPayload::Image(_) => {}
+            }
             copied = end;
         }
-        expanded.push_str(&self.text[copied..]);
-        expanded
+        projected.push_str(&self.text[copied..]);
+        projected
     }
 
-    fn snap_cursor_out_of_paste(&mut self, forward: bool) {
+    fn snap_cursor_out_of_unit(&mut self, forward: bool) {
         if let Some((start, end)) = self
-            .pastes
+            .units
             .iter()
-            .find(|paste| self.cursor > paste.start && self.cursor < paste.end())
-            .map(|paste| (paste.start, paste.end()))
+            .find(|unit| self.cursor > unit.start && self.cursor < unit.end())
+            .map(|unit| (unit.start, unit.end()))
         {
             self.cursor = if forward { end } else { start };
         }
     }
 
-    fn snap_cursor_to_nearest_paste_boundary(&mut self) {
+    fn snap_cursor_to_nearest_unit_boundary(&mut self) {
         if let Some((start, end)) = self
-            .pastes
+            .units
             .iter()
-            .find(|paste| self.cursor > paste.start && self.cursor < paste.end())
-            .map(|paste| (paste.start, paste.end()))
+            .find(|unit| self.cursor > unit.start && self.cursor < unit.end())
+            .map(|unit| (unit.start, unit.end()))
         {
             self.cursor = if self.cursor - start <= end - self.cursor {
                 start
@@ -618,13 +731,13 @@ impl Editor {
         }
     }
 
-    fn shift_pastes_at_or_after(&mut self, at: usize, amount: usize) {
+    fn shift_units_at_or_after(&mut self, at: usize, amount: usize) {
         if amount == 0 {
             return;
         }
-        for paste in &mut self.pastes {
-            if paste.start >= at {
-                paste.start = paste.start.saturating_add(amount);
+        for unit in &mut self.units {
+            if unit.start >= at {
+                unit.start = unit.start.saturating_add(amount);
             }
         }
     }
@@ -639,10 +752,10 @@ impl Editor {
         loop {
             let mut expanded_start = start;
             let mut expanded_end = end;
-            for paste in &self.pastes {
-                if paste.start < end && paste.end() > start {
-                    expanded_start = expanded_start.min(paste.start);
-                    expanded_end = expanded_end.max(paste.end());
+            for unit in &self.units {
+                if unit.start < end && unit.end() > start {
+                    expanded_start = expanded_start.min(unit.start);
+                    expanded_end = expanded_end.max(unit.end());
                 }
             }
             if (expanded_start, expanded_end) == (start, end) {
@@ -654,12 +767,12 @@ impl Editor {
 
         self.text.drain(start..end);
         let removed = end - start;
-        self.pastes.retain_mut(|paste| {
-            if paste.start >= start && paste.end() <= end {
+        self.units.retain_mut(|unit| {
+            if unit.start >= start && unit.end() <= end {
                 false
             } else {
-                if paste.start >= end {
-                    paste.start -= removed;
+                if unit.start >= end {
+                    unit.start -= removed;
                 }
                 true
             }
@@ -672,6 +785,18 @@ impl Editor {
         while !self.text.is_char_boundary(self.cursor) {
             self.cursor = self.cursor.saturating_sub(1);
         }
+    }
+}
+
+fn human_byte_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -910,7 +1035,7 @@ mod tests {
         assert_eq!(editor.cursor(), editor.text().len());
         editor.backspace();
         assert_eq!(editor.text(), "");
-        assert!(editor.pastes.is_empty());
+        assert!(editor.units.is_empty());
     }
 
     #[test]
@@ -934,6 +1059,78 @@ mod tests {
     }
 
     #[test]
+    fn image_units_are_atomic_and_have_distinct_display_and_model_projections() {
+        let mut editor = Editor::default();
+        editor.insert("before ");
+        let placeholder = editor.insert_image("image/png", "SECRET_BASE64_IMAGE", 2048);
+        editor.insert(" after");
+        assert_eq!(placeholder, "[image #1 · PNG 2 KB]");
+        assert_eq!(editor.text(), "before [image #1 · PNG 2 KB] after");
+
+        let submitted = editor.submit().expect("submitted image");
+        assert_eq!(submitted.display, "before [image #1 · PNG 2 KB] after");
+        assert_eq!(submitted.prompt, "before  after");
+        assert!(submitted.pastes.is_empty());
+        assert_eq!(submitted.images.len(), 1);
+        assert_eq!(submitted.images[0].data, "SECRET_BASE64_IMAGE");
+        let debug = format!("{submitted:?}");
+        assert!(!debug.contains("SECRET_BASE64_IMAGE"));
+        assert!(debug.contains("19 bytes redacted"));
+    }
+
+    #[test]
+    fn editing_any_part_of_an_image_placeholder_removes_the_whole_unit() {
+        let mut editor = Editor::default();
+        editor.insert("left");
+        let placeholder = editor.insert_image("image/png", "image-data", 10);
+        editor.insert("right");
+        editor.replace_range(5..6, "X");
+        assert_eq!(editor.text(), "leftXright");
+        assert!(editor.units.is_empty());
+
+        let submitted = editor.submit().expect("text remains");
+        assert!(submitted.images.is_empty());
+        assert!(!submitted.display.contains(&placeholder));
+    }
+
+    #[test]
+    fn history_round_trip_restores_an_unsubmitted_image_without_reconstructing_recall() {
+        let mut editor = Editor::new(vec!["remembered".to_string()]);
+        let placeholder = editor.insert_image("image/png", "draft-image", 512);
+        editor.up_or_history(80);
+        assert_eq!(editor.text(), "remembered");
+        editor.down_or_history(80);
+        assert_eq!(editor.text(), placeholder);
+
+        let submitted = editor.submit().expect("restored image draft");
+        assert_eq!(submitted.images.len(), 1);
+        editor.up_or_history(80);
+        assert_eq!(editor.text(), placeholder);
+        assert!(
+            editor.units.is_empty(),
+            "recall must leave an inert placeholder"
+        );
+        let recalled = editor.submit().expect("inert recalled placeholder");
+        assert!(recalled.images.is_empty());
+        assert_eq!(recalled.prompt, placeholder);
+    }
+
+    #[test]
+    fn paste_and_image_debug_views_redact_payloads() {
+        let mut editor = Editor::default();
+        editor.insert_paste(format!("{}\nline 2\nline 3\nline 4", "PASTE_SECRET"));
+        editor.insert_image("image/png", "IMAGE_SECRET", 12);
+        let debug = format!("{editor:?}");
+        assert!(!debug.contains("PASTE_SECRET"));
+        assert!(!debug.contains("IMAGE_SECRET"));
+        assert!(debug.contains("bytes redacted"));
+        let submitted = editor.submit().expect("secret-bearing draft");
+        let debug = format!("{submitted:?}");
+        assert!(!debug.contains("PASTE_SECRET"));
+        assert!(!debug.contains("IMAGE_SECRET"));
+    }
+
+    #[test]
     fn submitted_paste_recalls_as_raw_multiline_text() {
         let payload = twelve_line_paste();
         let mut editor = Editor::default();
@@ -942,7 +1139,7 @@ mod tests {
 
         editor.up_or_history(80);
         assert_eq!(editor.text(), payload);
-        assert!(editor.pastes.is_empty());
+        assert!(editor.units.is_empty());
     }
 
     #[test]
@@ -970,7 +1167,7 @@ mod tests {
         editor.delete_to_line_start();
 
         assert_eq!(editor.text(), "after");
-        assert!(editor.pastes.is_empty());
+        assert!(editor.units.is_empty());
     }
 
     #[test]
@@ -978,7 +1175,7 @@ mod tests {
         let mut editor = Editor::default();
         editor.insert_paste("one\ntwo\nthree");
         assert_eq!(editor.text(), "one\ntwo\nthree");
-        assert!(editor.pastes.is_empty());
+        assert!(editor.units.is_empty());
     }
 
     #[test]
@@ -1014,7 +1211,7 @@ mod tests {
 
         editor.replace_range(0..inside_paste, "z");
         assert_eq!(editor.text(), "zy");
-        assert!(editor.pastes.is_empty());
+        assert!(editor.units.is_empty());
         assert_eq!(editor.cursor(), 1);
     }
 

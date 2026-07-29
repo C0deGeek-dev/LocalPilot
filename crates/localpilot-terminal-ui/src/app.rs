@@ -708,6 +708,22 @@ impl AppModel {
         }
     }
 
+    /// Attach an already-validated image to the ordinary composer. Overlays and
+    /// dialogs own input while open, so a host-side Ctrl+V cannot bypass their
+    /// containment contract.
+    pub fn attach_image(
+        &mut self,
+        media_type: impl Into<String>,
+        data: impl Into<String>,
+        byte_len: usize,
+    ) -> Option<String> {
+        if self.focus != Focus::Composer || self.dialog.is_some() || self.input_overlay.is_some() {
+            return None;
+        }
+        self.exit_armed = false;
+        Some(self.editor.insert_image(media_type, data, byte_len))
+    }
+
     /// Add one submitted prompt at its stable transcript position. The host
     /// supplies presentation-only trailing metadata such as a local time.
     pub fn append_prompt(
@@ -1731,6 +1747,46 @@ mod tests {
         let _ = app.handle_input(InputAction::Escape, 80);
         assert_eq!(app.editor.text(), "@sam");
         assert!(!app.has_input_overlay());
+    }
+
+    #[test]
+    fn image_attach_respects_overlay_ownership_and_selection_copies_only_placeholder_text() {
+        let mut app = model();
+        app.set_command_catalog([command("model", "Switch model")]);
+        let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        assert!(app.has_input_overlay());
+        assert_eq!(
+            app.attach_image("image/png", "BLOCKED_IMAGE_DATA", 32),
+            None
+        );
+        let _ = app.handle_input(InputAction::Escape, 80);
+        app.editor.replace_draft("");
+
+        let placeholder = app
+            .attach_image("image/png", "SECRET_IMAGE_DATA", 2048)
+            .expect("attached image");
+        assert_eq!(app.editor.text(), placeholder);
+        assert!(!format!("{app:?}").contains("SECRET_IMAGE_DATA"));
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("image placeholder should submit");
+        };
+        assert_eq!(submitted.prompt, "");
+        assert_eq!(submitted.images.len(), 1);
+        let id = app
+            .append_prompt(submitted.display.clone(), None, false)
+            .expect("prompt");
+        app.timeline.start_selection(ContentPoint {
+            item_id: id,
+            byte: 0,
+        });
+        app.timeline.extend_selection(ContentPoint {
+            item_id: id,
+            byte: submitted.display.len(),
+        });
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::Copy(placeholder)
+        );
     }
 
     #[test]
