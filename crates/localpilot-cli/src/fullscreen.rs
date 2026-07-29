@@ -42,6 +42,7 @@ pub(crate) struct HostContext<'a> {
     pub(crate) approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
+    pub(crate) ingest: &'a localpilot_config::IngestConfig,
     pub(crate) trust_required: bool,
 }
 
@@ -72,6 +73,9 @@ pub(crate) async fn run(
     // Seat an immediately useful frame before reading even the bounded global
     // history store. Workspace scans stay out of this startup seam entirely.
     let _ = draw_synchronized(&mut terminal, &app)?;
+    if !context.trust_required {
+        crate::repl::start_session_knowledge_index(context.cwd, context.ingest);
+    }
     let history_entries = context.history.load();
     app.seed_history(localpilot_store::project_texts(
         &history_entries,
@@ -110,6 +114,7 @@ async fn run_event_loop(
         approval_rx,
         cwd,
         history,
+        ingest,
         trust_required: _,
     } = context;
     let mut queue = VecDeque::new();
@@ -120,7 +125,7 @@ async fn run_event_loop(
         }
         let next = event::read().context("read full-screen terminal event")?;
         if app.workspace_trust_pending() {
-            if handle_trust_event(app, next, cwd) {
+            if handle_trust_event(app, next, cwd, ingest) {
                 break;
             }
             continue;
@@ -212,7 +217,12 @@ async fn drive_prompt_chain(
     Ok(false)
 }
 
-fn handle_trust_event(app: &mut AppModel, event: Event, cwd: &Path) -> bool {
+fn handle_trust_event(
+    app: &mut AppModel,
+    event: Event,
+    cwd: &Path,
+    ingest: &localpilot_config::IngestConfig,
+) -> bool {
     let Event::Key(key) = event else {
         if matches!(event, Event::Paste(_)) {
             app.disarm_exit();
@@ -228,6 +238,7 @@ fn handle_trust_event(app: &mut AppModel, event: Event, cwd: &Path) -> bool {
     match key.code {
         KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
             crate::trust::remember(cwd);
+            crate::repl::start_session_knowledge_index(cwd, ingest);
             app.clear_dialog();
             false
         }
@@ -794,17 +805,19 @@ mod tests {
         let mut app = app();
         app.require_workspace_trust("fixture");
         let cwd = Path::new("fixture");
+        let ingest = localpilot_config::IngestConfig::default();
         let ctrl_c = || Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd));
+        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
         assert!(app.workspace_trust_pending());
         assert!(!handle_trust_event(
             &mut app,
             Event::Key(press(KeyCode::Char('x'), KeyModifiers::NONE)),
             cwd,
+            &ingest,
         ));
-        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd));
-        assert!(handle_trust_event(&mut app, ctrl_c(), cwd));
+        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
+        assert!(handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
     }
 
     #[test]

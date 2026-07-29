@@ -181,6 +181,26 @@ struct StartupTimer {
     last: Instant,
 }
 
+pub(crate) fn start_session_knowledge_index(
+    cwd: &std::path::Path,
+    config: &localpilot_config::IngestConfig,
+) {
+    let Some(mode) = localpilot_localmind::session_open_mode(cwd, config) else {
+        return;
+    };
+    let ingest_root = cwd.to_path_buf();
+    let ingest_config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode) {
+            tracing::warn!(
+                target: "localpilot::ingest",
+                %error,
+                "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
+            );
+        }
+    });
+}
+
 impl StartupTimer {
     fn new() -> Self {
         let start = Instant::now();
@@ -391,6 +411,7 @@ pub async fn run_chat(
                 approval_rx: &mut approval_rx,
                 cwd: &cwd,
                 history: &history,
+                ingest: &config.ingest,
                 trust_required,
             },
         )
@@ -445,24 +466,7 @@ pub async fn run_chat(
     // staleness refresh when a completed index's sources changed — and returns
     // nothing when ingest is disabled or the index is already current.
     if state.trusted {
-        if let Some(mode) = localpilot_localmind::session_open_mode(&cwd, &config.ingest) {
-            let ingest_root = cwd.clone();
-            let ingest_config = config.ingest.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(error) =
-                    localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode)
-                {
-                    // A failed background index build makes knowledge_search return
-                    // nothing or stale results all session, indistinguishable from
-                    // "no matching knowledge" — surface it so it is diagnosable.
-                    tracing::warn!(
-                        target: "localpilot::ingest",
-                        %error,
-                        "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
-                    );
-                }
-            });
-        }
+        start_session_knowledge_index(&cwd, &config.ingest);
     }
 
     timer.mark("knowledge index (mode check)");
