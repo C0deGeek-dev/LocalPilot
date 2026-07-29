@@ -11,6 +11,7 @@ use crate::{
     MINIMUM_WIDTH,
 };
 
+/// Six banner lines plus one deliberate blank line before the first prompt.
 const BANNER_ROWS: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,11 +197,16 @@ fn render_timeline(
         }
     }
 
+    let scrollbar_viewport_rows = if banner_visible {
+        view.viewport_rows.saturating_sub(usize::from(BANNER_ROWS))
+    } else {
+        view.viewport_rows
+    };
     let scrollbar = ScrollbarGeometry::calculate(
         layout.scrollbar,
         view.start,
         view.total_rows,
-        view.viewport_rows,
+        scrollbar_viewport_rows,
     );
     if let Some(thumb) = scrollbar.thumb {
         let theme = theme(app);
@@ -951,14 +957,28 @@ mod tests {
                 .push(ItemKind::Assistant, format!("response {number:02}"));
         }
         app.timeline.scroll_by(-10_000, 76, 16);
+        let mut hit_map = None;
         terminal
-            .draw(|frame| {
-                let _ = render(frame, &app);
-            })
+            .draw(|frame| hit_map = Some(render(frame, &app)))
             .expect("draw held conversation header");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("LocalPilot v0"));
         assert!(rendered.contains("first prompt"));
+        let hit_map = hit_map.expect("hit map");
+        let layout = hit_map.frame.expect("layout");
+        let view = app.timeline.view(
+            layout.timeline_content.width,
+            layout.timeline_content.height,
+        );
+        assert_eq!(
+            hit_map.scrollbar,
+            ScrollbarGeometry::calculate(
+                layout.scrollbar,
+                view.start,
+                view.total_rows,
+                view.viewport_rows.saturating_sub(usize::from(BANNER_ROWS)),
+            )
+        );
     }
 
     #[test]
