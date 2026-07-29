@@ -273,7 +273,7 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
     let used = fixed_width.saturating_add(UnicodeWidthStr::width(text.as_str()));
     let gap = usize::from(area.width).saturating_sub(used);
     let line = Line::from(vec![
-        Span::styled("┃", theme.ui(UiRole::Surface)),
+        Span::styled(" ", theme.ui(UiRole::Surface)),
         Span::styled(
             glyph,
             theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
@@ -288,7 +288,7 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
         ),
         Span::raw(" ".repeat(gap)),
         Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)),
-        Span::styled("┃", theme.ui(UiRole::Surface)),
+        Span::styled(" ", theme.ui(UiRole::Surface)),
     ])
     .style(theme.ui(UiRole::Surface));
     framed_rule(area.width, true, theme.ui(UiRole::SurfaceEdge))
@@ -379,7 +379,7 @@ fn timeline_line(
         if !trailing.is_empty() {
             spans.push(Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)));
         }
-        spans.push(Span::styled("┃", theme.ui(UiRole::Surface)));
+        spans.push(Span::styled(" ", theme.ui(UiRole::Surface)));
     }
     let line = Line::from(spans);
     if row.kind == ItemKind::User {
@@ -403,7 +403,7 @@ fn role_prefix(
 ) -> Vec<Span<'static>> {
     match kind {
         ItemKind::User => vec![
-            Span::styled("┃", theme.ui(UiRole::Surface)),
+            Span::styled(" ", theme.ui(UiRole::Surface)),
             Span::styled(
                 if first { "❯ " } else { "  " },
                 theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
@@ -834,6 +834,20 @@ mod tests {
         );
         assert!(
             buffer_line(buffer, layout.timeline_content.y + 1).contains("current prompt (pending)")
+        );
+        assert_eq!(
+            buffer[(layout.timeline_content.x, layout.timeline_content.y + 1)].symbol(),
+            " ",
+            "prompt surfaces must not draw a visible side bar"
+        );
+        assert_eq!(
+            buffer[(
+                layout.timeline_content.right() - 1,
+                layout.timeline_content.y + 1
+            )]
+                .symbol(),
+            " ",
+            "prompt surfaces must not draw a visible side bar"
         );
         assert_eq!(
             buffer[(layout.timeline_content.x + 1, layout.timeline_content.y + 1)]
