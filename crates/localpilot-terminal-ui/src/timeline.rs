@@ -453,12 +453,22 @@ impl Timeline {
         let max_start = total_rows.saturating_sub(viewport_rows);
         let current = self.current_start(width).min(max_start);
         let next = current.saturating_add_signed(delta).min(max_start);
-        if next >= max_start {
+        self.set_viewport_start(next, width, max_start);
+    }
+
+    pub fn scroll_to_row(&mut self, start: usize, width: u16, height: u16) {
+        let viewport_rows = usize::from(height.max(1));
+        let max_start = self.total_rows(width).saturating_sub(viewport_rows);
+        self.set_viewport_start(start.min(max_start), width, max_start);
+    }
+
+    fn set_viewport_start(&mut self, start: usize, width: u16, max_start: usize) {
+        if start >= max_start {
             self.viewport = ViewportAnchor::FollowBottom;
             self.new_content.set(false);
-        } else if next == 0 {
+        } else if start == 0 {
             self.viewport = ViewportAnchor::Top;
-        } else if let Some(point) = self.point_at_row(width, next) {
+        } else if let Some(point) = self.point_at_row(width, start) {
             self.viewport = ViewportAnchor::Held(point);
         }
     }
@@ -929,7 +939,7 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
         spans,
         part,
         content_column: match item.kind {
-            ItemKind::User => 4,
+            ItemKind::User => 3,
             ItemKind::Assistant | ItemKind::Reasoning | ItemKind::Tool | ItemKind::Notice => 2,
         },
         trailing: matches!(part, VisualRowPart::Content { first: true, .. })
@@ -983,6 +993,27 @@ mod tests {
         timeline.scroll_by(10_000, 40, 8);
         assert_eq!(timeline.viewport, ViewportAnchor::FollowBottom);
         assert!(!timeline.has_new_content());
+    }
+
+    #[test]
+    fn absolute_scroll_target_uses_content_anchors_and_reaches_bottom() {
+        let mut timeline = Timeline::new();
+        for number in 0..40 {
+            let _ = timeline.push(ItemKind::Assistant, format!("item {number:02}"));
+        }
+
+        timeline.scroll_to_row(12, 40, 8);
+        let ViewportAnchor::Held(anchor) = timeline.viewport else {
+            panic!("an interior absolute target must hold a content anchor");
+        };
+        assert_eq!(timeline.view(40, 8).start, 12);
+        assert_eq!(
+            timeline.view(40, 8).rows.first().map(|row| row.item_id),
+            Some(anchor.item_id)
+        );
+
+        timeline.scroll_to_row(usize::MAX, 40, 8);
+        assert_eq!(timeline.viewport, ViewportAnchor::FollowBottom);
     }
 
     #[test]

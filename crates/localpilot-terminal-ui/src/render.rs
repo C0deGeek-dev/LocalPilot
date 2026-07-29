@@ -67,6 +67,45 @@ impl ScrollbarGeometry {
             viewport_rows,
         }
     }
+
+    #[must_use]
+    pub fn content_start_for_thumb_top(&self, thumb_top: u16) -> Option<usize> {
+        let thumb = self.thumb?;
+        let max_thumb_start = usize::from(self.track.height.saturating_sub(thumb.height));
+        let max_view_start = self.total_rows.saturating_sub(self.viewport_rows);
+        if max_thumb_start == 0 || max_view_start == 0 {
+            return Some(0);
+        }
+        let relative = usize::from(
+            thumb_top
+                .saturating_sub(self.track.y)
+                .min(self.track.height.saturating_sub(thumb.height)),
+        );
+        Some(
+            relative
+                .saturating_mul(max_view_start)
+                .saturating_add(max_thumb_start / 2)
+                / max_thumb_start,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRowHit {
+    pub y: u16,
+    pub content_x: u16,
+    pub row: VisualRow,
+}
+
+impl TimelineRowHit {
+    #[must_use]
+    pub fn point_for_column(&self, column: u16, trailing: bool) -> crate::ContentPoint {
+        crate::Timeline::point_for_column(
+            &self.row,
+            column.saturating_sub(self.content_x),
+            trailing,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +113,7 @@ pub struct HitMap {
     pub frame: Option<FrameLayout>,
     pub tabs: Vec<TabHit>,
     pub timeline: Rect,
+    pub timeline_rows: Vec<TimelineRowHit>,
     pub scrollbar: ScrollbarGeometry,
     pub composer: Rect,
     pub editor_width: u16,
@@ -107,6 +147,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             frame: None,
             tabs: Vec::new(),
             timeline: Rect::default(),
+            timeline_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -115,7 +156,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     };
 
     let tabs = render_tabs(frame, layout.tabs, app);
-    let scrollbar = render_timeline(frame, layout, app);
+    let (scrollbar, timeline_rows) = render_timeline(frame, layout, app);
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
@@ -124,6 +165,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         frame: Some(layout),
         tabs,
         timeline: layout.timeline_content,
+        timeline_rows,
         scrollbar,
         composer: layout.composer_content,
         editor_width,
@@ -167,7 +209,7 @@ fn render_timeline(
     frame: &mut Frame<'_>,
     layout: FrameLayout,
     app: &AppModel,
-) -> ScrollbarGeometry {
+) -> (ScrollbarGeometry, Vec<TimelineRowHit>) {
     let area = layout.timeline_content;
     let view = app.timeline.view(area.width.max(1), area.height.max(1));
     let banner_visible = view.pinned.is_none()
@@ -183,6 +225,7 @@ fn render_timeline(
     } else {
         0
     };
+    let mut row_hits = Vec::new();
     if view.rows.is_empty() && view.pinned.is_none() && !banner_visible {
         render_idle_banner(frame, area, app);
     } else {
@@ -194,6 +237,13 @@ fn render_timeline(
                 .saturating_add(offset as u16);
             timeline_line(row, app, area.width)
                 .render(Rect::new(area.x, y, area.width, 1), frame.buffer_mut());
+            if matches!(row.part, VisualRowPart::Content { .. }) {
+                row_hits.push(TimelineRowHit {
+                    y,
+                    content_x: area.x.saturating_add(row.content_column),
+                    row: row.clone(),
+                });
+            }
         }
     }
 
@@ -223,7 +273,7 @@ fn render_timeline(
             );
         }
     }
-    scrollbar
+    (scrollbar, row_hits)
 }
 
 fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
@@ -403,9 +453,8 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
 }
 
 fn framed_rule(width: u16, top: bool, style: ratatui::style::Style) -> Line<'static> {
-    let (corner, fill) = if top { ("╻", "▄") } else { ("╹", "▀") };
-    let middle = fill.repeat(usize::from(width.saturating_sub(2)));
-    Line::styled(format!("{corner}{middle}{corner}"), style)
+    let fill = if top { "▄" } else { "▀" };
+    Line::styled(fill.repeat(usize::from(width)), style)
 }
 
 fn role_prefix(
@@ -615,19 +664,19 @@ fn render_slim_frame(
     if area.width < 2 || area.height < 2 {
         return;
     }
-    framed_composer_rule(area.width, true, left_edge, surface_edge)
+    framed_composer_rule(area.width, true, surface_edge)
         .render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
-    framed_composer_rule(area.width, false, left_edge, surface_edge).render(
+    framed_composer_rule(area.width, false, surface_edge).render(
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         frame.buffer_mut(),
     );
     for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
         frame.render_widget(
             Paragraph::new("").style(surface),
-            Rect::new(area.x.saturating_add(1), y, area.width.saturating_sub(1), 1),
+            Rect::new(area.x, y, area.width, 1),
         );
         frame.render_widget(
-            Paragraph::new("┃").style(left_edge),
+            Paragraph::new("▏").style(left_edge),
             Rect::new(area.x, y, 1, 1),
         );
     }
@@ -636,22 +685,10 @@ fn render_slim_frame(
 fn framed_composer_rule(
     width: u16,
     top: bool,
-    left_edge: ratatui::style::Style,
     surface_edge: ratatui::style::Style,
 ) -> Line<'static> {
-    let (corner, fill, far_corner) = if top {
-        ("╻", "▄", "╻")
-    } else {
-        ("╹", "▀", "╹")
-    };
-    Line::from(vec![
-        Span::styled(corner, left_edge),
-        Span::styled(
-            fill.repeat(usize::from(width.saturating_sub(2))),
-            surface_edge,
-        ),
-        Span::styled(far_corner, surface_edge),
-    ])
+    let fill = if top { "▄" } else { "▀" };
+    Line::styled(fill.repeat(usize::from(width)), surface_edge)
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
@@ -1021,7 +1058,7 @@ mod tests {
         let layout = hit_map.expect("hit map").frame.expect("layout");
         let buffer = terminal.backend().buffer();
         let prompt_y = layout.timeline_content.y + BANNER_ROWS;
-        assert_eq!(buffer[(layout.timeline_content.x, prompt_y)].symbol(), "╻");
+        assert_eq!(buffer[(layout.timeline_content.x, prompt_y)].symbol(), "▄");
         assert!(buffer_line(buffer, prompt_y + 1).contains("current prompt (pending)"));
         assert_eq!(
             buffer[(layout.timeline_content.x, prompt_y + 1)].symbol(),
@@ -1041,7 +1078,7 @@ mod tests {
         );
         assert_eq!(
             buffer[(layout.timeline_content.x, prompt_y + 2)].symbol(),
-            "╹"
+            "▀"
         );
 
         let mut app = model();
@@ -1059,12 +1096,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(layout.timeline_content.x, layout.timeline_content.y)].symbol(),
-            "╻"
+            "▄"
         );
         assert!(buffer_line(buffer, layout.timeline_content.y + 1).contains("pinned prompt"));
         assert_eq!(
             buffer[(layout.timeline_content.x, layout.timeline_content.y + 2)].symbol(),
-            "╹"
+            "▀"
         );
         assert!(buffer_line(buffer, layout.timeline_content.y + 3).contains("response"));
     }
@@ -1112,6 +1149,69 @@ mod tests {
     }
 
     #[test]
+    fn scrollbar_inverse_is_monotonic_and_reaches_both_ends() {
+        let track = Rect::new(79, 3, 1, 20);
+        let top = ScrollbarGeometry::calculate(track, 0, 500, 25);
+        let top_y = top.thumb.expect("top thumb").y;
+        assert_eq!(top.content_start_for_thumb_top(top_y), Some(0));
+
+        let bottom = ScrollbarGeometry::calculate(track, 475, 500, 25);
+        let bottom_y = bottom.thumb.expect("bottom thumb").y;
+        assert_eq!(bottom.content_start_for_thumb_top(bottom_y), Some(475));
+
+        let mut previous = 0;
+        for y in track.y..track.bottom() {
+            let start = bottom
+                .content_start_for_thumb_top(y)
+                .expect("visible thumb has an inverse");
+            assert!(start >= previous);
+            previous = start;
+        }
+    }
+
+    #[test]
+    fn timeline_row_hits_share_rendered_grapheme_coordinates() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        let _ = app.timeline.push(ItemKind::User, "prompt");
+        let _ = app.timeline.push(ItemKind::Assistant, "alpha 界 beta");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw row hits");
+        let hit_map = hit_map.expect("hit map");
+        let prompt = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::User)
+            .expect("prompt hit");
+        assert_eq!(prompt.content_x, hit_map.timeline.x + 3);
+
+        let response = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Assistant)
+            .expect("response hit");
+        assert_eq!(response.content_x, hit_map.timeline.x + 2);
+        assert_eq!(response.point_for_column(response.content_x, false).byte, 0);
+        assert_eq!(
+            response
+                .point_for_column(response.content_x + 6, false)
+                .byte,
+            "alpha ".len()
+        );
+        assert_eq!(
+            response.point_for_column(response.content_x + 6, true).byte,
+            "alpha 界".len()
+        );
+        assert_eq!(
+            response.point_for_column(u16::MAX, true).byte,
+            "alpha 界 beta".len()
+        );
+    }
+
+    #[test]
     fn style_type_is_kept_out_of_public_state() {
         let _: ratatui::style::Style = theme(&model()).ui(UiRole::Foreground);
     }
@@ -1151,10 +1251,10 @@ mod tests {
             let buffer = terminal.backend().buffer();
 
             assert!(buffer_line(buffer, 0).contains("Session"));
-            assert_eq!(buffer[(layout.composer.x, layout.composer.y)].symbol(), "╻");
+            assert_eq!(buffer[(layout.composer.x, layout.composer.y)].symbol(), "▄");
             assert_eq!(
                 buffer[(layout.composer.x, layout.composer.bottom() - 1)].symbol(),
-                "╹"
+                "▀"
             );
             assert_eq!(
                 buffer[(layout.scrollbar.x, layout.scrollbar.y)].symbol(),
@@ -1213,6 +1313,15 @@ mod tests {
 
         let rule = buffer[(layout.composer.x + 1, layout.composer.y)].style();
         let side = buffer[(layout.composer.x, layout.composer_content.y)].style();
+        assert_eq!(
+            buffer[(layout.composer.x, layout.composer_content.y)].symbol(),
+            "▏"
+        );
+        assert_eq!(
+            buffer[(layout.composer.right() - 1, layout.composer_content.y)].symbol(),
+            " ",
+            "the filled composer must not draw a right-edge artifact"
+        );
         assert_eq!(
             rule.fg,
             resolver.ui(UiRole::SurfaceEdge).fg,

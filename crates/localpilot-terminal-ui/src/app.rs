@@ -89,6 +89,7 @@ pub enum WorkState {
 pub enum InputAction {
     CancelOrExit,
     InterruptWork,
+    NavigateTimeline(TimelineNavigation),
     Insert(String),
     Backspace,
     Delete,
@@ -99,12 +100,21 @@ pub enum InputAction {
     Submit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineNavigation {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     None,
     CancelWork,
     Copy(String),
     Exit,
+    NavigateTimeline(TimelineNavigation),
     Submit(String),
 }
 
@@ -265,6 +275,7 @@ impl AppModel {
         match action {
             InputAction::CancelOrExit => self.cancel_or_exit(),
             InputAction::InterruptWork => self.interrupt_work(),
+            InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 self.editor.insert(&text);
                 AppCommand::None
@@ -675,6 +686,20 @@ mod tests {
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::None
         );
+    }
+
+    #[test]
+    fn timeline_navigation_is_semantic_and_disarms_exit() {
+        let mut app = model();
+        app.exit_armed = true;
+        assert_eq!(
+            app.handle_input(
+                InputAction::NavigateTimeline(TimelineNavigation::PageUp),
+                80,
+            ),
+            AppCommand::NavigateTimeline(TimelineNavigation::PageUp)
+        );
+        assert!(!app.exit_armed);
     }
 
     #[test]

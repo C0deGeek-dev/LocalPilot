@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,8 +22,9 @@ use crossterm::terminal::{
 };
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
-    render, AppCommand, AppModel, ColorSupport, Header, InputAction, ItemId, KeyboardSupport,
-    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities, Theme,
+    render, AppCommand, AppModel, ColorSupport, ContentPoint, Header, HitMap, InputAction, ItemId,
+    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities,
+    Theme, TimelineNavigation,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -34,6 +35,7 @@ use crate::key_input::{is_cancel, is_key_action};
 use crate::repl::ApprovalCall;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
@@ -57,6 +59,34 @@ pub(crate) struct HostContext<'a> {
 struct QueuedPrompt {
     text: String,
     item_id: ItemId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectionGesture {
+    leading: ContentPoint,
+    trailing: ContentPoint,
+    origin_column: u16,
+    origin_row: u16,
+}
+
+#[derive(Debug, Default)]
+struct MouseState {
+    selection: Option<SelectionGesture>,
+    scrollbar_grab: Option<u16>,
+}
+
+impl MouseState {
+    fn reset_gesture(&mut self) {
+        self.selection = None;
+        self.scrollbar_grab = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoutedEvent {
+    Unhandled,
+    Handled,
+    Copy(String),
 }
 
 pub(crate) async fn run(
@@ -125,6 +155,7 @@ async fn run_event_loop(
         trust_required: _,
     } = context;
     let mut queue = VecDeque::new();
+    let mut mouse_state = MouseState::default();
     while !app.exit_requested {
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
@@ -132,10 +163,19 @@ async fn run_event_loop(
         }
         let next = event::read().context("read full-screen terminal event")?;
         if app.workspace_trust_pending() {
+            mouse_state.reset_gesture();
             if handle_trust_event(app, next, cwd, ingest) {
                 break;
             }
             continue;
+        }
+        match route_pointer_or_navigation(app, &next, &hit_map, &mut mouse_state) {
+            RoutedEvent::Handled => continue,
+            RoutedEvent::Copy(text) => {
+                copy_to_clipboard(app, text);
+                continue;
+            }
+            RoutedEvent::Unhandled => {}
         }
         match next {
             Event::Key(key) if is_key_action(key) => {
@@ -164,14 +204,15 @@ async fn run_event_loop(
                             &mut queue,
                             history,
                             cwd,
-                            hit_map.editor_width,
+                            &mut mouse_state,
                         )
                         .await?
                         {
                             break;
                         }
                     }
-                    AppCommand::None | AppCommand::CancelWork => {}
+                    AppCommand::None | AppCommand::CancelWork | AppCommand::NavigateTimeline(_) => {
+                    }
                 }
             }
             Event::Paste(text) => {
@@ -179,8 +220,8 @@ async fn run_event_loop(
             }
             Event::FocusGained
             | Event::FocusLost
-            | Event::Mouse(_)
             | Event::Resize(_, _)
+            | Event::Mouse(_)
             | Event::Key(_) => {}
         }
     }
@@ -197,7 +238,7 @@ async fn drive_prompt_chain(
     queue: &mut VecDeque<QueuedPrompt>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
-    mut editor_width: u16,
+    mouse_state: &mut MouseState,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(prompt) = current {
@@ -209,16 +250,15 @@ async fn drive_prompt_chain(
             runtime,
             approval_rx,
             &prompt.text,
-            editor_width,
             queue,
             history,
             cwd,
+            mouse_state,
         )
         .await?
         {
             return Ok(true);
         }
-        editor_width = draw_synchronized(terminal, app)?.editor_width;
         current = queue.pop_front();
     }
     Ok(false)
@@ -265,10 +305,10 @@ async fn drive_turn(
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     prompt: &str,
-    initial_editor_width: u16,
     queue: &mut VecDeque<QueuedPrompt>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
+    mouse_state: &mut MouseState,
 ) -> Result<bool> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
@@ -276,38 +316,49 @@ async fn drive_turn(
     tokio::pin!(operation);
     let mut pending: Option<oneshot::Sender<bool>> = None;
     let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
-    let mut editor_width = initial_editor_width;
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             biased;
             _ = tick.tick() => {
+                let mut hit_map = draw_synchronized(terminal, app)?;
                 for _ in 0..64 {
                     if !event::poll(Duration::ZERO).context("poll full-screen turn input")? {
                         break;
                     }
                     let next = event::read().context("read full-screen turn input")?;
+                    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
                     let exit = if pending.is_some() {
                         handle_approval_event(app, next, &mut pending, &cancel)
                     } else {
-                        handle_turn_event(
-                            app,
-                            next,
-                            &cancel,
-                            editor_width,
-                            queue,
-                            history,
-                            cwd,
-                        )
+                        match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
+                            RoutedEvent::Handled => false,
+                            RoutedEvent::Copy(text) => {
+                                copy_to_clipboard(app, text);
+                                false
+                            }
+                            RoutedEvent::Unhandled => handle_turn_event(
+                                app,
+                                next,
+                                &cancel,
+                                hit_map.editor_width,
+                                queue,
+                                history,
+                                cwd,
+                            ),
+                        }
                     };
                     if exit {
                         cancel.cancel();
                         deny_pending(app, &mut pending);
                         return Ok(true);
                     }
+                    if geometry_event {
+                        hit_map = draw_synchronized(terminal, app)?;
+                    }
                 }
-                editor_width = draw_synchronized(terminal, app)?.editor_width;
+                let _ = draw_synchronized(terminal, app)?;
             }
             reason = &mut operation => {
                 drain_runtime_events(app, &mut rx);
@@ -317,6 +368,7 @@ async fn drive_turn(
                 return Ok(false);
             }
             Some(call) = approval_rx.recv(), if pending.is_none() => {
+                mouse_state.reset_gesture();
                 app.request_approval(
                     call.request.tool,
                     call.request.target,
@@ -374,7 +426,7 @@ fn handle_turn_event(
                     }
                     false
                 }
-                AppCommand::None => false,
+                AppCommand::None | AppCommand::NavigateTimeline(_) => false,
             }
         }
         Event::Paste(text) => {
@@ -387,6 +439,255 @@ fn handle_turn_event(
         | Event::Resize(_, _)
         | Event::Key(_) => false,
     }
+}
+
+fn route_pointer_or_navigation(
+    app: &mut AppModel,
+    event: &Event,
+    hit_map: &HitMap,
+    mouse_state: &mut MouseState,
+) -> RoutedEvent {
+    match event {
+        Event::Mouse(mouse) => handle_mouse_event(app, *mouse, hit_map, mouse_state),
+        Event::Key(key) if is_key_action(*key) => {
+            let Some(InputAction::NavigateTimeline(navigation)) = map_key(*key) else {
+                return RoutedEvent::Unhandled;
+            };
+            let command = app.handle_input(
+                InputAction::NavigateTimeline(navigation),
+                hit_map.editor_width,
+            );
+            let AppCommand::NavigateTimeline(navigation) = command else {
+                return RoutedEvent::Handled;
+            };
+            apply_timeline_navigation(app, navigation, hit_map);
+            RoutedEvent::Handled
+        }
+        Event::FocusGained
+        | Event::FocusLost
+        | Event::Paste(_)
+        | Event::Resize(_, _)
+        | Event::Key(_) => RoutedEvent::Unhandled,
+    }
+}
+
+fn handle_mouse_event(
+    app: &mut AppModel,
+    mouse: MouseEvent,
+    hit_map: &HitMap,
+    mouse_state: &mut MouseState,
+) -> RoutedEvent {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            app.disarm_exit();
+            app.timeline.scroll_by(
+                -WHEEL_SCROLL_ROWS,
+                hit_map.timeline.width,
+                hit_map.timeline.height,
+            );
+            RoutedEvent::Handled
+        }
+        MouseEventKind::ScrollDown => {
+            app.disarm_exit();
+            app.timeline.scroll_by(
+                WHEEL_SCROLL_ROWS,
+                hit_map.timeline.width,
+                hit_map.timeline.height,
+            );
+            RoutedEvent::Handled
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.disarm_exit();
+            mouse_state.reset_gesture();
+
+            if rect_contains(hit_map.scrollbar.track, mouse.column, mouse.row) {
+                if let Some(thumb) = hit_map.scrollbar.thumb {
+                    if rect_contains(thumb, mouse.column, mouse.row) {
+                        mouse_state.scrollbar_grab = Some(mouse.row.saturating_sub(thumb.y));
+                    } else {
+                        let delta =
+                            isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
+                        app.timeline.scroll_by(
+                            if mouse.row < thumb.y { -delta } else { delta },
+                            hit_map.timeline.width,
+                            hit_map.timeline.height,
+                        );
+                    }
+                }
+                return RoutedEvent::Handled;
+            }
+
+            if let Some(tab) = hit_map
+                .tabs
+                .iter()
+                .find(|tab| rect_contains(tab.area, mouse.column, mouse.row))
+            {
+                app.active_tab = tab.tab;
+                app.timeline.clear_selection();
+                return RoutedEvent::Handled;
+            }
+
+            if rect_contains(hit_map.composer, mouse.column, mouse.row) {
+                let visual_row = hit_map
+                    .composer_scroll
+                    .saturating_add(usize::from(mouse.row.saturating_sub(hit_map.composer.y)));
+                app.editor.set_cursor_from_visual(
+                    visual_row,
+                    mouse.column.saturating_sub(hit_map.composer.x),
+                    hit_map.editor_width,
+                );
+                app.timeline.clear_selection();
+                return RoutedEvent::Handled;
+            }
+
+            if let Some((leading, trailing)) = selection_points(hit_map, mouse.column, mouse.row) {
+                app.timeline.start_selection(leading);
+                mouse_state.selection = Some(SelectionGesture {
+                    leading,
+                    trailing,
+                    origin_column: mouse.column,
+                    origin_row: mouse.row,
+                });
+            } else {
+                app.timeline.clear_selection();
+            }
+            RoutedEvent::Handled
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            app.disarm_exit();
+            if let Some(grab) = mouse_state.scrollbar_grab {
+                let thumb_top = mouse.row.saturating_sub(grab);
+                if let Some(start) = hit_map.scrollbar.content_start_for_thumb_top(thumb_top) {
+                    app.timeline.scroll_to_row(
+                        start,
+                        hit_map.timeline.width,
+                        hit_map.timeline.height,
+                    );
+                }
+                return RoutedEvent::Handled;
+            }
+            if mouse_state.selection.is_some() {
+                if mouse.row < hit_map.timeline.y {
+                    app.timeline
+                        .scroll_by(-1, hit_map.timeline.width, hit_map.timeline.height);
+                } else if mouse.row >= hit_map.timeline.bottom() {
+                    app.timeline
+                        .scroll_by(1, hit_map.timeline.width, hit_map.timeline.height);
+                }
+                extend_mouse_selection(app, hit_map, mouse_state, mouse.column, mouse.row);
+            }
+            RoutedEvent::Handled
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.disarm_exit();
+            if mouse_state.scrollbar_grab.is_some() {
+                mouse_state.reset_gesture();
+                return RoutedEvent::Handled;
+            }
+            let selecting = mouse_state.selection;
+            if let Some(gesture) = selecting {
+                if (mouse.row, mouse.column) == (gesture.origin_row, gesture.origin_column) {
+                    app.timeline.clear_selection();
+                } else {
+                    extend_mouse_selection(app, hit_map, mouse_state, mouse.column, mouse.row);
+                }
+            }
+            mouse_state.reset_gesture();
+            if selecting.is_some() {
+                app.timeline
+                    .selected_text()
+                    .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
+            } else {
+                RoutedEvent::Handled
+            }
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            app.disarm_exit();
+            app.timeline
+                .selected_text()
+                .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
+        }
+        MouseEventKind::Down(_)
+        | MouseEventKind::Up(_)
+        | MouseEventKind::Drag(_)
+        | MouseEventKind::Moved
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => RoutedEvent::Unhandled,
+    }
+}
+
+fn extend_mouse_selection(
+    app: &mut AppModel,
+    hit_map: &HitMap,
+    mouse_state: &MouseState,
+    column: u16,
+    row: u16,
+) {
+    let Some(gesture) = mouse_state.selection else {
+        return;
+    };
+    let Some((leading, trailing)) = selection_points_nearest(hit_map, column, row) else {
+        return;
+    };
+    if (row, column) >= (gesture.origin_row, gesture.origin_column) {
+        app.timeline.start_selection(gesture.leading);
+        app.timeline.extend_selection(trailing);
+    } else {
+        app.timeline.start_selection(gesture.trailing);
+        app.timeline.extend_selection(leading);
+    }
+}
+
+fn selection_points(
+    hit_map: &HitMap,
+    column: u16,
+    row: u16,
+) -> Option<(ContentPoint, ContentPoint)> {
+    let hit = hit_map.timeline_rows.iter().find(|hit| hit.y == row)?;
+    Some((
+        hit.point_for_column(column, false),
+        hit.point_for_column(column, true),
+    ))
+}
+
+fn selection_points_nearest(
+    hit_map: &HitMap,
+    column: u16,
+    row: u16,
+) -> Option<(ContentPoint, ContentPoint)> {
+    selection_points(hit_map, column, row).or_else(|| {
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .min_by_key(|hit| hit.y.abs_diff(row))?;
+        Some((
+            hit.point_for_column(column, false),
+            hit.point_for_column(column, true),
+        ))
+    })
+}
+
+fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation, hit_map: &HitMap) {
+    let page = isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
+    match navigation {
+        TimelineNavigation::PageUp => {
+            app.timeline
+                .scroll_by(-page, hit_map.timeline.width, hit_map.timeline.height)
+        }
+        TimelineNavigation::PageDown => {
+            app.timeline
+                .scroll_by(page, hit_map.timeline.width, hit_map.timeline.height)
+        }
+        TimelineNavigation::Top => {
+            app.timeline
+                .scroll_to_row(0, hit_map.timeline.width, hit_map.timeline.height)
+        }
+        TimelineNavigation::Bottom => app.timeline.follow_bottom(),
+    }
+}
+
+fn rect_contains(rect: ratatui::layout::Rect, column: u16, row: u16) -> bool {
+    column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
 }
 
 fn persist_prompt(
@@ -499,6 +800,14 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
+        KeyCode::PageUp => Some(InputAction::NavigateTimeline(TimelineNavigation::PageUp)),
+        KeyCode::PageDown => Some(InputAction::NavigateTimeline(TimelineNavigation::PageDown)),
+        KeyCode::Home if ctrl && !alt => {
+            Some(InputAction::NavigateTimeline(TimelineNavigation::Top))
+        }
+        KeyCode::End if ctrl && !alt => {
+            Some(InputAction::NavigateTimeline(TimelineNavigation::Bottom))
+        }
         KeyCode::Char(character) if !ctrl && !alt => {
             Some(InputAction::Insert(character.to_string()))
         }
@@ -672,9 +981,10 @@ fn install_panic_restore_hook() {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, MouseEvent};
     use localpilot_core::TokenUsage;
-    use localpilot_terminal_ui::{ViewportAnchor, WorkState};
+    use localpilot_terminal_ui::{ItemKind, ViewportAnchor, WorkState};
+    use ratatui::backend::TestBackend;
 
     use super::*;
 
@@ -685,6 +995,25 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn draw_hit_map(app: &AppModel, width: u16, height: u16) -> HitMap {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, app)))
+            .expect("draw hit map");
+        hit_map.expect("hit map")
     }
 
     fn app() -> AppModel {
@@ -727,6 +1056,267 @@ mod tests {
             map_key(press(KeyCode::Enter, KeyModifiers::SHIFT)),
             Some(InputAction::Insert("\n".to_string()))
         );
+    }
+
+    #[test]
+    fn wheel_and_page_navigation_hold_idle_and_busy_timelines() {
+        let mut app = app();
+        for number in 0..100 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let mut mouse_state = MouseState::default();
+        app.exit_armed = true;
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::ScrollUp,
+                    hit_map.timeline.x,
+                    hit_map.timeline.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(matches!(
+            app.timeline.viewport,
+            ViewportAnchor::Held(_) | ViewportAnchor::Top
+        ));
+        assert!(!app.exit_armed);
+
+        app.timeline.follow_bottom();
+        app.begin_work();
+        let busy_hit_map = draw_hit_map(&app, 80, 24);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::ScrollUp,
+                    busy_hit_map.timeline.x,
+                    busy_hit_map.timeline.y,
+                )),
+                &busy_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(matches!(
+            app.timeline.viewport,
+            ViewportAnchor::Held(_) | ViewportAnchor::Top
+        ));
+
+        app.timeline.follow_bottom();
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::PageUp, KeyModifiers::NONE)),
+                &busy_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(matches!(
+            app.timeline.viewport,
+            ViewportAnchor::Held(_) | ViewportAnchor::Top
+        ));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::Home, KeyModifiers::CONTROL)),
+                &busy_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.timeline.viewport, ViewportAnchor::Top);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::End, KeyModifiers::CONTROL)),
+                &busy_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.timeline.viewport, ViewportAnchor::FollowBottom);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Key(press(KeyCode::Home, KeyModifiers::NONE)),
+                &busy_hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Unhandled
+        );
+    }
+
+    #[test]
+    fn mouse_drag_selects_graphemes_and_copy_on_release_persists() {
+        let mut app = app();
+        let _ = app.timeline.push(ItemKind::Assistant, "alpha 界 beta");
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Assistant)
+            .expect("assistant row hit");
+        let start_column = hit.content_x;
+        let end_column = hit.content_x + 6;
+        let row = hit.y;
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    start_column,
+                    row
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    end_column,
+                    row
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.timeline.selected_text().as_deref(), Some("alpha 界"));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    end_column,
+                    row
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Copy("alpha 界".to_string())
+        );
+        assert_eq!(app.timeline.selected_text().as_deref(), Some("alpha 界"));
+        assert!(mouse_state.selection.is_none());
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    start_column,
+                    row
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    start_column,
+                    row
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.timeline.selected_text().is_none());
+    }
+
+    #[test]
+    fn scrollbar_thumb_drag_and_track_click_reanchor_timeline() {
+        let mut app = app();
+        for number in 0..120 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let thumb = hit_map.scrollbar.thumb.expect("scrollbar thumb");
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    thumb.x,
+                    thumb.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(mouse_state.scrollbar_grab, Some(0));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    thumb.x,
+                    hit_map.scrollbar.track.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.timeline.viewport, ViewportAnchor::Top);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    thumb.x,
+                    hit_map.scrollbar.track.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(mouse_state.scrollbar_grab, None);
+
+        app.timeline.follow_bottom();
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let thumb = hit_map.scrollbar.thumb.expect("bottom thumb");
+        let click_y = thumb.y.saturating_sub(1);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    thumb.x,
+                    click_y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(matches!(
+            app.timeline.viewport,
+            ViewportAnchor::Held(_) | ViewportAnchor::Top
+        ));
     }
 
     #[test]

@@ -17,11 +17,12 @@ mod timeline;
 
 pub use app::{
     AppCommand, AppModel, ColorSupport, DialogState, Focus, Header, InputAction, KeyboardSupport,
-    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities, WorkState,
+    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities,
+    TimelineNavigation, WorkState,
 };
 pub use editor::{Editor, EditorRow};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
-pub use render::{render, HitMap, ScrollbarGeometry, TabHit};
+pub use render::{render, HitMap, ScrollbarGeometry, TabHit, TimelineRowHit};
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
