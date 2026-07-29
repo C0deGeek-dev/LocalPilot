@@ -19,11 +19,6 @@ path = "src/main.rs"
 # --features tui,learning --bin localpilot`; a default-feature run finds fewer of them.
 test = true
 
-[[example]]
-name = "interaction_lab"
-path = "examples/interaction_lab.rs"
-required-features = ["tui"]
-
 [features]
 # The interactive `chat` REPL links crossterm. It is opt-in so the default
 # binary (doctor/ask/print/harness/memory/export) links no terminal backend and
@@ -34,6 +29,7 @@ tui = [
     "dep:parking_lot",
     "dep:ratatui",
     "dep:localpilot-tui",
+    "dep:localpilot-terminal-ui",
     "dep:ignore",
     "dep:arboard",
     "dep:base64",
@@ -105,12 +101,11 @@ localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-tui = { path = "../localpilot-tui", optional = true }
+localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 crossterm = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
-unicode-segmentation = { workspace = true }
-unicode-width = { workspace = true }
 wiremock = { workspace = true }

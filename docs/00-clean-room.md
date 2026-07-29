@@ -1,4 +1,4 @@
-﻿# Clean-Room Development Policy
+# Clean-Room Development Policy
 
 ## Purpose
 
@@ -7,6 +7,25 @@ vendor CLI. The goal is to build an original coding-agent harness in Rust.
 
 This policy is part of the technical spec. Pull requests that violate it should
 be rejected even if the code works.
+
+## Scoped Owner Exception: Terminal Chat Experience
+
+The project owner has authorized one narrow exception for LocalPilot's
+interactive terminal chat: its observable layout, geometry, interactions, and
+behavior may deliberately match the normally used public distribution of
+GitHub Copilot CLI 1.0.75. Normal-use observation, public documentation, and the
+public changelog are allowed evidence for that surface.
+
+The exception does **not** permit proprietary or leaked source, source maps,
+hidden prompts, private endpoints, credentials, non-UI internals, or copied
+implementation structure. Shipped UI remains LocalPilot: no GitHub/Copilot
+name, logo, wordmark, mascot, brand theme, or brand-identifying verbatim copy.
+Provider and tool behavior stays provider-neutral and uses only the public/local
+surfaces allowed below. Tests are authored from the recorded observable
+contract, not a proprietary implementation.
+
+This exception applies only to that terminal-chat surface. Every other change
+continues to follow the policy without modification. See ADR-0108.
 
 ## Hard Rules
 
@@ -111,6 +130,8 @@ Every PR must answer:
 - Does this avoid vendor branding and private implementation names?
 - Are prompts authored for LocalPilot rather than copied from a product?
 - Are tests derived from LocalPilot's spec, not another implementation?
+- If the terminal-chat exception applies, is the change limited to observable
+  layout/interaction behavior and free of vendor identity or private internals?
 
 ## Repository Hygiene
 

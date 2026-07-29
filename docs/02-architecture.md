@@ -148,7 +148,22 @@ The harness coordinates with the quota scheduler. If a step pauses due to a
 provider quota window, the current committed state and plan remain authoritative;
 the scheduler only resumes the next safe turn.
 
-### `localpilot-tui`
+### Terminal UI crates
+
+`localpilot-terminal-ui` is the new authoritative, backend-neutral full-screen
+chat model. It owns:
+
+- stable-ID timeline, content-coordinate viewport and selection state
+- grapheme/display-width editor geometry and input routing
+- lifecycle/focus state, including cancel/exit intent
+- terminal capability values, semantic frame state, rendering and hit maps
+
+It depends on Ratatui's backend-neutral APIs but not Crossterm, the harness,
+providers, the store, or the CLI. `localpilot-cli` owns the Crossterm alternate-
+buffer lifecycle, raw event and clipboard adapters, and maps the existing
+provider-neutral runtime/approval/cancellation streams into terminal UI actions.
+
+`localpilot-tui` is the legacy inline rollback during the transition. It owns:
 
 Owns:
 
@@ -167,9 +182,12 @@ UI stack (chosen; see ADR-0006):
 - a hand-rolled multi-line composer (no third-party input widget), so cursor,
   wrapping, history, and paste behaviour are owned and testable
 
-Rendering is inline in the terminal's main screen buffer, not an alternate screen
-(ADR-0021): finished transcript blocks are written once into native scrollback, and
-a fixed-height bottom band holds the only redrawn surface (ADR-0039).
+That rollback renders inline in the terminal's main screen buffer (ADR-0021):
+finished transcript blocks are written once into native scrollback and a fixed-
+height bottom band holds the only redrawn surface (ADR-0039). The new host uses
+an alternate buffer, full-frame rendering, captured mouse input, and application-
+owned content selection (ADR-0107). The rollback and its selector are removed
+once full-screen parity is accepted.
 
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.

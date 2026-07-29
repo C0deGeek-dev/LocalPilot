@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **A new full-screen terminal-chat foundation is available for branch testing.**
+  `LOCALPILOT_CHAT_UI=fullscreen localpilot chat` selects an alternate-buffer
+  host backed by the new backend-neutral `localpilot-terminal-ui` crate; unset
+  or `inline` keeps the current working REPL as the rollback. The foundation
+  carries stable content IDs, grapheme/display-width editor geometry, a complete
+  provider-neutral runtime-event adapter, transactional terminal restore, and
+  contextual Ctrl+C handling: copy selected text, cancel active work when no
+  text is selected, and exit only on a consecutive second press. The full-screen host is still an idle
+  foundation, not the completed chat experience; the temporary selector is
+  removed when feature parity is accepted.
+
 ## v2.6.0 - 2026-07-27
 
 Coordinated LocalX release.

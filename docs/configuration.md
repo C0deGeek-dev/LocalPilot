@@ -21,6 +21,20 @@ The configuration schema is **stable under semantic versioning** from v1.0:
 The configuration schema is SemVer-stable (LocalPilot has been ≥ 1.0.0 since
 2026-06-24); any change is noted in `CHANGELOG.md`.
 
+## Transitional interactive-chat host
+
+The full-screen chat foundation is temporarily opt-in while it is completed:
+
+```powershell
+$env:LOCALPILOT_CHAT_UI = "fullscreen"
+localpilot chat
+```
+
+Unset the variable or set it to `inline` to use the current working inline REPL.
+Any other value is rejected with a configuration error. This is an environment-
+only transition switch, not part of the stable TOML schema; the inline host and
+selector are removed when full-screen feature parity is accepted (ADR-0107).
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

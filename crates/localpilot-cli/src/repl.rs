@@ -1,10 +1,10 @@
 //! `localpilot chat` — the interactive terminal REPL.
 //!
-//! This is the terminal driver: it maps real crossterm key events into the
-//! backend-agnostic `localpilot-tui` core, runs a session turn per submission,
-//! and forwards the runtime event stream into the UI. It is the un-testable
-//! terminal-I/O edge; the rendering and input logic it drives are unit-tested in
-//! `localpilot-tui`.
+//! This is the established inline terminal driver. During the full-screen
+//! transition, [`run_chat`] remains the one session initializer and selects the
+//! terminal host only after provider/runtime setup. The inline rendering and
+//! input logic remain unit-tested in `localpilot-tui`; the new backend-neutral
+//! application lives in `localpilot-terminal-ui`.
 
 use std::future::Future;
 use std::io::{self, Stdout};
@@ -60,6 +60,24 @@ const LIVE_REGION_HEIGHT: u16 = 8;
 
 /// Blank rows between the launch banner and the composer at startup.
 const BANNER_GAP_ROWS: u16 = 2;
+
+const CHAT_UI_ENV: &str = "LOCALPILOT_CHAT_UI";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatUi {
+    Inline,
+    Fullscreen,
+}
+
+fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None | Some("") | Some("inline") => Ok(ChatUi::Inline),
+        Some("fullscreen") => Ok(ChatUi::Fullscreen),
+        Some(value) => Err(anyhow::anyhow!(
+            "invalid {CHAT_UI_ENV} value `{value}`; expected `inline` or `fullscreen`"
+        )),
+    }
+}
 
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
@@ -174,6 +192,7 @@ pub async fn run_chat(
 ) -> anyhow::Result<()> {
     let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
+    let chat_ui = selected_chat_ui(std::env::var_os(CHAT_UI_ENV).as_deref())?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
     timer.mark("config load");
 
@@ -387,6 +406,23 @@ pub async fn run_chat(
     }
 
     timer.mark("knowledge index (mode check)");
+    if chat_ui == ChatUi::Fullscreen {
+        timer.mark("READY — entering full-screen TUI");
+        let result = crate::fullscreen::run(
+            localpilot_terminal_ui::Header {
+                version: state.header.version.clone(),
+                provider: state.header.provider.clone(),
+                model: state.header.model.clone(),
+                workspace: state.header.workspace.clone(),
+                session_id: state.header.session_id.clone(),
+                session_name: state.header.session_name.clone(),
+            },
+            std::iter::empty(),
+        );
+        crate::context_inject::close_out(&cwd, runtime.session_id());
+        return result;
+    }
+
     timer.mark("READY — entering TUI");
     install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal()?;
@@ -2712,6 +2748,25 @@ mod tests {
     use super::*;
     use localpilot_tui::TranscriptLine;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn full_screen_host_is_opt_in_during_the_transition() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            selected_chat_ui(None).expect("default host"),
+            ChatUi::Inline
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new("inline"))).expect("inline host"),
+            ChatUi::Inline
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new("fullscreen"))).expect("full-screen host"),
+            ChatUi::Fullscreen
+        );
+        assert!(selected_chat_ui(Some(OsStr::new("unknown"))).is_err());
+    }
 
     #[test]
     fn a_missing_clipboard_image_is_benign_but_a_read_failure_is_surfaced() {

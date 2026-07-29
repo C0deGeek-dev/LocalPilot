@@ -14,6 +14,8 @@ mod context_inject;
 mod credential_cmd;
 mod doctor;
 mod eval_cmd;
+#[cfg(feature = "tui")]
+mod fullscreen;
 mod handoff_cmd;
 mod harness_cmd;
 mod ingest_cmd;

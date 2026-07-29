@@ -26,6 +26,28 @@ Required for:
 - session persistence
 - cancellation during streaming/tool execution
 
+### Terminal UI Tests
+
+The full-screen UI is split at the terminal boundary so deterministic tests do
+not need a real console:
+
+- `cargo test -p localpilot-terminal-ui` covers stable content anchors,
+  grapheme/display-width editing, selection fidelity, lifecycle routing, and
+  Ratatui `TestBackend` frames.
+- `cargo test -p localpilot --features tui,learning --bin localpilot` covers the
+  Crossterm host selector, provider-neutral runtime-event mapping, key mapping,
+  and ANSI terminal-mode ordering.
+- PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
+  gates visible terminal behavior. A snapshot or PTY result alone is not proof
+  of mouse, clipboard, wide-glyph, or terminal-restore parity.
+
+Ctrl+C has an explicit state-matrix test: selected text copies on the first
+press; active work cancels on the first press; idle arms exit on the first
+press; and every state exits only on a consecutive second press. Any other input
+disarms the pending exit.
+Terminal restore tests must cover normal exit, partial setup, post-entry errors,
+panic, and the later signal/suspension paths as those paths are added.
+
 ### Golden-Task Evals
 
 The worker loop needs an eval suite before higher-level features are built. Unit
