@@ -57,18 +57,23 @@ impl FrameLayout {
 
         let timeline = rows[1];
         let timeline_content = Rect::new(
-            timeline.x.saturating_add(1),
+            timeline.x.saturating_add(2),
             timeline.y,
-            timeline.width.saturating_sub(2),
+            timeline.width.saturating_sub(4),
             timeline.height,
         );
         let scrollbar = Rect::new(
-            timeline.right().saturating_sub(1),
+            timeline.right().saturating_sub(2),
             timeline.y,
             1,
             timeline.height,
         );
-        let composer = rows[3];
+        let composer = Rect::new(
+            rows[3].x.saturating_add(1),
+            rows[3].y,
+            rows[3].width.saturating_sub(2),
+            rows[3].height,
+        );
         let composer_content = Rect::new(
             composer.x.saturating_add(1),
             composer.y.saturating_add(1),
@@ -105,7 +110,11 @@ mod tests {
         assert!(layout.status.bottom() <= layout.composer.y);
         assert!(layout.composer.bottom() <= layout.footer.y);
         assert_eq!(layout.scrollbar.width, 1);
+        assert_eq!(layout.timeline_content.x, 2);
+        assert_eq!(layout.scrollbar.x, 78);
         assert_eq!(layout.timeline_content.right(), layout.scrollbar.x);
+        assert_eq!(layout.composer.x, 1);
+        assert_eq!(layout.composer_content.x, 2);
         assert_eq!(layout.composer_content.height, 1);
         assert!(!layout.narrow);
     }

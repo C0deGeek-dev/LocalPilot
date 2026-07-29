@@ -1,6 +1,6 @@
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -80,6 +80,10 @@ pub struct HitMap {
 #[must_use]
 pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     let area = frame.area();
+    frame.render_widget(
+        Block::default().style(theme(app).ui(UiRole::Background)),
+        area,
+    );
     let prospective_editor_width = area.width.saturating_sub(2).max(1);
     let requested_editor_rows = u16::try_from(
         app.editor
@@ -126,12 +130,13 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Vec<TabHit> {
     let theme = theme(app);
     let mut hits = Vec::new();
-    let mut x = area.x;
+    let mut x = area.x.saturating_add(2);
+    let right = area.right().saturating_sub(2);
     for tab in &app.tabs {
-        let label = format!("  {}  ", tab.label());
+        let label = format!(" {} ", tab.label());
         let width = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
-        if width > area.right().saturating_sub(x) {
-            let arrow = Rect::new(area.right().saturating_sub(1), area.y, 1, 1);
+        if width > right.saturating_sub(x) {
+            let arrow = Rect::new(right.saturating_sub(1), area.y, 1, 1);
             frame.render_widget(
                 Paragraph::new("›").style(theme.ui(UiRole::TabInactive)),
                 arrow,
@@ -163,21 +168,12 @@ fn render_timeline(
     let view = app.timeline.view(area.width.max(1), area.height.max(1));
     let content_offset = if let Some(pinned) = &view.pinned {
         render_pinned_prompt(frame, area, pinned, app);
-        1
+        u16::try_from(PinnedPrompt::ROWS).unwrap_or(u16::MAX)
     } else {
         0
     };
     if view.rows.is_empty() && view.pinned.is_none() {
-        let theme = theme(app);
-        let banner = Line::from(vec![
-            Span::styled("● ", theme.ui(UiRole::Accent)),
-            Span::styled(APP_NAME, theme.ui(UiRole::Foreground)),
-            Span::styled(
-                format!(" · {}", app.header.provider),
-                theme.ui(UiRole::Muted),
-            ),
-        ]);
-        banner.render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
+        render_idle_banner(frame, area, app);
     } else {
         for (offset, row) in view.rows.iter().enumerate() {
             let y = area
@@ -205,7 +201,7 @@ fn render_timeline(
         }
         for y in thumb.y..thumb.bottom() {
             frame.render_widget(
-                Paragraph::new("█").style(theme.ui(UiRole::Accent)),
+                Paragraph::new("█").style(theme.ui(UiRole::Focus)),
                 Rect::new(thumb.x, y, 1, 1),
             );
         }
@@ -213,25 +209,98 @@ fn render_timeline(
     scrollbar
 }
 
+fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+    let theme = theme(app);
+    let mark = theme.ui(UiRole::Accent);
+    let rows = vec![
+        Line::from(vec![
+            Span::styled("╭──────╮", mark),
+            Span::styled(
+                format!(
+                    "  {APP_NAME} v{}",
+                    app.header
+                        .version
+                        .strip_prefix('v')
+                        .unwrap_or(&app.header.version)
+                ),
+                theme.ui(UiRole::Foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("│ >_ ● │", mark),
+            Span::styled(
+                format!("  {} · {}", app.header.provider, app.header.model),
+                theme.ui(UiRole::Muted),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("╰──┬───╯", mark),
+            Span::styled(
+                "  Local-first assistance for this workspace",
+                theme.ui(UiRole::Muted),
+            ),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("● ", theme.ui(UiRole::Accent)),
+            Span::styled("Tip: press ? for shortcuts", theme.ui(UiRole::Foreground)),
+        ]),
+        Line::from(vec![
+            Span::styled("  └ ", theme.ui(UiRole::Muted)),
+            Span::styled("Type / to browse commands", theme.ui(UiRole::Muted)),
+        ]),
+    ];
+    for (offset, row) in rows.into_iter().take(usize::from(area.height)).enumerate() {
+        row.render(
+            Rect::new(area.x, area.y.saturating_add(offset as u16), area.width, 1),
+            frame.buffer_mut(),
+        );
+    }
+}
+
 fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, app: &AppModel) {
     let theme = theme(app);
     let glyph = if pin.overflowing { "↓ " } else { "❯ " };
     let trailing = pin.trailing.as_deref().unwrap_or("");
-    let fixed_width = UnicodeWidthStr::width(glyph)
+    let pending = if pin.pending { " (pending)" } else { "" };
+    let fixed_width = 1usize
+        .saturating_add(UnicodeWidthStr::width(glyph))
+        .saturating_add(UnicodeWidthStr::width(pending))
         .saturating_add(UnicodeWidthStr::width(trailing))
-        .saturating_add(2);
+        .saturating_add(1);
     let text_budget = usize::from(area.width).saturating_sub(fixed_width);
     let text = truncate_end(&pin.text, u16::try_from(text_budget).unwrap_or(u16::MAX));
     let used = fixed_width.saturating_add(UnicodeWidthStr::width(text.as_str()));
     let gap = usize::from(area.width).saturating_sub(used);
     let line = Line::from(vec![
-        Span::styled(glyph, theme.ui(UiRole::Accent)),
-        Span::styled(text, theme.text(TextStyle::new(crate::SemanticRole::User))),
+        Span::styled("┃", theme.ui(UiRole::Surface)),
+        Span::styled(
+            glyph,
+            theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
+        ),
+        Span::styled(
+            text,
+            theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
+        ),
+        Span::styled(
+            pending,
+            theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
+        ),
         Span::raw(" ".repeat(gap)),
         Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)),
-        Span::styled(" ┃", theme.ui(UiRole::Border)),
-    ]);
-    line.render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
+        Span::styled("┃", theme.ui(UiRole::Surface)),
+    ])
+    .style(theme.ui(UiRole::Surface));
+    framed_rule(area.width, true, theme.ui(UiRole::SurfaceEdge))
+        .render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
+    line.render(
+        Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+        frame.buffer_mut(),
+    );
+    framed_rule(area.width, false, theme.ui(UiRole::SurfaceEdge)).render(
+        Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
+        frame.buffer_mut(),
+    );
 }
 
 fn timeline_line(
@@ -242,13 +311,13 @@ fn timeline_line(
 ) -> Line<'static> {
     let theme = theme(app);
     if row.part == VisualRowPart::FrameTop {
-        return framed_rule(width, true, theme.ui(UiRole::Border));
+        return framed_rule(width, true, theme.ui(UiRole::SurfaceEdge));
     }
     if row.part == VisualRowPart::FrameBottom {
-        return framed_rule(width, false, theme.ui(UiRole::Border));
+        return framed_rule(width, false, theme.ui(UiRole::SurfaceEdge));
     }
 
-    let VisualRowPart::Content { first, .. } = row.part else {
+    let VisualRowPart::Content { first, last } = row.part else {
         return Line::default();
     };
     let mut spans = role_prefix(row.kind, row.activity, first, theme);
@@ -266,7 +335,11 @@ fn timeline_line(
             let end = start + grapheme.len();
             let selected =
                 selection.is_some_and(|value| value.contains_grapheme(row.item_id, start, end));
-            let mut style = theme.text(visual_span.style);
+            let mut style = if row.kind == ItemKind::User {
+                theme.text(visual_span.style.bold())
+            } else {
+                theme.text(visual_span.style)
+            };
             if selected {
                 style = theme.selected(style);
             }
@@ -283,10 +356,22 @@ fn timeline_line(
     if row.kind == ItemKind::User {
         let trailing = row.trailing.as_deref().unwrap_or("");
         let trailing_width = UnicodeWidthStr::width(trailing);
+        let pending = if row.pending && last {
+            " (pending)"
+        } else {
+            ""
+        };
         let reserved = prefix_width
             .saturating_add(content_width)
+            .saturating_add(UnicodeWidthStr::width(pending))
             .saturating_add(trailing_width)
             .saturating_add(1);
+        if !pending.is_empty() {
+            spans.push(Span::styled(
+                pending,
+                theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
+            ));
+        }
         let gap = usize::from(width).saturating_sub(reserved);
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -294,9 +379,14 @@ fn timeline_line(
         if !trailing.is_empty() {
             spans.push(Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)));
         }
-        spans.push(Span::styled("┃", theme.ui(UiRole::Border)));
+        spans.push(Span::styled("┃", theme.ui(UiRole::Surface)));
     }
-    Line::from(spans)
+    let line = Line::from(spans);
+    if row.kind == ItemKind::User {
+        line.style(theme.ui(UiRole::Surface))
+    } else {
+        line
+    }
 }
 
 fn framed_rule(width: u16, top: bool, style: ratatui::style::Style) -> Line<'static> {
@@ -313,8 +403,11 @@ fn role_prefix(
 ) -> Vec<Span<'static>> {
     match kind {
         ItemKind::User => vec![
-            Span::styled("┃ ", theme.ui(UiRole::Border)),
-            Span::styled(if first { "❯ " } else { "  " }, theme.ui(UiRole::Accent)),
+            Span::styled("┃", theme.ui(UiRole::Surface)),
+            Span::styled(
+                if first { "❯ " } else { "  " },
+                theme.text(TextStyle::new(crate::SemanticRole::User).bold()),
+            ),
         ],
         ItemKind::Assistant => vec![Span::styled(
             if first { "● " } else { "  " },
@@ -343,6 +436,7 @@ fn role_prefix(
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
+    let area = inset_chrome(area);
     let theme = theme(app);
     let left = status_left(app);
     let right = status_right(app);
@@ -399,20 +493,22 @@ fn status_right(app: &AppModel) -> String {
 
 fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -> (u16, usize) {
     let theme = theme(app);
-    let side = if app.focus == Focus::Composer {
+    let left_edge = if app.focus == Focus::Composer {
         theme.ui(UiRole::Focus)
     } else {
-        theme.ui(UiRole::Border)
+        theme.ui(UiRole::SurfaceEdge)
     };
-    let rule = theme.ui(UiRole::Border);
+    let surface_edge = theme.ui(UiRole::SurfaceEdge);
+    let surface = theme.ui(UiRole::Surface);
     let inner = layout.composer_content;
     let width = inner.width.max(1);
     let (cursor_row, cursor_column) = app.editor.cursor_row_and_column(width);
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
-    render_slim_frame(frame, layout.composer, rule, side);
+    render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
     frame.render_widget(
         Paragraph::new(app.editor.text().to_string())
+            .style(surface)
             .wrap(Wrap { trim: false })
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         inner,
@@ -434,31 +530,54 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
 fn render_slim_frame(
     frame: &mut Frame<'_>,
     area: Rect,
-    rule_style: ratatui::style::Style,
-    side_style: ratatui::style::Style,
+    surface_edge: ratatui::style::Style,
+    left_edge: ratatui::style::Style,
+    surface: ratatui::style::Style,
 ) {
     if area.width < 2 || area.height < 2 {
         return;
     }
-    framed_rule(area.width, true, rule_style)
+    framed_composer_rule(area.width, true, left_edge, surface_edge)
         .render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
-    framed_rule(area.width, false, rule_style).render(
+    framed_composer_rule(area.width, false, left_edge, surface_edge).render(
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         frame.buffer_mut(),
     );
     for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
         frame.render_widget(
-            Paragraph::new("┃").style(side_style),
-            Rect::new(area.x, y, 1, 1),
+            Paragraph::new("").style(surface),
+            Rect::new(area.x.saturating_add(1), y, area.width.saturating_sub(1), 1),
         );
         frame.render_widget(
-            Paragraph::new("┃").style(side_style),
-            Rect::new(area.right().saturating_sub(1), y, 1, 1),
+            Paragraph::new("┃").style(left_edge),
+            Rect::new(area.x, y, 1, 1),
         );
     }
 }
 
+fn framed_composer_rule(
+    width: u16,
+    top: bool,
+    left_edge: ratatui::style::Style,
+    surface_edge: ratatui::style::Style,
+) -> Line<'static> {
+    let (corner, fill, far_corner) = if top {
+        ("╻", "▄", "╻")
+    } else {
+        ("╹", "▀", "╹")
+    };
+    Line::from(vec![
+        Span::styled(corner, left_edge),
+        Span::styled(
+            fill.repeat(usize::from(width.saturating_sub(2))),
+            surface_edge,
+        ),
+        Span::styled(far_corner, surface_edge),
+    ])
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
+    let area = inset_chrome(area);
     let state = footer_state(app);
     let shortcuts = "? help · / commands";
     let context = format!(
@@ -476,6 +595,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
         two_sided(&format!("{state} · {shortcuts}"), &context, area.width)
     };
     frame.render_widget(Paragraph::new(text).style(theme.ui(UiRole::Muted)), area);
+}
+
+fn inset_chrome(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(3),
+        area.height,
+    )
 }
 
 fn footer_state(app: &AppModel) -> String {
@@ -648,6 +776,8 @@ mod tests {
         assert!(rendered.contains(APP_NAME));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("model"));
+        assert!(rendered.contains("Tip: press ? for shortcuts"));
+        assert!(rendered.contains("Type / to browse commands"));
         let hit_map = hit_map.expect("hit map");
         assert_eq!(hit_map.tabs.len(), 1);
         assert!(hit_map.timeline.height > 0);
@@ -678,6 +808,67 @@ mod tests {
         assert!(thumb.height >= 1);
         assert_eq!(thumb.bottom(), hit_map.scrollbar.track.bottom());
         assert!(terminal.backend().to_string().contains('█'));
+    }
+
+    #[test]
+    fn in_flow_and_pinned_prompts_are_three_row_dark_surfaces() {
+        let resolver = ThemeResolver::new(Theme::Default, ColorSupport::Color);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        let prompt = app
+            .timeline
+            .push(ItemKind::User, "current prompt")
+            .expect("prompt");
+        assert!(app.timeline.set_pending(prompt, true));
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw in-flow prompt");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(layout.timeline_content.x, layout.timeline_content.y)].symbol(),
+            "╻"
+        );
+        assert!(
+            buffer_line(buffer, layout.timeline_content.y + 1).contains("current prompt (pending)")
+        );
+        assert_eq!(
+            buffer[(layout.timeline_content.x + 1, layout.timeline_content.y + 1)]
+                .style()
+                .bg,
+            resolver.ui(UiRole::Surface).bg
+        );
+        assert_eq!(
+            buffer[(layout.timeline_content.x, layout.timeline_content.y + 2)].symbol(),
+            "╹"
+        );
+
+        let mut app = model();
+        let _ = app.timeline.push(ItemKind::User, "pinned prompt");
+        for number in 0..80 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw pinned prompt");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(layout.timeline_content.x, layout.timeline_content.y)].symbol(),
+            "╻"
+        );
+        assert!(buffer_line(buffer, layout.timeline_content.y + 1).contains("pinned prompt"));
+        assert_eq!(
+            buffer[(layout.timeline_content.x, layout.timeline_content.y + 2)].symbol(),
+            "╹"
+        );
+        assert!(buffer_line(buffer, layout.timeline_content.y + 3).contains("response"));
     }
 
     #[test]
@@ -762,8 +953,11 @@ mod tests {
             let buffer = terminal.backend().buffer();
 
             assert!(buffer_line(buffer, 0).contains("Session"));
-            assert_eq!(buffer[(0, layout.composer.y)].symbol(), "╻");
-            assert_eq!(buffer[(0, layout.composer.bottom() - 1)].symbol(), "╹");
+            assert_eq!(buffer[(layout.composer.x, layout.composer.y)].symbol(), "╻");
+            assert_eq!(
+                buffer[(layout.composer.x, layout.composer.bottom() - 1)].symbol(),
+                "╹"
+            );
             assert_eq!(
                 buffer[(layout.scrollbar.x, layout.scrollbar.y)].symbol(),
                 "│"
@@ -771,7 +965,6 @@ mod tests {
             assert!(buffer_line(buffer, layout.status.y).contains("workspace"));
             assert!(buffer_line(buffer, layout.footer.y).contains("Ctrl+C"));
             if width == 40 {
-                assert!(buffer_line(buffer, 0).contains('›'));
                 assert_eq!(layout.status.height, 2);
                 assert_eq!(layout.footer.height, 2);
             } else {
@@ -798,7 +991,7 @@ mod tests {
                     let _ = render(frame, &app);
                 })
                 .expect("draw themed frame");
-            let actual = terminal.backend().buffer()[(0, 0)].style();
+            let actual = terminal.backend().buffer()[(2, 0)].style();
             let expected =
                 ThemeResolver::new(theme_name, ColorSupport::Color).ui(UiRole::TabActive);
             assert_eq!(actual.fg, expected.fg);
@@ -808,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_composer_keeps_full_width_rules_muted_and_focus_on_thin_sides() {
+    fn focused_composer_forms_a_dark_surface_with_one_subtle_focus_edge() {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let app = model();
@@ -824,16 +1017,22 @@ mod tests {
         let side = buffer[(layout.composer.x, layout.composer_content.y)].style();
         assert_eq!(
             rule.fg,
-            resolver.ui(UiRole::Border).fg,
-            "the long half-block rule must stay muted"
+            resolver.ui(UiRole::SurfaceEdge).fg,
+            "the half-block fill must merge into the input surface"
         );
         assert_eq!(
             side.fg,
             resolver.ui(UiRole::Focus).fg,
             "focus is carried only by the thin side"
         );
+        assert_eq!(
+            buffer[(layout.composer_content.x, layout.composer_content.y)]
+                .style()
+                .bg,
+            resolver.ui(UiRole::Surface).bg
+        );
         assert_ne!(
-            resolver.ui(UiRole::Border).fg,
+            resolver.ui(UiRole::Focus).fg,
             resolver.ui(UiRole::Accent).fg
         );
     }
@@ -856,7 +1055,7 @@ mod tests {
             })
             .expect("draw no-color frame");
         let buffer = terminal.backend().buffer();
-        assert!(buffer[(0, 0)]
+        assert!(buffer[(2, 0)]
             .modifier
             .contains(ratatui::style::Modifier::REVERSED));
         let rendered = terminal.backend().to_string();

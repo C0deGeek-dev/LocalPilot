@@ -114,6 +114,7 @@ pub struct TimelineItem {
     pub text: String,
     pub styles: Vec<StyledRange>,
     pub trailing: Option<String>,
+    pub pending: bool,
     pub activity: Option<ActivityState>,
     pub expanded: bool,
 }
@@ -127,6 +128,7 @@ impl TimelineItem {
             text,
             styles,
             trailing: None,
+            pending: false,
             activity: None,
             expanded: !matches!(kind, ItemKind::Reasoning | ItemKind::Tool),
         }
@@ -151,6 +153,7 @@ pub struct VisualRow {
     pub part: VisualRowPart,
     pub content_column: u16,
     pub trailing: Option<String>,
+    pub pending: bool,
     pub activity: Option<ActivityState>,
 }
 
@@ -219,7 +222,14 @@ pub struct PinnedPrompt {
     pub item_id: ItemId,
     pub text: String,
     pub trailing: Option<String>,
+    pub pending: bool,
     pub overflowing: bool,
+}
+
+impl PinnedPrompt {
+    /// Top half-cell, content row, and bottom half-cell form the two-cell-high
+    /// prompt surface used for both in-flow and pinned prompts.
+    pub const ROWS: usize = 3;
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +359,19 @@ impl Timeline {
         true
     }
 
+    pub fn set_pending(&mut self, id: ItemId, pending: bool) -> bool {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        if self.items[index].kind != ItemKind::User || self.items[index].pending == pending {
+            return self.items[index].kind == ItemKind::User;
+        }
+        self.items[index].pending = pending;
+        self.wrap_cache.borrow_mut().remove(&id);
+        self.invalidate_layout();
+        true
+    }
+
     pub fn set_activity(&mut self, id: ItemId, activity: Option<ActivityState>) -> bool {
         let Some(index) = self.item_positions.get(&id).copied() else {
             return false;
@@ -385,9 +408,11 @@ impl Timeline {
         let full_start = self
             .current_start(width)
             .min(total_rows.saturating_sub(outer_rows));
-        let full_pin = self.pinned_prompt(width, full_start, outer_rows);
+        let full_pin = (outer_rows > PinnedPrompt::ROWS)
+            .then(|| self.pinned_prompt(width, full_start, outer_rows))
+            .flatten();
         let (start, pinned, viewport_rows) = if let Some(full_pin) = full_pin {
-            let pinned_rows = outer_rows.saturating_sub(1).max(1);
+            let pinned_rows = outer_rows.saturating_sub(PinnedPrompt::ROWS);
             let pinned_start = self
                 .current_start(width)
                 .min(total_rows.saturating_sub(pinned_rows));
@@ -398,7 +423,7 @@ impl Timeline {
             {
                 (pinned_start, pinned, pinned_rows)
             } else {
-                // The one-row capacity change crossed into the next prompt.
+                // Reserving the pinned surface crossed into the next prompt.
                 // Prefer a full unpinned viewport at that exact boundary.
                 (full_start, None, outer_rows)
             }
@@ -666,6 +691,7 @@ impl Timeline {
             item_id: prompt.id,
             text: prompt.text.replace('\n', " "),
             trailing: prompt.trailing.clone(),
+            pending: prompt.pending,
             overflowing: response_rows > viewport_rows,
         })
     }
@@ -728,6 +754,7 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
                 .map(UnicodeWidthStr::width)
                 .and_then(|value| u16::try_from(value).ok())
                 .unwrap_or(0)
+                .saturating_add(if item.pending { 10 } else { 0 })
                 .saturating_add(1),
         ),
         ItemKind::Assistant | ItemKind::Reasoning | ItemKind::Tool | ItemKind::Notice => 2,
@@ -787,6 +814,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
         part,
         content_column: 0,
         trailing: None,
+        pending: item.pending,
         activity: item.activity,
     }
 }
@@ -866,6 +894,7 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
         trailing: matches!(part, VisualRowPart::Content { first: true, .. })
             .then(|| item.trailing.clone())
             .flatten(),
+        pending: item.pending,
         activity: item.activity,
     }
 }
@@ -1031,6 +1060,22 @@ mod tests {
     }
 
     #[test]
+    fn pending_is_prompt_only_and_part_of_prompt_geometry() {
+        let mut timeline = Timeline::new();
+        let prompt = timeline.push(ItemKind::User, "queued").expect("prompt");
+        let reply = timeline.push(ItemKind::Assistant, "reply").expect("reply");
+        let ordinary = timeline.rows(20);
+
+        assert!(timeline.set_pending(prompt, true));
+        assert!(timeline.item(prompt).expect("prompt").pending);
+        assert!(!timeline.set_pending(reply, true));
+        assert!(!timeline.item(reply).expect("reply").pending);
+        assert_ne!(timeline.rows(20), ordinary);
+        assert!(timeline.set_pending(prompt, false));
+        assert!(!timeline.item(prompt).expect("prompt").pending);
+    }
+
+    #[test]
     fn overflowing_response_keeps_its_prompt_as_a_single_line_pin() {
         let mut timeline = Timeline::new();
         let prompt = timeline
@@ -1045,7 +1090,7 @@ mod tests {
         assert_eq!(pin.item_id, prompt);
         assert!(pin.overflowing);
         assert_eq!(pin.text, "write many numbered lines");
-        assert_eq!(view.rows.len(), 7);
+        assert_eq!(view.rows.len(), 5);
         assert_eq!(
             view.rows.last().map(|row| row.text.as_str()),
             Some("line 39")
@@ -1139,10 +1184,11 @@ mod tests {
                 let _ = timeline.push(ItemKind::Assistant, "latest");
 
                 let view = timeline.view(30, height);
-                let occupied = view
-                    .rows
-                    .len()
-                    .saturating_add(usize::from(view.pinned.is_some()));
+                let occupied = view.rows.len().saturating_add(if view.pinned.is_some() {
+                    PinnedPrompt::ROWS
+                } else {
+                    0
+                });
                 assert!(
                     occupied <= usize::from(height),
                     "response={response_items}, height={height}"

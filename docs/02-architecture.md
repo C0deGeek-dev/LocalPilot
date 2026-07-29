@@ -161,6 +161,13 @@ chat model. It owns:
 - one responsive frame layout/hit map and one semantic theme resolver across
   default, dim, high-contrast, colorblind, and no-color rendering
 
+The default resolver owns the application canvas, raised prompt/composer
+surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
+and composer bands are filled surfaces assembled from terminal cells; they are
+not long accent-colored rules. Pinned prompts use the same three-row projection
+as prompts in the conversation flow so scrolling cannot change their visual
+identity.
+
 It depends on Ratatui's backend-neutral APIs but not Crossterm, the harness,
 providers, the store, or the CLI. `localpilot-cli` owns the Crossterm alternate-
 buffer lifecycle, raw event and clipboard adapters, and maps the existing

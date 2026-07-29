@@ -12,7 +12,8 @@ is SemVer-stable; the configuration schema stability policy is in
   or `inline` keeps the current working REPL as the rollback. The foundation
   carries stable content IDs, virtualized content-anchored history, framed
   prompts, compact activity, semantic themes, responsive status/composer/footer
-  regions, a muted true-color default palette with restrained frame chrome,
+  regions, a screenshot-measured true-color palette with a dark application
+  canvas and joined prompt/composer surfaces, restrained frame chrome,
   grapheme/display-width editor geometry, a provider-neutral runtime-
   event adapter, transactional terminal restore, and contextual Ctrl+C handling:
   copy selected text, cancel active work when no text is selected, and exit only

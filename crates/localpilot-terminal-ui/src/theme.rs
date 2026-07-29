@@ -62,7 +62,11 @@ impl FromStr for Theme {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiRole {
+    Background,
+    Surface,
+    SurfaceEdge,
     Foreground,
+    Prompt,
     Muted,
     Accent,
     Border,
@@ -95,7 +99,8 @@ impl ThemeResolver {
     pub fn text(self, text_style: TextStyle) -> Style {
         let role = match text_style.role {
             SemanticRole::Accent | SemanticRole::Heading => UiRole::Accent,
-            SemanticRole::User | SemanticRole::Assistant => UiRole::Foreground,
+            SemanticRole::User => UiRole::Prompt,
+            SemanticRole::Assistant => UiRole::Foreground,
             SemanticRole::Reasoning | SemanticRole::Muted => UiRole::Muted,
             SemanticRole::Tool | SemanticRole::Code => UiRole::Code,
             SemanticRole::Notice => UiRole::Warning,
@@ -136,7 +141,7 @@ fn no_color_style(role: UiRole) -> Style {
         UiRole::TabActive | UiRole::Selection | UiRole::Code => {
             Style::default().add_modifier(Modifier::REVERSED)
         }
-        UiRole::Accent | UiRole::Focus | UiRole::Success => {
+        UiRole::Accent | UiRole::Focus | UiRole::Prompt | UiRole::Success => {
             Style::default().add_modifier(Modifier::BOLD)
         }
         UiRole::Warning | UiRole::Error => Style::default()
@@ -145,7 +150,9 @@ fn no_color_style(role: UiRole) -> Style {
         UiRole::Muted | UiRole::TabInactive | UiRole::Border => {
             Style::default().add_modifier(Modifier::DIM)
         }
-        UiRole::Foreground => Style::default(),
+        UiRole::Background | UiRole::Surface | UiRole::SurfaceEdge | UiRole::Foreground => {
+            Style::default()
+        }
     }
 }
 
@@ -168,15 +175,32 @@ fn color_style(theme: Theme, role: UiRole) -> Style {
 
 fn default_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
     match role {
-        UiRole::Foreground => (Color::Reset, None, None),
-        UiRole::Muted | UiRole::TabInactive => (Color::Rgb(0x8b, 0x94, 0x9e), None, None),
-        UiRole::Border => (Color::Rgb(0x6e, 0x76, 0x81), None, None),
-        UiRole::Accent => (Color::Rgb(0x38, 0x8b, 0xfd), None, None),
-        UiRole::Focus => (Color::Rgb(0x58, 0xa6, 0xff), None, None),
+        UiRole::Background => (
+            Color::Rgb(0xb4, 0xb4, 0xb4),
+            Some(Color::Rgb(0x0d, 0x11, 0x17)),
+            None,
+        ),
+        UiRole::Surface => (
+            Color::Rgb(0xb4, 0xb4, 0xb4),
+            Some(Color::Rgb(0x14, 0x1b, 0x22)),
+            None,
+        ),
+        UiRole::SurfaceEdge => (
+            Color::Rgb(0x14, 0x1b, 0x22),
+            Some(Color::Rgb(0x0d, 0x11, 0x17)),
+            None,
+        ),
+        UiRole::Foreground => (Color::Rgb(0xb4, 0xb4, 0xb4), None, None),
+        UiRole::Prompt => (Color::Rgb(0xf0, 0xf6, 0xfc), None, None),
+        UiRole::Muted => (Color::Rgb(0x92, 0x92, 0x94), None, None),
+        UiRole::TabInactive => (Color::Rgb(0x4d, 0x4f, 0x53), None, None),
+        UiRole::Border => (Color::Rgb(0x30, 0x36, 0x3d), None, None),
+        UiRole::Accent => (Color::Rgb(0x44, 0x93, 0xf8), None, None),
+        UiRole::Focus => (Color::Rgb(0x81, 0x8b, 0x98), None, None),
         UiRole::TabActive => (
             Color::Rgb(0xf0, 0xf6, 0xfc),
-            Some(Color::Rgb(0x1f, 0x6f, 0xeb)),
-            None,
+            Some(Color::Rgb(0x09, 0x69, 0xda)),
+            Some(Modifier::BOLD),
         ),
         UiRole::Selection => (
             Color::Rgb(0xf0, 0xf6, 0xfc),
@@ -192,7 +216,11 @@ fn default_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
 
 fn dim_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
     match role {
+        UiRole::Background => (Color::Gray, Some(Color::Black), None),
+        UiRole::Surface => (Color::Gray, Some(Color::Rgb(0x11, 0x16, 0x1c)), None),
+        UiRole::SurfaceEdge => (Color::Rgb(0x11, 0x16, 0x1c), Some(Color::Black), None),
         UiRole::Foreground => (Color::Gray, None, None),
+        UiRole::Prompt => (Color::Gray, None, Some(Modifier::BOLD)),
         UiRole::Muted | UiRole::TabInactive | UiRole::Border => {
             (Color::DarkGray, None, Some(Modifier::DIM))
         }
@@ -208,7 +236,10 @@ fn dim_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
 
 fn high_contrast_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
     match role {
+        UiRole::Background | UiRole::Surface => (Color::White, Some(Color::Black), None),
+        UiRole::SurfaceEdge => (Color::White, Some(Color::Black), None),
         UiRole::Foreground => (Color::White, None, None),
+        UiRole::Prompt => (Color::White, None, Some(Modifier::BOLD)),
         UiRole::Muted | UiRole::TabInactive | UiRole::Border => (Color::Gray, None, None),
         UiRole::Accent | UiRole::Focus => (Color::Yellow, None, Some(Modifier::BOLD)),
         UiRole::TabActive => (Color::Black, Some(Color::Yellow), Some(Modifier::BOLD)),
@@ -222,7 +253,23 @@ fn high_contrast_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>
 
 fn colorblind_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
     match role {
+        UiRole::Background => (
+            Color::Rgb(0xb4, 0xb4, 0xb4),
+            Some(Color::Rgb(0x0d, 0x11, 0x17)),
+            None,
+        ),
+        UiRole::Surface => (
+            Color::Rgb(0xb4, 0xb4, 0xb4),
+            Some(Color::Rgb(0x14, 0x1b, 0x22)),
+            None,
+        ),
+        UiRole::SurfaceEdge => (
+            Color::Rgb(0x14, 0x1b, 0x22),
+            Some(Color::Rgb(0x0d, 0x11, 0x17)),
+            None,
+        ),
         UiRole::Foreground => (Color::Reset, None, None),
+        UiRole::Prompt => (Color::Reset, None, Some(Modifier::BOLD)),
         UiRole::Muted | UiRole::TabInactive | UiRole::Border => (Color::DarkGray, None, None),
         UiRole::Accent | UiRole::Focus | UiRole::Success => {
             (Color::Blue, None, Some(Modifier::BOLD))
@@ -280,10 +327,18 @@ mod tests {
         let border = resolver.ui(UiRole::Border);
         let active_tab = resolver.ui(UiRole::TabActive);
 
-        assert_eq!(accent.fg, Some(Color::Rgb(0x38, 0x8b, 0xfd)));
+        assert_eq!(accent.fg, Some(Color::Rgb(0x44, 0x93, 0xf8)));
         assert!(!accent.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(border.fg, Some(Color::Rgb(0x6e, 0x76, 0x81)));
-        assert_eq!(active_tab.bg, Some(Color::Rgb(0x1f, 0x6f, 0xeb)));
-        assert!(!active_tab.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(border.fg, Some(Color::Rgb(0x30, 0x36, 0x3d)));
+        assert_eq!(active_tab.bg, Some(Color::Rgb(0x09, 0x69, 0xda)));
+        assert!(active_tab.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            resolver.ui(UiRole::Background).bg,
+            Some(Color::Rgb(0x0d, 0x11, 0x17))
+        );
+        assert_eq!(
+            resolver.ui(UiRole::Surface).bg,
+            Some(Color::Rgb(0x14, 0x1b, 0x22))
+        );
     }
 }

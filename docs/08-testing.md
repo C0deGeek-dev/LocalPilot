@@ -36,6 +36,10 @@ not need a real console:
   virtualization, grapheme/display-width editing, selection fidelity, lifecycle
   routing, held/new-output state, and 120x30/80x24/40x20 Ratatui `TestBackend`
   frames across semantic themes and no-color mode.
+- Default-theme frame tests also lock the screenshot-measured application
+  canvas, filled prompt/composer surfaces, one-edge composer focus, neutral
+  scrollbar, outer margins, pending-prompt label, and identical in-flow/pinned
+  prompt geometry.
 - `cargo test -p localpilot --features tui,learning --bin localpilot` covers the
   Crossterm host selector, provider-neutral runtime-event mapping, key mapping,
   ANSI terminal-mode ordering, best-effort workspace Git metadata, and recorded
