@@ -678,11 +678,6 @@ fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation,
             app.timeline
                 .scroll_by(page, hit_map.timeline.width, hit_map.timeline.height)
         }
-        TimelineNavigation::Top => {
-            app.timeline
-                .scroll_to_row(0, hit_map.timeline.width, hit_map.timeline.height)
-        }
-        TimelineNavigation::Bottom => app.timeline.follow_bottom(),
     }
 }
 
@@ -802,12 +797,21 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
     match key.code {
         KeyCode::PageUp => Some(InputAction::NavigateTimeline(TimelineNavigation::PageUp)),
         KeyCode::PageDown => Some(InputAction::NavigateTimeline(TimelineNavigation::PageDown)),
-        KeyCode::Home if ctrl && !alt => {
-            Some(InputAction::NavigateTimeline(TimelineNavigation::Top))
-        }
-        KeyCode::End if ctrl && !alt => {
-            Some(InputAction::NavigateTimeline(TimelineNavigation::Bottom))
-        }
+        KeyCode::Home if ctrl && !alt => Some(InputAction::MoveTextStart),
+        KeyCode::End if ctrl && !alt => Some(InputAction::MoveTextEnd),
+        KeyCode::Home if !ctrl && !alt => Some(InputAction::MoveVisualStart),
+        KeyCode::End if !ctrl && !alt => Some(InputAction::MoveVisualEnd),
+        KeyCode::Left if alt && !ctrl => Some(InputAction::MoveWordLeft),
+        KeyCode::Right if alt && !ctrl => Some(InputAction::MoveWordRight),
+        KeyCode::Char('a') if ctrl && !alt => Some(InputAction::MoveLineStart),
+        KeyCode::Char('b') if ctrl && !alt => Some(InputAction::MoveLeft),
+        KeyCode::Char('e') if ctrl && !alt => Some(InputAction::MoveLineEnd),
+        KeyCode::Char('f') if ctrl && !alt => Some(InputAction::MoveRight),
+        KeyCode::Char('h') if ctrl && !alt => Some(InputAction::Backspace),
+        KeyCode::Char('j') if ctrl && !alt => Some(InputAction::Insert("\n".to_string())),
+        KeyCode::Char('k') if ctrl && !alt => Some(InputAction::DeleteToLineEnd),
+        KeyCode::Char('u') if ctrl && !alt => Some(InputAction::DeleteToLineStart),
+        KeyCode::Char('w') if ctrl && !alt => Some(InputAction::DeleteWordLeft),
         KeyCode::Char(character) if !ctrl && !alt => {
             Some(InputAction::Insert(character.to_string()))
         }
@@ -1123,6 +1127,7 @@ mod tests {
             app.timeline.viewport,
             ViewportAnchor::Held(_) | ViewportAnchor::Top
         ));
+        let held = app.timeline.viewport;
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -1130,9 +1135,9 @@ mod tests {
                 &busy_hit_map,
                 &mut mouse_state,
             ),
-            RoutedEvent::Handled
+            RoutedEvent::Unhandled
         );
-        assert_eq!(app.timeline.viewport, ViewportAnchor::Top);
+        assert_eq!(app.timeline.viewport, held);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -1140,9 +1145,9 @@ mod tests {
                 &busy_hit_map,
                 &mut mouse_state,
             ),
-            RoutedEvent::Handled
+            RoutedEvent::Unhandled
         );
-        assert_eq!(app.timeline.viewport, ViewportAnchor::FollowBottom);
+        assert_eq!(app.timeline.viewport, held);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -1152,6 +1157,82 @@ mod tests {
             ),
             RoutedEvent::Unhandled
         );
+    }
+
+    #[test]
+    fn composer_navigation_and_shell_editing_shortcuts_map_semantically() {
+        let cases = [
+            (
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                InputAction::MoveVisualStart,
+            ),
+            (KeyCode::End, KeyModifiers::NONE, InputAction::MoveVisualEnd),
+            (
+                KeyCode::Home,
+                KeyModifiers::CONTROL,
+                InputAction::MoveTextStart,
+            ),
+            (
+                KeyCode::End,
+                KeyModifiers::CONTROL,
+                InputAction::MoveTextEnd,
+            ),
+            (KeyCode::Left, KeyModifiers::ALT, InputAction::MoveWordLeft),
+            (
+                KeyCode::Right,
+                KeyModifiers::ALT,
+                InputAction::MoveWordRight,
+            ),
+            (
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                InputAction::MoveLineStart,
+            ),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                InputAction::MoveLeft,
+            ),
+            (
+                KeyCode::Char('e'),
+                KeyModifiers::CONTROL,
+                InputAction::MoveLineEnd,
+            ),
+            (
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+                InputAction::MoveRight,
+            ),
+            (
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL,
+                InputAction::Backspace,
+            ),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                InputAction::DeleteToLineEnd,
+            ),
+            (
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+                InputAction::DeleteToLineStart,
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                InputAction::DeleteWordLeft,
+            ),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL,
+                InputAction::Insert("\n".to_string()),
+            ),
+        ];
+        for (code, modifiers, expected) in cases {
+            assert_eq!(map_key(press(code, modifiers)), Some(expected));
+        }
     }
 
     #[test]

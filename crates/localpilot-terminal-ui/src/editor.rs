@@ -13,6 +13,7 @@ pub struct EditorRow {
 pub struct Editor {
     text: String,
     cursor: usize,
+    preferred_column: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -45,6 +46,7 @@ impl Editor {
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
+        self.preferred_column = None;
     }
 
     #[must_use]
@@ -77,12 +79,14 @@ impl Editor {
                 row.end_byte,
                 usize::from(column),
             );
+            self.preferred_column = None;
         }
     }
 
     pub fn insert(&mut self, text: &str) {
         self.fork_recall_on_edit();
         self.normalize_cursor();
+        self.preferred_column = None;
         let text = sanitize_text(text);
         self.text.insert_str(self.cursor, &text);
         self.cursor += text.len();
@@ -91,6 +95,7 @@ impl Editor {
     pub fn backspace(&mut self) {
         self.fork_recall_on_edit();
         self.normalize_cursor();
+        self.preferred_column = None;
         if let Some((byte, _)) = self.text[..self.cursor].grapheme_indices(true).next_back() {
             self.text.drain(byte..self.cursor);
             self.cursor = byte;
@@ -100,6 +105,7 @@ impl Editor {
     pub fn delete(&mut self) {
         self.fork_recall_on_edit();
         self.normalize_cursor();
+        self.preferred_column = None;
         if let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() {
             self.text.drain(self.cursor..self.cursor + grapheme.len());
         }
@@ -107,6 +113,7 @@ impl Editor {
 
     pub fn move_left(&mut self) {
         self.normalize_cursor();
+        self.preferred_column = None;
         if let Some((byte, _)) = self.text[..self.cursor].grapheme_indices(true).next_back() {
             self.cursor = byte;
         }
@@ -114,6 +121,7 @@ impl Editor {
 
     pub fn move_right(&mut self) {
         self.normalize_cursor();
+        self.preferred_column = None;
         if let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() {
             self.cursor += grapheme.len();
         }
@@ -145,6 +153,7 @@ impl Editor {
         }
         let submitted = std::mem::take(&mut self.text);
         self.cursor = 0;
+        self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
@@ -154,15 +163,111 @@ impl Editor {
         Some(submitted)
     }
 
+    pub fn move_visual_start(&mut self, width: u16) {
+        self.normalize_cursor();
+        let rows = self.visual_rows(width);
+        let row = &rows[cursor_row(&rows, self.cursor)];
+        self.cursor = row.start_byte;
+        self.preferred_column = None;
+    }
+
+    pub fn move_visual_end(&mut self, width: u16) {
+        self.normalize_cursor();
+        let rows = self.visual_rows(width);
+        let row = &rows[cursor_row(&rows, self.cursor)];
+        self.cursor = row.end_byte;
+        self.preferred_column = None;
+    }
+
+    pub fn move_line_start(&mut self) {
+        self.normalize_cursor();
+        self.cursor = self.line_start();
+        self.preferred_column = None;
+    }
+
+    pub fn move_line_end(&mut self) {
+        self.normalize_cursor();
+        self.cursor = self.line_end();
+        self.preferred_column = None;
+    }
+
+    pub fn move_text_start(&mut self) {
+        self.cursor = 0;
+        self.preferred_column = None;
+    }
+
+    pub fn move_text_end(&mut self) {
+        self.cursor = self.text.len();
+        self.preferred_column = None;
+    }
+
+    pub fn move_word_left(&mut self) {
+        self.normalize_cursor();
+        self.cursor = previous_word_start(&self.text, self.cursor);
+        self.preferred_column = None;
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.normalize_cursor();
+        self.cursor = next_word_end(&self.text, self.cursor);
+        self.preferred_column = None;
+    }
+
+    pub fn delete_word_left(&mut self) {
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        let start = previous_word_start(&self.text, self.cursor);
+        self.text.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        let start = self.line_start();
+        self.text.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    pub fn delete_to_line_end(&mut self) {
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        let end = self.line_end();
+        let delete_end = if self.cursor == end && end < self.text.len() {
+            end + self.text[end..].graphemes(true).next().map_or(0, str::len)
+        } else {
+            end
+        };
+        self.text.drain(self.cursor..delete_end);
+    }
+
     fn move_to_adjacent_row(&mut self, rows: &[EditorRow], from: usize, to: usize) {
         let source = &rows[from];
-        let column = display_width(&self.text[source.start_byte..self.cursor.min(source.end_byte)]);
+        let column = *self.preferred_column.get_or_insert_with(|| {
+            display_width(&self.text[source.start_byte..self.cursor.min(source.end_byte)])
+        });
         let target = &rows[to];
         self.cursor =
             byte_at_display_column(&self.text, target.start_byte, target.end_byte, column);
     }
 
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor]
+            .rfind('\n')
+            .map_or(0, |offset| offset + 1)
+    }
+
+    fn line_end(&self) -> usize {
+        self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |offset| self.cursor + offset)
+    }
+
     fn recall_previous(&mut self) {
+        self.preferred_column = None;
         if self.history.is_empty() {
             return;
         }
@@ -180,6 +285,7 @@ impl Editor {
     }
 
     fn recall_next(&mut self) {
+        self.preferred_column = None;
         let Some(index) = self.history_index else {
             return;
         };
@@ -208,6 +314,29 @@ impl Editor {
             self.cursor = self.cursor.saturating_sub(1);
         }
     }
+}
+
+fn is_word_segment(segment: &str) -> bool {
+    segment.chars().any(|character| {
+        character.is_alphanumeric()
+            || character == '_'
+            || (!character.is_ascii_punctuation() && !character.is_whitespace())
+    })
+}
+
+fn previous_word_start(text: &str, cursor: usize) -> usize {
+    UnicodeSegmentation::split_word_bound_indices(&text[..cursor])
+        .rev()
+        .find_map(|(start, segment)| is_word_segment(segment).then_some(start))
+        .unwrap_or(0)
+}
+
+fn next_word_end(text: &str, cursor: usize) -> usize {
+    UnicodeSegmentation::split_word_bound_indices(&text[cursor..])
+        .find_map(|(start, segment)| {
+            is_word_segment(segment).then_some(cursor + start + segment.len())
+        })
+        .unwrap_or(text.len())
 }
 
 fn cursor_row(rows: &[EditorRow], cursor: usize) -> usize {
@@ -293,5 +422,93 @@ mod tests {
         let mut editor = Editor::default();
         editor.insert("safe\x1b[2J text\0");
         assert_eq!(editor.text(), "safe text");
+    }
+
+    #[test]
+    fn vertical_movement_keeps_the_original_display_column_across_short_rows() {
+        let mut editor = Editor::default();
+        editor.insert("abcdef\nxy\nabcdef");
+
+        editor.up_or_history(80);
+        assert_eq!(editor.cursor_row_and_column(80), (1, 2));
+        editor.up_or_history(80);
+        assert_eq!(editor.cursor_row_and_column(80), (0, 6));
+
+        editor.down_or_history(80);
+        editor.move_left();
+        editor.up_or_history(80);
+        assert_eq!(editor.cursor_row_and_column(80), (0, 1));
+    }
+
+    #[test]
+    fn visual_line_logical_line_and_whole_text_bounds_are_distinct() {
+        let mut editor = Editor::default();
+        editor.insert("abcdef\nxy");
+        editor.move_text_start();
+        editor.move_right();
+        editor.move_visual_end(3);
+        assert_eq!(editor.cursor(), 3);
+        editor.move_line_end();
+        assert_eq!(editor.cursor(), 6);
+        editor.move_text_end();
+        assert_eq!(editor.cursor(), editor.text().len());
+        editor.move_visual_start(3);
+        assert_eq!(editor.cursor(), 7);
+        editor.move_text_start();
+        assert_eq!(editor.cursor(), 0);
+    }
+
+    #[test]
+    fn home_and_ctrl_a_diverge_on_a_wrapped_logical_line() {
+        let mut editor = Editor::default();
+        editor.insert("abcdef");
+        editor.move_left();
+        editor.move_visual_start(3);
+        assert_eq!(editor.cursor(), 3);
+        editor.move_line_start();
+        assert_eq!(editor.cursor(), 0);
+    }
+
+    #[test]
+    fn a_mouse_position_resets_the_vertical_preferred_column() {
+        let mut editor = Editor::default();
+        editor.insert("abcdef\nxy\nabcdef");
+        editor.up_or_history(80);
+        editor.set_cursor_from_visual(1, 1, 80);
+        editor.up_or_history(80);
+        assert_eq!(editor.cursor_row_and_column(80), (0, 1));
+    }
+
+    #[test]
+    fn word_and_kill_commands_keep_unicode_boundaries_valid() {
+        let mut editor = Editor::default();
+        editor.insert("alpha 界 beta");
+        editor.move_word_left();
+        assert_eq!(&editor.text()[editor.cursor()..], "beta");
+        editor.move_word_left();
+        assert_eq!(&editor.text()[editor.cursor()..], "界 beta");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+
+        editor.move_text_end();
+        editor.delete_word_left();
+        assert_eq!(editor.text(), "alpha 界 ");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+
+        editor.insert("🧪 beta\ngamma");
+        editor.move_text_end();
+        editor.delete_to_line_start();
+        assert_eq!(editor.text(), "alpha 界 🧪 beta\n");
+        assert!(editor.text().is_char_boundary(editor.cursor()));
+    }
+
+    #[test]
+    fn ctrl_k_at_a_logical_line_end_removes_the_line_break() {
+        let mut editor = Editor::default();
+        editor.insert("first\nsecond");
+        editor.move_text_start();
+        editor.move_line_end();
+        editor.delete_to_line_end();
+        assert_eq!(editor.text(), "firstsecond");
+        assert_eq!(editor.cursor(), 5);
     }
 }

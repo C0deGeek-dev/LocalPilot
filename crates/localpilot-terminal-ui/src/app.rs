@@ -95,8 +95,19 @@ pub enum InputAction {
     Delete,
     MoveLeft,
     MoveRight,
+    MoveWordLeft,
+    MoveWordRight,
     MoveUp,
     MoveDown,
+    MoveVisualStart,
+    MoveVisualEnd,
+    MoveLineStart,
+    MoveLineEnd,
+    MoveTextStart,
+    MoveTextEnd,
+    DeleteWordLeft,
+    DeleteToLineStart,
+    DeleteToLineEnd,
     Submit,
 }
 
@@ -104,8 +115,6 @@ pub enum InputAction {
 pub enum TimelineNavigation {
     PageUp,
     PageDown,
-    Top,
-    Bottom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,12 +305,56 @@ impl AppModel {
                 self.editor.move_right();
                 AppCommand::None
             }
+            InputAction::MoveWordLeft if self.focus == Focus::Composer => {
+                self.editor.move_word_left();
+                AppCommand::None
+            }
+            InputAction::MoveWordRight if self.focus == Focus::Composer => {
+                self.editor.move_word_right();
+                AppCommand::None
+            }
             InputAction::MoveUp if self.focus == Focus::Composer => {
                 self.editor.up_or_history(editor_width);
                 AppCommand::None
             }
             InputAction::MoveDown if self.focus == Focus::Composer => {
                 self.editor.down_or_history(editor_width);
+                AppCommand::None
+            }
+            InputAction::MoveVisualStart if self.focus == Focus::Composer => {
+                self.editor.move_visual_start(editor_width);
+                AppCommand::None
+            }
+            InputAction::MoveVisualEnd if self.focus == Focus::Composer => {
+                self.editor.move_visual_end(editor_width);
+                AppCommand::None
+            }
+            InputAction::MoveLineStart if self.focus == Focus::Composer => {
+                self.editor.move_line_start();
+                AppCommand::None
+            }
+            InputAction::MoveLineEnd if self.focus == Focus::Composer => {
+                self.editor.move_line_end();
+                AppCommand::None
+            }
+            InputAction::MoveTextStart if self.focus == Focus::Composer => {
+                self.editor.move_text_start();
+                AppCommand::None
+            }
+            InputAction::MoveTextEnd if self.focus == Focus::Composer => {
+                self.editor.move_text_end();
+                AppCommand::None
+            }
+            InputAction::DeleteWordLeft if self.focus == Focus::Composer => {
+                self.editor.delete_word_left();
+                AppCommand::None
+            }
+            InputAction::DeleteToLineStart if self.focus == Focus::Composer => {
+                self.editor.delete_to_line_start();
+                AppCommand::None
+            }
+            InputAction::DeleteToLineEnd if self.focus == Focus::Composer => {
+                self.editor.delete_to_line_end();
                 AppCommand::None
             }
             InputAction::Submit if self.focus == Focus::Composer => self
@@ -313,8 +366,19 @@ impl AppModel {
             | InputAction::Delete
             | InputAction::MoveLeft
             | InputAction::MoveRight
+            | InputAction::MoveWordLeft
+            | InputAction::MoveWordRight
             | InputAction::MoveUp
             | InputAction::MoveDown
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd
             | InputAction::Submit => AppCommand::None,
         }
     }
