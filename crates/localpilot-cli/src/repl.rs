@@ -69,6 +69,27 @@ enum ChatUi {
     Fullscreen,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceGitStatus {
+    branch: String,
+    dirty: Option<bool>,
+}
+
+fn workspace_git_status(root: &std::path::Path) -> Option<WorkspaceGitStatus> {
+    let branch =
+        crate::harness_cmd::git_line(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .or_else(|| {
+                crate::harness_cmd::git_line(root, &["rev-parse", "--short", "HEAD"])
+                    .map(|commit| format!("detached@{commit}"))
+            })?;
+    let dirty = crate::harness_cmd::git_line(
+        root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )
+    .map(|status| !status.is_empty());
+    Some(WorkspaceGitStatus { branch, dirty })
+}
+
 fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
     match value.and_then(std::ffi::OsStr::to_str) {
         None | Some("") | Some("inline") => Ok(ChatUi::Inline),
@@ -408,12 +429,17 @@ pub async fn run_chat(
     timer.mark("knowledge index (mode check)");
     if chat_ui == ChatUi::Fullscreen {
         timer.mark("READY — entering full-screen TUI");
+        let git = workspace_git_status(&cwd);
         let result = crate::fullscreen::run(
             localpilot_terminal_ui::Header {
                 version: state.header.version.clone(),
                 provider: state.header.provider.clone(),
                 model: state.header.model.clone(),
-                workspace: state.header.workspace.clone(),
+                workspace: cwd.display().to_string(),
+                branch: git.as_ref().map(|status| status.branch.clone()),
+                workspace_dirty: git.as_ref().and_then(|status| status.dirty),
+                mode: state.mode.label().to_string(),
+                profile: state.profile.label().to_string(),
                 session_id: state.header.session_id.clone(),
                 session_name: state.header.session_name.clone(),
             },
@@ -2747,6 +2773,27 @@ mod tests {
 
     use super::*;
     use localpilot_tui::TranscriptLine;
+
+    #[test]
+    fn full_screen_git_status_is_best_effort_and_truthful() {
+        let directory = tempfile::tempdir().expect("temporary git workspace");
+        let init = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(directory.path())
+            .output()
+            .expect("run git init");
+        assert!(init.status.success());
+        std::fs::write(directory.path().join("draft.txt"), "draft")
+            .expect("write untracked fixture");
+
+        let status = workspace_git_status(directory.path()).expect("git status");
+        assert_eq!(status.branch, "main");
+        assert_eq!(status.dirty, Some(true));
+        assert_eq!(
+            workspace_git_status(directory.path().join("missing").as_path()),
+            None
+        );
+    }
     use ratatui::backend::TestBackend;
 
     #[test]

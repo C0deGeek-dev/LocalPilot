@@ -222,10 +222,11 @@ fn cadence_label(cadence: localpilot_config::Cadence) -> &'static str {
     }
 }
 
-fn git_line(root: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git_line(root: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()?;
     if output.status.success() {

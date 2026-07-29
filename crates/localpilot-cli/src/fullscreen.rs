@@ -389,6 +389,10 @@ mod tests {
             provider: "fixture".to_string(),
             model: "fixture-model".to_string(),
             workspace: "fixture-workspace".to_string(),
+            branch: Some("fixture-branch".to_string()),
+            workspace_dirty: Some(true),
+            mode: "agent".to_string(),
+            profile: "default".to_string(),
             session_id: "fixture-session".to_string(),
             session_name: None,
         };

@@ -347,12 +347,13 @@ fn role_prefix(
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
     let theme = theme(app);
+    let left = status_left(app);
     let right = status_right(app);
     if narrow {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::styled(
-                    middle_elide(&app.header.workspace, area.width),
+                    middle_elide(&left, area.width),
                     theme.ui(UiRole::Foreground),
                 ),
                 Line::styled(truncate_end(&right, area.width), theme.ui(UiRole::Muted)),
@@ -361,18 +362,33 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
         );
     } else {
         frame.render_widget(
-            Paragraph::new(two_sided(&app.header.workspace, &right, area.width))
-                .style(theme.ui(UiRole::Muted)),
+            Paragraph::new(two_sided(&left, &right, area.width)).style(theme.ui(UiRole::Muted)),
             area,
         );
     }
 }
 
+fn status_left(app: &AppModel) -> String {
+    app.header.branch.as_ref().map_or_else(
+        || app.header.workspace.clone(),
+        |branch| {
+            format!(
+                "{} [{}{}]",
+                app.header.workspace,
+                branch,
+                if app.header.workspace_dirty == Some(true) {
+                    "*"
+                } else {
+                    ""
+                }
+            )
+        },
+    )
+}
+
 fn status_right(app: &AppModel) -> String {
-    let mut parts = vec![app.header.model.clone()];
-    if let Some((input, output)) = app.usage {
-        parts.push(format!("{} tokens", input.saturating_add(output)));
-    }
+    let (input, output) = app.usage.unwrap_or_default();
+    let mut parts = vec![format!("{} tokens", input.saturating_add(output))];
     if let Some((used, limit)) = app.context_usage {
         let percentage = if limit == 0 {
             0
@@ -439,35 +455,61 @@ fn render_slim_frame(frame: &mut Frame<'_>, area: Rect, style: ratatui::style::S
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
     let state = footer_state(app);
     let shortcuts = "? help · / commands";
+    let context = format!(
+        "{} · {} → {}",
+        app.header.mode, app.header.profile, app.header.model
+    );
     let theme = theme(app);
     let text = if narrow {
         format!(
             "{}\n{}",
-            truncate_end(state, area.width),
-            truncate_end(shortcuts, area.width)
+            truncate_end(&state, area.width),
+            two_sided(shortcuts, &context, area.width)
         )
     } else {
-        two_sided(shortcuts, state, area.width)
+        two_sided(&format!("{state} · {shortcuts}"), &context, area.width)
     };
     frame.render_widget(Paragraph::new(text).style(theme.ui(UiRole::Muted)), area);
 }
 
-fn footer_state(app: &AppModel) -> &'static str {
+fn footer_state(app: &AppModel) -> String {
+    let held = matches!(app.timeline.viewport, crate::ViewportAnchor::Held(_));
+    let new_output = app.timeline.has_new_content();
     match (app.work, app.exit_armed) {
-        (_, true) => "press Ctrl+C again to exit",
-        (crate::WorkState::Idle, false) => "idle · Ctrl+C copy / twice to exit",
+        (_, true) => "press Ctrl+C again to exit".to_string(),
+        (crate::WorkState::Idle, false) if held && new_output => {
+            "↓ new output · timeline held · Ctrl+C twice to exit".to_string()
+        }
+        (crate::WorkState::Idle, false) if held => {
+            "timeline held · Ctrl+C twice to exit".to_string()
+        }
+        (crate::WorkState::Idle, false) => "idle · Ctrl+C copy / twice to exit".to_string(),
         (
             crate::WorkState::Busy {
                 cancellation_requested: false,
             },
             false,
-        ) => "working · Ctrl+C cancel / twice to exit",
+        ) if held && new_output => {
+            "↓ new output · timeline held · Ctrl+C cancel / twice to exit".to_string()
+        }
+        (
+            crate::WorkState::Busy {
+                cancellation_requested: false,
+            },
+            false,
+        ) if held => "timeline held · working · Ctrl+C cancel / twice to exit".to_string(),
+        (
+            crate::WorkState::Busy {
+                cancellation_requested: false,
+            },
+            false,
+        ) => "working · Ctrl+C cancel / twice to exit".to_string(),
         (
             crate::WorkState::Busy {
                 cancellation_requested: true,
             },
             false,
-        ) => "cancelling · Ctrl+C again to exit",
+        ) => "cancelling · Ctrl+C again to exit".to_string(),
     }
 }
 
@@ -576,6 +618,10 @@ mod tests {
                 provider: "provider".to_string(),
                 model: "model".to_string(),
                 workspace: "workspace".to_string(),
+                branch: Some("main".to_string()),
+                workspace_dirty: Some(false),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
                 session_id: "session".to_string(),
                 session_name: None,
             },
@@ -778,5 +824,56 @@ mod tests {
             .contains(ratatui::style::Modifier::REVERSED));
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains('×'));
+    }
+
+    #[test]
+    fn status_and_footer_render_only_truthful_workspace_and_session_context() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
+        app.header.branch = Some("terminal-chat-experience".to_string());
+        app.header.workspace_dirty = Some(true);
+        app.header.mode = "agent".to_string();
+        app.header.profile = "relaxed".to_string();
+        app.usage = Some((12, 34));
+        app.context_usage = Some((2_500, 10_000));
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw truthful context");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let buffer = terminal.backend().buffer();
+        let status = buffer_line(buffer, layout.status.y);
+        let footer = buffer_line(buffer, layout.footer.y);
+        assert!(status.contains("D:\\repos\\LocalX\\LocalPilot"));
+        assert!(status.contains("[terminal-chat-experience*]"));
+        assert!(status.contains("46 tokens · 25% context"));
+        assert!(footer.contains("agent · relaxed → model"));
+    }
+
+    #[test]
+    fn held_stream_surfaces_new_output_without_moving_the_anchor() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        for number in 0..40 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        app.timeline.scroll_by(-20, 70, 12);
+        let crate::ViewportAnchor::Held(anchor) = app.timeline.viewport else {
+            panic!("timeline must be held");
+        };
+        let tail = app.timeline.items().last().expect("tail").id;
+        assert!(app.timeline.append_text(tail, " streamed"));
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw held stream");
+        assert_eq!(app.timeline.viewport, crate::ViewportAnchor::Held(anchor));
+        assert!(terminal.backend().to_string().contains("new output"));
     }
 }

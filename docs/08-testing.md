@@ -32,11 +32,14 @@ The full-screen UI is split at the terminal boundary so deterministic tests do
 not need a real console:
 
 - `cargo test -p localpilot-terminal-ui` covers stable content anchors,
-  grapheme/display-width editing, selection fidelity, lifecycle routing, and
-  Ratatui `TestBackend` frames.
+  mixed framed/collapsed/pinned projection equivalence, 10k-item visible-row
+  virtualization, grapheme/display-width editing, selection fidelity, lifecycle
+  routing, held/new-output state, and 120x30/80x24/40x20 Ratatui `TestBackend`
+  frames across semantic themes and no-color mode.
 - `cargo test -p localpilot --features tui,learning --bin localpilot` covers the
   Crossterm host selector, provider-neutral runtime-event mapping, key mapping,
-  and ANSI terminal-mode ordering.
+  ANSI terminal-mode ordering, best-effort workspace Git metadata, and recorded
+  RuntimeEvent replay through FollowBottom and Held viewport states.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.

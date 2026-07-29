@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -208,6 +208,7 @@ pub enum ViewportAnchor {
 pub struct TimelineView {
     pub rows: Vec<VisualRow>,
     pub pinned: Option<PinnedPrompt>,
+    pub new_content: bool,
     pub start: usize,
     pub total_rows: usize,
     pub viewport_rows: usize,
@@ -250,6 +251,7 @@ pub struct Timeline {
     next_id: Option<u64>,
     pub viewport: ViewportAnchor,
     pub selection: Option<Selection>,
+    new_content: Cell<bool>,
 }
 
 impl Default for Timeline {
@@ -269,6 +271,7 @@ impl Timeline {
             next_id: Some(1),
             viewport: ViewportAnchor::FollowBottom,
             selection: None,
+            new_content: Cell::new(false),
         }
     }
 
@@ -291,6 +294,9 @@ impl Timeline {
         let text = sanitize_text(&text.into());
         self.item_positions.insert(id, self.items.len());
         self.items.push(TimelineItem::new(id, kind, text));
+        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+            self.new_content.set(true);
+        }
         self.invalidate_layout();
         Some(id)
     }
@@ -317,6 +323,9 @@ impl Timeline {
             });
         }
         self.wrap_cache.borrow_mut().remove(&id);
+        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+            self.new_content.set(true);
+        }
         self.invalidate_layout();
         true
     }
@@ -397,10 +406,14 @@ impl Timeline {
             (full_start, None, outer_rows)
         };
         let end = start.saturating_add(viewport_rows).min(total_rows);
+        if start >= total_rows.saturating_sub(viewport_rows) {
+            self.new_content.set(false);
+        }
         let rows = self.project_rows(width, start, end);
         TimelineView {
             rows,
             pinned,
+            new_content: self.new_content.get(),
             start,
             total_rows,
             viewport_rows,
@@ -415,6 +428,7 @@ impl Timeline {
         let next = current.saturating_add_signed(delta).min(max_start);
         if next >= max_start {
             self.viewport = ViewportAnchor::FollowBottom;
+            self.new_content.set(false);
         } else if let Some(point) = self.point_at_row(width, next) {
             self.viewport = ViewportAnchor::Held(point);
         }
@@ -422,6 +436,12 @@ impl Timeline {
 
     pub fn follow_bottom(&mut self) {
         self.viewport = ViewportAnchor::FollowBottom;
+        self.new_content.set(false);
+    }
+
+    #[must_use]
+    pub fn has_new_content(&self) -> bool {
+        self.new_content.get()
     }
 
     pub fn start_selection(&mut self, point: ContentPoint) {
@@ -1170,6 +1190,38 @@ mod tests {
 
         assert!(timeline.append_text(id, " changed"));
         assert!(timeline.layout_cache.borrow().is_none());
+    }
+
+    #[test]
+    fn held_timeline_marks_new_output_until_it_returns_to_bottom() {
+        let mut timeline = Timeline::new();
+        for number in 0..30 {
+            let _ = timeline.push(ItemKind::Assistant, format!("item {number:02}"));
+        }
+        timeline.scroll_by(-12, 40, 8);
+        let ViewportAnchor::Held(anchor) = timeline.viewport else {
+            panic!("timeline must be held");
+        };
+        assert!(!timeline.has_new_content());
+
+        let tail = timeline.items().last().expect("tail").id;
+        assert!(timeline.append_text(tail, " streamed"));
+        assert!(timeline.has_new_content());
+        assert_eq!(timeline.viewport, ViewportAnchor::Held(anchor));
+        let resized = timeline.view(31, 6);
+        assert!(resized.new_content);
+        assert!(timeline.has_new_content());
+        assert_eq!(timeline.viewport, ViewportAnchor::Held(anchor));
+
+        timeline.scroll_by(isize::MAX, 40, 8);
+        assert_eq!(timeline.viewport, ViewportAnchor::FollowBottom);
+        assert!(!timeline.has_new_content());
+
+        timeline.scroll_by(-3, 40, 8);
+        let _ = timeline.push(ItemKind::Notice, "later notice");
+        assert!(timeline.has_new_content());
+        timeline.follow_bottom();
+        assert!(!timeline.has_new_content());
     }
 
     #[test]

@@ -35,6 +35,12 @@ Any other value is rejected with a configuration error. This is an environment-
 only transition switch, not part of the stable TOML schema; the inline host and
 selector are removed when full-screen feature parity is accepted (ADR-0107).
 
+While using the full-screen branch host, `LOCALPILOT_CHAT_THEME` accepts
+`default`, `dim`, `high-contrast`, or `colorblind`. An invalid value is shown as
+a sanitized timeline warning and falls back to `default`. `NO_COLOR` disables
+palette colors while retaining non-color focus, selection, success, and error
+cues. These environment-only controls do not extend the stable TOML schema.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

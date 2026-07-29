@@ -154,9 +154,12 @@ the scheduler only resumes the next safe turn.
 chat model. It owns:
 
 - stable-ID timeline, content-coordinate viewport and selection state
+- width-indexed visible-row virtualization, pinned prompts, compact activity,
+  and held/new-output state
 - grapheme/display-width editor geometry and input routing
 - lifecycle/focus state, including cancel/exit intent
-- terminal capability values, semantic frame state, rendering and hit maps
+- one responsive frame layout/hit map and one semantic theme resolver across
+  default, dim, high-contrast, colorblind, and no-color rendering
 
 It depends on Ratatui's backend-neutral APIs but not Crossterm, the harness,
 providers, the store, or the CLI. `localpilot-cli` owns the Crossterm alternate-
