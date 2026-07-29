@@ -88,6 +88,7 @@ pub enum WorkState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
     CancelOrExit,
+    InterruptWork,
     Insert(String),
     Backspace,
     Delete,
@@ -129,6 +130,18 @@ pub enum StopState {
 pub struct PlanEntry {
     pub title: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogState {
+    Trust {
+        path: String,
+    },
+    Approval {
+        tool: String,
+        target: String,
+        risk_class: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +193,8 @@ pub struct AppModel {
     pub plan: Vec<PlanEntry>,
     pub usage: Option<(u64, u64)>,
     pub context_usage: Option<(usize, usize)>,
+    pub stream_bytes: usize,
+    pub dialog: Option<DialogState>,
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
     active_tools: BTreeMap<String, ItemId>,
@@ -215,6 +230,8 @@ impl AppModel {
             plan: Vec::new(),
             usage: None,
             context_usage: None,
+            stream_bytes: 0,
+            dialog: None,
             active_assistant: None,
             active_reasoning: None,
             active_tools: BTreeMap::new(),
@@ -245,6 +262,7 @@ impl AppModel {
         }
         match action {
             InputAction::CancelOrExit => self.cancel_or_exit(),
+            InputAction::InterruptWork => self.interrupt_work(),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 self.editor.insert(&text);
                 AppCommand::None
@@ -291,11 +309,13 @@ impl AppModel {
     pub fn apply_runtime(&mut self, update: RuntimeUpdate) {
         match update {
             RuntimeUpdate::Text(text) => {
+                self.stream_bytes = self.stream_bytes.saturating_add(text.len());
                 if !self.append_active(self.active_assistant, &text) {
                     self.active_assistant = self.timeline.push(ItemKind::Assistant, text);
                 }
             }
             RuntimeUpdate::Reasoning(text) => {
+                self.stream_bytes = self.stream_bytes.saturating_add(text.len());
                 if !self.append_active(self.active_reasoning, &text) {
                     self.active_reasoning = self.timeline.push(ItemKind::Reasoning, text);
                 }
@@ -390,6 +410,59 @@ impl AppModel {
         self.active_assistant = None;
         self.active_reasoning = None;
         self.active_tools.clear();
+        self.stream_bytes = 0;
+    }
+
+    pub fn seed_history(&mut self, history: Vec<String>) {
+        self.editor.seed_history(history);
+    }
+
+    /// Add one submitted prompt at its stable transcript position. The host
+    /// supplies presentation-only trailing metadata such as a local time.
+    pub fn append_prompt(
+        &mut self,
+        text: impl Into<String>,
+        trailing: Option<String>,
+        pending: bool,
+    ) -> Option<ItemId> {
+        self.timeline.follow_bottom();
+        let id = self.timeline.push(ItemKind::User, text)?;
+        let _ = self.timeline.set_trailing(id, trailing);
+        let _ = self.timeline.set_pending(id, pending);
+        Some(id)
+    }
+
+    pub fn activate_prompt(&mut self, id: ItemId) -> bool {
+        self.timeline.follow_bottom();
+        self.timeline.set_pending(id, false)
+    }
+
+    pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
+        self.dialog = Some(DialogState::Trust {
+            path: sanitize_text(&path.into()),
+        });
+    }
+
+    #[must_use]
+    pub fn workspace_trust_pending(&self) -> bool {
+        matches!(self.dialog, Some(DialogState::Trust { .. }))
+    }
+
+    pub fn request_approval(
+        &mut self,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+    ) {
+        self.dialog = Some(DialogState::Approval {
+            tool: sanitize_text(&tool.into()),
+            target: sanitize_text(&target.into()),
+            risk_class: sanitize_text(&risk_class.into()),
+        });
+    }
+
+    pub fn clear_dialog(&mut self) {
+        self.dialog = None;
     }
 
     fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
@@ -451,6 +524,23 @@ impl AppModel {
                 AppCommand::CancelWork
             }
             WorkState::Busy {
+                cancellation_requested: true,
+            } => AppCommand::None,
+        }
+    }
+
+    fn interrupt_work(&mut self) -> AppCommand {
+        match self.work {
+            WorkState::Busy {
+                cancellation_requested: false,
+            } => {
+                self.work = WorkState::Busy {
+                    cancellation_requested: true,
+                };
+                AppCommand::CancelWork
+            }
+            WorkState::Idle
+            | WorkState::Busy {
                 cancellation_requested: true,
             } => AppCommand::None,
         }
@@ -570,6 +660,75 @@ mod tests {
         assert_eq!(app.timeline.items().len(), 1);
         assert_eq!(app.timeline.items()[0].id, id);
         assert_eq!(app.timeline.items()[0].text, "hello world");
+        assert_eq!(app.stream_bytes, "hello world".len());
+    }
+
+    #[test]
+    fn escape_interrupts_work_without_arming_process_exit() {
+        let mut app = model();
+        assert_eq!(
+            app.handle_input(InputAction::InterruptWork, 80),
+            AppCommand::None
+        );
+        app.begin_work();
+        assert_eq!(
+            app.handle_input(InputAction::InterruptWork, 80),
+            AppCommand::CancelWork
+        );
+        assert!(!app.exit_armed);
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: true
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_submission_reanchors_and_pending_state_clears_in_place() {
+        let mut app = model();
+        let _ = app.timeline.push(ItemKind::Assistant, "old response");
+        app.timeline.scroll_by(-1, 20, 1);
+        let prompt = app
+            .append_prompt("queued", Some("12:34".to_string()), true)
+            .expect("prompt");
+        assert_eq!(app.timeline.viewport, crate::ViewportAnchor::FollowBottom);
+        assert!(app.timeline.item(prompt).expect("prompt").pending);
+        assert!(app.activate_prompt(prompt));
+        assert!(!app.timeline.item(prompt).expect("prompt").pending);
+        assert_eq!(
+            app.timeline
+                .item(prompt)
+                .expect("prompt")
+                .trailing
+                .as_deref(),
+            Some("12:34")
+        );
+    }
+
+    #[test]
+    fn dialog_content_is_sanitized_and_trust_is_explicit() {
+        let mut app = model();
+        app.require_workspace_trust("safe\u{1b}[2J-path");
+        assert!(app.workspace_trust_pending());
+        assert_eq!(
+            app.dialog,
+            Some(DialogState::Trust {
+                path: "safe-path".to_string()
+            })
+        );
+        app.clear_dialog();
+        assert!(!app.workspace_trust_pending());
+
+        app.request_approval("tool", "target\0", "write");
+        assert_eq!(
+            app.dialog,
+            Some(DialogState::Approval {
+                tool: "tool".to_string(),
+                target: "target".to_string(),
+                risk_class: "write".to_string(),
+            })
+        );
     }
 
     #[test]

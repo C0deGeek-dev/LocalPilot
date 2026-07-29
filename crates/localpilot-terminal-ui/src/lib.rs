@@ -16,8 +16,8 @@ mod theme;
 mod timeline;
 
 pub use app::{
-    AppCommand, AppModel, ColorSupport, Focus, Header, InputAction, KeyboardSupport, PlanEntry,
-    RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities, WorkState,
+    AppCommand, AppModel, ColorSupport, DialogState, Focus, Header, InputAction, KeyboardSupport,
+    PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities, WorkState,
 };
 pub use editor::{Editor, EditorRow};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};

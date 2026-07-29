@@ -38,6 +38,15 @@ impl Editor {
         self.cursor
     }
 
+    /// Replace the recall source without disturbing the current draft. Hosts
+    /// call this after the first frame when durable history has been loaded.
+    pub fn seed_history(&mut self, history: Vec<String>) {
+        self.history = history;
+        self.history_index = None;
+        self.history_draft.clear();
+        self.history_draft_cursor = 0;
+    }
+
     #[must_use]
     pub fn visual_rows(&self, width: u16) -> Vec<EditorRow> {
         wrap_ranges(&self.text, width)
@@ -242,6 +251,20 @@ mod tests {
         editor.insert("!");
         editor.down_or_history(80);
         assert_eq!(editor.text(), "remembered!");
+    }
+
+    #[test]
+    fn seeding_durable_history_preserves_an_existing_draft() {
+        let mut editor = Editor::default();
+        editor.insert("draft");
+        editor.move_left();
+        let cursor = editor.cursor();
+
+        editor.seed_history(vec!["persisted".to_string()]);
+        assert_eq!(editor.text(), "draft");
+        assert_eq!(editor.cursor(), cursor);
+        editor.up_or_history(80);
+        assert_eq!(editor.text(), "persisted");
     }
 
     #[test]

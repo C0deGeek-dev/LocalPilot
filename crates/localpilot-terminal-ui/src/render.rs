@@ -1,13 +1,13 @@
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    ActivityState, AppModel, Focus, FrameLayout, ItemKind, PinnedPrompt, Selection, TabId,
-    TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
+    ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, Selection,
+    TabId, TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
     MINIMUM_WIDTH,
 };
 
@@ -116,6 +116,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
+    render_dialog(frame, area, app);
     HitMap {
         frame: Some(layout),
         tabs,
@@ -513,7 +514,7 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         inner,
     );
-    if app.focus == Focus::Composer {
+    if app.focus == Focus::Composer && app.dialog.is_none() {
         let cursor_y = inner
             .y
             .saturating_add(u16::try_from(cursor_row.saturating_sub(scroll)).unwrap_or(u16::MAX))
@@ -525,6 +526,71 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }
     (width, scroll)
+}
+
+fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
+    let Some(dialog) = &app.dialog else {
+        return;
+    };
+    let width = frame_area.width.saturating_sub(4).min(72);
+    let height = frame_area.height.saturating_sub(2).min(7);
+    if width < 20 || height < 5 {
+        return;
+    }
+    let area = Rect::new(
+        frame_area.x + frame_area.width.saturating_sub(width) / 2,
+        frame_area.y + frame_area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(2),
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme.ui(UiRole::Surface)), area);
+    let lines = match dialog {
+        DialogState::Trust { path } => vec![
+            Line::from(vec![
+                Span::styled("● ", theme.ui(UiRole::Accent)),
+                Span::styled("Trust this workspace?", theme.ui(UiRole::Prompt)),
+            ]),
+            Line::styled(
+                middle_elide(path, inner.width),
+                theme.ui(UiRole::Foreground),
+            ),
+            Line::styled(
+                "LocalPilot will use the permissions in the active profile.",
+                theme.ui(UiRole::Muted),
+            ),
+            Line::styled("Y trust and continue · N exit", theme.ui(UiRole::Muted)),
+        ],
+        DialogState::Approval {
+            tool,
+            target,
+            risk_class,
+        } => vec![
+            Line::from(vec![
+                Span::styled("● ", theme.ui(UiRole::Warning)),
+                Span::styled("Permission required", theme.ui(UiRole::Prompt)),
+            ]),
+            Line::styled(
+                format!("{tool} · {risk_class}"),
+                theme.ui(UiRole::Foreground),
+            ),
+            Line::styled(target.clone(), theme.ui(UiRole::Muted)),
+            Line::styled("Y allow once · N deny", theme.ui(UiRole::Muted)),
+        ],
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.ui(UiRole::Surface))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn render_slim_frame(
@@ -595,6 +661,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
         two_sided(&format!("{state} · {shortcuts}"), &context, area.width)
     };
     frame.render_widget(Paragraph::new(text).style(theme.ui(UiRole::Muted)), area);
+    if let Some(offset) = state.find("● Working") {
+        let x = area
+            .x
+            .saturating_add(u16::try_from(UnicodeWidthStr::width(&state[..offset])).unwrap_or(0));
+        frame.render_widget(
+            Paragraph::new("● Working").style(theme.ui(UiRole::Accent)),
+            Rect::new(x, area.y, 9.min(area.right().saturating_sub(x)), 1),
+        );
+    }
 }
 
 fn inset_chrome(area: Rect) -> Rect {
@@ -624,26 +699,48 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) if held && new_output => {
-            "↓ new output · timeline held · Ctrl+C cancel / twice to exit".to_string()
+            format!(
+                "↓ new output · ● Working · {} · Esc interrupt",
+                format_stream_size(app.stream_bytes)
+            )
         }
         (
             crate::WorkState::Busy {
                 cancellation_requested: false,
             },
             false,
-        ) if held => "timeline held · working · Ctrl+C cancel / twice to exit".to_string(),
+        ) if held => format!(
+            "timeline held · ● Working · {} · Esc interrupt",
+            format_stream_size(app.stream_bytes)
+        ),
         (
             crate::WorkState::Busy {
                 cancellation_requested: false,
             },
             false,
-        ) => "working · Ctrl+C cancel / twice to exit".to_string(),
+        ) => format!(
+            "● Working · {} · Esc interrupt",
+            format_stream_size(app.stream_bytes)
+        ),
         (
             crate::WorkState::Busy {
                 cancellation_requested: true,
             },
             false,
         ) => "cancelling · Ctrl+C again to exit".to_string(),
+    }
+}
+
+fn format_stream_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as usize)
     }
 }
 
@@ -787,6 +884,32 @@ mod tests {
             hit_map.scrollbar.track.x,
             "timeline wrapping width must always exclude the scrollbar gutter"
         );
+    }
+
+    #[test]
+    fn trust_and_approval_dialogs_use_original_deny_safe_copy() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.require_workspace_trust("D:\\workspace");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw trust dialog");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Trust this workspace?"));
+        assert!(rendered.contains("Y trust and continue · N exit"));
+
+        app.request_approval("write_file", "D:\\workspace\\src\\main.rs", "write");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw approval dialog");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Permission required"));
+        assert!(rendered.contains("Y allow once · N deny"));
     }
 
     #[test]
@@ -1110,6 +1233,30 @@ mod tests {
                 assert!(status_left.contains("experience*]"));
             }
         }
+    }
+
+    #[test]
+    fn working_footer_shows_truthful_stream_size_and_escape_interrupt() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.begin_work();
+        app.apply_runtime(crate::RuntimeUpdate::Text("x".repeat(9_114)));
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw working footer");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let buffer = terminal.backend().buffer();
+        let footer = buffer_line(buffer, layout.footer.y);
+
+        assert!(footer.contains("● Working · 8.9 KiB · Esc interrupt"));
+        assert_eq!(
+            buffer[(layout.footer.x + 1, layout.footer.y)].style().fg,
+            ThemeResolver::new(Theme::Default, ColorSupport::Color)
+                .ui(UiRole::Accent)
+                .fg
+        );
     }
 
     #[test]
