@@ -359,6 +359,34 @@ pub async fn run_chat(
         }),
     };
     timer.mark("update check");
+    // The full-screen model has no consumer for the inline host's eager
+    // `@`-mention file list, prompt-history projection, or knowledge-index
+    // startup. Enter its first frame before those synchronous workspace walks;
+    // large directories (notably a user's home directory) must never look like
+    // a hung, blank launch. The shared provider/runtime initialization above is
+    // still authoritative for both hosts.
+    if chat_ui == ChatUi::Fullscreen {
+        timer.mark("READY — entering full-screen TUI");
+        let git = workspace_git_status(&cwd);
+        let result = crate::fullscreen::run(
+            localpilot_terminal_ui::Header {
+                version: header.version.clone(),
+                provider: header.provider.clone(),
+                model: header.model.clone(),
+                workspace: cwd.display().to_string(),
+                branch: git.as_ref().map(|status| status.branch.clone()),
+                workspace_dirty: git.as_ref().and_then(|status| status.dirty),
+                mode: Mode::Agent.label().to_string(),
+                profile: ui_profile(profile).label().to_string(),
+                session_id: header.session_id.clone(),
+                session_name: header.session_name.clone(),
+            },
+            std::iter::empty(),
+        );
+        crate::context_inject::close_out(&cwd, runtime.session_id());
+        return result;
+    }
+
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
     // sessions. Already-trusted folders (and bypass/unrestricted, which are
@@ -427,28 +455,6 @@ pub async fn run_chat(
     }
 
     timer.mark("knowledge index (mode check)");
-    if chat_ui == ChatUi::Fullscreen {
-        timer.mark("READY — entering full-screen TUI");
-        let git = workspace_git_status(&cwd);
-        let result = crate::fullscreen::run(
-            localpilot_terminal_ui::Header {
-                version: state.header.version.clone(),
-                provider: state.header.provider.clone(),
-                model: state.header.model.clone(),
-                workspace: cwd.display().to_string(),
-                branch: git.as_ref().map(|status| status.branch.clone()),
-                workspace_dirty: git.as_ref().and_then(|status| status.dirty),
-                mode: state.mode.label().to_string(),
-                profile: state.profile.label().to_string(),
-                session_id: state.header.session_id.clone(),
-                session_name: state.header.session_name.clone(),
-            },
-            std::iter::empty(),
-        );
-        crate::context_inject::close_out(&cwd, runtime.session_id());
-        return result;
-    }
-
     timer.mark("READY — entering TUI");
     install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal()?;
@@ -2813,6 +2819,22 @@ mod tests {
             ChatUi::Fullscreen
         );
         assert!(selected_chat_ui(Some(OsStr::new("unknown"))).is_err());
+    }
+
+    #[test]
+    fn full_screen_first_frame_precedes_inline_workspace_enumeration() {
+        let source = include_str!("repl.rs");
+        let full_screen_entry = source
+            .find("if chat_ui == ChatUi::Fullscreen {")
+            .expect("full-screen branch");
+        let inline_file_walk = source
+            .find("state.set_workspace_files(workspace_files(&cwd));")
+            .expect("inline workspace file walk");
+
+        assert!(
+            full_screen_entry < inline_file_walk,
+            "the full-screen host must draw before the inline @-mention scan"
+        );
     }
 
     #[test]
