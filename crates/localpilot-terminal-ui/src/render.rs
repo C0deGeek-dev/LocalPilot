@@ -828,28 +828,38 @@ mod tests {
 
     #[test]
     fn status_and_footer_render_only_truthful_workspace_and_session_context() {
-        let backend = TestBackend::new(120, 30);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = model();
-        app.header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
-        app.header.branch = Some("terminal-chat-experience".to_string());
-        app.header.workspace_dirty = Some(true);
-        app.header.mode = "agent".to_string();
-        app.header.profile = "relaxed".to_string();
-        app.usage = Some((12, 34));
-        app.context_usage = Some((2_500, 10_000));
-        let mut hit_map = None;
-        terminal
-            .draw(|frame| hit_map = Some(render(frame, &app)))
-            .expect("draw truthful context");
-        let layout = hit_map.expect("hit map").frame.expect("layout");
-        let buffer = terminal.backend().buffer();
-        let status = buffer_line(buffer, layout.status.y);
-        let footer = buffer_line(buffer, layout.footer.y);
-        assert!(status.contains("D:\\repos\\LocalX\\LocalPilot"));
-        assert!(status.contains("[terminal-chat-experience*]"));
-        assert!(status.contains("46 tokens · 25% context"));
-        assert!(footer.contains("agent · relaxed → model"));
+        for (width, height) in [(120, 30), (40, 20)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut app = model();
+            app.header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
+            app.header.branch = Some("terminal-chat-experience".to_string());
+            app.header.workspace_dirty = Some(true);
+            app.header.mode = "agent".to_string();
+            app.header.profile = "relaxed".to_string();
+            app.usage = Some((12, 34));
+            app.context_usage = Some((2_500, 10_000));
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, &app)))
+                .expect("draw truthful context");
+            let layout = hit_map.expect("hit map").frame.expect("layout");
+            let buffer = terminal.backend().buffer();
+            let status_left = buffer_line(buffer, layout.status.y);
+            let status_right = buffer_line(buffer, layout.status.bottom() - 1);
+            let footer_context = buffer_line(buffer, layout.footer.bottom() - 1);
+
+            assert!(status_right.contains("46 tokens · 25% context"));
+            assert!(footer_context.contains("agent · relaxed → model"));
+            if width == 120 {
+                assert!(status_left.contains("D:\\repos\\LocalX\\LocalPilot"));
+                assert!(status_left.contains("[terminal-chat-experience*]"));
+            } else {
+                assert_eq!(layout.status.height, 2);
+                assert_eq!(layout.footer.height, 2);
+                assert!(status_left.contains("experience*]"));
+            }
+        }
     }
 
     #[test]
