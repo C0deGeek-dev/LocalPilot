@@ -3,10 +3,45 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::sanitize_text;
 use crate::text::{byte_at_display_column, display_width, wrap_ranges};
 
+const COMPACT_PASTE_LINE_THRESHOLD: usize = 4;
+const COMPACT_PASTE_BYTE_THRESHOLD: usize = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditorRow {
     pub start_byte: usize,
     pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteUnit {
+    pub placeholder: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmittedInput {
+    pub shown: String,
+    pub prompt: String,
+    pub pastes: Vec<PasteUnit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivePaste {
+    start: usize,
+    unit: PasteUnit,
+}
+
+impl ActivePaste {
+    fn end(&self) -> usize {
+        self.start.saturating_add(self.unit.placeholder.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+    pastes: Vec<ActivePaste>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -18,6 +53,9 @@ pub struct Editor {
     history_index: Option<usize>,
     history_draft: String,
     history_draft_cursor: usize,
+    history_draft_pastes: Vec<ActivePaste>,
+    pastes: Vec<ActivePaste>,
+    paste_sequence: usize,
 }
 
 impl Editor {
@@ -47,6 +85,27 @@ impl Editor {
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.preferred_column = None;
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            pastes: self.pastes.clone(),
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor.min(self.text.len());
+        self.pastes = snapshot.pastes;
+        self.normalize_cursor();
+        self.preferred_column = None;
+        self.history_index = None;
+        self.history_draft.clear();
+        self.history_draft_cursor = 0;
+        self.history_draft_pastes.clear();
     }
 
     #[must_use]
@@ -92,10 +151,12 @@ impl Editor {
         self.text = sanitize_text(&text.into());
         self.cursor = cursor.min(self.text.len());
         self.normalize_cursor();
+        self.pastes.clear();
         self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
+        self.history_draft_pastes.clear();
     }
 
     #[must_use]
@@ -123,6 +184,7 @@ impl Editor {
                 row.end_byte,
                 usize::from(column),
             );
+            self.snap_cursor_to_nearest_paste_boundary();
             self.preferred_column = None;
         }
     }
@@ -132,16 +194,56 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         let text = sanitize_text(text);
+        self.snap_cursor_out_of_paste(true);
+        self.shift_pastes_at_or_after(self.cursor, text.len());
         self.text.insert_str(self.cursor, &text);
         self.cursor += text.len();
+    }
+
+    pub fn insert_paste(&mut self, text: impl Into<String>) {
+        let text = sanitize_text(&text.into());
+        let lines = text.split('\n').count().max(1);
+        if lines < COMPACT_PASTE_LINE_THRESHOLD && text.len() <= COMPACT_PASTE_BYTE_THRESHOLD {
+            self.insert(&text);
+            return;
+        }
+
+        self.fork_recall_on_edit();
+        self.normalize_cursor();
+        self.preferred_column = None;
+        self.snap_cursor_out_of_paste(true);
+        self.paste_sequence = self.paste_sequence.saturating_add(1);
+        let placeholder = format!("[Paste #{} - {lines} lines]", self.paste_sequence);
+        let start = self.cursor;
+        self.shift_pastes_at_or_after(start, placeholder.len());
+        self.text.insert_str(start, &placeholder);
+        self.cursor = start.saturating_add(placeholder.len());
+        self.pastes.push(ActivePaste {
+            start,
+            unit: PasteUnit {
+                placeholder,
+                content: text,
+            },
+        });
+        self.pastes.sort_by_key(|paste| paste.start);
     }
 
     pub fn backspace(&mut self) {
         self.fork_recall_on_edit();
         self.normalize_cursor();
         self.preferred_column = None;
+        if let Some((start, end)) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor > paste.start && self.cursor <= paste.end())
+            .map(|paste| (paste.start, paste.end()))
+        {
+            self.delete_range_atomic(start, end);
+            self.cursor = start;
+            return;
+        }
         if let Some((byte, _)) = self.text[..self.cursor].grapheme_indices(true).next_back() {
-            self.text.drain(byte..self.cursor);
+            self.delete_range_atomic(byte, self.cursor);
             self.cursor = byte;
         }
     }
@@ -150,14 +252,33 @@ impl Editor {
         self.fork_recall_on_edit();
         self.normalize_cursor();
         self.preferred_column = None;
+        if let Some((start, end)) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor >= paste.start && self.cursor < paste.end())
+            .map(|paste| (paste.start, paste.end()))
+        {
+            self.delete_range_atomic(start, end);
+            self.cursor = start;
+            return;
+        }
         if let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() {
-            self.text.drain(self.cursor..self.cursor + grapheme.len());
+            self.delete_range_atomic(self.cursor, self.cursor + grapheme.len());
         }
     }
 
     pub fn move_left(&mut self) {
         self.normalize_cursor();
         self.preferred_column = None;
+        if let Some(start) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor > paste.start && self.cursor <= paste.end())
+            .map(|paste| paste.start)
+        {
+            self.cursor = start;
+            return;
+        }
         if let Some((byte, _)) = self.text[..self.cursor].grapheme_indices(true).next_back() {
             self.cursor = byte;
         }
@@ -166,6 +287,15 @@ impl Editor {
     pub fn move_right(&mut self) {
         self.normalize_cursor();
         self.preferred_column = None;
+        if let Some(end) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor >= paste.start && self.cursor < paste.end())
+            .map(ActivePaste::end)
+        {
+            self.cursor = end;
+            return;
+        }
         if let Some(grapheme) = self.text[self.cursor..].graphemes(true).next() {
             self.cursor += grapheme.len();
         }
@@ -191,20 +321,30 @@ impl Editor {
         }
     }
 
-    pub fn submit(&mut self) -> Option<String> {
+    pub fn submit(&mut self) -> Option<SubmittedInput> {
         if self.text.trim().is_empty() {
             return None;
         }
-        let submitted = std::mem::take(&mut self.text);
+        let prompt = self.expanded_text();
+        let shown = std::mem::take(&mut self.text);
+        let pastes = std::mem::take(&mut self.pastes)
+            .into_iter()
+            .map(|paste| paste.unit)
+            .collect();
         self.cursor = 0;
         self.preferred_column = None;
         self.history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
-        if self.history.last() != Some(&submitted) {
-            self.history.push(submitted.clone());
+        self.history_draft_pastes.clear();
+        if self.history.last() != Some(&prompt) {
+            self.history.push(prompt.clone());
         }
-        Some(submitted)
+        Some(SubmittedInput {
+            shown,
+            prompt,
+            pastes,
+        })
     }
 
     pub fn move_visual_start(&mut self, width: u16) {
@@ -212,6 +352,7 @@ impl Editor {
         let rows = self.visual_rows(width);
         let row = &rows[cursor_row(&rows, self.cursor)];
         self.cursor = row.start_byte;
+        self.snap_cursor_out_of_paste(false);
         self.preferred_column = None;
     }
 
@@ -220,6 +361,7 @@ impl Editor {
         let rows = self.visual_rows(width);
         let row = &rows[cursor_row(&rows, self.cursor)];
         self.cursor = row.end_byte;
+        self.snap_cursor_out_of_paste(true);
         self.preferred_column = None;
     }
 
@@ -248,12 +390,14 @@ impl Editor {
     pub fn move_word_left(&mut self) {
         self.normalize_cursor();
         self.cursor = previous_word_start(&self.text, self.cursor);
+        self.snap_cursor_out_of_paste(false);
         self.preferred_column = None;
     }
 
     pub fn move_word_right(&mut self) {
         self.normalize_cursor();
         self.cursor = next_word_end(&self.text, self.cursor);
+        self.snap_cursor_out_of_paste(true);
         self.preferred_column = None;
     }
 
@@ -262,8 +406,7 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         let start = previous_word_start(&self.text, self.cursor);
-        self.text.drain(start..self.cursor);
-        self.cursor = start;
+        self.cursor = self.delete_range_atomic(start, self.cursor);
     }
 
     pub fn delete_to_line_start(&mut self) {
@@ -271,8 +414,7 @@ impl Editor {
         self.normalize_cursor();
         self.preferred_column = None;
         let start = self.line_start();
-        self.text.drain(start..self.cursor);
-        self.cursor = start;
+        self.cursor = self.delete_range_atomic(start, self.cursor);
     }
 
     pub fn delete_to_line_end(&mut self) {
@@ -285,7 +427,7 @@ impl Editor {
         } else {
             end
         };
-        self.text.drain(self.cursor..delete_end);
+        self.cursor = self.delete_range_atomic(self.cursor, delete_end);
     }
 
     fn move_to_adjacent_row(&mut self, rows: &[EditorRow], from: usize, to: usize) {
@@ -296,6 +438,7 @@ impl Editor {
         let target = &rows[to];
         self.cursor =
             byte_at_display_column(&self.text, target.start_byte, target.end_byte, column);
+        self.snap_cursor_to_nearest_paste_boundary();
     }
 
     fn line_start(&self) -> usize {
@@ -320,10 +463,12 @@ impl Editor {
             None => {
                 self.history_draft = self.text.clone();
                 self.history_draft_cursor = self.cursor;
+                self.history_draft_pastes = std::mem::take(&mut self.pastes);
                 self.history.len() - 1
             }
         };
         self.text = self.history[index].clone();
+        self.pastes.clear();
         self.cursor = self.text.len();
         self.history_index = Some(index);
     }
@@ -335,11 +480,13 @@ impl Editor {
         };
         if index + 1 < self.history.len() {
             self.text = self.history[index + 1].clone();
+            self.pastes.clear();
             self.cursor = self.text.len();
             self.history_index = Some(index + 1);
         } else {
             self.text = std::mem::take(&mut self.history_draft);
             self.cursor = self.history_draft_cursor.min(self.text.len());
+            self.pastes = std::mem::take(&mut self.history_draft_pastes);
             self.history_draft_cursor = 0;
             self.history_index = None;
         }
@@ -349,7 +496,113 @@ impl Editor {
         if self.history_index.take().is_some() {
             self.history_draft.clear();
             self.history_draft_cursor = 0;
+            self.history_draft_pastes.clear();
         }
+    }
+
+    fn expanded_text(&self) -> String {
+        let extra = self
+            .pastes
+            .iter()
+            .map(|paste| {
+                paste
+                    .unit
+                    .content
+                    .len()
+                    .saturating_sub(paste.unit.placeholder.len())
+            })
+            .sum::<usize>();
+        let mut expanded = String::with_capacity(self.text.len().saturating_add(extra));
+        let mut copied = 0;
+        for paste in &self.pastes {
+            let end = paste.end();
+            if paste.start < copied
+                || end > self.text.len()
+                || self.text.get(paste.start..end) != Some(paste.unit.placeholder.as_str())
+            {
+                continue;
+            }
+            expanded.push_str(&self.text[copied..paste.start]);
+            expanded.push_str(&paste.unit.content);
+            copied = end;
+        }
+        expanded.push_str(&self.text[copied..]);
+        expanded
+    }
+
+    fn snap_cursor_out_of_paste(&mut self, forward: bool) {
+        if let Some((start, end)) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor > paste.start && self.cursor < paste.end())
+            .map(|paste| (paste.start, paste.end()))
+        {
+            self.cursor = if forward { end } else { start };
+        }
+    }
+
+    fn snap_cursor_to_nearest_paste_boundary(&mut self) {
+        if let Some((start, end)) = self
+            .pastes
+            .iter()
+            .find(|paste| self.cursor > paste.start && self.cursor < paste.end())
+            .map(|paste| (paste.start, paste.end()))
+        {
+            self.cursor = if self.cursor - start <= end - self.cursor {
+                start
+            } else {
+                end
+            };
+        }
+    }
+
+    fn shift_pastes_at_or_after(&mut self, at: usize, amount: usize) {
+        if amount == 0 {
+            return;
+        }
+        for paste in &mut self.pastes {
+            if paste.start >= at {
+                paste.start = paste.start.saturating_add(amount);
+            }
+        }
+    }
+
+    fn delete_range_atomic(&mut self, start: usize, end: usize) -> usize {
+        let mut start = start.min(self.text.len());
+        let mut end = end.min(self.text.len());
+        if start >= end {
+            return start;
+        }
+
+        loop {
+            let mut expanded_start = start;
+            let mut expanded_end = end;
+            for paste in &self.pastes {
+                if paste.start < end && paste.end() > start {
+                    expanded_start = expanded_start.min(paste.start);
+                    expanded_end = expanded_end.max(paste.end());
+                }
+            }
+            if (expanded_start, expanded_end) == (start, end) {
+                break;
+            }
+            start = expanded_start;
+            end = expanded_end;
+        }
+
+        self.text.drain(start..end);
+        let removed = end - start;
+        self.pastes.retain_mut(|paste| {
+            if paste.start >= start && paste.end() <= end {
+                false
+            } else {
+                if paste.start >= end {
+                    paste.start -= removed;
+                }
+                true
+            }
+        });
+        start
     }
 
     fn normalize_cursor(&mut self) {
@@ -412,6 +665,13 @@ fn cursor_row(rows: &[EditorRow], cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn twelve_line_paste() -> String {
+        (1..=12)
+            .map(|line| format!("line {line} 界"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn up_down_moves_then_recalls_and_restores_full_draft_and_caret() {
@@ -570,5 +830,92 @@ mod tests {
         editor.delete_to_line_end();
         assert_eq!(editor.text(), "firstsecond");
         assert_eq!(editor.cursor(), 5);
+    }
+
+    #[test]
+    fn multiline_paste_is_one_compact_atomic_unit() {
+        let mut editor = Editor::default();
+        editor.insert_paste(twelve_line_paste());
+        assert_eq!(editor.text(), "[Paste #1 - 12 lines]");
+
+        editor.move_text_start();
+        editor.move_right();
+        assert_eq!(editor.cursor(), editor.text().len());
+        editor.move_left();
+        assert_eq!(editor.cursor(), 0);
+
+        editor.set_cursor_from_visual(0, 19, 80);
+        assert_eq!(editor.cursor(), editor.text().len());
+        editor.backspace();
+        assert_eq!(editor.text(), "");
+        assert!(editor.pastes.is_empty());
+    }
+
+    #[test]
+    fn compact_paste_submission_keeps_shown_text_and_expands_exact_prompt() {
+        let payload = twelve_line_paste();
+        let mut editor = Editor::default();
+        editor.insert("before ");
+        editor.insert_paste(payload.clone());
+        editor.insert(" after");
+
+        let submitted = editor.submit().expect("submitted paste");
+        assert_eq!(submitted.shown, "before [Paste #1 - 12 lines] after");
+        assert_eq!(submitted.prompt, format!("before {payload} after"));
+        assert_eq!(
+            submitted.pastes,
+            vec![PasteUnit {
+                placeholder: "[Paste #1 - 12 lines]".to_string(),
+                content: payload,
+            }]
+        );
+    }
+
+    #[test]
+    fn submitted_paste_recalls_as_raw_multiline_text() {
+        let payload = twelve_line_paste();
+        let mut editor = Editor::default();
+        editor.insert_paste(payload.clone());
+        let _ = editor.submit();
+
+        editor.up_or_history(80);
+        assert_eq!(editor.text(), payload);
+        assert!(editor.pastes.is_empty());
+    }
+
+    #[test]
+    fn history_round_trip_restores_an_unsubmitted_compact_paste_draft() {
+        let payload = twelve_line_paste();
+        let mut editor = Editor::new(vec!["remembered".to_string()]);
+        editor.insert_paste(payload.clone());
+        editor.up_or_history(80);
+        assert_eq!(editor.text(), "remembered");
+
+        editor.down_or_history(80);
+        assert_eq!(editor.text(), "[Paste #1 - 12 lines]");
+        let submitted = editor.submit().expect("restored draft");
+        assert_eq!(submitted.prompt, payload);
+        assert_eq!(submitted.pastes.len(), 1);
+    }
+
+    #[test]
+    fn a_kill_intersecting_a_paste_removes_the_whole_unit() {
+        let mut editor = Editor::default();
+        editor.insert("before ");
+        editor.insert_paste(twelve_line_paste());
+        editor.insert(" after");
+        editor.move_word_left();
+        editor.delete_to_line_start();
+
+        assert_eq!(editor.text(), "after");
+        assert!(editor.pastes.is_empty());
+    }
+
+    #[test]
+    fn short_pastes_remain_inline_text() {
+        let mut editor = Editor::default();
+        editor.insert_paste("one\ntwo\nthree");
+        assert_eq!(editor.text(), "one\ntwo\nthree");
+        assert!(editor.pastes.is_empty());
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::editor::{EditorSnapshot, SubmittedInput};
 use crate::presentation::semantic_ranges;
 use crate::{
     sanitize_text, ActivityState, Editor, ItemId, ItemKind, SemanticRole, StyledRange, TextStyle,
@@ -93,6 +94,7 @@ pub enum InputAction {
     OpenReverseHistory,
     NavigateTimeline(TimelineNavigation),
     Insert(String),
+    Paste(String),
     Backspace,
     Delete,
     MoveLeft,
@@ -122,8 +124,7 @@ enum InputOverlay {
 struct ReverseHistoryState {
     query: String,
     match_index: Option<usize>,
-    original_draft: String,
-    original_cursor: usize,
+    original_draft: EditorSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +146,7 @@ pub enum AppCommand {
     Copy(String),
     Exit,
     NavigateTimeline(TimelineNavigation),
-    Submit(String),
+    Submit(SubmittedInput),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +302,11 @@ impl AppModel {
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
+        if matches!(action, InputAction::CancelOrExit) && self.input_overlay.is_some() {
+            self.exit_armed = false;
+            self.dismiss_input_overlay();
+            return AppCommand::None;
+        }
         if !matches!(action, InputAction::CancelOrExit) {
             self.exit_armed = false;
         }
@@ -323,6 +329,10 @@ impl AppModel {
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 self.editor.insert(&text);
+                AppCommand::None
+            }
+            InputAction::Paste(text) if self.focus == Focus::Composer => {
+                self.editor.insert_paste(text);
                 AppCommand::None
             }
             InputAction::Backspace if self.focus == Focus::Composer => {
@@ -398,6 +408,7 @@ impl AppModel {
                 .submit()
                 .map_or(AppCommand::None, AppCommand::Submit),
             InputAction::Insert(_)
+            | InputAction::Paste(_)
             | InputAction::OpenReverseHistory
             | InputAction::Backspace
             | InputAction::Delete
@@ -619,21 +630,27 @@ impl AppModel {
         self.input_overlay = Some(InputOverlay::ReverseHistory(ReverseHistoryState {
             query: String::new(),
             match_index: None,
-            original_draft: self.editor.text().to_string(),
-            original_cursor: self.editor.cursor(),
+            original_draft: self.editor.snapshot(),
         }));
         self.refresh_reverse_history(None);
     }
 
     fn handle_overlay_input(&mut self, action: InputAction) -> AppCommand {
         match action {
-            InputAction::Escape | InputAction::Submit => self.dismiss_input_overlay(),
+            InputAction::Escape => self.dismiss_input_overlay(),
+            InputAction::Submit => {
+                self.dismiss_input_overlay();
+                return self
+                    .editor
+                    .submit()
+                    .map_or(AppCommand::None, AppCommand::Submit);
+            }
             InputAction::OpenReverseHistory | InputAction::MoveUp => {
                 let before = self.reverse_history_index();
                 self.refresh_reverse_history(before);
             }
             InputAction::MoveDown => self.advance_reverse_history(),
-            InputAction::Insert(text) => {
+            InputAction::Insert(text) | InputAction::Paste(text) => {
                 let text = sanitize_text(&text).replace(['\r', '\n'], " ");
                 if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
                     state.query.push_str(&text);
@@ -683,7 +700,6 @@ impl AppModel {
         };
         let query = state.query.clone();
         let original_draft = state.original_draft.clone();
-        let original_cursor = state.original_cursor;
         let found = self.editor.history_match_reverse(&query, before_exclusive);
         if let Some((index, text)) = found {
             self.editor.replace_draft(text);
@@ -691,8 +707,7 @@ impl AppModel {
                 state.match_index = Some(index);
             }
         } else if before_exclusive.is_none() {
-            self.editor
-                .replace_draft_at(original_draft, original_cursor);
+            self.editor.restore_snapshot(original_draft);
             if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
                 state.match_index = None;
             }
@@ -1001,6 +1016,27 @@ mod tests {
     }
 
     #[test]
+    fn reverse_search_no_match_restores_a_compact_paste_unit() {
+        let payload = (1..=12)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = model();
+        app.seed_history(vec!["remembered".to_string()]);
+        let _ = app.handle_input(InputAction::Paste(payload.clone()), 80);
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        let _ = app.handle_input(InputAction::Insert("absent".to_string()), 80);
+        assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
+        let _ = app.handle_input(InputAction::Escape, 80);
+
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("restored paste should submit");
+        };
+        assert_eq!(submitted.prompt, payload);
+        assert_eq!(submitted.pastes.len(), 1);
+    }
+
+    #[test]
     fn overlay_escape_precedes_work_interrupt_and_dialog_precedes_the_overlay() {
         let mut app = model();
         app.seed_history(vec!["remembered".to_string()]);
@@ -1035,6 +1071,29 @@ mod tests {
         let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
         assert!(!app.exit_armed);
         assert!(app.has_input_overlay());
+    }
+
+    #[test]
+    fn reverse_search_enter_submits_the_match_and_ctrl_c_only_dismisses() {
+        let mut enter = model();
+        enter.seed_history(vec!["matched prompt".to_string()]);
+        let _ = enter.handle_input(InputAction::OpenReverseHistory, 80);
+        let AppCommand::Submit(submitted) = enter.handle_input(InputAction::Submit, 80) else {
+            panic!("reverse search Enter should submit its match");
+        };
+        assert_eq!(submitted.prompt, "matched prompt");
+        assert!(!enter.has_input_overlay());
+
+        let mut cancel = model();
+        cancel.seed_history(vec!["matched prompt".to_string()]);
+        let _ = cancel.handle_input(InputAction::OpenReverseHistory, 80);
+        assert_eq!(
+            cancel.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(!cancel.has_input_overlay());
+        assert!(!cancel.exit_armed);
+        assert!(!cancel.exit_requested);
     }
 
     #[test]

@@ -23,8 +23,8 @@ use crossterm::terminal::{
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, ContentPoint, Header, HitMap, InputAction, ItemId,
-    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, TerminalCapabilities,
-    Theme, TimelineNavigation,
+    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, SubmittedInput,
+    TerminalCapabilities, Theme, TimelineNavigation,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -114,10 +114,12 @@ pub(crate) async fn run(
         crate::repl::start_session_knowledge_index(context.cwd, context.ingest);
     }
     let history_entries = context.history.load();
-    app.seed_history(localpilot_store::project_texts(
-        &history_entries,
-        context.cwd,
-    ));
+    app.seed_history(
+        localpilot_store::project_entries(&history_entries, context.cwd)
+            .iter()
+            .map(expand_history_entry)
+            .collect(),
+    );
     let result = run_event_loop(&mut terminal, &mut app, context).await;
     let _ = terminal.show_cursor();
     drop(terminal);
@@ -185,20 +187,22 @@ async fn run_event_loop(
                 match app.handle_input(action, hit_map.editor_width) {
                     AppCommand::Exit => break,
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
-                    AppCommand::Submit(prompt) => {
-                        let Some(item_id) =
-                            app.append_prompt(prompt.clone(), Some(local_prompt_time()), false)
-                        else {
+                    AppCommand::Submit(submitted) => {
+                        let Some(item_id) = app.append_prompt(
+                            submitted.prompt.clone(),
+                            Some(local_prompt_time()),
+                            false,
+                        ) else {
                             continue;
                         };
-                        persist_prompt(app, history, cwd, &prompt);
+                        persist_prompt(app, history, cwd, &submitted);
                         if drive_prompt_chain(
                             terminal,
                             app,
                             runtime,
                             approval_rx,
                             QueuedPrompt {
-                                text: prompt,
+                                text: submitted.prompt,
                                 item_id,
                             },
                             &mut queue,
@@ -216,7 +220,7 @@ async fn run_event_loop(
                 }
             }
             Event::Paste(text) => {
-                let _ = app.handle_input(InputAction::Insert(text), hit_map.editor_width);
+                let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
             }
             Event::FocusGained
             | Event::FocusLost
@@ -414,13 +418,13 @@ fn handle_turn_event(
                     copy_to_clipboard(app, text);
                     false
                 }
-                AppCommand::Submit(prompt) => {
+                AppCommand::Submit(submitted) => {
                     if let Some(item_id) =
-                        app.append_prompt(prompt.clone(), Some(local_prompt_time()), true)
+                        app.append_prompt(submitted.prompt.clone(), Some(local_prompt_time()), true)
                     {
-                        persist_prompt(app, history, cwd, &prompt);
+                        persist_prompt(app, history, cwd, &submitted);
                         queue.push_back(QueuedPrompt {
-                            text: prompt,
+                            text: submitted.prompt,
                             item_id,
                         });
                     }
@@ -430,7 +434,7 @@ fn handle_turn_event(
             }
         }
         Event::Paste(text) => {
-            let _ = app.handle_input(InputAction::Insert(text), editor_width);
+            let _ = app.handle_input(InputAction::Paste(text), editor_width);
             false
         }
         Event::FocusGained
@@ -692,13 +696,38 @@ fn persist_prompt(
     app: &mut AppModel,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
-    prompt: &str,
+    submitted: &SubmittedInput,
 ) {
-    if let Err(error) = history.append(prompt, &[], cwd) {
+    let pastes = submitted
+        .pastes
+        .iter()
+        .map(|paste| localpilot_store::HistoryPaste {
+            placeholder: paste.placeholder.clone(),
+            content: paste.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    if let Err(error) = history.append(&submitted.shown, &pastes, cwd) {
         app.apply_runtime(RuntimeUpdate::Warning(format!(
             "prompt history could not be saved: {error}"
         )));
     }
+}
+
+fn expand_history_entry(entry: &localpilot_store::HistoryEntry) -> String {
+    let mut expanded = String::with_capacity(entry.text.len());
+    let mut copied = 0;
+    for paste in &entry.pastes {
+        let Some(relative) = entry.text[copied..].find(&paste.placeholder) else {
+            continue;
+        };
+        let start = copied + relative;
+        let end = start + paste.placeholder.len();
+        expanded.push_str(&entry.text[copied..start]);
+        expanded.push_str(&paste.content);
+        copied = end;
+    }
+    expanded.push_str(&entry.text[copied..]);
+    expanded
 }
 
 fn handle_approval_event(
@@ -1473,6 +1502,50 @@ mod tests {
                 cancellation_requested: true
             }
         );
+    }
+
+    #[test]
+    fn active_turn_paste_stays_compact_until_submit_then_queues_and_persists_raw() {
+        let payload = (1..=12)
+            .map(|line| format!("line {line} 界"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(Some(
+            temp.path().join("prompt-history.jsonl"),
+        ));
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Paste(payload.clone()),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            temp.path(),
+        ));
+        assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
+        assert!(queue.is_empty());
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            temp.path(),
+        ));
+        assert_eq!(queue.front().expect("queued paste").text, payload);
+        let entry = history.load().pop().expect("stored paste");
+        assert_eq!(entry.text, "[Paste #1 - 12 lines]");
+        assert_eq!(entry.pastes.len(), 1);
+        assert_eq!(expand_history_entry(&entry), payload);
+        assert!(!cancel.is_cancelled());
     }
 
     #[test]

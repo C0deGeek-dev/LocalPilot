@@ -20,7 +20,7 @@ pub use app::{
     PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId, TerminalCapabilities,
     TimelineNavigation, WorkState,
 };
-pub use editor::{Editor, EditorRow};
+pub use editor::{Editor, EditorRow, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
 pub use render::{render, HitMap, ScrollbarGeometry, TabHit, TimelineRowHit};
 pub use sanitize::sanitize_text;
