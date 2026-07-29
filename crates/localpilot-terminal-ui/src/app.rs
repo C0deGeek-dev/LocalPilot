@@ -124,9 +124,16 @@ enum InputOverlay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompletionState {
+    kind: CompletionKind,
     token: EditorToken,
     items: Vec<CompletionItem>,
     selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionKind {
+    Command,
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,8 +150,10 @@ pub(crate) struct CompletionItem {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompletionView<'a> {
+    pub kind: CompletionKind,
     pub items: &'a [CompletionItem],
     pub selected: usize,
+    pub loading: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +274,8 @@ pub struct AppModel {
     pub dialog: Option<DialogState>,
     input_overlay: Option<InputOverlay>,
     command_catalog: Vec<CompletionCommand>,
+    workspace_files: Vec<String>,
+    workspace_files_ready: bool,
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
     active_tools: BTreeMap<String, ItemId>,
@@ -305,6 +316,8 @@ impl AppModel {
             dialog: None,
             input_overlay: None,
             command_catalog: Vec::new(),
+            workspace_files: Vec::new(),
+            workspace_files_ready: false,
             active_assistant: None,
             active_reasoning: None,
             active_tools: BTreeMap::new(),
@@ -597,8 +610,10 @@ impl AppModel {
             return None;
         };
         Some(CompletionView {
+            kind: state.kind,
             items: &state.items,
             selected: state.selected,
+            loading: state.kind == CompletionKind::File && !self.workspace_files_ready,
         })
     }
 
@@ -619,6 +634,20 @@ impl AppModel {
             })
             .filter(|command| !command.name.is_empty())
             .collect();
+    }
+
+    pub fn set_workspace_files(&mut self, files: impl IntoIterator<Item = String>) {
+        self.workspace_files = files
+            .into_iter()
+            .map(|path| sanitize_text(&path).replace('\\', "/"))
+            .filter(|path| !path.is_empty())
+            .collect();
+        self.workspace_files.sort();
+        self.workspace_files.dedup();
+        self.workspace_files_ready = true;
+        if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
+            self.refresh_or_open_completion();
+        }
     }
 
     /// Add one submitted prompt at its stable transcript position. The host
@@ -799,17 +828,30 @@ impl AppModel {
     }
 
     fn refresh_or_open_completion(&mut self) {
-        let Some(token) = self.editor.slash_token() else {
+        let completion = self
+            .editor
+            .slash_token()
+            .map(|token| (CompletionKind::Command, token))
+            .or_else(|| {
+                self.editor
+                    .mention_token()
+                    .map(|token| (CompletionKind::File, token))
+            });
+        let Some((kind, token)) = completion else {
             if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
                 self.dismiss_input_overlay();
             }
             return;
         };
-        if self.command_catalog.is_empty() {
+        if kind == CompletionKind::Command && self.command_catalog.is_empty() {
             return;
         }
-        let items = completion_items(&self.command_catalog, &token.query);
+        let items = match kind {
+            CompletionKind::Command => completion_items(&self.command_catalog, &token.query),
+            CompletionKind::File => file_completion_items(&self.workspace_files, &token.query),
+        };
         self.input_overlay = Some(InputOverlay::Completion(CompletionState {
+            kind,
             token,
             items,
             selected: 0,
@@ -832,14 +874,20 @@ impl AppModel {
     }
 
     fn accept_completion(&mut self) {
-        let Some(InputOverlay::Completion(state)) = self.input_overlay.take() else {
+        let Some(InputOverlay::Completion(state)) = &self.input_overlay else {
             return;
         };
-        let Some(item) = state.items.get(state.selected) else {
+        let Some(item) = state.items.get(state.selected).cloned() else {
             return;
         };
-        self.editor
-            .replace_range(state.token.range, &format!("/{}", item.name));
+        let kind = state.kind;
+        let range = state.token.range.clone();
+        self.input_overlay = None;
+        let replacement = match kind {
+            CompletionKind::Command => format!("/{}", item.name),
+            CompletionKind::File => format!("@{} ", item.name),
+        };
+        self.editor.replace_range(range, &replacement);
     }
 
     fn reverse_history_index(&self) -> Option<usize> {
@@ -992,6 +1040,28 @@ fn completion_items(catalog: &[CompletionCommand], query: &str) -> Vec<Completio
         .map(|(_, _, command)| CompletionItem {
             name: command.name.clone(),
             description: command.description.clone(),
+        })
+        .collect()
+}
+
+fn file_completion_items(files: &[String], query: &str) -> Vec<CompletionItem> {
+    let mut matches = files
+        .iter()
+        .enumerate()
+        .filter_map(|(order, path)| {
+            let basename = path.rsplit('/').next().unwrap_or(path);
+            fuzzy_score(basename, query)
+                .or_else(|| fuzzy_score(path, query).map(|score| score.saturating_add(20_000)))
+                .map(|score| (score, order, path))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(score, order, _)| (*score, *order));
+    matches
+        .into_iter()
+        .take(50)
+        .map(|(_, _, path)| CompletionItem {
+            name: path.clone(),
+            description: "workspace file".to_string(),
         })
         .collect()
 }
@@ -1372,6 +1442,43 @@ mod tests {
             app.handle_input(InputAction::Escape, 80),
             AppCommand::CancelWork
         );
+    }
+
+    #[test]
+    fn mention_completion_stays_live_while_indexing_then_accepts_a_file() {
+        let mut app = model();
+        let _ = app.handle_input(InputAction::Insert("open @sam".to_string()), 80);
+        let completion = app.completion().expect("loading mention");
+        assert_eq!(completion.kind, CompletionKind::File);
+        assert!(completion.loading);
+        assert!(completion.items.is_empty());
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.has_input_overlay());
+
+        app.set_workspace_files([
+            "README.md".to_string(),
+            "src/sample.rs".to_string(),
+            "src/state.rs".to_string(),
+        ]);
+        let completion = app.completion().expect("ready mention");
+        assert!(!completion.loading);
+        assert_eq!(completion.items.len(), 1);
+        assert_eq!(completion.items[0].name, "src/sample.rs");
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "open @src/sample.rs ");
+        assert!(!app.has_input_overlay());
+    }
+
+    #[test]
+    fn mention_escape_keeps_the_original_token_editable() {
+        let mut app = model();
+        app.set_workspace_files(["sample.rs".to_string()]);
+        let _ = app.handle_input(InputAction::Insert("@sam".to_string()), 80);
+        assert!(app.has_input_overlay());
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert_eq!(app.editor.text(), "@sam");
+        assert!(!app.has_input_overlay());
     }
 
     #[test]

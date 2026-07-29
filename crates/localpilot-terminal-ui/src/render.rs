@@ -5,6 +5,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::CompletionKind;
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
     TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
@@ -223,8 +224,13 @@ fn render_completion(
     );
 
     if completion.items.is_empty() {
+        let message = match (completion.kind, completion.loading) {
+            (CompletionKind::File, true) => "  Indexing workspace files…",
+            (CompletionKind::File, false) => "  No matching files",
+            (CompletionKind::Command, _) => "  No matching commands",
+        };
         frame.render_widget(
-            Paragraph::new("  No matching commands").style(theme(app).ui(UiRole::Muted)),
+            Paragraph::new(message).style(theme(app).ui(UiRole::Muted)),
             picker,
         );
         return (Some(picker), Vec::new());
@@ -253,7 +259,10 @@ fn render_completion(
         );
         let selected = index == completion.selected;
         let prefix = if selected { "❯ " } else { "  " };
-        let label = format!("/{name}", name = item.name);
+        let label = match completion.kind {
+            CompletionKind::Command => format!("/{name}", name = item.name),
+            CompletionKind::File => format!("@{name}", name = item.name),
+        };
         let fixed =
             UnicodeWidthStr::width(prefix).saturating_add(UnicodeWidthStr::width(label.as_str()));
         let description_budget = usize::from(row.width).saturating_sub(fixed.saturating_add(2));
@@ -900,10 +909,15 @@ fn footer_state(app: &AppModel) -> String {
         return "history search · type to filter · Esc keep match".to_string();
     }
     if let Some(completion) = app.completion() {
+        let fallback = match (completion.kind, completion.loading) {
+            (CompletionKind::File, true) => "indexing workspace files",
+            (CompletionKind::File, false) => "file completion",
+            (CompletionKind::Command, _) => "command completion",
+        };
         let detail = completion
             .items
             .get(completion.selected)
-            .map_or("command completion", |item| item.description.as_str());
+            .map_or(fallback, |item| item.description.as_str());
         return format!("{detail} · ↑↓ navigate · Enter/Tab accept · Esc close");
     }
     match (app.work, app.exit_armed) {
@@ -1556,6 +1570,35 @@ mod tests {
         );
         assert!(selected.contains("❯ /model"));
         assert!(selected.contains("Switch provider or model"));
+    }
+
+    #[test]
+    fn file_completion_reports_indexing_then_renders_at_prefixed_paths() {
+        let mut app = model();
+        let _ = app.handle_input(crate::InputAction::Insert("@sam".to_string()), 76);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw indexing mention");
+        let indexing = (0..24)
+            .map(|row| buffer_line(terminal.backend().buffer(), row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(indexing.contains("Indexing workspace files"));
+
+        app.set_workspace_files(["src/sample.rs".to_string()]);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw ready mention");
+        let hit_map = hit_map.expect("hit map");
+        let line = buffer_line(
+            terminal.backend().buffer(),
+            hit_map.completion_rows[0].area.y,
+        );
+        assert!(line.contains("❯ @src/sample.rs"));
     }
 
     #[test]

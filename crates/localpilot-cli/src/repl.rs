@@ -2329,7 +2329,7 @@ fn file_picker_captures(state: &AppState, key: KeyEvent) -> bool {
 
 /// Enumerate workspace files for the `@`-mention picker: relative, forward-slash
 /// paths, respecting ignore files, sorted and capped.
-fn workspace_files(root: &std::path::Path) -> Vec<String> {
+pub(crate) fn workspace_files(root: &std::path::Path) -> Vec<String> {
     const MAX_FILES: usize = 10_000;
     let mut files = Vec::new();
     for entry in ignore::WalkBuilder::new(root)

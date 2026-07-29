@@ -134,6 +134,31 @@ impl Editor {
         })
     }
 
+    #[must_use]
+    pub(crate) fn mention_token(&self) -> Option<EditorToken> {
+        let before = &self.text[..self.cursor];
+        let start = before.rfind('@')?;
+        if start > 0
+            && !self.text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            return None;
+        }
+        let query = &before[start + 1..];
+        if query.contains(char::is_whitespace) {
+            return None;
+        }
+        let end = self.text[self.cursor..]
+            .find(char::is_whitespace)
+            .map_or(self.text.len(), |offset| self.cursor + offset);
+        Some(EditorToken {
+            range: start..end,
+            query: query.to_string(),
+        })
+    }
+
     pub(crate) fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
         self.fork_recall_on_edit();
         self.normalize_cursor();
@@ -991,5 +1016,25 @@ mod tests {
         assert_eq!(editor.text(), "zy");
         assert!(editor.pastes.is_empty());
         assert_eq!(editor.cursor(), 1);
+    }
+
+    #[test]
+    fn mention_tokens_require_a_word_boundary_and_cover_the_whole_path_token() {
+        let mut editor = Editor::default();
+        editor.insert("ask @sam tail");
+        editor.move_text_start();
+        for _ in 0..8 {
+            editor.move_right();
+        }
+        assert_eq!(
+            editor.mention_token(),
+            Some(EditorToken {
+                range: 4..8,
+                query: "sam".to_string(),
+            })
+        );
+
+        editor.replace_draft("user@host");
+        assert!(editor.mention_token().is_none());
     }
 }

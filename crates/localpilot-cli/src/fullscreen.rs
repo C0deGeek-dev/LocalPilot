@@ -3,9 +3,9 @@
 use std::collections::VecDeque;
 use std::io::{self, Stdout, Write};
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{mpsc as std_mpsc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -82,6 +82,43 @@ impl MouseState {
     }
 }
 
+struct WorkspaceFileIndex {
+    receiver: std_mpsc::Receiver<Vec<String>>,
+    finished: bool,
+}
+
+impl WorkspaceFileIndex {
+    fn start(root: PathBuf) -> Self {
+        let (sender, receiver) = std_mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("localpilot-workspace-files".to_string())
+            .spawn(move || {
+                let _ = sender.send(crate::repl::workspace_files(&root));
+            });
+        Self {
+            receiver,
+            finished: false,
+        }
+    }
+
+    fn refresh(&mut self, app: &mut AppModel) {
+        if self.finished {
+            return;
+        }
+        match self.receiver.try_recv() {
+            Ok(files) => {
+                app.set_workspace_files(files);
+                self.finished = true;
+            }
+            Err(std_mpsc::TryRecvError::Disconnected) => {
+                app.set_workspace_files(Vec::new());
+                self.finished = true;
+            }
+            Err(std_mpsc::TryRecvError::Empty) => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RoutedEvent {
     Unhandled,
@@ -116,6 +153,7 @@ pub(crate) async fn run(
     // Seat an immediately useful frame before reading even the bounded global
     // history store. Workspace scans stay out of this startup seam entirely.
     let _ = draw_synchronized(&mut terminal, &app)?;
+    let mut workspace_index = WorkspaceFileIndex::start(context.cwd.to_path_buf());
     if !context.trust_required {
         crate::repl::start_session_knowledge_index(context.cwd, context.ingest);
     }
@@ -126,7 +164,7 @@ pub(crate) async fn run(
             .map(expand_history_entry)
             .collect(),
     );
-    let result = run_event_loop(&mut terminal, &mut app, context).await;
+    let result = run_event_loop(&mut terminal, &mut app, context, &mut workspace_index).await;
     let _ = terminal.show_cursor();
     drop(terminal);
     modes.restore();
@@ -153,6 +191,7 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
     context: HostContext<'_>,
+    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<()> {
     let HostContext {
         runtime,
@@ -165,6 +204,7 @@ async fn run_event_loop(
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
     while !app.exit_requested {
+        workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
             continue;
@@ -215,6 +255,7 @@ async fn run_event_loop(
                             history,
                             cwd,
                             &mut mouse_state,
+                            workspace_index,
                         )
                         .await?
                         {
@@ -249,6 +290,7 @@ async fn drive_prompt_chain(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
+    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(prompt) = current {
@@ -264,6 +306,7 @@ async fn drive_prompt_chain(
             history,
             cwd,
             mouse_state,
+            workspace_index,
         )
         .await?
         {
@@ -319,6 +362,7 @@ async fn drive_turn(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
+    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
@@ -332,6 +376,7 @@ async fn drive_turn(
         tokio::select! {
             biased;
             _ = tick.tick() => {
+                workspace_index.refresh(app);
                 let mut hit_map = draw_synchronized(terminal, app)?;
                 for _ in 0..64 {
                     if !event::poll(Duration::ZERO).context("poll full-screen turn input")? {
@@ -1564,6 +1609,38 @@ mod tests {
         assert_eq!(entry.pastes.len(), 1);
         assert_eq!(expand_history_entry(&entry), payload);
         assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn workspace_file_index_refreshes_an_open_mention_without_blocking_input() {
+        let (sender, receiver) = std_mpsc::channel();
+        let mut index = WorkspaceFileIndex {
+            receiver,
+            finished: false,
+        };
+        let mut app = app();
+        let _ = app.handle_input(InputAction::Insert("@sam".to_string()), 80);
+        assert!(app.has_input_overlay());
+
+        sender
+            .send(vec!["src/sample.rs".to_string()])
+            .expect("workspace result");
+        index.refresh(&mut app);
+        assert!(index.finished);
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "@src/sample.rs ");
+    }
+
+    #[test]
+    fn first_frame_is_drawn_before_the_fullscreen_workspace_scan_starts() {
+        let source = include_str!("fullscreen.rs");
+        let first_frame = source
+            .find("let _ = draw_synchronized(&mut terminal, &app)?;")
+            .expect("first frame");
+        let index_start = source
+            .find("WorkspaceFileIndex::start(context.cwd.to_path_buf())")
+            .expect("async workspace index start");
+        assert!(first_frame < index_start);
     }
 
     #[test]
