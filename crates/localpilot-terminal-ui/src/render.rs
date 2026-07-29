@@ -127,14 +127,21 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         Block::default().style(theme(app).ui(UiRole::Background)),
         area,
     );
-    let prospective_editor_width = area.width.saturating_sub(2).max(1);
-    let requested_editor_rows = u16::try_from(
+    // FrameLayout insets the composer twice: once for the outer surface and
+    // once for its content. Use that exact width for the height request so the
+    // renderer never wraps with one width and allocates rows with another.
+    let prospective_editor_width = area.width.saturating_sub(4).max(1);
+    let requested_editor_rows = if let Some((search, _)) = reverse_search_projection(app) {
+        crate::text::wrap_ranges(&search, prospective_editor_width)
+            .len()
+            .max(1)
+    } else {
         app.editor
             .visual_rows(prospective_editor_width)
             .len()
-            .max(1),
-    )
-    .unwrap_or(u16::MAX);
+            .max(1)
+    };
+    let requested_editor_rows = u16::try_from(requested_editor_rows).unwrap_or(u16::MAX);
     let Some(layout) = FrameLayout::calculate(area, requested_editor_rows) else {
         frame.render_widget(
             Paragraph::new(format!(
@@ -564,6 +571,34 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let surface = theme.ui(UiRole::Surface);
     let inner = layout.composer_content;
     let width = inner.width.max(1);
+    if let Some((search, search_cursor)) = reverse_search_projection(app) {
+        let (cursor_row, cursor_column) =
+            crate::editor::text_row_and_column(&search, search_cursor, width);
+        let visible_rows = usize::from(inner.height.max(1));
+        let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
+        render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
+        frame.render_widget(
+            Paragraph::new(search)
+                .style(surface)
+                .wrap(Wrap { trim: false })
+                .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+            inner,
+        );
+        if app.focus == Focus::Composer && app.dialog.is_none() {
+            let cursor_y = inner
+                .y
+                .saturating_add(
+                    u16::try_from(cursor_row.saturating_sub(scroll)).unwrap_or(u16::MAX),
+                )
+                .min(inner.bottom().saturating_sub(1));
+            let cursor_x = inner
+                .x
+                .saturating_add(cursor_column)
+                .min(inner.right().saturating_sub(1));
+            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+        }
+        return (width, scroll);
+    }
     let (cursor_row, cursor_column) = app.editor.cursor_row_and_column(width);
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
@@ -587,6 +622,18 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }
     (width, scroll)
+}
+
+fn reverse_search_projection(app: &AppModel) -> Option<(String, usize)> {
+    let search = app.reverse_search()?;
+    let result = if search.has_match {
+        app.editor.text()
+    } else {
+        "no match"
+    };
+    let prefix = "(history-search)`";
+    let cursor = prefix.len().saturating_add(search.query.len());
+    Some((format!("{prefix}{}': {result}", search.query), cursor))
 }
 
 fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
@@ -743,6 +790,12 @@ fn inset_chrome(area: Rect) -> Rect {
 fn footer_state(app: &AppModel) -> String {
     let held = !matches!(app.timeline.viewport, crate::ViewportAnchor::FollowBottom);
     let new_output = app.timeline.has_new_content();
+    if app.exit_armed {
+        return "press Ctrl+C again to exit".to_string();
+    }
+    if app.reverse_search().is_some() {
+        return "history search · type to filter · Esc keep match".to_string();
+    }
     match (app.work, app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
         (crate::WorkState::Idle, false) if held && new_output => {
@@ -1341,6 +1394,42 @@ mod tests {
         assert_ne!(
             resolver.ui(UiRole::Focus).fg,
             resolver.ui(UiRole::Accent).fg
+        );
+    }
+
+    #[test]
+    fn reverse_history_search_replaces_the_composer_without_moving_the_timeline() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.seed_history(vec!["remember this prompt".to_string()]);
+        let _ = app.handle_input(crate::InputAction::OpenReverseHistory, 76);
+        let _ = app.handle_input(crate::InputAction::Insert("this".to_string()), 76);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw reverse search");
+        let layout = hit_map.expect("hit map").frame.expect("frame layout");
+        let line = buffer_line(terminal.backend().buffer(), layout.composer_content.y);
+        assert!(line.contains("(history-search)`this': remember this prompt"));
+        assert!(footer_state(&app).contains("Esc keep match"));
+    }
+
+    #[test]
+    fn composer_height_and_text_use_the_same_inset_width() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        app.editor.insert(&"x".repeat(77));
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw wrapped composer");
+        let hit_map = hit_map.expect("hit map");
+        assert_eq!(hit_map.editor_width, 76);
+        assert_eq!(
+            hit_map.frame.expect("frame layout").composer_content.height,
+            2
         );
     }
 

@@ -50,6 +50,55 @@ impl Editor {
     }
 
     #[must_use]
+    pub fn history_match_reverse(
+        &self,
+        query: &str,
+        before_exclusive: Option<usize>,
+    ) -> Option<(usize, String)> {
+        let query = query.to_lowercase();
+        let end = before_exclusive
+            .unwrap_or(self.history.len())
+            .min(self.history.len());
+        self.history[..end]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| entry.to_lowercase().contains(&query))
+            .map(|(index, entry)| (index, entry.clone()))
+    }
+
+    #[must_use]
+    pub fn history_match_forward(
+        &self,
+        query: &str,
+        after_exclusive: usize,
+    ) -> Option<(usize, String)> {
+        let query = query.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .skip(after_exclusive.saturating_add(1))
+            .find(|(_, entry)| entry.to_lowercase().contains(&query))
+            .map(|(index, entry)| (index, entry.clone()))
+    }
+
+    pub fn replace_draft(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        let cursor = text.len();
+        self.replace_draft_at(text, cursor);
+    }
+
+    pub fn replace_draft_at(&mut self, text: impl Into<String>, cursor: usize) {
+        self.text = sanitize_text(&text.into());
+        self.cursor = cursor.min(self.text.len());
+        self.normalize_cursor();
+        self.preferred_column = None;
+        self.history_index = None;
+        self.history_draft.clear();
+        self.history_draft_cursor = 0;
+    }
+
+    #[must_use]
     pub fn visual_rows(&self, width: u16) -> Vec<EditorRow> {
         wrap_ranges(&self.text, width)
             .into_iter()
@@ -62,12 +111,7 @@ impl Editor {
 
     #[must_use]
     pub fn cursor_row_and_column(&self, width: u16) -> (usize, u16) {
-        let rows = self.visual_rows(width);
-        let row_index = cursor_row(&rows, self.cursor);
-        let row = &rows[row_index];
-        let slice = &self.text[row.start_byte..self.cursor.min(row.end_byte)];
-        let column = u16::try_from(display_width(slice)).unwrap_or(u16::MAX);
-        (row_index, column)
+        text_row_and_column(&self.text, self.cursor, width)
     }
 
     pub fn set_cursor_from_visual(&mut self, row_index: usize, column: u16, width: u16) {
@@ -314,6 +358,22 @@ impl Editor {
             self.cursor = self.cursor.saturating_sub(1);
         }
     }
+}
+
+pub(crate) fn text_row_and_column(text: &str, cursor: usize, width: u16) -> (usize, u16) {
+    let rows: Vec<EditorRow> = wrap_ranges(text, width)
+        .into_iter()
+        .map(|row| EditorRow {
+            start_byte: row.start_byte,
+            end_byte: row.end_byte,
+        })
+        .collect();
+    let cursor = cursor.min(text.len());
+    let row_index = cursor_row(&rows, cursor);
+    let row = &rows[row_index];
+    let slice = &text[row.start_byte..cursor.min(row.end_byte)];
+    let column = u16::try_from(display_width(slice)).unwrap_or(u16::MAX);
+    (row_index, column)
 }
 
 fn is_word_segment(segment: &str) -> bool {

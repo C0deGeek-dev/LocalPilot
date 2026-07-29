@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::presentation::semantic_ranges;
 use crate::{
@@ -88,7 +89,8 @@ pub enum WorkState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
     CancelOrExit,
-    InterruptWork,
+    Escape,
+    OpenReverseHistory,
     NavigateTimeline(TimelineNavigation),
     Insert(String),
     Backspace,
@@ -109,6 +111,25 @@ pub enum InputAction {
     DeleteToLineStart,
     DeleteToLineEnd,
     Submit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputOverlay {
+    ReverseHistory(ReverseHistoryState),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReverseHistoryState {
+    query: String,
+    match_index: Option<usize>,
+    original_draft: String,
+    original_cursor: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReverseSearchView<'a> {
+    pub query: &'a str,
+    pub has_match: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +235,7 @@ pub struct AppModel {
     pub context_usage: Option<(usize, usize)>,
     pub stream_bytes: usize,
     pub dialog: Option<DialogState>,
+    input_overlay: Option<InputOverlay>,
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
     active_tools: BTreeMap<String, ItemId>,
@@ -252,6 +274,7 @@ impl AppModel {
             context_usage: None,
             stream_bytes: 0,
             dialog: None,
+            input_overlay: None,
             active_assistant: None,
             active_reasoning: None,
             active_tools: BTreeMap::new(),
@@ -281,9 +304,22 @@ impl AppModel {
         if !matches!(action, InputAction::CancelOrExit) {
             self.exit_armed = false;
         }
+        if matches!(action, InputAction::CancelOrExit) {
+            return self.cancel_or_exit();
+        }
+        if self.dialog.is_some() {
+            return AppCommand::None;
+        }
+        if self.input_overlay.is_some() {
+            return self.handle_overlay_input(action);
+        }
         match action {
-            InputAction::CancelOrExit => self.cancel_or_exit(),
-            InputAction::InterruptWork => self.interrupt_work(),
+            InputAction::CancelOrExit => AppCommand::None,
+            InputAction::Escape => self.interrupt_work(),
+            InputAction::OpenReverseHistory if self.focus == Focus::Composer => {
+                self.open_reverse_history();
+                AppCommand::None
+            }
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
                 self.editor.insert(&text);
@@ -362,6 +398,7 @@ impl AppModel {
                 .submit()
                 .map_or(AppCommand::None, AppCommand::Submit),
             InputAction::Insert(_)
+            | InputAction::OpenReverseHistory
             | InputAction::Backspace
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -496,6 +533,26 @@ impl AppModel {
         self.active_insert_before = item;
     }
 
+    #[must_use]
+    pub(crate) fn reverse_search(&self) -> Option<ReverseSearchView<'_>> {
+        let Some(InputOverlay::ReverseHistory(state)) = &self.input_overlay else {
+            return None;
+        };
+        Some(ReverseSearchView {
+            query: &state.query,
+            has_match: state.match_index.is_some(),
+        })
+    }
+
+    #[must_use]
+    pub const fn has_input_overlay(&self) -> bool {
+        self.input_overlay.is_some()
+    }
+
+    fn dismiss_input_overlay(&mut self) {
+        self.input_overlay = None;
+    }
+
     pub fn seed_history(&mut self, history: Vec<String>) {
         self.editor.seed_history(history);
     }
@@ -556,6 +613,108 @@ impl AppModel {
 
     pub fn disarm_exit(&mut self) {
         self.exit_armed = false;
+    }
+
+    fn open_reverse_history(&mut self) {
+        self.input_overlay = Some(InputOverlay::ReverseHistory(ReverseHistoryState {
+            query: String::new(),
+            match_index: None,
+            original_draft: self.editor.text().to_string(),
+            original_cursor: self.editor.cursor(),
+        }));
+        self.refresh_reverse_history(None);
+    }
+
+    fn handle_overlay_input(&mut self, action: InputAction) -> AppCommand {
+        match action {
+            InputAction::Escape | InputAction::Submit => self.dismiss_input_overlay(),
+            InputAction::OpenReverseHistory | InputAction::MoveUp => {
+                let before = self.reverse_history_index();
+                self.refresh_reverse_history(before);
+            }
+            InputAction::MoveDown => self.advance_reverse_history(),
+            InputAction::Insert(text) => {
+                let text = sanitize_text(&text).replace(['\r', '\n'], " ");
+                if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
+                    state.query.push_str(&text);
+                    state.match_index = None;
+                }
+                self.refresh_reverse_history(None);
+            }
+            InputAction::Backspace => {
+                if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
+                    if let Some((byte, _)) = state.query.grapheme_indices(true).next_back() {
+                        state.query.truncate(byte);
+                    }
+                    state.match_index = None;
+                }
+                self.refresh_reverse_history(None);
+            }
+            InputAction::CancelOrExit
+            | InputAction::NavigateTimeline(_)
+            | InputAction::Delete
+            | InputAction::MoveLeft
+            | InputAction::MoveRight
+            | InputAction::MoveWordLeft
+            | InputAction::MoveWordRight
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd => {}
+        }
+        AppCommand::None
+    }
+
+    fn reverse_history_index(&self) -> Option<usize> {
+        let Some(InputOverlay::ReverseHistory(state)) = &self.input_overlay else {
+            return None;
+        };
+        state.match_index
+    }
+
+    fn refresh_reverse_history(&mut self, before_exclusive: Option<usize>) {
+        let Some(InputOverlay::ReverseHistory(state)) = &self.input_overlay else {
+            return;
+        };
+        let query = state.query.clone();
+        let original_draft = state.original_draft.clone();
+        let original_cursor = state.original_cursor;
+        let found = self.editor.history_match_reverse(&query, before_exclusive);
+        if let Some((index, text)) = found {
+            self.editor.replace_draft(text);
+            if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
+                state.match_index = Some(index);
+            }
+        } else if before_exclusive.is_none() {
+            self.editor
+                .replace_draft_at(original_draft, original_cursor);
+            if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
+                state.match_index = None;
+            }
+        }
+    }
+
+    fn advance_reverse_history(&mut self) {
+        let Some(InputOverlay::ReverseHistory(state)) = &self.input_overlay else {
+            return;
+        };
+        let query = state.query.clone();
+        let Some(index) = state.match_index else {
+            self.refresh_reverse_history(None);
+            return;
+        };
+        let Some((next_index, text)) = self.editor.history_match_forward(&query, index) else {
+            return;
+        };
+        self.editor.replace_draft(text);
+        if let Some(InputOverlay::ReverseHistory(state)) = &mut self.input_overlay {
+            state.match_index = Some(next_index);
+        }
     }
 
     fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
@@ -782,13 +941,10 @@ mod tests {
     #[test]
     fn escape_interrupts_work_without_arming_process_exit() {
         let mut app = model();
-        assert_eq!(
-            app.handle_input(InputAction::InterruptWork, 80),
-            AppCommand::None
-        );
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         app.begin_work();
         assert_eq!(
-            app.handle_input(InputAction::InterruptWork, 80),
+            app.handle_input(InputAction::Escape, 80),
             AppCommand::CancelWork
         );
         assert!(!app.exit_armed);
@@ -798,6 +954,87 @@ mod tests {
                 cancellation_requested: true
             }
         );
+    }
+
+    #[test]
+    fn reverse_search_filters_and_navigates_without_a_second_editable_buffer() {
+        let mut app = model();
+        app.seed_history(vec![
+            "alpha old command".to_string(),
+            "beta old command".to_string(),
+            "newest prompt".to_string(),
+        ]);
+        app.editor.insert("draft");
+
+        assert_eq!(
+            app.handle_input(InputAction::OpenReverseHistory, 80),
+            AppCommand::None
+        );
+        assert_eq!(app.editor.text(), "newest prompt");
+        assert!(app.reverse_search().is_some());
+
+        let _ = app.handle_input(InputAction::Insert("old".to_string()), 80);
+        assert_eq!(app.editor.text(), "beta old command");
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        assert_eq!(app.editor.text(), "alpha old command");
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.editor.text(), "beta old command");
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_input_overlay());
+        assert_eq!(app.editor.text(), "beta old command");
+        app.editor.insert("!");
+        assert_eq!(app.editor.text(), "beta old command!");
+    }
+
+    #[test]
+    fn reverse_search_no_match_restores_the_original_draft_and_caret() {
+        let mut app = model();
+        app.seed_history(vec!["remembered".to_string()]);
+        app.editor.insert("draft");
+        app.editor.move_left();
+        let cursor = app.editor.cursor();
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        let _ = app.handle_input(InputAction::Insert("absent".to_string()), 80);
+        assert_eq!(app.editor.text(), "draft");
+        assert_eq!(app.editor.cursor(), cursor);
+    }
+
+    #[test]
+    fn overlay_escape_precedes_work_interrupt_and_dialog_precedes_the_overlay() {
+        let mut app = model();
+        app.seed_history(vec!["remembered".to_string()]);
+        app.begin_work();
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        assert!(app.has_input_overlay());
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(
+            app.handle_input(InputAction::Escape, 80),
+            AppCommand::CancelWork
+        );
+
+        let mut dialog = model();
+        dialog.seed_history(vec!["remembered".to_string()]);
+        dialog.require_workspace_trust("fixture");
+        let _ = dialog.handle_input(InputAction::OpenReverseHistory, 80);
+        assert!(!dialog.has_input_overlay());
+    }
+
+    #[test]
+    fn opening_an_overlay_disarms_contextual_exit() {
+        let mut app = model();
+        app.seed_history(vec!["remembered".to_string()]);
+        app.exit_armed = true;
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        assert!(!app.exit_armed);
+        assert!(app.has_input_overlay());
     }
 
     #[test]

@@ -528,6 +528,9 @@ fn handle_mouse_event(
             }
 
             if rect_contains(hit_map.composer, mouse.column, mouse.row) {
+                if app.has_input_overlay() {
+                    return RoutedEvent::Handled;
+                }
                 let visual_row = hit_map
                     .composer_scroll
                     .saturating_add(usize::from(mouse.row.saturating_sub(hit_map.composer.y)));
@@ -810,6 +813,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Char('h') if ctrl && !alt => Some(InputAction::Backspace),
         KeyCode::Char('j') if ctrl && !alt => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Char('k') if ctrl && !alt => Some(InputAction::DeleteToLineEnd),
+        KeyCode::Char('r') if ctrl && !alt => Some(InputAction::OpenReverseHistory),
         KeyCode::Char('u') if ctrl && !alt => Some(InputAction::DeleteToLineStart),
         KeyCode::Char('w') if ctrl && !alt => Some(InputAction::DeleteWordLeft),
         KeyCode::Char(character) if !ctrl && !alt => {
@@ -817,7 +821,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         }
         KeyCode::Enter if alt || shift => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Enter => Some(InputAction::Submit),
-        KeyCode::Esc => Some(InputAction::InterruptWork),
+        KeyCode::Esc => Some(InputAction::Escape),
         KeyCode::Backspace => Some(InputAction::Backspace),
         KeyCode::Delete => Some(InputAction::Delete),
         KeyCode::Left => Some(InputAction::MoveLeft),
@@ -1054,7 +1058,7 @@ mod tests {
         );
         assert_eq!(
             map_key(press(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(InputAction::InterruptWork)
+            Some(InputAction::Escape)
         );
         assert_eq!(
             map_key(press(KeyCode::Enter, KeyModifiers::SHIFT)),
@@ -1228,6 +1232,11 @@ mod tests {
                 KeyCode::Char('j'),
                 KeyModifiers::CONTROL,
                 InputAction::Insert("\n".to_string()),
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                InputAction::OpenReverseHistory,
             ),
         ];
         for (code, modifiers, expected) in cases {
