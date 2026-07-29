@@ -6,10 +6,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, Selection,
-    TabId, TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
+    ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
+    TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
     MINIMUM_WIDTH,
 };
+
+const BANNER_ROWS: u16 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabHit {
@@ -167,21 +169,29 @@ fn render_timeline(
 ) -> ScrollbarGeometry {
     let area = layout.timeline_content;
     let view = app.timeline.view(area.width.max(1), area.height.max(1));
-    let content_offset = if let Some(pinned) = &view.pinned {
+    let banner_visible = view.pinned.is_none()
+        && view.start == 0
+        && (view.total_rows.saturating_add(usize::from(BANNER_ROWS)) <= usize::from(area.height)
+            || matches!(app.timeline.viewport, crate::ViewportAnchor::Top));
+    let content_offset = if banner_visible {
+        render_idle_banner(frame, area, app);
+        BANNER_ROWS
+    } else if let Some(pinned) = &view.pinned {
         render_pinned_prompt(frame, area, pinned, app);
         u16::try_from(PinnedPrompt::ROWS).unwrap_or(u16::MAX)
     } else {
         0
     };
-    if view.rows.is_empty() && view.pinned.is_none() {
+    if view.rows.is_empty() && view.pinned.is_none() && !banner_visible {
         render_idle_banner(frame, area, app);
     } else {
-        for (offset, row) in view.rows.iter().enumerate() {
+        let capacity = usize::from(area.height.saturating_sub(content_offset));
+        for (offset, row) in view.rows.iter().take(capacity).enumerate() {
             let y = area
                 .y
                 .saturating_add(content_offset)
                 .saturating_add(offset as u16);
-            timeline_line(row, app.timeline.selection, app, area.width)
+            timeline_line(row, app, area.width)
                 .render(Rect::new(area.x, y, area.width, 1), frame.buffer_mut());
         }
     }
@@ -304,12 +314,7 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
     );
 }
 
-fn timeline_line(
-    row: &VisualRow,
-    selection: Option<Selection>,
-    app: &AppModel,
-    width: u16,
-) -> Line<'static> {
+fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
     let theme = theme(app);
     if row.part == VisualRowPart::FrameTop {
         return framed_rule(width, true, theme.ui(UiRole::SurfaceEdge));
@@ -334,8 +339,9 @@ fn timeline_line(
         for (offset, grapheme) in row.text[relative_start..relative_end].grapheme_indices(true) {
             let start = visual_span.start_byte + offset;
             let end = start + grapheme.len();
-            let selected =
-                selection.is_some_and(|value| value.contains_grapheme(row.item_id, start, end));
+            let selected = app
+                .timeline
+                .selection_contains_grapheme(row.item_id, start, end);
             let mut style = if row.kind == ItemKind::User {
                 theme.text(visual_span.style.bold())
             } else {
@@ -692,7 +698,7 @@ fn inset_chrome(area: Rect) -> Rect {
 }
 
 fn footer_state(app: &AppModel) -> String {
-    let held = matches!(app.timeline.viewport, crate::ViewportAnchor::Held(_));
+    let held = !matches!(app.timeline.viewport, crate::ViewportAnchor::FollowBottom);
     let new_output = app.timeline.has_new_content();
     match (app.work, app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
@@ -923,6 +929,39 @@ mod tests {
     }
 
     #[test]
+    fn banner_remains_the_scrollable_conversation_header() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        let _ = app.append_prompt("first prompt", Some("12:34".to_string()), false);
+        let _ = app.timeline.push(ItemKind::Assistant, "short response");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw conversation header");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("LocalPilot v0"));
+        assert!(rendered.contains("first prompt"));
+        assert!(rendered.contains("short response"));
+
+        for number in 0..60 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:02}"));
+        }
+        app.timeline.scroll_by(-10_000, 76, 16);
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw held conversation header");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("LocalPilot v0"));
+        assert!(rendered.contains("first prompt"));
+    }
+
+    #[test]
     fn overflowing_timeline_draws_and_reports_a_proportional_scrollbar() {
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -961,35 +1000,27 @@ mod tests {
             .expect("draw in-flow prompt");
         let layout = hit_map.expect("hit map").frame.expect("layout");
         let buffer = terminal.backend().buffer();
+        let prompt_y = layout.timeline_content.y + BANNER_ROWS;
+        assert_eq!(buffer[(layout.timeline_content.x, prompt_y)].symbol(), "╻");
+        assert!(buffer_line(buffer, prompt_y + 1).contains("current prompt (pending)"));
         assert_eq!(
-            buffer[(layout.timeline_content.x, layout.timeline_content.y)].symbol(),
-            "╻"
-        );
-        assert!(
-            buffer_line(buffer, layout.timeline_content.y + 1).contains("current prompt (pending)")
-        );
-        assert_eq!(
-            buffer[(layout.timeline_content.x, layout.timeline_content.y + 1)].symbol(),
+            buffer[(layout.timeline_content.x, prompt_y + 1)].symbol(),
             " ",
             "prompt surfaces must not draw a visible side bar"
         );
         assert_eq!(
-            buffer[(
-                layout.timeline_content.right() - 1,
-                layout.timeline_content.y + 1
-            )]
-                .symbol(),
+            buffer[(layout.timeline_content.right() - 1, prompt_y + 1)].symbol(),
             " ",
             "prompt surfaces must not draw a visible side bar"
         );
         assert_eq!(
-            buffer[(layout.timeline_content.x + 1, layout.timeline_content.y + 1)]
+            buffer[(layout.timeline_content.x + 1, prompt_y + 1)]
                 .style()
                 .bg,
             resolver.ui(UiRole::Surface).bg
         );
         assert_eq!(
-            buffer[(layout.timeline_content.x, layout.timeline_content.y + 2)].symbol(),
+            buffer[(layout.timeline_content.x, prompt_y + 2)].symbol(),
             "╹"
         );
 

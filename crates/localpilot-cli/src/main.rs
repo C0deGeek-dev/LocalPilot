@@ -1189,6 +1189,8 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // worker thread with a generous stack so the binary behaves identically across
     // platforms (tier-1 parity, ADR-0007).
     const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+    #[cfg(feature = "tui")]
+    fullscreen::capture_local_utc_offset();
     let worker = std::thread::Builder::new()
         .name("localpilot-main".to_string())
         .stack_size(MAIN_STACK_SIZE)

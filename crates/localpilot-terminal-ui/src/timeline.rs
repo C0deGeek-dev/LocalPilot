@@ -164,7 +164,7 @@ pub enum VisualRowPart {
     FrameBottom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContentPoint {
     pub item_id: ItemId,
     pub byte: usize,
@@ -176,34 +176,10 @@ pub struct Selection {
     pub focus: ContentPoint,
 }
 
-impl Selection {
-    #[must_use]
-    pub fn normalized(self) -> (ContentPoint, ContentPoint) {
-        if self.anchor <= self.focus {
-            (self.anchor, self.focus)
-        } else {
-            (self.focus, self.anchor)
-        }
-    }
-
-    #[must_use]
-    pub fn contains_grapheme(self, item_id: ItemId, start_byte: usize, end_byte: usize) -> bool {
-        let (start, end) = self.normalized();
-        let grapheme_start = ContentPoint {
-            item_id,
-            byte: start_byte,
-        };
-        let grapheme_end = ContentPoint {
-            item_id,
-            byte: end_byte,
-        };
-        grapheme_start < end && grapheme_end > start
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportAnchor {
     FollowBottom,
+    Top,
     Held(ContentPoint),
 }
 
@@ -304,7 +280,7 @@ impl Timeline {
         let text = sanitize_text(&text.into());
         self.item_positions.insert(id, self.items.len());
         self.items.push(TimelineItem::new(id, kind, text));
-        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
             self.new_content.set(true);
         }
         self.invalidate_layout();
@@ -330,7 +306,7 @@ impl Timeline {
             self.item_positions
                 .insert(self.items[position].id, position);
         }
-        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
             self.new_content.set(true);
         }
         self.invalidate_layout();
@@ -359,7 +335,7 @@ impl Timeline {
             });
         }
         self.wrap_cache.borrow_mut().remove(&id);
-        if matches!(self.viewport, ViewportAnchor::Held(_)) {
+        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
             self.new_content.set(true);
         }
         self.invalidate_layout();
@@ -480,6 +456,8 @@ impl Timeline {
         if next >= max_start {
             self.viewport = ViewportAnchor::FollowBottom;
             self.new_content.set(false);
+        } else if next == 0 {
+            self.viewport = ViewportAnchor::Top;
         } else if let Some(point) = self.point_at_row(width, next) {
             self.viewport = ViewportAnchor::Held(point);
         }
@@ -514,24 +492,23 @@ impl Timeline {
 
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
-        let (start, end) = self.selection?.normalized();
-        if start == end {
+        let selection = self.selection?;
+        let (start_index, start_byte, end_index, end_byte) = self.selection_bounds(selection)?;
+        if start_index == end_index && start_byte == end_byte {
             return None;
         }
         let mut output = String::new();
         let mut selected_any = false;
-        for item in &self.items {
-            if item.id < start.item_id || item.id > end.item_id {
-                continue;
-            }
+        for (index, item) in self.items[start_index..=end_index].iter().enumerate() {
+            let index = start_index + index;
             let visible_len = displayed_text(item).len();
-            let from = if item.id == start.item_id {
-                start.byte.min(visible_len)
+            let from = if index == start_index {
+                start_byte.min(visible_len)
             } else {
                 0
             };
-            let to = if item.id == end.item_id {
-                end.byte.min(visible_len)
+            let to = if index == end_index {
+                end_byte.min(visible_len)
             } else {
                 visible_len
             };
@@ -545,6 +522,28 @@ impl Timeline {
             selected_any = true;
         }
         selected_any.then_some(output)
+    }
+
+    #[must_use]
+    pub fn selection_contains_grapheme(
+        &self,
+        item_id: ItemId,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        let Some((start_index, selection_start, end_index, selection_end)) =
+            self.selection_bounds(selection)
+        else {
+            return false;
+        };
+        let Some(index) = self.item_positions.get(&item_id).copied() else {
+            return false;
+        };
+        (index, start_byte) < (end_index, selection_end)
+            && (index, end_byte) > (start_index, selection_start)
     }
 
     #[must_use]
@@ -599,7 +598,23 @@ impl Timeline {
     fn current_start(&self, width: u16) -> usize {
         match self.viewport {
             ViewportAnchor::FollowBottom => self.total_rows(width),
+            ViewportAnchor::Top => 0,
             ViewportAnchor::Held(anchor) => self.resolve_anchor(width, anchor),
+        }
+    }
+
+    fn selection_bounds(&self, selection: Selection) -> Option<(usize, usize, usize, usize)> {
+        let anchor_index = self
+            .item_positions
+            .get(&selection.anchor.item_id)
+            .copied()?;
+        let focus_index = self.item_positions.get(&selection.focus.item_id).copied()?;
+        let anchor = (anchor_index, selection.anchor.byte);
+        let focus = (focus_index, selection.focus.byte);
+        if anchor <= focus {
+            Some((anchor.0, anchor.1, focus.0, focus.1))
+        } else {
+            Some((focus.0, focus.1, anchor.0, anchor.1))
         }
     }
 
@@ -951,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn absolute_start_has_a_stable_top_anchor() {
+        let mut timeline = Timeline::new();
+        for number in 0..30 {
+            let _ = timeline.push(ItemKind::Assistant, format!("item {number:02}"));
+        }
+
+        timeline.scroll_by(-10_000, 40, 8);
+        assert_eq!(timeline.viewport, ViewportAnchor::Top);
+        assert_eq!(timeline.view(40, 8).start, 0);
+
+        let _ = timeline.push(ItemKind::Assistant, "new output while at top");
+        assert_eq!(timeline.viewport, ViewportAnchor::Top);
+        assert!(timeline.has_new_content());
+
+        timeline.scroll_by(10_000, 40, 8);
+        assert_eq!(timeline.viewport, ViewportAnchor::FollowBottom);
+        assert!(!timeline.has_new_content());
+    }
+
+    #[test]
     fn anchor_at_wrap_boundary_resolves_to_row_that_starts_there() {
         let mut timeline = Timeline::new();
         let id = timeline
@@ -1125,6 +1160,43 @@ mod tests {
         assert_eq!(
             timeline.item(response).expect("response").text,
             "response tail"
+        );
+    }
+
+    #[test]
+    fn selection_uses_visual_order_after_insertion_before_pending_prompt() {
+        let mut timeline = Timeline::new();
+        let active = timeline.push(ItemKind::User, "active").expect("active");
+        let pending = timeline.push(ItemKind::User, "pending").expect("pending");
+        let response = timeline
+            .insert_before(pending, ItemKind::Assistant, "response")
+            .expect("response");
+
+        timeline.start_selection(ContentPoint {
+            item_id: active,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: pending,
+            byte: "pending".len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("active\nresponse\npending")
+        );
+        assert!(timeline.selection_contains_grapheme(response, 0, "response".len()));
+
+        timeline.start_selection(ContentPoint {
+            item_id: pending,
+            byte: "pending".len(),
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: active,
+            byte: 0,
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some("active\nresponse\npending")
         );
     }
 

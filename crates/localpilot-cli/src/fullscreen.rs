@@ -5,6 +5,7 @@ use std::io::{self, Stdout, Write};
 use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -36,6 +37,12 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
+static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
+
+pub(crate) fn capture_local_utc_offset() {
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let _ = LOCAL_UTC_OFFSET.set(offset);
+}
 
 pub(crate) struct HostContext<'a> {
     pub(crate) runtime: &'a mut SessionRuntime,
@@ -447,7 +454,15 @@ fn drain_runtime_events(app: &mut AppModel, rx: &mut broadcast::Receiver<Runtime
 }
 
 fn local_prompt_time() -> String {
-    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let offset = LOCAL_UTC_OFFSET
+        .get()
+        .copied()
+        .unwrap_or(time::UtcOffset::UTC);
+    let now = time::OffsetDateTime::now_utc().to_offset(offset);
+    format_prompt_time(now)
+}
+
+fn format_prompt_time(now: time::OffsetDateTime) -> String {
     format!("{:02}:{:02}", now.hour(), now.minute())
 }
 
@@ -827,6 +842,13 @@ mod tests {
         assert_eq!(value.as_bytes()[2], b':');
         assert!(value[..2].parse::<u8>().is_ok_and(|hour| hour < 24));
         assert!(value[3..].parse::<u8>().is_ok_and(|minute| minute < 60));
+    }
+
+    #[test]
+    fn prompt_timestamp_formats_the_precomputed_local_offset() {
+        let offset = time::UtcOffset::from_hms(2, 30, 0).expect("offset");
+        let local = time::OffsetDateTime::UNIX_EPOCH.to_offset(offset);
+        assert_eq!(format_prompt_time(local), "02:30");
     }
 
     #[test]
