@@ -171,10 +171,7 @@ fn render_timeline(
         let theme = theme(app);
         let banner = Line::from(vec![
             Span::styled("● ", theme.ui(UiRole::Accent)),
-            Span::styled(
-                APP_NAME,
-                theme.text(TextStyle::new(crate::SemanticRole::Heading)),
-            ),
+            Span::styled(APP_NAME, theme.ui(UiRole::Foreground)),
             Span::styled(
                 format!(" · {}", app.header.provider),
                 theme.ui(UiRole::Muted),
@@ -232,7 +229,7 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
         Span::styled(text, theme.text(TextStyle::new(crate::SemanticRole::User))),
         Span::raw(" ".repeat(gap)),
         Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)),
-        Span::styled(" ┃", theme.ui(UiRole::Accent)),
+        Span::styled(" ┃", theme.ui(UiRole::Border)),
     ]);
     line.render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
 }
@@ -245,10 +242,10 @@ fn timeline_line(
 ) -> Line<'static> {
     let theme = theme(app);
     if row.part == VisualRowPart::FrameTop {
-        return framed_rule(width, true, theme.ui(UiRole::Accent));
+        return framed_rule(width, true, theme.ui(UiRole::Border));
     }
     if row.part == VisualRowPart::FrameBottom {
-        return framed_rule(width, false, theme.ui(UiRole::Accent));
+        return framed_rule(width, false, theme.ui(UiRole::Border));
     }
 
     let VisualRowPart::Content { first, .. } = row.part else {
@@ -297,7 +294,7 @@ fn timeline_line(
         if !trailing.is_empty() {
             spans.push(Span::styled(trailing.to_string(), theme.ui(UiRole::Muted)));
         }
-        spans.push(Span::styled("┃", theme.ui(UiRole::Accent)));
+        spans.push(Span::styled("┃", theme.ui(UiRole::Border)));
     }
     Line::from(spans)
 }
@@ -316,7 +313,7 @@ fn role_prefix(
 ) -> Vec<Span<'static>> {
     match kind {
         ItemKind::User => vec![
-            Span::styled("┃ ", theme.ui(UiRole::Accent)),
+            Span::styled("┃ ", theme.ui(UiRole::Border)),
             Span::styled(if first { "❯ " } else { "  " }, theme.ui(UiRole::Accent)),
         ],
         ItemKind::Assistant => vec![Span::styled(
@@ -402,17 +399,18 @@ fn status_right(app: &AppModel) -> String {
 
 fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -> (u16, usize) {
     let theme = theme(app);
-    let border = if app.focus == Focus::Composer {
+    let side = if app.focus == Focus::Composer {
         theme.ui(UiRole::Focus)
     } else {
         theme.ui(UiRole::Border)
     };
+    let rule = theme.ui(UiRole::Border);
     let inner = layout.composer_content;
     let width = inner.width.max(1);
     let (cursor_row, cursor_column) = app.editor.cursor_row_and_column(width);
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
-    render_slim_frame(frame, layout.composer, border);
+    render_slim_frame(frame, layout.composer, rule, side);
     frame.render_widget(
         Paragraph::new(app.editor.text().to_string())
             .wrap(Wrap { trim: false })
@@ -433,20 +431,28 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     (width, scroll)
 }
 
-fn render_slim_frame(frame: &mut Frame<'_>, area: Rect, style: ratatui::style::Style) {
+fn render_slim_frame(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    rule_style: ratatui::style::Style,
+    side_style: ratatui::style::Style,
+) {
     if area.width < 2 || area.height < 2 {
         return;
     }
-    framed_rule(area.width, true, style)
+    framed_rule(area.width, true, rule_style)
         .render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
-    framed_rule(area.width, false, style).render(
+    framed_rule(area.width, false, rule_style).render(
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         frame.buffer_mut(),
     );
     for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
-        frame.render_widget(Paragraph::new("┃").style(style), Rect::new(area.x, y, 1, 1));
         frame.render_widget(
-            Paragraph::new("┃").style(style),
+            Paragraph::new("┃").style(side_style),
+            Rect::new(area.x, y, 1, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("┃").style(side_style),
             Rect::new(area.right().saturating_sub(1), y, 1, 1),
         );
     }
@@ -799,6 +805,37 @@ mod tests {
             assert_eq!(actual.bg, expected.bg);
             assert!(actual.add_modifier.contains(expected.add_modifier));
         }
+    }
+
+    #[test]
+    fn focused_composer_keeps_full_width_rules_muted_and_focus_on_thin_sides() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let app = model();
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw focused composer");
+        let layout = hit_map.expect("hit map").frame.expect("frame layout");
+        let buffer = terminal.backend().buffer();
+        let resolver = ThemeResolver::new(Theme::Default, ColorSupport::Color);
+
+        let rule = buffer[(layout.composer.x + 1, layout.composer.y)].style();
+        let side = buffer[(layout.composer.x, layout.composer_content.y)].style();
+        assert_eq!(
+            rule.fg,
+            resolver.ui(UiRole::Border).fg,
+            "the long half-block rule must stay muted"
+        );
+        assert_eq!(
+            side.fg,
+            resolver.ui(UiRole::Focus).fg,
+            "focus is carried only by the thin side"
+        );
+        assert_ne!(
+            resolver.ui(UiRole::Border).fg,
+            resolver.ui(UiRole::Accent).fg
+        );
     }
 
     #[test]

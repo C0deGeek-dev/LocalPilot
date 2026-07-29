@@ -94,8 +94,8 @@ impl ThemeResolver {
     #[must_use]
     pub fn text(self, text_style: TextStyle) -> Style {
         let role = match text_style.role {
-            SemanticRole::User | SemanticRole::Accent | SemanticRole::Heading => UiRole::Accent,
-            SemanticRole::Assistant => UiRole::Foreground,
+            SemanticRole::Accent | SemanticRole::Heading => UiRole::Accent,
+            SemanticRole::User | SemanticRole::Assistant => UiRole::Foreground,
             SemanticRole::Reasoning | SemanticRole::Muted => UiRole::Muted,
             SemanticRole::Tool | SemanticRole::Code => UiRole::Code,
             SemanticRole::Notice => UiRole::Warning,
@@ -169,14 +169,24 @@ fn color_style(theme: Theme, role: UiRole) -> Style {
 fn default_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
     match role {
         UiRole::Foreground => (Color::Reset, None, None),
-        UiRole::Muted | UiRole::TabInactive | UiRole::Border => (Color::DarkGray, None, None),
-        UiRole::Accent | UiRole::Focus => (Color::Blue, None, Some(Modifier::BOLD)),
-        UiRole::TabActive => (Color::White, Some(Color::Blue), Some(Modifier::BOLD)),
-        UiRole::Selection => (Color::Black, Some(Color::LightBlue), None),
-        UiRole::Warning => (Color::Yellow, None, None),
-        UiRole::Success => (Color::Green, None, None),
-        UiRole::Error => (Color::Red, None, Some(Modifier::BOLD)),
-        UiRole::Code => (Color::LightCyan, Some(Color::Black), None),
+        UiRole::Muted | UiRole::TabInactive => (Color::Rgb(0x8b, 0x94, 0x9e), None, None),
+        UiRole::Border => (Color::Rgb(0x6e, 0x76, 0x81), None, None),
+        UiRole::Accent => (Color::Rgb(0x38, 0x8b, 0xfd), None, None),
+        UiRole::Focus => (Color::Rgb(0x58, 0xa6, 0xff), None, None),
+        UiRole::TabActive => (
+            Color::Rgb(0xf0, 0xf6, 0xfc),
+            Some(Color::Rgb(0x1f, 0x6f, 0xeb)),
+            None,
+        ),
+        UiRole::Selection => (
+            Color::Rgb(0xf0, 0xf6, 0xfc),
+            Some(Color::Rgb(0x26, 0x4f, 0x78)),
+            None,
+        ),
+        UiRole::Warning => (Color::Rgb(0xd2, 0x99, 0x22), None, None),
+        UiRole::Success => (Color::Rgb(0x3f, 0xb9, 0x50), None, None),
+        UiRole::Error => (Color::Rgb(0xf8, 0x51, 0x49), None, Some(Modifier::BOLD)),
+        UiRole::Code => (Color::Rgb(0xa5, 0xd6, 0xff), None, None),
     }
 }
 
@@ -261,5 +271,19 @@ mod tests {
         let error = resolver.ui(UiRole::Error).fg;
         assert!(!matches!(success, Some(Color::Red | Color::Green)));
         assert!(!matches!(error, Some(Color::Red | Color::Green)));
+    }
+
+    #[test]
+    fn default_theme_uses_stable_true_color_and_subtle_large_chrome() {
+        let resolver = ThemeResolver::new(Theme::Default, ColorSupport::Color);
+        let accent = resolver.ui(UiRole::Accent);
+        let border = resolver.ui(UiRole::Border);
+        let active_tab = resolver.ui(UiRole::TabActive);
+
+        assert_eq!(accent.fg, Some(Color::Rgb(0x38, 0x8b, 0xfd)));
+        assert!(!accent.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(border.fg, Some(Color::Rgb(0x6e, 0x76, 0x81)));
+        assert_eq!(active_tab.bg, Some(Color::Rgb(0x1f, 0x6f, 0xeb)));
+        assert!(!active_tab.add_modifier.contains(Modifier::BOLD));
     }
 }
