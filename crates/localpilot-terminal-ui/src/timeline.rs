@@ -478,6 +478,20 @@ impl Timeline {
         self.new_content.set(false);
     }
 
+    /// Hold the viewport at a stable content identity. The byte is validated
+    /// against the original item text so resize and streaming reflow can safely
+    /// resolve it to a visual row later.
+    pub fn hold_at(&mut self, point: ContentPoint) -> bool {
+        let Some(item) = self.item(point.item_id) else {
+            return false;
+        };
+        if point.byte > item.text.len() || !item.text.is_char_boundary(point.byte) {
+            return false;
+        }
+        self.viewport = ViewportAnchor::Held(point);
+        true
+    }
+
     #[must_use]
     pub fn has_new_content(&self) -> bool {
         self.new_content.get()

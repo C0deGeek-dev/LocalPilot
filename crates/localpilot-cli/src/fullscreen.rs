@@ -137,12 +137,7 @@ pub(crate) async fn run(
     let mut terminal = Terminal::new(backend).context("initialize full-screen terminal")?;
     terminal.clear().context("clear full-screen terminal")?;
     let mut app = AppModel::new(header, capabilities);
-    app.set_command_catalog(localpilot_tui::AppState::slash_commands().iter().map(
-        |(name, description)| CompletionCommand {
-            name: (*name).to_string(),
-            description: (*description).to_string(),
-        },
-    ));
+    app.set_command_catalog(fullscreen_command_catalog());
     apply_host_preferences(&mut app);
     for event in startup_events {
         app.apply_runtime(map_runtime_event(event));
@@ -169,6 +164,21 @@ pub(crate) async fn run(
     drop(terminal);
     modes.restore();
     result
+}
+
+fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
+    let mut command_catalog = localpilot_tui::AppState::slash_commands()
+        .iter()
+        .map(|(name, description)| CompletionCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+        })
+        .collect::<Vec<_>>();
+    command_catalog.push(CompletionCommand {
+        name: "search".to_string(),
+        description: "Search messages in this session".to_string(),
+    });
+    command_catalog
 }
 
 fn apply_host_preferences(app: &mut AppModel) {
@@ -889,7 +899,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Char('a') if ctrl && !alt => Some(InputAction::MoveLineStart),
         KeyCode::Char('b') if ctrl && !alt => Some(InputAction::MoveLeft),
         KeyCode::Char('e') if ctrl && !alt => Some(InputAction::MoveLineEnd),
-        KeyCode::Char('f') if ctrl && !alt => Some(InputAction::MoveRight),
+        KeyCode::Char('f') if ctrl && !alt => Some(InputAction::ForwardCharOrSearch),
         KeyCode::Char('h') if ctrl && !alt => Some(InputAction::Backspace),
         KeyCode::Char('j') if ctrl && !alt => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Char('k') if ctrl && !alt => Some(InputAction::DeleteToLineEnd),
@@ -1288,7 +1298,7 @@ mod tests {
             (
                 KeyCode::Char('f'),
                 KeyModifiers::CONTROL,
-                InputAction::MoveRight,
+                InputAction::ForwardCharOrSearch,
             ),
             (
                 KeyCode::Char('h'),
@@ -1334,6 +1344,20 @@ mod tests {
         for (code, modifiers, expected) in cases {
             assert_eq!(map_key(press(code, modifiers)), Some(expected));
         }
+    }
+
+    #[test]
+    fn fullscreen_catalog_adds_search_without_changing_the_rollback_catalog() {
+        assert!(!localpilot_tui::AppState::slash_commands()
+            .iter()
+            .any(|(name, _)| *name == "search"));
+        let catalog = fullscreen_command_catalog();
+        let search = catalog
+            .iter()
+            .filter(|command| command.name == "search")
+            .collect::<Vec<_>>();
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].description, "Search messages in this session");
     }
 
     #[test]

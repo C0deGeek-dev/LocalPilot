@@ -139,16 +139,17 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     // once for its content. Use that exact width for the height request so the
     // renderer never wraps with one width and allocates rows with another.
     let prospective_editor_width = area.width.saturating_sub(4).max(1);
-    let requested_editor_rows = if let Some((search, _)) = reverse_search_projection(app) {
-        crate::text::wrap_ranges(&search, prospective_editor_width)
-            .len()
-            .max(1)
-    } else {
-        app.editor
-            .visual_rows(prospective_editor_width)
-            .len()
-            .max(1)
-    };
+    let requested_editor_rows =
+        if let Some((search, _)) = input_overlay_projection(app, prospective_editor_width) {
+            crate::text::wrap_ranges(&search, prospective_editor_width)
+                .len()
+                .max(1)
+        } else {
+            app.editor
+                .visual_rows(prospective_editor_width)
+                .len()
+                .max(1)
+        };
     let requested_editor_rows = u16::try_from(requested_editor_rows).unwrap_or(u16::MAX);
     let Some(layout) = FrameLayout::calculate(area, requested_editor_rows) else {
         frame.render_widget(
@@ -683,7 +684,7 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let surface = theme.ui(UiRole::Surface);
     let inner = layout.composer_content;
     let width = inner.width.max(1);
-    if let Some((search, search_cursor)) = reverse_search_projection(app) {
+    if let Some((search, search_cursor)) = input_overlay_projection(app, width) {
         let (cursor_row, cursor_column) =
             crate::editor::text_row_and_column(&search, search_cursor, width);
         let visible_rows = usize::from(inner.height.max(1));
@@ -746,6 +747,29 @@ fn reverse_search_projection(app: &AppModel) -> Option<(String, usize)> {
     let prefix = "(history-search)`";
     let cursor = prefix.len().saturating_add(search.query.len());
     Some((format!("{prefix}{}': {result}", search.query), cursor))
+}
+
+fn input_overlay_projection(app: &AppModel, width: u16) -> Option<(String, usize)> {
+    timeline_search_projection(app, width).or_else(|| reverse_search_projection(app))
+}
+
+fn timeline_search_projection(app: &AppModel, width: u16) -> Option<(String, usize)> {
+    let search = app.timeline_search()?;
+    let width = width.max(1);
+    let mut text = format!("❯ {}", search.query);
+    let cursor = text.len();
+    let counter = format!("{} / {}", search.current, search.total);
+    let counter_width = u16::try_from(UnicodeWidthStr::width(counter.as_str())).unwrap_or(u16::MAX);
+    let (_, cursor_column) = crate::editor::text_row_and_column(&text, cursor, width);
+    let remaining = width.saturating_sub(cursor_column);
+    if counter_width < remaining {
+        text.push_str(&" ".repeat(usize::from(remaining.saturating_sub(counter_width))));
+    } else {
+        text.push('\n');
+        text.push_str(&" ".repeat(usize::from(width.saturating_sub(counter_width))));
+    }
+    text.push_str(&counter);
+    Some((text, cursor))
 }
 
 fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
@@ -907,6 +931,9 @@ fn footer_state(app: &AppModel) -> String {
     }
     if app.reverse_search().is_some() {
         return "history search · type to filter · Esc keep match".to_string();
+    }
+    if app.timeline_search().is_some() {
+        return "search · ↑↓ navigate · esc close".to_string();
     }
     if let Some(completion) = app.completion() {
         let fallback = match (completion.kind, completion.loading) {
@@ -1537,6 +1564,31 @@ mod tests {
         let line = buffer_line(terminal.backend().buffer(), layout.composer_content.y);
         assert!(line.contains("(history-search)`this': remember this prompt"));
         assert!(footer_state(&app).contains("Esc keep match"));
+    }
+
+    #[test]
+    fn timeline_search_replaces_composer_with_query_and_right_aligned_count() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
+        let _ = app.timeline.push(ItemKind::User, "marker marker");
+        let _ = app.timeline.push(ItemKind::Assistant, "new MARKER");
+        let _ = app.handle_input(crate::InputAction::Insert("/search marker".to_string()), 76);
+        let _ = app.handle_input(crate::InputAction::Submit, 76);
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw timeline search");
+        let layout = hit_map.expect("hit map").frame.expect("frame layout");
+        let buffer = terminal.backend().buffer();
+        let composer = (layout.composer_content.x..layout.composer_content.right())
+            .filter_map(|x| buffer.cell((x, layout.composer_content.y)))
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(composer.starts_with("❯ marker"));
+        assert!(composer.ends_with("2 / 2"));
+        assert_eq!(footer_state(&app), "search · ↑↓ navigate · esc close");
     }
 
     #[test]

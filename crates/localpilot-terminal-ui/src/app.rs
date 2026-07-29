@@ -4,8 +4,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
 use crate::{
-    sanitize_text, ActivityState, Editor, ItemId, ItemKind, SemanticRole, StyledRange, TextStyle,
-    Theme, Timeline,
+    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, SemanticRole,
+    StyledRange, TextStyle, Theme, Timeline,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,6 +99,7 @@ pub enum InputAction {
     Delete,
     MoveLeft,
     MoveRight,
+    ForwardCharOrSearch,
     MoveWordLeft,
     MoveWordRight,
     MoveUp,
@@ -120,6 +121,7 @@ pub enum InputAction {
 enum InputOverlay {
     ReverseHistory(ReverseHistoryState),
     Completion(CompletionState),
+    TimelineSearch(TimelineSearchState),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +169,21 @@ struct ReverseHistoryState {
 pub(crate) struct ReverseSearchView<'a> {
     pub query: &'a str,
     pub has_match: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimelineSearchState {
+    query: String,
+    matches: Vec<ContentPoint>,
+    selected: Option<usize>,
+    original_draft: EditorSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimelineSearchView<'a> {
+    pub query: &'a str,
+    pub current: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,7 +363,7 @@ impl AppModel {
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
         if matches!(action, InputAction::CancelOrExit) && self.input_overlay.is_some() {
             self.exit_armed = false;
-            self.dismiss_input_overlay();
+            self.cancel_input_overlay();
             return AppCommand::None;
         }
         if !matches!(action, InputAction::CancelOrExit) {
@@ -392,6 +409,14 @@ impl AppModel {
             }
             InputAction::MoveRight if self.focus == Focus::Composer => {
                 self.editor.move_right();
+                AppCommand::None
+            }
+            InputAction::ForwardCharOrSearch if self.focus == Focus::Composer => {
+                if self.editor.text().is_empty() {
+                    self.open_timeline_search(String::new());
+                } else {
+                    self.editor.move_right();
+                }
                 AppCommand::None
             }
             InputAction::MoveWordLeft if self.focus == Focus::Composer => {
@@ -447,10 +472,19 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::AcceptCompletion => AppCommand::None,
-            InputAction::Submit if self.focus == Focus::Composer => self
-                .editor
-                .submit()
-                .map_or(AppCommand::None, AppCommand::Submit),
+            InputAction::Submit if self.focus == Focus::Composer => {
+                if let Some(query) = timeline_search_command(self.editor.text()) {
+                    // The slash command is an invocation, not a draft to restore
+                    // when search closes.
+                    self.editor.replace_draft(String::new());
+                    self.open_timeline_search(query);
+                    AppCommand::None
+                } else {
+                    self.editor
+                        .submit()
+                        .map_or(AppCommand::None, AppCommand::Submit)
+                }
+            }
             InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::OpenReverseHistory
@@ -458,6 +492,7 @@ impl AppModel {
             | InputAction::Delete
             | InputAction::MoveLeft
             | InputAction::MoveRight
+            | InputAction::ForwardCharOrSearch
             | InputAction::MoveWordLeft
             | InputAction::MoveWordRight
             | InputAction::MoveUp
@@ -570,6 +605,9 @@ impl AppModel {
                 self.active_insert_before = None;
             }
         }
+        if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+            self.refresh_timeline_search();
+        }
     }
 
     pub fn begin_work(&mut self) {
@@ -600,6 +638,20 @@ impl AppModel {
     }
 
     #[must_use]
+    pub(crate) fn timeline_search(&self) -> Option<TimelineSearchView<'_>> {
+        let Some(InputOverlay::TimelineSearch(state)) = &self.input_overlay else {
+            return None;
+        };
+        Some(TimelineSearchView {
+            query: &state.query,
+            current: state
+                .selected
+                .map_or(0, |selected| selected.saturating_add(1)),
+            total: state.matches.len(),
+        })
+    }
+
+    #[must_use]
     pub const fn has_input_overlay(&self) -> bool {
         self.input_overlay.is_some()
     }
@@ -619,6 +671,12 @@ impl AppModel {
 
     fn dismiss_input_overlay(&mut self) {
         self.input_overlay = None;
+    }
+
+    fn cancel_input_overlay(&mut self) {
+        if let Some(InputOverlay::TimelineSearch(state)) = self.input_overlay.take() {
+            self.editor.restore_snapshot(state.original_draft);
+        }
     }
 
     pub fn seed_history(&mut self, history: Vec<String>) {
@@ -717,9 +775,24 @@ impl AppModel {
         self.refresh_reverse_history(None);
     }
 
+    fn open_timeline_search(&mut self, query: String) {
+        let original_draft = self.editor.snapshot();
+        self.editor.replace_draft(String::new());
+        self.input_overlay = Some(InputOverlay::TimelineSearch(TimelineSearchState {
+            query: sanitize_text(&query).replace(['\r', '\n'], " "),
+            matches: Vec::new(),
+            selected: None,
+            original_draft,
+        }));
+        self.refresh_timeline_search();
+    }
+
     fn handle_overlay_input(&mut self, action: InputAction) -> AppCommand {
         if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
             return self.handle_completion_input(action);
+        }
+        if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+            return self.handle_timeline_search_input(action);
         }
         match action {
             InputAction::Escape => self.dismiss_input_overlay(),
@@ -757,6 +830,7 @@ impl AppModel {
             | InputAction::Delete
             | InputAction::MoveLeft
             | InputAction::MoveRight
+            | InputAction::ForwardCharOrSearch
             | InputAction::MoveWordLeft
             | InputAction::MoveWordRight
             | InputAction::MoveVisualStart
@@ -803,6 +877,10 @@ impl AppModel {
                 self.editor.move_right();
                 self.refresh_or_open_completion();
             }
+            InputAction::ForwardCharOrSearch => {
+                self.editor.move_right();
+                self.refresh_or_open_completion();
+            }
             InputAction::MoveWordLeft => {
                 self.editor.move_word_left();
                 self.refresh_or_open_completion();
@@ -825,6 +903,128 @@ impl AppModel {
             | InputAction::DeleteToLineEnd => {}
         }
         AppCommand::None
+    }
+
+    fn handle_timeline_search_input(&mut self, action: InputAction) -> AppCommand {
+        match action {
+            InputAction::Escape => self.cancel_input_overlay(),
+            InputAction::Submit | InputAction::MoveDown => self.move_timeline_search(1),
+            InputAction::MoveUp => self.move_timeline_search(-1),
+            InputAction::Insert(text) | InputAction::Paste(text) => {
+                let text = sanitize_text(&text).replace(['\r', '\n'], " ");
+                if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+                    state.query.push_str(&text);
+                }
+                self.refresh_timeline_search();
+            }
+            InputAction::Backspace => {
+                if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+                    if let Some((byte, _)) = state.query.grapheme_indices(true).next_back() {
+                        state.query.truncate(byte);
+                    }
+                }
+                self.refresh_timeline_search();
+            }
+            InputAction::CancelOrExit
+            | InputAction::OpenReverseHistory
+            | InputAction::NavigateTimeline(_)
+            | InputAction::Delete
+            | InputAction::MoveLeft
+            | InputAction::MoveRight
+            | InputAction::ForwardCharOrSearch
+            | InputAction::MoveWordLeft
+            | InputAction::MoveWordRight
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd
+            | InputAction::AcceptCompletion => {}
+        }
+        AppCommand::None
+    }
+
+    fn refresh_timeline_search(&mut self) {
+        let Some(InputOverlay::TimelineSearch(state)) = &self.input_overlay else {
+            return;
+        };
+        let query = state.query.clone();
+        let previous = state
+            .selected
+            .and_then(|selected| state.matches.get(selected))
+            .copied();
+        let previous_order = previous.and_then(|point| {
+            self.timeline
+                .items()
+                .iter()
+                .position(|item| item.id == point.item_id)
+        });
+        let matches = timeline_search_matches(&self.timeline, &query);
+        let selected = if matches.is_empty() {
+            None
+        } else if let Some(previous) = previous {
+            matches
+                .iter()
+                .position(|point| point.item_id == previous.item_id)
+                .or_else(|| {
+                    previous_order.and_then(|previous_order| {
+                        matches
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(match_index, point)| {
+                                self.timeline
+                                    .items()
+                                    .iter()
+                                    .position(|item| item.id == point.item_id)
+                                    .map(|item_index| {
+                                        (
+                                            item_index.abs_diff(previous_order),
+                                            usize::MAX.saturating_sub(item_index),
+                                            match_index,
+                                        )
+                                    })
+                            })
+                            .min()
+                            .map(|(_, _, match_index)| match_index)
+                    })
+                })
+                .or_else(|| matches.len().checked_sub(1))
+        } else {
+            matches.len().checked_sub(1)
+        };
+        let point = selected.and_then(|selected| matches.get(selected)).copied();
+        if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+            state.matches = matches;
+            state.selected = selected;
+        }
+        if let Some(point) = point {
+            let _ = self.timeline.hold_at(point);
+        }
+    }
+
+    fn move_timeline_search(&mut self, delta: isize) {
+        let point = {
+            let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay else {
+                return;
+            };
+            let len = state.matches.len();
+            if len == 0 {
+                return;
+            }
+            let selected = state.selected.unwrap_or(len - 1);
+            let next = if delta < 0 {
+                selected.checked_sub(1).unwrap_or(len - 1)
+            } else {
+                (selected + 1) % len
+            };
+            state.selected = Some(next);
+            state.matches[next]
+        };
+        let _ = self.timeline.hold_at(point);
     }
 
     fn refresh_or_open_completion(&mut self) {
@@ -1044,6 +1244,57 @@ fn completion_items(catalog: &[CompletionCommand], query: &str) -> Vec<Completio
         .collect()
 }
 
+fn timeline_search_command(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("/search")?;
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| rest.trim().to_string())
+}
+
+fn timeline_search_matches(timeline: &Timeline, query: &str) -> Vec<ContentPoint> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    timeline
+        .items()
+        .iter()
+        .filter_map(|item| {
+            case_insensitive_match_byte(&item.text, query).map(|byte| ContentPoint {
+                item_id: item.id,
+                byte,
+            })
+        })
+        .collect()
+}
+
+fn case_insensitive_match_byte(text: &str, query: &str) -> Option<usize> {
+    let folded_query = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if folded_query.is_empty() {
+        return None;
+    }
+    let mut folded_text = String::new();
+    let mut original_bytes = Vec::new();
+    for (original_byte, character) in text.char_indices() {
+        for folded_character in character.to_lowercase() {
+            let before = folded_text.len();
+            folded_text.push(folded_character);
+            original_bytes.extend(std::iter::repeat_n(
+                original_byte,
+                folded_text.len().saturating_sub(before),
+            ));
+        }
+    }
+    let folded_byte = folded_text.find(&folded_query)?;
+    original_bytes.get(folded_byte).copied()
+}
+
 fn file_completion_items(files: &[String], query: &str) -> Vec<CompletionItem> {
     let mut matches = files
         .iter()
@@ -1100,6 +1351,7 @@ fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ViewportAnchor;
 
     fn model() -> AppModel {
         AppModel::new(
@@ -1479,6 +1731,200 @@ mod tests {
         let _ = app.handle_input(InputAction::Escape, 80);
         assert_eq!(app.editor.text(), "@sam");
         assert!(!app.has_input_overlay());
+    }
+
+    #[test]
+    fn timeline_search_command_counts_messages_and_starts_at_the_newest() {
+        let mut app = model();
+        let older = app
+            .timeline
+            .push(ItemKind::User, "marker appears twice: marker")
+            .expect("older");
+        let newer = app
+            .timeline
+            .push(ItemKind::Assistant, "newer MARKER")
+            .expect("newer");
+        let _ = app.handle_input(InputAction::Insert("/search marker".to_string()), 80);
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "");
+        assert_eq!(
+            app.timeline_search(),
+            Some(TimelineSearchView {
+                query: "marker",
+                current: 2,
+                total: 2,
+            })
+        );
+        let ViewportAnchor::Held(point) = app.timeline.viewport else {
+            panic!("search should hold the selected match");
+        };
+        assert_eq!(point.item_id, newer);
+
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.timeline_search().expect("search").current, 1);
+        let ViewportAnchor::Held(point) = app.timeline.viewport else {
+            panic!("search should hold the older match");
+        };
+        assert_eq!(point.item_id, older);
+
+        // Target parity: Enter advances just like Down and leaves search open.
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert_eq!(app.timeline_search().expect("search").current, 2);
+        assert!(app.has_input_overlay());
+    }
+
+    #[test]
+    fn ctrl_f_is_forward_character_with_a_draft_and_search_when_empty() {
+        let mut app = model();
+        app.editor.insert("ab");
+        app.editor.move_left();
+        assert_eq!(app.editor.cursor(), 1);
+        let _ = app.handle_input(InputAction::ForwardCharOrSearch, 80);
+        assert_eq!(app.editor.cursor(), 2);
+        assert!(!app.has_input_overlay());
+
+        app.editor.replace_draft("");
+        let _ = app.handle_input(InputAction::ForwardCharOrSearch, 80);
+        assert_eq!(
+            app.timeline_search(),
+            Some(TimelineSearchView {
+                query: "",
+                current: 0,
+                total: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_search_escape_and_ctrl_c_restore_without_interrupt_or_exit_arm() {
+        let payload = (1..=12)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = model();
+        app.editor.insert_paste(payload.clone());
+        app.begin_work();
+        app.open_timeline_search("line".to_string());
+
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(!app.exit_armed);
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("restored compact paste should submit");
+        };
+        assert_eq!(submitted.prompt, payload);
+        assert_eq!(submitted.pastes.len(), 1);
+
+        let mut command = model();
+        command.begin_work();
+        let _ = command.handle_input(InputAction::Insert("/search marker".to_string()), 80);
+        let _ = command.handle_input(InputAction::Submit, 80);
+        assert_eq!(
+            command.handle_input(InputAction::Escape, 80),
+            AppCommand::None
+        );
+        assert_eq!(command.editor.text(), "");
+        assert!(!command.exit_armed);
+        assert_eq!(
+            command.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(
+            command.handle_input(InputAction::Escape, 80),
+            AppCommand::CancelWork
+        );
+    }
+
+    #[test]
+    fn timeline_search_refresh_preserves_identity_then_uses_nearest_newer_match() {
+        let mut app = model();
+        let older = app
+            .timeline
+            .push(ItemKind::User, "targetx older")
+            .expect("older");
+        let middle = app
+            .timeline
+            .push(ItemKind::Assistant, "target middle")
+            .expect("middle");
+        let newer = app
+            .timeline
+            .push(ItemKind::Notice, "targetx newer")
+            .expect("newer");
+        app.open_timeline_search("target".to_string());
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        let selected = match app.timeline.viewport {
+            ViewportAnchor::Held(point) => point.item_id,
+            _ => panic!("held search result"),
+        };
+        assert_eq!(selected, middle);
+
+        // The selected item no longer matches. Equidistant survivors prefer the
+        // newer item so refresh does not jump unpredictably.
+        let _ = app.handle_input(InputAction::Insert("x".to_string()), 80);
+        let selected = match app.timeline.viewport {
+            ViewportAnchor::Held(point) => point.item_id,
+            _ => panic!("held fallback result"),
+        };
+        assert_eq!(selected, newer);
+        assert_ne!(selected, older);
+
+        // Appending a new matching item keeps the existing selected identity.
+        app.apply_runtime(RuntimeUpdate::Warning("targetx newest".to_string()));
+        let selected_after_stream = match app.timeline.viewport {
+            ViewportAnchor::Held(point) => point.item_id,
+            _ => panic!("held preserved result"),
+        };
+        assert_eq!(selected_after_stream, newer);
+        assert_eq!(app.timeline_search().expect("search").total, 3);
+    }
+
+    #[test]
+    fn timeline_search_fold_mapping_returns_original_character_boundaries() {
+        let text = "zero İSTANBUL ẞtraße 東京";
+        for (query, expected) in [
+            ("i\u{307}stanbul", text.find('İ')),
+            ("ßTRAßE", text.find('ẞ')),
+            ("東京", text.find("東京")),
+        ] {
+            let byte = case_insensitive_match_byte(text, query).expect("Unicode match");
+            assert!(
+                text.is_char_boundary(byte),
+                "{query} mapped inside a codepoint"
+            );
+            assert_eq!(Some(byte), expected);
+        }
+        assert_eq!(case_insensitive_match_byte(text, "東京"), text.find("東京"));
+    }
+
+    #[test]
+    fn timeline_search_rejects_command_prefixes_and_no_match_navigation_is_inert() {
+        let mut app = model();
+        let _ = app.handle_input(InputAction::Insert("/searching".to_string()), 80);
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("non-command prefix should submit normally");
+        };
+        assert_eq!(submitted.prompt, "/searching");
+
+        app.open_timeline_search("absent".to_string());
+        assert_eq!(app.timeline_search().expect("search").current, 0);
+        assert_eq!(app.timeline_search().expect("search").total, 0);
+        let viewport = app.timeline.viewport;
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let _ = app.handle_input(InputAction::Submit, 80);
+        assert_eq!(app.timeline.viewport, viewport);
+        assert!(app.has_input_overlay());
     }
 
     #[test]
