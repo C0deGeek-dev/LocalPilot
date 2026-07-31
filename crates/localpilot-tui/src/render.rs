@@ -642,9 +642,6 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
             .unwrap_or(state.header.session_id.as_str())
     });
     let mut line2 = format!("{} · session:{short_session}", state.header.model);
-    if let Some(cost) = f.cost_usd {
-        line2.push_str(&format!("  est ${cost:.4}"));
-    }
     if let Some(reset) = &f.quota_reset {
         line2.push_str(&format!("  quota resets: {reset}"));
     }

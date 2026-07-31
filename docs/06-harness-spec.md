@@ -22,16 +22,19 @@ Harness mode is entered three ways:
 
 ## Mode and Permission Flags
 
-Mode and permission profile are selectable per launch. Flags override config;
-config overrides built-in defaults.
+The permission profile is selectable per launch. Flags override config; config
+overrides built-in defaults.
 
-- `--mode <agent|harness>`: operating mode. Default `agent`.
 - `--permission <default|relaxed|bypass>`: permission profile. Default `default`.
 - `--bypass`: shorthand for `--permission bypass`. Allow-all, no prompts. Must be
   set explicitly; the active profile is shown in the footer/status.
 
-These flags apply to the interactive REPL, print mode, and every `localpilot
-harness` subcommand. The `localpilot harness` subcommands imply `--mode harness`.
+The **operating mode is selected structurally by the subcommand**, not by a
+flag: the `localpilot harness` subcommands run harness mode, while `chat`,
+`print`, and `eval` run agent mode. `[harness] mode` records the default label
+for that concept; it is a reserved config key and does not gate behaviour on its
+own. The permission flags apply to the interactive REPL, print mode, and every
+`localpilot harness` subcommand.
 
 Config equivalents:
 
@@ -240,7 +243,8 @@ Inputs:
 
 - `brief.md`
 - repository summary
-- optional `--replan`
+
+Re-running `localpilot harness plan` regenerates `PROGRESS.md` from the brief.
 
 Output:
 

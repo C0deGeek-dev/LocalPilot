@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Cleanup: removed dead surfaces and corrected drifted docs.** Deleted unused
+  internal code (an unwired provider retry policy, an unpopulated `cost_usd`
+  footer estimate with no pricing source, and the unwired `write_loop_lesson`
+  writeback) and the dead `--mode` CLI-override plumbing. Corrected the docs that
+  advertised unbuilt surfaces: `--mode` and `--replan` are not flags (mode is
+  selected by subcommand; re-running `harness plan` regenerates the plan), and
+  the loop-outcome writeback + `[memory] outcome_downweight` are documented as
+  reserved/not-yet-wired. Reserved config keys (`[harness] mode`,
+  `[memory] outcome_downweight`) and the `ManualPin` pack source are unchanged
+  (kept for SemVer-stable config + future use). The skills research report now
+  says a skill is *eligible* for `skill_load` rather than claiming it was loaded.
+
 - **Security: writes to a secret-like path now prompt even in a trusted
   workspace.** A trusted in-workspace write was auto-allowed with no regard for
   the target, so overwriting `.env`, an SSH key, or another credential file was a

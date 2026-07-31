@@ -529,33 +529,38 @@ async fn run_discovery(
     Ok(SkillsOutcome { had_failure: false })
 }
 
-/// Whether a relevant match may be auto-loaded into a research run: only an
-/// installed, model-discoverable skill, and only when `[skills].autonomous_discovery`
-/// is enabled. An available/discovered match, a user-only skill, or a project with
-/// autonomous discovery off all stay report-only (LocalHub#41).
+/// Whether a relevant match is *eligible* for the model to `skill_load` during a
+/// run: only an installed, model-discoverable skill, and only when
+/// `[skills].autonomous_discovery` is enabled. This research flow is review-only
+/// (ADR-0099) — it never loads a skill itself; it reports eligibility so the model
+/// can choose to `skill_load` on a normal turn. An available/discovered match, a
+/// user-only skill, or a project with autonomous discovery off all stay
+/// report-only (LocalHub#41).
 #[must_use]
-pub fn should_autoload(skill: &DiscoveredSkill, autonomous_discovery: bool) -> bool {
+pub fn is_autoload_eligible(skill: &DiscoveredSkill, autonomous_discovery: bool) -> bool {
     autonomous_discovery && skill.state == MatchState::Installed && skill.discoverable
 }
 
-/// Report which installed, discoverable skills are loaded into this run under
-/// `[skills].autonomous_discovery`; note the report-only posture when the toggle is
-/// off but a discoverable installed skill would otherwise have loaded.
+/// Report which installed, discoverable skills are eligible for the model to
+/// `skill_load` under `[skills].autonomous_discovery`; note the report-only
+/// posture when the toggle is off but a discoverable installed skill would
+/// otherwise be eligible.
 fn report_autoload(
     ranked: &Ranked,
     autonomous_discovery: bool,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let relevant = || ranked.matches.iter().filter(|m| m.score > 0.0);
-    let loaded: Vec<&str> = relevant()
-        .filter(|m| should_autoload(&m.skill, autonomous_discovery))
+    let eligible: Vec<&str> = relevant()
+        .filter(|m| is_autoload_eligible(&m.skill, autonomous_discovery))
         .map(|m| m.skill.name.as_str())
         .collect();
-    if !loaded.is_empty() {
+    if !eligible.is_empty() {
         writeln!(
             out,
-            "loaded into this run ([skills].autonomous_discovery on): {}",
-            loaded.join(", ")
+            "eligible for autonomous load ([skills].autonomous_discovery on) — \
+             the model may `skill_load` these: {}",
+            eligible.join(", ")
         )?;
     } else if !autonomous_discovery
         && relevant().any(|m| m.skill.state == MatchState::Installed && m.skill.discoverable)
@@ -1054,14 +1059,14 @@ mod tests {
             source_path: None,
             discoverable,
         };
-        // Toggle on: only an installed, discoverable skill auto-loads.
-        assert!(should_autoload(&mk(MatchState::Installed, true), true));
+        // Toggle on: only an installed, discoverable skill is load-eligible.
+        assert!(is_autoload_eligible(&mk(MatchState::Installed, true), true));
         // A user-only installed skill stays report-only.
-        assert!(!should_autoload(&mk(MatchState::Installed, false), true));
-        // An available match never auto-loads (it is not installed).
-        assert!(!should_autoload(&mk(MatchState::Available, true), true));
-        // Toggle off: nothing auto-loads, even an installed discoverable skill.
-        assert!(!should_autoload(&mk(MatchState::Installed, true), false));
+        assert!(!is_autoload_eligible(&mk(MatchState::Installed, false), true));
+        // An available match is never eligible (it is not installed).
+        assert!(!is_autoload_eligible(&mk(MatchState::Available, true), true));
+        // Toggle off: nothing is eligible, even an installed discoverable skill.
+        assert!(!is_autoload_eligible(&mk(MatchState::Installed, true), false));
     }
 
     #[tokio::test]

@@ -23,7 +23,17 @@ use localmind_core::{
 use localmind_store::ReviewQueue;
 
 use crate::error::LearningError;
-use crate::loop_lesson::fnv_hex;
+
+/// A small FNV-1a hex digest for stable, content-addressed lesson ids, so every
+/// review candidate derives its id the same way.
+pub(crate) fn fnv_hex(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
 
 /// Advisory confidence for a completion-retrospective or driver-intervention candidate —
 /// origins with no independent match-quality signal to derive one from. Deliberately below

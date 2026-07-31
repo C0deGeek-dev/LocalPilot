@@ -282,12 +282,18 @@ store answered.
   holds *no accepted memory yet*; (c) a non-empty store whose memory the *query
   missed*.
 
-## Loop-Outcome Lesson Writeback
+## Loop-Outcome Lesson Writeback (planned, not yet wired)
 
-When a human accepts or rejects a self-improvement patch proposal, the outcome is
-written back as a durable lesson so the next loop run retrieves it and stops
-repeating a mistake (LocalMind decision `D-LM-0014`). This reuses the **existing**
-review-gated path — it builds no new store:
+> **Status: designed, not shipped.** The accept/reject signal for a
+> self-improvement patch lives in LocalMind's review flow, not in this repo, so
+> there is no in-repo event to hook yet. This section is the intended design; the
+> writeback is not wired to a live caller. The shipped, adjacent capability is the
+> completion-retrospective bridge below, which uses `write_retrospective_lesson`.
+
+When a human accepts or rejects a self-improvement patch proposal, the outcome
+would be written back as a durable lesson so the next loop run retrieves it and
+stops repeating a mistake (LocalMind decision `D-LM-0014`). It reuses the
+**existing** review-gated path — it builds no new store:
 
 - A loop-outcome lesson carries `{ trigger, what, why, applies_to, outcome,
   provenance_ref }` and is enqueued as a `CandidateLesson` through the normal
@@ -308,8 +314,8 @@ review-gated path — it builds no new store:
   candidate never reaches accepted memory; a bad *accepted* lesson is curated with
   the existing `memory delete` (supersede) path. No special-case store.
 
-The host surface is `localpilot_localmind::write_loop_lesson`; everything else
-(review, promote, search, delete) is the existing LocalMind loop.
+When wired, this would enqueue candidates through the same review/promote/search/
+delete path as every other LocalMind lesson — no special-case surface.
 
 ## Completion-Retrospective Lesson Bridge
 

@@ -1,4 +1,4 @@
-﻿# Implementation Plan
+# Implementation Plan
 
 ## Phase 0: Repository Foundation
 
@@ -139,10 +139,10 @@ Tasks:
 - implement `harness intake`
 - implement `harness plan`
 - persist intake transcript
-- support `--auto`
-- support `--refine`
-- support `--replan`
 - validate generated artifacts before writing
+
+Deferred (not shipped): the `--auto` / `--refine` / `--replan` refinement flags.
+Re-running `harness plan` regenerates `PROGRESS.md` from the brief.
 
 Done when:
 

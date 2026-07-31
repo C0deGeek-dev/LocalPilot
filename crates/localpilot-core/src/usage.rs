@@ -26,14 +26,12 @@ impl TokenUsage {
     }
 }
 
-/// A usage summary suitable for the TUI footer: token counts plus elapsed time
-/// and an optional cost estimate. Throughput is derived, never stored.
+/// A usage summary suitable for the TUI footer: token counts plus elapsed time.
+/// Throughput is derived, never stored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub tokens: TokenUsage,
     pub elapsed_secs: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_estimate_usd: Option<f64>,
 }
 
 impl UsageSummary {
@@ -75,7 +73,6 @@ mod tests {
                 output_tokens: 200,
             },
             elapsed_secs: 2.0,
-            cost_estimate_usd: Some(0.01),
         };
         assert!((s.output_tokens_per_sec() - 100.0).abs() < f64::EPSILON);
         let back: UsageSummary = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();

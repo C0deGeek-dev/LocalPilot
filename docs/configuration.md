@@ -182,7 +182,7 @@ discovery time (it never runs model inference).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `mode` | `agent` \| `harness` | `agent` | Operating mode |
+| `mode` | `agent` \| `harness` | `agent` | Default operating-mode label. Reserved: the active mode is selected by the subcommand (`localpilot harness …` runs harness mode; `chat`/`print`/`eval` run agent mode); this key does not gate behaviour on its own. |
 | `attempts_per_step` | int | `3` | Max attempts per plan step |
 | `auto_commit` | bool | `true` | Commit each completed step |
 | `test_command` | string | none | Command run to gate step completion |
@@ -238,7 +238,7 @@ endpoint is configured.
 | `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
 | `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
 | `injection_language_filter` | bool | `true` | Skip an accepted memory clearly about a different programming language than the workspace's; a language-agnostic lesson stays eligible. |
-| `outcome_downweight` | bool | `false` | **Outcome-aware down-weight.** When the uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). Off by default: a single eval is a weak signal, so the host acts on the A/B verdict (joined by the per-turn `memories_used` audit), not a live turn, and the action is reversible. |
+| `outcome_downweight` | bool | `false` | **Outcome-aware down-weight (reserved; engine built, not yet wired to a live eval).** The intent: when an uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). The down-weight engine and this default-off lever exist, but no in-repo uplift-eval runner reads the key yet, so it is currently inert. Off by default: a single eval is a weak signal, and the action must stay reversible. |
 
 ### `[docs]`
 

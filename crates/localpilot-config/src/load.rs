@@ -18,7 +18,7 @@ use figment::Figment;
 use localpilot_core::Secret;
 
 use crate::error::ConfigError;
-use crate::schema::{CheckConfig, Config, McpEnvEntry, Mode, PermissionProfile, ProviderAuth};
+use crate::schema::{CheckConfig, Config, McpEnvEntry, PermissionProfile, ProviderAuth};
 
 /// The file locations a load should consider. Either may be `None` (absent).
 #[derive(Debug, Clone, Default)]
@@ -44,7 +44,6 @@ impl ConfigPaths {
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
     pub provider_default: Option<String>,
-    pub mode: Option<Mode>,
     pub permission_profile: Option<PermissionProfile>,
 }
 
@@ -71,9 +70,6 @@ pub fn load(paths: &ConfigPaths, cli: &CliOverrides) -> Result<Config, ConfigErr
 
     if let Some(provider) = &cli.provider_default {
         figment = figment.merge(Serialized::default("provider.default", provider));
-    }
-    if let Some(mode) = &cli.mode {
-        figment = figment.merge(Serialized::default("harness.mode", mode));
     }
     if let Some(profile) = &cli.permission_profile {
         figment = figment.merge(Serialized::default("permissions.profile", profile));

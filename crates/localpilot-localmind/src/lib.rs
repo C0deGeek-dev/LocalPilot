@@ -22,7 +22,6 @@ mod inspector;
 mod knowledge_tool;
 mod layered;
 mod layered_tool;
-mod loop_lesson;
 mod memory_search_tool;
 mod ops;
 mod pack;
@@ -72,7 +71,6 @@ pub use inspector::{
 pub use knowledge_tool::KnowledgeSearch;
 pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
-pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, freshness_pass,

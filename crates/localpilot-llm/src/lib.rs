@@ -19,7 +19,6 @@ mod openai;
 mod provider;
 mod registry;
 mod request;
-mod retry;
 mod vision;
 
 pub use anthropic::AnthropicProvider;
@@ -37,7 +36,6 @@ pub use provider::{
 };
 pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
 pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
-pub use retry::{retry, RetryPolicy};
 pub use vision::{resolve_vision, resolve_vision_with_source, VisionSource};
 
 /// Fuzzing entry points (enabled by the `fuzzing` feature; not public API).

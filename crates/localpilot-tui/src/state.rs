@@ -73,7 +73,6 @@ pub struct FooterStats {
     pub tokens_per_sec: f64,
     pub context_used: usize,
     pub context_limit: usize,
-    pub cost_usd: Option<f64>,
     pub quota_reset: Option<String>,
     /// The requested reasoning-effort level, when one is set.
     pub effort: Option<String>,
