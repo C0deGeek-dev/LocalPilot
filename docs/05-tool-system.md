@@ -360,10 +360,12 @@ Tool result text must be:
 - explicit about truncation
 - free of secrets where redaction is possible
 
-Oversized output is bounded at the dispatch chokepoint after redaction: the
-head and tail stay in context with an explicit truncation note, and the full
-redacted output spills to the retention store under the call id, where
-`read_tool_output` can fetch it.
+Oversized output is bounded at a single seam — the dispatch chokepoint, after
+redaction: the head and tail stay in context with an explicit truncation note,
+and the *full* redacted output spills to the retention store under the call id,
+where `read_tool_output` can fetch it. Tools return their complete output to
+that seam; there is no per-tool pre-cap that would drop data before it is
+retained, so a large result is always recoverable in full.
 
 ## Input Validation, Readable Errors, and Repair
 

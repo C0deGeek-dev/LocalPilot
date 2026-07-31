@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Fixed: large tool output is no longer lost past 64 KiB.** A tool result
+  larger than the old per-tool 64 KiB cap was truncated *before* it reached the
+  retention store, so `read_tool_output` could only page back the first 64 KiB.
+  Tools now hand their full output to the single dispatch-seam bound, which keeps
+  a head/tail view in context and retains the complete output — so an oversized
+  `search_text` or `run_shell` result is recoverable in full.
+
 - **Fixed: phase-cadence quality-gate checks now run.** A ratified check with
   `cadence = "phase"` (a whole-suite test, dependency check, or `audit`) is
   evaluated at the plan boundary — when a completed step leaves no incomplete

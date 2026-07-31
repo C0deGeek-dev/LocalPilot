@@ -362,6 +362,130 @@ fn format_tool_output(tool: &str, output: &str, is_error: bool) -> String {
 }
 
 #[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::tool::OutputRetention;
+    use async_trait::async_trait;
+    use localpilot_core::{ToolCall, ToolUseId};
+    use localpilot_sandbox::{
+        Effect, Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
+    };
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// An in-memory retention store standing in for the host's disk-backed one.
+    #[derive(Default)]
+    struct MemoryRetention(Mutex<HashMap<String, String>>);
+
+    impl crate::tool::OutputRetention for MemoryRetention {
+        fn retain(&self, id: &str, output: &str) -> Result<(), String> {
+            self.0.lock().unwrap().insert(id.to_string(), output.to_string());
+            Ok(())
+        }
+        fn fetch(&self, id: &str) -> Result<Option<String>, String> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+    }
+
+    /// A tool that emits a large output through `cap`, exactly as a real builtin
+    /// (`search_text`, `run_shell`, …) does — the seam the fix touches.
+    struct BigTool(String);
+
+    #[async_trait]
+    impl Tool for BigTool {
+        fn name(&self) -> &str {
+            "big"
+        }
+        fn description(&self) -> &str {
+            "emits a large output"
+        }
+        fn schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        fn effects(
+            &self,
+            _input: &Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<Vec<Effect>, crate::error::ToolError> {
+            Ok(Vec::new())
+        }
+        async fn invoke(
+            &self,
+            _input: Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<crate::ToolOutput, crate::error::ToolError> {
+            Ok(crate::builtins::cap(self.0.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn output_over_the_per_tool_cap_is_retained_in_full_and_readable() {
+        // A ~128 KiB output — well past the old 64 KiB per-tool cap — with a unique
+        // marker on its own final line. Before the fix the per-tool cap dropped
+        // everything past 64 KiB *before* retention, so the tail marker never
+        // reached the store and `read_tool_output` could not recover it.
+        let tail = "END-OF-BIG-OUTPUT-MARKER";
+        let body = format!("{}\n", "a".repeat(63)).repeat(2000);
+        let tail_line = 2001; // the 2000 body lines, then the marker on line 2001
+        let big = format!("{body}{tail}");
+        assert!(big.len() > 64 * 1024);
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let retention = MemoryRetention::default();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: Some(&retention),
+            processes: None,
+            agents: None,
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(BigTool(big.clone())));
+        registry.register(Box::new(crate::builtins::ReadToolOutput));
+        let engine = PermissionEngine::new(Profile::Bypass, Vec::new());
+        let approver = ScriptedApprover::always();
+
+        // An alphanumeric call id so the retention key equals it (retention_key
+        // only strips storage-unsafe characters).
+        let call = ToolCall::new(ToolUseId::new("bigcall1"), "big", json!({}));
+        let result = registry.dispatch(&call, &ctx, &engine, &approver).await;
+        assert!(!result.is_error);
+        assert!(
+            result.output.contains("retained under id bigcall1"),
+            "the bounded result must point at the retained output: {}",
+            result.output
+        );
+
+        // The store holds the FULL output, tail included — the whole point.
+        let stored = retention.fetch("bigcall1").unwrap().unwrap();
+        assert_eq!(stored.len(), big.len(), "the full output must be retained");
+        assert!(
+            stored.ends_with(tail),
+            "content past the old 64 KiB cap must be retained"
+        );
+
+        // And `read_tool_output` can page to the tail via the line range (the
+        // marker is on the last line).
+        let read = ToolCall::new(
+            ToolUseId::new("readback1"),
+            "read_tool_output",
+            json!({ "id": "bigcall1", "start_line": tail_line, "end_line": tail_line }),
+        );
+        let readback = registry.dispatch(&read, &ctx, &engine, &approver).await;
+        assert!(!readback.is_error);
+        assert!(
+            readback.output.contains(tail),
+            "read_tool_output must recover the tail: {}",
+            readback.output
+        );
+    }
+}
+
+#[cfg(test)]
 mod catalog_tests {
     use super::*;
     use async_trait::async_trait;

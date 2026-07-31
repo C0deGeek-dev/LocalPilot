@@ -73,8 +73,9 @@ fn paths_detail(input: &Value, prefix: &str) -> String {
     detail_preview(&format!("{prefix} {joined}"))
 }
 
-/// Cap on a tool's textual output before truncation.
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Bound on the slice a single `read_tool_output` call returns. The full output
+/// is already retained, so this is a non-lossy display bound, not a data cap.
+const MAX_READBACK_BYTES: usize = 64 * 1024;
 
 /// Soft cap on a single `write_file` payload. A write larger than this risks
 /// being truncated in transit (an oversized tool call can arrive as malformed
@@ -83,17 +84,34 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// source file, so it only trips on the pathological single-huge-file path.
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
+/// Wrap a tool's full textual output. Bounding the model-visible view *and*
+/// spilling the complete text to the retention store both happen once, at the
+/// registry seam (`bound_output`) — so tools return their whole output here and
+/// never lose data to a per-tool pre-truncation. A large result is retained in
+/// full and paged back with `read_tool_output`; the model still only sees the
+/// bounded view in context.
 pub(crate) fn cap(text: String) -> ToolOutput {
-    if text.len() <= MAX_OUTPUT_BYTES {
+    ToolOutput::ok(text)
+}
+
+/// Bound the slice a `read_tool_output` call returns. The full output stays
+/// retained under the call id, so this truncation loses nothing — it only keeps
+/// a single read-back from flooding the context, and points the model at the
+/// line-range parameters to page further. `read_tool_output` bounds itself
+/// because the registry seam deliberately does not re-bound it.
+fn bound_readback(text: String) -> ToolOutput {
+    if text.len() <= MAX_READBACK_BYTES {
         return ToolOutput::ok(text);
     }
-    let mut end = MAX_OUTPUT_BYTES;
+    let mut end = MAX_READBACK_BYTES;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut capped = text[..end].to_string();
-    capped.push_str("\n... [output truncated]");
-    ToolOutput::truncated(capped)
+    let mut out = text[..end].to_string();
+    out.push_str(
+        "\n... [read-back truncated; the full output is still retained — narrow start_line/end_line to page further]",
+    );
+    ToolOutput::ok(out)
 }
 
 /// Heuristic: does this byte slice look like binary (non-text) data?
@@ -1377,7 +1395,7 @@ impl Tool for ReadToolOutput {
                     .join("\n")
             }
         };
-        Ok(cap(selected))
+        Ok(bound_readback(selected))
     }
 }
 
