@@ -56,10 +56,12 @@ pub enum Effect {
         inside_workspace: bool,
         secret_like: bool,
     },
-    /// Write or overwrite a path.
+    /// Write or overwrite a path. `secret_like` and `inside_workspace` drive the
+    /// decision the same way they do for a read.
     WritePath {
         inside_workspace: bool,
         overwrite: bool,
+        secret_like: bool,
     },
     /// Run a classified command.
     RunCommand(CommandClass),
@@ -100,6 +102,9 @@ impl Effect {
                 ..
             } => "read outside the workspace",
             Effect::ReadPath { .. } => "read a file",
+            Effect::WritePath {
+                secret_like: true, ..
+            } => "write a secret-like path",
             Effect::WritePath {
                 inside_workspace: false,
                 ..
@@ -203,8 +208,10 @@ fn allowlist_may_relax(effect: Effect) -> bool {
             secret_like,
         } => inside_workspace && !secret_like,
         Effect::WritePath {
-            inside_workspace, ..
-        } => inside_workspace,
+            inside_workspace,
+            secret_like,
+            ..
+        } => inside_workspace && !secret_like,
         Effect::Network => true,
     }
 }
@@ -227,10 +234,14 @@ fn base_decision(request: &PermissionRequest) -> Decision {
         | Effect::Network => ask_or_deny(request.interactivity),
         Effect::WritePath {
             inside_workspace: true,
+            secret_like,
             ..
         } => {
-            // Writing inside a trusted workspace is allowed; otherwise prompt.
-            if request.trusted {
+            // Writing inside a trusted workspace is allowed — but never silently
+            // for a secret-like path (.env, keys, .ssh/…). Overwriting a
+            // credential file always prompts, matching the read side, so a trusted
+            // workspace cannot mask a clobbered secret.
+            if !secret_like && request.trusted {
                 Decision::Allow
             } else {
                 ask_or_deny(request.interactivity)
@@ -406,6 +417,7 @@ mod tests {
         let outside_overwrite = Effect::WritePath {
             inside_workspace: false,
             overwrite: true,
+            secret_like: false,
         };
         assert_eq!(
             outside_overwrite.risk_label(),
@@ -414,8 +426,16 @@ mod tests {
         let inside_overwrite = Effect::WritePath {
             inside_workspace: true,
             overwrite: true,
+            secret_like: false,
         };
         assert_eq!(inside_overwrite.risk_label(), "overwrite a file");
+        // A secret-like write reads as secret-like ahead of any other detail.
+        let secret_write = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: true,
+        };
+        assert_eq!(secret_write.risk_label(), "write a secret-like path");
     }
 
     fn req(effect: Effect, interactivity: Interactivity, trusted: bool) -> PermissionRequest {
@@ -430,6 +450,43 @@ mod tests {
 
     fn engine(profile: Profile) -> PermissionEngine {
         PermissionEngine::new(profile, Vec::new())
+    }
+
+    #[test]
+    fn a_secret_like_write_in_a_trusted_workspace_is_never_silently_allowed() {
+        // A trusted in-workspace write is auto-allowed, but a secret-like path
+        // (.env, keys, .ssh/…) must never be silently overwritten: it prompts
+        // like a secret read in every prompting profile, and denies headless.
+        let secret_write = Effect::WritePath {
+            inside_workspace: true,
+            overwrite: true,
+            secret_like: true,
+        };
+        for profile in [Profile::Default, Profile::Relaxed] {
+            assert_eq!(
+                engine(profile).decide(&req(secret_write, Interactivity::Interactive, true)),
+                Decision::Ask,
+                "{profile:?} must ask before overwriting a secret in a trusted workspace",
+            );
+            assert_eq!(
+                engine(profile).decide(&req(secret_write, Interactivity::NonInteractive, true)),
+                Decision::Deny,
+                "{profile:?} must deny a secret overwrite headless",
+            );
+        }
+        // A non-secret trusted in-workspace write is still allowed (no regression).
+        assert_eq!(
+            engine(Profile::Default).decide(&req(
+                Effect::WritePath {
+                    inside_workspace: true,
+                    overwrite: true,
+                    secret_like: false,
+                },
+                Interactivity::NonInteractive,
+                true,
+            )),
+            Decision::Allow,
+        );
     }
 
     #[test]
@@ -503,6 +560,7 @@ mod tests {
             Effect::WritePath {
                 inside_workspace: false,
                 overwrite: false,
+                secret_like: false,
             },
             Effect::ReadPath {
                 inside_workspace: false,
@@ -535,6 +593,7 @@ mod tests {
             Effect::WritePath {
                 inside_workspace: false,
                 overwrite: true,
+                secret_like: true,
             },
             Effect::RunCommand(CommandClass::Destructive),
             Effect::RunCommand(CommandClass::Privileged),

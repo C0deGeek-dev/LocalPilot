@@ -166,6 +166,7 @@ fn write_path_effect(ctx: &ToolContext<'_>, path: &Path, overwrite: bool) -> Eff
     Effect::WritePath {
         inside_workspace: ctx.workspace.contains(path),
         overwrite,
+        secret_like: is_secret_like(path),
     }
 }
 

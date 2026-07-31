@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Security: writes to a secret-like path now prompt even in a trusted
+  workspace.** A trusted in-workspace write was auto-allowed with no regard for
+  the target, so overwriting `.env`, an SSH key, or another credential file was a
+  silent Allow. Secret-like writes now prompt (and deny non-interactively) under
+  `default` and `relaxed`, matching how secret-like *reads* are already gated —
+  the allowlist can no longer relax them either. Ordinary in-workspace writes are
+  unchanged.
+
 - **Fixed: large tool output is no longer lost past 64 KiB.** A tool result
   larger than the old per-tool 64 KiB cap was truncated *before* it reached the
   retention store, so `read_tool_output` could only page back the first 64 KiB.

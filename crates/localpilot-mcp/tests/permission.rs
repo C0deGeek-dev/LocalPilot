@@ -36,6 +36,7 @@ async fn an_mcp_write_is_denied_like_a_builtin_write() {
         vec![Effect::WritePath {
             inside_workspace: false,
             overwrite: false,
+            secret_like: false,
         }],
         transport,
     );
