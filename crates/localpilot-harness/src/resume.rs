@@ -363,12 +363,52 @@ pub async fn resume_one_step_with_events(
     git(root, &["add", "PROGRESS.md"])?;
     git(root, &["commit", "-m", "harness: update progress"])?;
 
+    // Phase-cadence quality gate. Steps carry a per-step gate (`StepComplete`);
+    // phase-cadence checks — the expensive full-suite / dependency / audit set a
+    // project ratifies with `cadence = "phase"` — evaluate on a phase boundary. In
+    // this flat-step plan model the plan boundary is the phase boundary: once the
+    // step just committed leaves no incomplete step, the phase checks run here,
+    // once, rather than on every step. Without this the ratified phase checks
+    // would never run, because the per-step gate only evaluates `StepComplete`.
+    let mut gate = final_gate;
+    let plan_complete = read(&progress_path)
+        .ok()
+        .and_then(|raw| Progress::parse(&raw).ok())
+        .is_some_and(|updated| updated.next_incomplete().is_none());
+    if plan_complete {
+        let phase_outcomes = runtime
+            .run_gate_checks(checks, Trigger::PhaseComplete, root)
+            .await;
+        if !phase_outcomes.is_empty() {
+            // Reduce through the same `quality_gate` rule the step gate uses (it
+            // triggers on both cadences). A blocking phase finding (e.g. a failing
+            // `audit`) is surfaced to the human — the step stays committed, but the
+            // run stops with the reason rather than reporting a clean completion.
+            let phase_ctx = RuleContext {
+                gate_outcomes: phase_outcomes.clone(),
+                ..RuleContext::default()
+            };
+            let phase_block =
+                first_blocking_reason(rule_engine, Trigger::PhaseComplete, &phase_ctx);
+            gate.extend(phase_outcomes);
+            if let Some(reason) = phase_block {
+                return Ok(ResumeOutcome {
+                    step_number: step.number,
+                    committed: true,
+                    blocked_reason: Some(format!("phase quality gate — {reason}")),
+                    paused: false,
+                    gate,
+                });
+            }
+        }
+    }
+
     Ok(ResumeOutcome {
         step_number: step.number,
         committed: true,
         blocked_reason: None,
         paused: false,
-        gate: final_gate,
+        gate,
     })
 }
 

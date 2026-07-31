@@ -56,7 +56,7 @@ ratified gate below shares the file (ADR-0012).
 mode = "agent"
 attempts_per_step = 3
 auto_commit = true
-test_command = "cargo test"   # shorthand; equivalent to a single cadence="phase" check
+test_command = "cargo test"   # shorthand; equivalent to a single cadence="step" check
 claim_gate = "off"            # "warn" flags a final-reply action claim no verified call backs (ADR-0023)
 
 [harness.rules]
@@ -399,11 +399,13 @@ See ADR-0028 for the decision.
 > discipline (stale state, tests, commit hygiene, launch discipline) on top of
 > that boundary — it is not the boundary.
 >
-> Two further live-path caveats: `decision_logged` is not implemented as a rule —
-> a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it;
-> and phase-cadence `quality_gate` checks require a `phase_complete` trigger the
-> live loop does not emit outside tests. This list is the source of truth; treat
-> a rule's prose below as its *intent*, gated by this status.
+> One further live-path caveat: `decision_logged` is not implemented as a rule —
+> a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it.
+> Phase-cadence `quality_gate` checks now run at the plan boundary — when a
+> committed step leaves no incomplete step, the `phase`-cadence checks
+> (whole-suite test, dependency, audit) run once and a blocking finding stops the
+> run with its reason. This list is the source of truth; treat a rule's prose
+> below as its *intent*, gated by this status.
 
 #### `no_stale_uncommitted`
 

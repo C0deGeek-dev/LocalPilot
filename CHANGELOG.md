@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Fixed: phase-cadence quality-gate checks now run.** A ratified check with
+  `cadence = "phase"` (a whole-suite test, dependency check, or `audit`) is
+  evaluated at the plan boundary — when a completed step leaves no incomplete
+  step — instead of never running. A blocking phase finding (e.g. a failing
+  audit) stops `harness resume` with its reason rather than reporting a clean
+  completion. Step-cadence checks are unchanged.
+
 ## v2.6.0 - 2026-07-27
 
 Coordinated LocalX release.

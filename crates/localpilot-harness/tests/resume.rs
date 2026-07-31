@@ -476,6 +476,86 @@ fn ratification_allowance_lets_the_gate_run_headless_but_grants_nothing_else() {
 }
 
 #[tokio::test]
+async fn a_phase_cadence_check_runs_at_the_plan_boundary() {
+    let dir = sample_repo();
+    let root = dir.path();
+
+    // The single step completes cleanly, so it also completes the plan. A
+    // phase-cadence audit is ratified: it must run at that plan boundary and,
+    // failing at block severity, surface a reason — even though the step itself
+    // committed (phase checks run post-commit). On the pre-fix loop the phase
+    // check never ran, so this would report a clean completion.
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("c1", "write_file", write_marker_call())
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let mut audit = failing_check("audit", Some(RuleSeverity::Block));
+    audit.cadence = Cadence::Phase;
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[audit], 3)
+        .await
+        .unwrap();
+
+    // The step committed, but the phase gate ran and blocked on the audit.
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    let reason = outcome.blocked_reason.unwrap_or_default();
+    assert!(
+        reason.contains("phase quality gate") && reason.contains("audit"),
+        "expected a phase-gate audit block, got: {reason}"
+    );
+    // The phase check appears in the rendered gate.
+    assert!(
+        outcome.gate.iter().any(|o| o.name == "audit"),
+        "the phase-cadence check must appear in the gate outcomes"
+    );
+}
+
+#[tokio::test]
+async fn a_phase_cadence_check_is_skipped_until_the_plan_completes() {
+    // A two-step plan: completing step 1 does NOT reach the plan boundary, so the
+    // phase-cadence audit must not run yet (it would run only after the final
+    // step). This pins that phase checks fire at the boundary, not every step.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("brief.md"), "# Brief: two\n\n## Summary\n\nTwo.\n").unwrap();
+    std::fs::write(
+        root.join("PROGRESS.md"),
+        "# Progress: two\nBranch: feature/two\n\n## Steps\n\n- [ ] 1. First\n- [ ] 2. Second\n",
+    )
+    .unwrap();
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-m", "initial"]);
+
+    let provider = Arc::new(
+        FakeProvider::new()
+            .tool_call("c1", "write_file", write_marker_call())
+            .text("done"),
+    );
+    let mut rt = runtime(root, Arc::clone(&provider));
+
+    let rules = RuleEngine::with_baseline(&Default::default());
+    let mut audit = failing_check("audit", Some(RuleSeverity::Block));
+    audit.cadence = Cadence::Phase;
+    let outcome = resume_one_step(&mut rt, root, &rules, None, &[audit], 3)
+        .await
+        .unwrap();
+
+    // Step 1 committed and the phase audit did NOT run (a second step remains).
+    assert!(outcome.committed, "{:?}", outcome.blocked_reason);
+    assert!(outcome.blocked_reason.is_none(), "{:?}", outcome.blocked_reason);
+    assert!(
+        !outcome.gate.iter().any(|o| o.name == "audit"),
+        "the phase-cadence check must not run before the plan boundary"
+    );
+}
+
+#[tokio::test]
 async fn an_unratified_check_never_runs() {
     // Security boundary: `resume_one_step` runs only the checks it is handed (the
     // ratified gate). Discovery's proposal is never executed — passing an empty

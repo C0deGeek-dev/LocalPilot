@@ -798,6 +798,13 @@ where
         }
         if outcome.committed {
             writeln!(out, "step {} complete", outcome.step_number)?;
+            // A committed step can still carry a reason when the phase-cadence
+            // gate ran (plan boundary) and blocked — e.g. a failing dependency
+            // audit. Surface it and stop rather than reporting a clean run.
+            if let Some(reason) = &outcome.blocked_reason {
+                writeln!(out, "phase gate blocked: {reason}")?;
+                break;
+            }
         } else {
             writeln!(
                 out,
