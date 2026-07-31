@@ -50,6 +50,15 @@ turn and is never written to prompt history. Provider declarations may set
 `supports_vision = true`, while `[discovery] vision_probe = true` enables the
 existing best-effort local-server capability probe.
 
+Ctrl+G edits the idle composer in a foreground external editor. The host checks
+`LOCALPILOT_EDITOR`, then `VISUAL`, then `EDITOR`; the value may contain a quoted
+executable path and arguments. If none is set, the fallback is Notepad on
+Windows and `vi` elsewhere. Editors that normally detach should be configured
+with their wait flag (for example, `code --wait`) so LocalPilot can read the
+temporary draft before it is removed. The temporary file contains visible
+placeholder text only—not compact-paste or image payload bytes—and edited input
+is capped at 8 MiB.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

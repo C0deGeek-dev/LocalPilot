@@ -27,9 +27,12 @@ is SemVer-stable; the configuration schema stability policy is in
   scrollbar navigation, precise composer clicks, boundary-aware history,
   reverse and timeline search, fuzzy slash/file completion, atomic compact
   multiline paste, and clipboard-image placeholders whose bytes stay out of
-  prompt history. Detailed pickers/conversation surfaces, accessibility and the
-  remaining terminal matrix remain branch work; the temporary selector is
-  removed when feature parity is accepted.
+  prompt history. Ctrl+G temporarily restores the ordinary terminal, opens the
+  draft in a foreground external editor, then rebuilds the full-screen frame
+  without losing its timeline or opaque attachment identity. Detailed pickers/
+  conversation surfaces, accessibility and the remaining terminal matrix remain
+  branch work; the temporary selector is removed when feature parity is
+  accepted.
 
 ## v2.6.0 - 2026-07-27
 

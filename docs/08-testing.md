@@ -48,7 +48,8 @@ not need a real console:
   tests also cover plain-submit versus newline, Escape cancellation, ordered
   pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
   timestamps, async workspace-file completion, reverse/timeline search routing,
-  mouse selection/scrollbar gestures and isolated clipboard-image attachments.
+  mouse selection/scrollbar gestures, isolated clipboard-image attachments, and
+  external-editor command resolution plus terminal leave/re-entry ordering.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.

@@ -35,6 +35,7 @@ tui = [
     "dep:base64",
     "dep:image",
     "dep:time",
+    "dep:tempfile",
 ]
 # LocalMind is always linked; this feature remains as a compatibility alias for
 # existing build commands.
@@ -79,6 +80,7 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 time = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

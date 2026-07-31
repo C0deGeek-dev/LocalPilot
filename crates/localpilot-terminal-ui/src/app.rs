@@ -113,6 +113,7 @@ pub enum InputAction {
     DeleteWordLeft,
     DeleteToLineStart,
     DeleteToLineEnd,
+    OpenExternalEditor,
     AcceptCompletion,
     Submit,
 }
@@ -199,6 +200,7 @@ pub enum AppCommand {
     Copy(String),
     Exit,
     NavigateTimeline(TimelineNavigation),
+    OpenExternalEditor,
     Submit(SubmittedInput),
 }
 
@@ -290,6 +292,7 @@ pub struct AppModel {
     pub stream_bytes: usize,
     pub dialog: Option<DialogState>,
     input_overlay: Option<InputOverlay>,
+    external_edit_snapshot: Option<EditorSnapshot>,
     command_catalog: Vec<CompletionCommand>,
     workspace_files: Vec<String>,
     workspace_files_ready: bool,
@@ -332,6 +335,7 @@ impl AppModel {
             stream_bytes: 0,
             dialog: None,
             input_overlay: None,
+            external_edit_snapshot: None,
             command_catalog: Vec::new(),
             workspace_files: Vec::new(),
             workspace_files_ready: false,
@@ -471,6 +475,12 @@ impl AppModel {
                 self.editor.delete_to_line_end();
                 AppCommand::None
             }
+            InputAction::OpenExternalEditor
+                if self.focus == Focus::Composer && self.work == WorkState::Idle =>
+            {
+                self.external_edit_snapshot = Some(self.editor.snapshot());
+                AppCommand::OpenExternalEditor
+            }
             InputAction::AcceptCompletion => AppCommand::None,
             InputAction::Submit if self.focus == Focus::Composer => {
                 if let Some(query) = timeline_search_command(self.editor.text()) {
@@ -506,6 +516,7 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor
             | InputAction::Submit => AppCommand::None,
         }
     }
@@ -724,6 +735,40 @@ impl AppModel {
         Some(self.editor.insert_image(media_type, data, byte_len))
     }
 
+    /// Placeholder-only text handed to an external editor after Ctrl+G.
+    /// Opaque paste and image payloads remain in the private snapshot.
+    #[must_use]
+    pub fn external_edit_text(&self) -> Option<&str> {
+        self.external_edit_snapshot
+            .as_ref()
+            .map(EditorSnapshot::text)
+    }
+
+    /// Complete an external-edit round trip. An unchanged file restores the
+    /// exact snapshot (including atomic units and caret); any real edit becomes
+    /// ordinary text so modified placeholders cannot resend stale payloads.
+    pub fn finish_external_edit(&mut self, edited: Option<String>) {
+        let Some(snapshot) = self.external_edit_snapshot.take() else {
+            return;
+        };
+        let Some(edited) = edited else {
+            self.editor.restore_snapshot(snapshot);
+            return;
+        };
+        let mut edited = sanitize_text(&edited);
+        if edited
+            .strip_suffix('\n')
+            .is_some_and(|without_newline| without_newline == snapshot.text())
+        {
+            edited.pop();
+        }
+        if edited == snapshot.text() {
+            self.editor.restore_snapshot(snapshot);
+        } else {
+            self.editor.replace_draft(edited);
+        }
+    }
+
     /// Add one submitted prompt at its stable transcript position. The host
     /// supplies presentation-only trailing metadata such as a local time.
     pub fn append_prompt(
@@ -858,6 +903,7 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -916,7 +962,8 @@ impl AppModel {
             | InputAction::MoveTextEnd
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
-            | InputAction::DeleteToLineEnd => {}
+            | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor => {}
         }
         AppCommand::None
     }
@@ -959,6 +1006,7 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
@@ -1787,6 +1835,89 @@ mod tests {
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::Copy(placeholder)
         );
+    }
+
+    #[test]
+    fn external_edit_preserves_opaque_units_only_when_placeholder_text_is_unchanged() {
+        let mut unchanged = model();
+        let paste_secret = format!("{}\nline 2\nline 3\nline 4", "PASTE_SECRET");
+        let _ = unchanged.handle_input(InputAction::Paste(paste_secret), 80);
+        unchanged
+            .attach_image("image/png", "IMAGE_SECRET", 2048)
+            .expect("image attachment");
+        assert_eq!(
+            unchanged.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::OpenExternalEditor
+        );
+        let external = unchanged
+            .external_edit_text()
+            .expect("external edit snapshot")
+            .to_string();
+        assert!(!external.contains("PASTE_SECRET"));
+        assert!(!external.contains("IMAGE_SECRET"));
+        unchanged.finish_external_edit(Some(format!("{external}\n")));
+        let AppCommand::Submit(submitted) = unchanged.handle_input(InputAction::Submit, 80) else {
+            panic!("restored atomic draft should submit");
+        };
+        assert_eq!(submitted.pastes.len(), 1);
+        assert_eq!(submitted.images.len(), 1);
+
+        let mut changed = model();
+        let placeholder = changed
+            .attach_image("image/png", "DROP_IMAGE_SECRET", 1024)
+            .expect("image attachment");
+        assert_eq!(
+            changed.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::OpenExternalEditor
+        );
+        changed.finish_external_edit(Some(placeholder.replace("image", "edited image")));
+        let AppCommand::Submit(submitted) = changed.handle_input(InputAction::Submit, 80) else {
+            panic!("edited literal draft should submit");
+        };
+        assert!(submitted.images.is_empty());
+        assert!(submitted.pastes.is_empty());
+        assert!(submitted.prompt.contains("edited image"));
+
+        let mut failed = model();
+        failed
+            .attach_image("image/png", "RESTORED_IMAGE_SECRET", 512)
+            .expect("image attachment");
+        assert_eq!(
+            failed.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::OpenExternalEditor
+        );
+        failed.finish_external_edit(None);
+        let AppCommand::Submit(submitted) = failed.handle_input(InputAction::Submit, 80) else {
+            panic!("failed editor launch should restore the draft");
+        };
+        assert_eq!(submitted.images.len(), 1);
+    }
+
+    #[test]
+    fn external_edit_is_idle_composer_only() {
+        let mut overlay = model();
+        overlay.set_command_catalog([command("model", "Switch model")]);
+        let _ = overlay.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        assert_eq!(
+            overlay.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::None
+        );
+        assert!(overlay.external_edit_text().is_none());
+
+        let mut dialog = model();
+        dialog.require_workspace_trust("fixture");
+        assert_eq!(
+            dialog.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::None
+        );
+
+        let mut busy = model();
+        busy.begin_work();
+        assert_eq!(
+            busy.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::None
+        );
+        assert!(busy.external_edit_text().is_none());
     }
 
     #[test]

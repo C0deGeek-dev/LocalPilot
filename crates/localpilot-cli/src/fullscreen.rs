@@ -1,9 +1,12 @@
 //! Crossterm host for the backend-neutral full-screen chat model.
 
 use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::future::Future;
 use std::io::{self, Stdout, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, OnceLock};
 use std::time::Duration;
@@ -38,6 +41,8 @@ use crate::repl::{ApprovalCall, ClipboardImageRead};
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
+const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
+const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
 static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
@@ -185,7 +190,14 @@ pub(crate) async fn run(
             .map(expand_history_entry)
             .collect(),
     );
-    let result = run_event_loop(&mut terminal, &mut app, context, &mut workspace_index).await;
+    let result = run_event_loop(
+        &mut terminal,
+        &mut modes,
+        &mut app,
+        context,
+        &mut workspace_index,
+    )
+    .await;
     let _ = terminal.show_cursor();
     drop(terminal);
     modes.restore();
@@ -294,8 +306,232 @@ fn attach_clipboard_image_with_capability(
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct EditorCommand {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl std::fmt::Debug for EditorCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EditorCommand")
+            .field("program", &self.program)
+            .field("args", &format_args!("<{} redacted>", self.args.len()))
+            .finish()
+    }
+}
+
+fn resolve_editor_command() -> Result<EditorCommand> {
+    resolve_editor_command_with(|name| std::env::var_os(name))
+        .map_err(anyhow::Error::msg)
+        .context("resolve external editor")
+}
+
+fn resolve_editor_command_with(
+    mut lookup: impl FnMut(&str) -> Option<OsString>,
+) -> std::result::Result<EditorCommand, String> {
+    for name in [CHAT_EDITOR_ENV, "VISUAL", "EDITOR"] {
+        let Some(value) = lookup(name) else {
+            continue;
+        };
+        let value = value
+            .into_string()
+            .map_err(|_| format!("{name} contains non-Unicode text"))?;
+        let mut parts = split_editor_command(&value)?;
+        let Some(program) = parts.first().cloned() else {
+            return Err(format!("{name} is empty"));
+        };
+        parts.remove(0);
+        return Ok(EditorCommand {
+            program,
+            args: parts,
+        });
+    }
+    Ok(EditorCommand {
+        program: if cfg!(windows) {
+            OsString::from("notepad.exe")
+        } else {
+            OsString::from("vi")
+        },
+        args: Vec::new(),
+    })
+}
+
+fn split_editor_command(value: &str) -> std::result::Result<Vec<OsString>, String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut token_started = false;
+    for character in value.trim().chars() {
+        match (quote, character) {
+            (Some(open), current_quote) if open == current_quote => {
+                quote = None;
+                token_started = true;
+            }
+            (None, '"' | '\'') => {
+                quote = Some(character);
+                token_started = true;
+            }
+            (None, whitespace) if whitespace.is_whitespace() => {
+                if token_started {
+                    parts.push(OsString::from(std::mem::take(&mut current)));
+                    token_started = false;
+                }
+            }
+            _ => {
+                current.push(character);
+                token_started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err("external editor command has an unterminated quote".to_string());
+    }
+    if token_started {
+        parts.push(OsString::from(current));
+    }
+    Ok(parts)
+}
+
+trait SuspensibleModes {
+    type Capabilities;
+
+    fn leave(&mut self);
+    fn reenter(&mut self) -> Result<Self::Capabilities>;
+}
+
+struct ModeSuspension<'a, M: SuspensibleModes> {
+    modes: &'a mut M,
+    reentry_attempted: bool,
+}
+
+impl<'a, M: SuspensibleModes> ModeSuspension<'a, M> {
+    fn new(modes: &'a mut M) -> Self {
+        modes.leave();
+        Self {
+            modes,
+            reentry_attempted: false,
+        }
+    }
+
+    fn resume(mut self) -> Result<M::Capabilities> {
+        self.reentry_attempted = true;
+        self.modes.reenter()
+    }
+}
+
+impl<M: SuspensibleModes> Drop for ModeSuspension<'_, M> {
+    fn drop(&mut self) {
+        // An early non-panic return still restores the application. During a
+        // panic, remaining in the already-restored plain terminal is safer; the
+        // panic hook cannot run a second time after unwinding re-enters modes.
+        if !self.reentry_attempted && !std::thread::panicking() {
+            let _ = self.modes.reenter();
+        }
+    }
+}
+
+async fn with_modes_suspended<M, F, T>(modes: &mut M, operation: F) -> Result<(T, M::Capabilities)>
+where
+    M: SuspensibleModes,
+    F: Future<Output = T>,
+{
+    let suspension = ModeSuspension::new(modes);
+    let output = operation.await;
+    let capabilities = suspension.resume()?;
+    Ok((output, capabilities))
+}
+
+async fn launch_external_editor(command: &EditorCommand, path: &Path) -> Result<()> {
+    let status = tokio::process::Command::new(&command.program)
+        .args(&command.args)
+        .arg(path)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| format!("start editor {}", command.program.to_string_lossy()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("external editor exited with {status}"))
+    }
+}
+
+fn read_external_edit(path: &Path) -> Result<String> {
+    let size = std::fs::metadata(path)
+        .context("inspect edited prompt")?
+        .len();
+    if size > MAX_EXTERNAL_EDITOR_BYTES {
+        anyhow::bail!("edited prompt exceeds the 8 MiB limit");
+    }
+    let bytes = std::fs::read(path).context("read edited prompt")?;
+    String::from_utf8(bytes).context("edited prompt is not valid UTF-8")
+}
+
+async fn edit_composer_externally(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    modes: &mut TerminalModes,
+    app: &mut AppModel,
+) -> Result<()> {
+    let Some(draft) = app.external_edit_text().map(str::to_owned) else {
+        return Ok(());
+    };
+    let prepared = (|| -> Result<_> {
+        let directory = tempfile::Builder::new()
+            .prefix("localpilot-edit-")
+            .tempdir()
+            .context("create external-editor directory")?;
+        let path = directory.path().join("LOCALPILOT_PROMPT.md");
+        std::fs::write(&path, draft).context("write external-editor draft")?;
+        let command = resolve_editor_command()?;
+        Ok((directory, path, command))
+    })();
+    let (directory, path, command) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            app.finish_external_edit(None);
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "external editor could not start: {error}"
+            )));
+            return Ok(());
+        }
+    };
+
+    let _ = terminal.show_cursor();
+    let operation = async {
+        let mut stdout = io::stdout();
+        writeln!(
+            stdout,
+            "Editing prompt; close the editor to return to LocalPilot…"
+        )
+        .context("write external-editor handoff")?;
+        stdout.flush().context("flush external-editor handoff")?;
+        launch_external_editor(&command, &path).await?;
+        read_external_edit(&path)
+    };
+    let (edited, capabilities) = with_modes_suspended(modes, operation).await?;
+    app.capabilities = capabilities;
+    drop(directory);
+    match edited {
+        Ok(edited) => app.finish_external_edit(Some(edited)),
+        Err(error) => {
+            app.finish_external_edit(None);
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "external editor kept the original draft: {error}"
+            )));
+        }
+    }
+    terminal.clear().context("clear after external editor")?;
+    let _ = draw_synchronized(terminal, app)?;
+    Ok(())
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    modes: &mut TerminalModes,
     app: &mut AppModel,
     context: HostContext<'_>,
     workspace_index: &mut WorkspaceFileIndex,
@@ -345,6 +581,9 @@ async fn run_event_loop(
                 match app.handle_input(action, hit_map.editor_width) {
                     AppCommand::Exit => break,
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
+                    AppCommand::OpenExternalEditor => {
+                        edit_composer_externally(terminal, modes, app).await?;
+                    }
                     AppCommand::Submit(submitted) => {
                         let Some(item_id) = app.append_prompt(
                             submitted.display.clone(),
@@ -631,7 +870,9 @@ fn handle_turn_event(
                     }
                     false
                 }
-                AppCommand::None | AppCommand::NavigateTimeline(_) => false,
+                AppCommand::None
+                | AppCommand::OpenExternalEditor
+                | AppCommand::NavigateTimeline(_) => false,
             }
         }
         Event::Paste(text) => {
@@ -1044,6 +1285,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Char('b') if ctrl && !alt => Some(InputAction::MoveLeft),
         KeyCode::Char('e') if ctrl && !alt => Some(InputAction::MoveLineEnd),
         KeyCode::Char('f') if ctrl && !alt => Some(InputAction::ForwardCharOrSearch),
+        KeyCode::Char('g') if ctrl && !alt => Some(InputAction::OpenExternalEditor),
         KeyCode::Char('h') if ctrl && !alt => Some(InputAction::Backspace),
         KeyCode::Char('j') if ctrl && !alt => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Char('k') if ctrl && !alt => Some(InputAction::DeleteToLineEnd),
@@ -1159,6 +1401,20 @@ impl TerminalModes {
         }
         restore_terminal_modes();
         self.active = false;
+    }
+}
+
+impl SuspensibleModes for TerminalModes {
+    type Capabilities = TerminalCapabilities;
+
+    fn leave(&mut self) {
+        self.restore();
+    }
+
+    fn reenter(&mut self) -> Result<Self::Capabilities> {
+        let (replacement, capabilities) = Self::enter()?;
+        *self = replacement;
+        Ok(capabilities)
     }
 }
 
@@ -1452,6 +1708,11 @@ mod tests {
                 InputAction::ForwardCharOrSearch,
             ),
             (
+                KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+                InputAction::OpenExternalEditor,
+            ),
+            (
                 KeyCode::Char('h'),
                 KeyModifiers::CONTROL,
                 InputAction::Backspace,
@@ -1509,6 +1770,107 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
+    }
+
+    #[test]
+    fn external_editor_resolution_honors_precedence_quotes_and_redacts_arguments() {
+        let command = resolve_editor_command_with(|name| match name {
+            CHAT_EDITOR_ENV => Some(OsString::from(
+                "\"C:\\Program Files\\Editor\\editor.exe\" --wait --token SECRET_ARG",
+            )),
+            "VISUAL" => Some(OsString::from("ignored-visual")),
+            "EDITOR" => Some(OsString::from("ignored-editor")),
+            _ => None,
+        })
+        .expect("editor command");
+        assert_eq!(
+            command.program,
+            OsString::from("C:\\Program Files\\Editor\\editor.exe")
+        );
+        assert_eq!(
+            command.args,
+            [
+                OsString::from("--wait"),
+                OsString::from("--token"),
+                OsString::from("SECRET_ARG")
+            ]
+        );
+        assert!(!format!("{command:?}").contains("SECRET_ARG"));
+        assert!(split_editor_command("\"unterminated").is_err());
+    }
+
+    #[test]
+    fn external_editor_readback_rejects_invalid_utf8_and_oversize_files() {
+        let directory = tempfile::tempdir().expect("editor fixture");
+        let path = directory.path().join("LOCALPILOT_PROMPT.md");
+        std::fs::write(&path, b"edited draft").expect("valid fixture");
+        assert_eq!(
+            read_external_edit(&path).expect("valid UTF-8 fixture"),
+            "edited draft"
+        );
+
+        std::fs::write(&path, [0xff, 0xfe]).expect("invalid fixture");
+        assert!(read_external_edit(&path)
+            .expect_err("invalid UTF-8")
+            .to_string()
+            .contains("not valid UTF-8"));
+
+        let file = std::fs::File::create(&path).expect("oversize fixture");
+        file.set_len(MAX_EXTERNAL_EDITOR_BYTES + 1)
+            .expect("sparse oversize fixture");
+        assert!(read_external_edit(&path)
+            .expect_err("oversize file")
+            .to_string()
+            .contains("8 MiB"));
+    }
+
+    #[derive(Default)]
+    struct FakeModes {
+        events: Vec<&'static str>,
+    }
+
+    impl SuspensibleModes for FakeModes {
+        type Capabilities = &'static str;
+
+        fn leave(&mut self) {
+            self.events.push("leave");
+        }
+
+        fn reenter(&mut self) -> Result<Self::Capabilities> {
+            self.events.push("reenter");
+            Ok("capabilities")
+        }
+    }
+
+    #[tokio::test]
+    async fn suspended_operation_reenters_after_success_and_operation_error() {
+        let mut success_modes = FakeModes::default();
+        let (value, capabilities) = with_modes_suspended(&mut success_modes, async { 42 })
+            .await
+            .expect("successful round trip");
+        assert_eq!(value, 42);
+        assert_eq!(capabilities, "capabilities");
+        assert_eq!(success_modes.events, ["leave", "reenter"]);
+
+        let mut failed_operation_modes = FakeModes::default();
+        let (operation, _) = with_modes_suspended(&mut failed_operation_modes, async {
+            Err::<(), _>("injected spawn failure")
+        })
+        .await
+        .expect("terminal re-entry still succeeds");
+        assert_eq!(operation, Err("injected spawn failure"));
+        assert_eq!(failed_operation_modes.events, ["leave", "reenter"]);
+    }
+
+    #[test]
+    fn suspended_operation_leaves_a_plain_terminal_during_panic_unwind() {
+        let mut modes = FakeModes::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _suspension = ModeSuspension::new(&mut modes);
+            panic!("injected editor panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(modes.events, ["leave"]);
     }
 
     #[test]

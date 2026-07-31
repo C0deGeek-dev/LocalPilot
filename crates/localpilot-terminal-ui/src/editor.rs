@@ -118,6 +118,12 @@ pub(crate) struct EditorSnapshot {
     units: Vec<ActiveUnit>,
 }
 
+impl EditorSnapshot {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EditorToken {
     pub range: Range<usize>,
