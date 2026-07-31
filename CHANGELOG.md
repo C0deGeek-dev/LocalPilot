@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Improved: memory retrieval now fuses keyword and semantic rankings.** When
+  the stored-vector rerank is enabled (`[retrieval] rerank` + an embedding
+  endpoint), memory injection now blends the keyword (bm25) ranking with the
+  dense (cosine) ranking via Reciprocal Rank Fusion, so a memory both retrievers
+  agree on rises instead of letting a single noisy cosine dominate. Keyword search
+  stays the candidate floor and the default (rerank off / no embeddings) path is
+  byte-identical. New `[memory] injection_dedup_ttl_turns` (default `0`, off)
+  suppresses re-injecting a memory already shown within the last N turns so a
+  persistently-relevant lesson doesn't crowd out the rest. The audit still equals
+  the injection.
+
 - **Added: Anthropic prompt caching (opt-in per provider).** Set
   `prompt_caching = true` on an `anthropic` provider to place an ephemeral
   `cache_control` breakpoint on the stable prefix (tools + the stable system

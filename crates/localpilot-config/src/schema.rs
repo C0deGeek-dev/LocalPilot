@@ -711,6 +711,11 @@ pub struct MemoryConfig {
     /// byte-identical. The gate only re-filters keyword candidates by semantic
     /// relevance; it never selects.
     pub injection_min_cosine: f32,
+    /// Suppress re-injecting an accepted memory that was injected within the last
+    /// N turns, so a persistently-relevant lesson does not consume the per-turn
+    /// budget every turn and crowd out other memory. `0` disables (the default) —
+    /// a memory may be injected on consecutive turns, the prior behaviour.
+    pub injection_dedup_ttl_turns: u32,
     /// Outcome-aware down-weight: when the uplift A/B eval shows an injected
     /// lesson coincided with an arm under-performing its control, route that
     /// lesson to review (never delete it). **Off by default** — a single eval is a
@@ -729,6 +734,7 @@ impl Default for MemoryConfig {
             injection_skip_categories: Vec::new(),
             injection_language_filter: true,
             injection_min_cosine: 0.6,
+            injection_dedup_ttl_turns: 0,
             outcome_downweight: false,
         }
     }

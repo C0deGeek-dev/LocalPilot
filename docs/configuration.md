@@ -239,6 +239,7 @@ endpoint is configured.
 | `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
 | `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
 | `injection_language_filter` | bool | `true` | Skip an accepted memory clearly about a different programming language than the workspace's; a language-agnostic lesson stays eligible. |
+| `injection_dedup_ttl_turns` | int | `0` | Suppress re-injecting an accepted memory that was already injected within the last N turns, so a persistently-relevant lesson does not spend the per-turn budget every turn and crowd out other memory. `0` disables (the default) — a memory may be injected on consecutive turns. Dropping a suppressed memory keeps it out of both the injected block and the memories-used audit. |
 | `outcome_downweight` | bool | `false` | **Outcome-aware down-weight (reserved; engine built, not yet wired to a live eval).** The intent: when an uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). The down-weight engine and this default-off lever exist, but no in-repo uplift-eval runner reads the key yet, so it is currently inert. Off by default: a single eval is a weak signal, and the action must stay reversible. |
 
 ### `[docs]`

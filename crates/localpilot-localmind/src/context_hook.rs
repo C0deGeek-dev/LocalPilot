@@ -9,8 +9,10 @@
 //! This lives in the engine crate (not the host binary) so the pull/push gate is
 //! unit-testable; the host just registers it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use localpilot_config::{CliOverrides, ConfigPaths, IngestConfig, IngestMode};
 use localpilot_harness::{ContextContribution, ContextHook, SessionRuntime};
@@ -38,6 +40,15 @@ pub struct LocalMindContext {
     /// The workspace's dominant language, detected once per session (a bounded
     /// scan) and cached, so language-relevance filtering costs nothing per turn.
     language: OnceLock<Option<&'static str>>,
+    /// Per-session injection-dedup state: memory id -> the turn tick it was last
+    /// injected on. Bounded by pruning entries past the TTL each turn. Interior
+    /// mutability because `contribute` takes `&self`; the hook is created per
+    /// session, so this state is naturally per-session.
+    recently_injected: Mutex<HashMap<String, u64>>,
+    /// Monotonic per-turn counter, advanced once each `contribute`. On the real
+    /// path `contribute` runs once per turn (via `HookFabric`), so a tick is a
+    /// turn.
+    turn_tick: AtomicU64,
 }
 
 impl LocalMindContext {
@@ -47,6 +58,8 @@ impl LocalMindContext {
         Self {
             root: root.into(),
             language: OnceLock::new(),
+            recently_injected: Mutex::new(HashMap::new()),
+            turn_tick: AtomicU64::new(0),
         }
     }
 
@@ -94,7 +107,38 @@ impl LocalMindContext {
             skip_categories: memory.injection_skip_categories.clone(),
             language_filter: memory.injection_language_filter,
             min_cosine: memory.injection_min_cosine,
+            dedup_ttl_turns: memory.injection_dedup_ttl_turns,
         }
+    }
+
+    /// Advance the per-turn tick and, when the dedup TTL is on, drop the memory
+    /// ids that were injected within the last `ttl` turns so they are not
+    /// re-injected turn after turn. Returns the ids currently suppressed. TTL `0`
+    /// disables dedup entirely (the default) — an empty suppressed set, no change.
+    fn dedup_suppressed(&self, ttl_turns: u32) -> std::collections::HashSet<String> {
+        let tick = self.turn_tick.fetch_add(1, Ordering::Relaxed);
+        if ttl_turns == 0 {
+            return std::collections::HashSet::new();
+        }
+        let ttl = u64::from(ttl_turns);
+        let mut injected = self
+            .recently_injected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Prune anything past the TTL so the map stays bounded, and collect what is
+        // still within it (injected on one of the last `ttl` turns).
+        injected.retain(|_, stamp| tick.saturating_sub(*stamp) < ttl);
+        injected.keys().cloned().collect()
+    }
+
+    /// Record that `id` was injected on the current turn (the tick just advanced by
+    /// [`Self::dedup_suppressed`]), so it is suppressed for the next `ttl` turns.
+    fn mark_injected(&self, id: &str) {
+        let tick = self.turn_tick.load(Ordering::Relaxed).saturating_sub(1);
+        self.recently_injected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_string(), tick);
     }
 }
 
@@ -112,6 +156,10 @@ struct InjectionPolicy {
     /// (the semantic relevance gate). `0.0` disables. A hit without a cosine
     /// (no embedding endpoint / unembedded lesson) always passes — best-effort.
     min_cosine: f32,
+    /// Suppress re-injecting a memory that was injected within the last N turns,
+    /// so a persistently-relevant lesson does not consume the budget every turn.
+    /// `0` disables (the default) — a memory can be injected on consecutive turns.
+    dedup_ttl_turns: u32,
 }
 
 impl InjectionPolicy {
@@ -124,6 +172,7 @@ impl InjectionPolicy {
             skip_categories: Vec::new(),
             language_filter: true,
             min_cosine: 0.0,
+            dedup_ttl_turns: 0,
         }
     }
 
@@ -244,6 +293,9 @@ impl ContextHook for LocalMindContext {
             .language_filter
             .then(|| self.workspace_language())
             .flatten();
+        // Advance the per-turn tick once and get the ids to suppress this turn
+        // (injected within the dedup TTL). TTL 0 => empty set => no change.
+        let suppressed = self.dedup_suppressed(policy.dedup_ttl_turns);
         match crate::ops::context_hits(&self.root, prompt, task_language) {
             Ok(hits) => {
                 let mut block = String::from("Relevant accepted project memory:\n");
@@ -260,12 +312,21 @@ impl ContextHook for LocalMindContext {
                     if cue_ids.contains(&hit.memory_id) {
                         continue;
                     }
+                    // Recently injected within the dedup TTL: don't re-spend the
+                    // budget on it this turn. Dropping it here keeps it out of both
+                    // the injected block and the memories-used audit.
+                    if suppressed.contains(&hit.memory_id) {
+                        continue;
+                    }
                     let line = format!("- {}\n", hit.snippet.trim());
                     if block.chars().count() + line.chars().count() > policy.char_budget {
                         break;
                     }
                     block.push_str(&line);
                     wrote = true;
+                    if policy.dedup_ttl_turns > 0 {
+                        self.mark_injected(&hit.memory_id);
+                    }
                     memories.push(MemoryUsed {
                         id: hit.memory_id,
                         score: hit.score,
@@ -482,6 +543,83 @@ mod tests {
         assert!(hook.memories_used("audio playback latency").is_empty());
     }
 
+    /// Seed one accepted memory into a fresh project with the given `[memory]`
+    /// config body, returning the project dir.
+    fn project_with_one_memory(memory_config: &str) -> tempfile::TempDir {
+        use localmind_core::{
+            Confidence, EvidenceKind, EvidenceRef, LessonCategory, MemoryEntry, MemoryEntryId,
+            MemoryScope, MemoryStatus, SyncMeta,
+        };
+        use localmind_store::MemoryPersistence;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Learning/store config lives in .localmind.toml; the injection `[memory]`
+        // policy is read from .localpilot.toml by `localpilot_config::load`.
+        std::fs::write(
+            dir.path().join(".localmind.toml"),
+            "[learning]\nenabled = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            format!("[memory]\n{memory_config}\n"),
+        )
+        .unwrap();
+        let entry = MemoryEntry {
+            id: MemoryEntryId::new("mem-cache"),
+            scope: MemoryScope::Project,
+            body: "prefer the cache-aside pattern for the read path".to_string(),
+            category: LessonCategory::ProjectConvention,
+            confidence: Confidence::new(0.9).unwrap(),
+            source_session: None,
+            evidence: vec![EvidenceRef::new(EvidenceKind::ManualNote, "seeded")],
+            tags: Vec::new(),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            created_at: None,
+            updated_at: None,
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+            status: MemoryStatus::Active,
+            sync_meta: SyncMeta::default(),
+        };
+        MemoryPersistence::open_project(dir.path())
+            .unwrap()
+            .persist_memory_entry(&entry)
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn injection_dedup_ttl_suppresses_then_re_injects() {
+        // TTL 2: a memory injected this turn is suppressed the next turn, then
+        // eligible again. The prompt is held constant so only the dedup state
+        // changes the outcome.
+        let dir = project_with_one_memory("injection_dedup_ttl_turns = 2");
+        let hook = LocalMindContext::new(dir.path());
+        let query = "how should I structure the read path";
+        let injected = |h: &LocalMindContext| h.memories_used(query).iter().any(|m| m.id == "mem-cache");
+
+        assert!(injected(&hook), "turn 1: the memory is injected");
+        assert!(!injected(&hook), "turn 2: within TTL, suppressed");
+        assert!(injected(&hook), "turn 3: TTL elapsed, injected again");
+    }
+
+    #[test]
+    fn injection_dedup_off_by_default_injects_every_turn() {
+        // TTL 0 (the default): no suppression — the memory is injected on
+        // consecutive turns, the prior behaviour.
+        let dir = project_with_one_memory("injection_dedup_ttl_turns = 0");
+        let hook = LocalMindContext::new(dir.path());
+        let query = "how should I structure the read path";
+        for turn in 1..=3 {
+            assert!(
+                hook.memories_used(query).iter().any(|m| m.id == "mem-cache"),
+                "turn {turn}: dedup off, always injected"
+            );
+        }
+    }
+
     #[test]
     fn a_broken_memory_store_is_handled_best_effort_at_the_hook_seam() {
         // context_hits now propagates a corrupt-store error (proven in ops). At
@@ -599,6 +737,7 @@ mod tests {
             skip_categories: Vec::new(),
             language_filter: true,
             min_cosine: 0.6,
+            dedup_ttl_turns: 0,
         };
         assert!(
             !gate.skips(10, "CodePattern", Some(0.81)),
@@ -624,6 +763,7 @@ mod tests {
             char_budget: 1_200,
             skip_categories: Vec::new(),
             language_filter: true,
+            dedup_ttl_turns: 0,
         };
         assert!(!disabled.skips(10, "CodePattern", Some(0.01)));
     }

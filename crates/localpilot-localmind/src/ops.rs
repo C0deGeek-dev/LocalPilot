@@ -1269,6 +1269,69 @@ mod tests {
         );
     }
 
+    fn seed_body(root: &Path, body: &str) {
+        let lesson = crate::SeedLesson {
+            body: body.to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        crate::seed_memory(root, &[lesson], false).unwrap();
+    }
+
+    /// Deterministic offline before/after retrieval eval: hybrid (RRF) must not
+    /// rank the truly-relevant memory *below* lexical-only. The fixture is built to
+    /// lift — the relevant memory is keyword-weak but semantically closest — so it
+    /// also demonstrates a strict improvement (precision@1 0 -> 1).
+    #[test]
+    fn hybrid_retrieval_does_not_regress_and_lifts_a_built_to_lift_case() {
+        let base_url = content_aware_embeddings_server(64);
+
+        // Relevance: only the "cypress" memory answers the query; it is keyword-weak
+        // (one query-term match) while a decoy is keyword-strong (two matches).
+        let relevant = "cypress"; // the stub embeds this memory ~= the query
+        let seed = |root: &Path| {
+            seed_body(root, "redwood redwood build lesson"); // keyword-strong decoy
+            seed_body(root, "maple build lesson"); // keyword decoy
+            seed_body(root, "cypress build tips"); // relevant, keyword-weak
+        };
+        let query = "redwood build";
+        let precision_at_1 =
+            |hits: &[SearchHit]| usize::from(hits.first().is_some_and(|h| h.snippet.contains(relevant)));
+
+        // Baseline: lexical only (rerank off). The keyword-strong decoy wins.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!("[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n"),
+        )
+        .unwrap();
+        seed(dir.path());
+        let lexical = context_hits(dir.path(), query, None).unwrap();
+        let lexical_p1 = precision_at_1(&lexical);
+
+        // Hybrid: rerank on → RRF fuses keyword + dense; the relevant memory climbs.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!("[learning]\nenabled = true\n\n[retrieval]\nrerank = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n"),
+        )
+        .unwrap();
+        seed(dir.path());
+        let hybrid = context_hits(dir.path(), query, None).unwrap();
+        let hybrid_p1 = precision_at_1(&hybrid);
+
+        assert!(
+            hybrid_p1 >= lexical_p1,
+            "hybrid must never regress precision@1: lexical={lexical_p1} hybrid={hybrid_p1}"
+        );
+        assert_eq!(lexical_p1, 0, "the built-to-lift baseline misses at rank 1");
+        assert_eq!(hybrid_p1, 1, "hybrid lifts the relevant memory to rank 1");
+    }
+
     #[test]
     fn context_hits_corrupt_store_errors_rather_than_masking() {
         // The smallest artefact proving the masking is gone: a configured,
