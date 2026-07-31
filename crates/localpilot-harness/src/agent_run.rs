@@ -610,6 +610,7 @@ mod tests {
         let usage = localpilot_core::TokenUsage {
             input_tokens: 120,
             output_tokens: 34,
+            ..Default::default()
         };
         let _ = child_tx.send(RuntimeEvent::Usage(usage));
         let _ = child_tx.send(RuntimeEvent::Plan(Vec::new()));

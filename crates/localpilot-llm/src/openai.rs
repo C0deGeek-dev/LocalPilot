@@ -922,9 +922,22 @@ impl SseDecoder {
         }
         if chunk["usage"].is_object() {
             let usage = &chunk["usage"];
+            // OpenAI's `prompt_tokens` *includes* any automatically cached prefix
+            // (reported under `prompt_tokens_details.cached_tokens`), unlike
+            // Anthropic where `input_tokens` excludes it. Split the cached tokens
+            // out so `input_tokens` means fresh input in both providers and
+            // `effective_input_tokens()` stays the true prompt size (no double
+            // count). OpenAI reports no separate cache-creation count.
+            let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            let cached = usage["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(prompt);
             out.push_back(Ok(ModelEvent::Usage(TokenUsage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
+                input_tokens: prompt.saturating_sub(cached),
                 output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: cached,
             })));
         }
     }

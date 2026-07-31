@@ -76,6 +76,7 @@ impl FakeProvider {
             Ok(ModelEvent::Usage(TokenUsage {
                 input_tokens: 1,
                 output_tokens: 1,
+                ..Default::default()
             })),
             Ok(ModelEvent::Done),
         ])

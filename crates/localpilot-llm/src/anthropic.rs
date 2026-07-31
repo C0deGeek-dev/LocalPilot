@@ -465,6 +465,8 @@ struct SseDecoder {
     closed_blocks: usize,
     saw_content_delta: bool,
     input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
     done: bool,
     warned_stop_reason: bool,
     saw_stop_reason: bool,
@@ -567,9 +569,14 @@ impl SseDecoder {
     fn handle_event(&mut self, event: &Value, out: &mut EventQueue) {
         match event["type"].as_str() {
             Some("message_start") => {
-                self.input_tokens = event["message"]["usage"]["input_tokens"]
-                    .as_u64()
-                    .unwrap_or(0);
+                let usage = &event["message"]["usage"];
+                self.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                // Prompt-cache tokens are reported here, on message_start, not in
+                // the message_delta that carries output_tokens.
+                self.cache_creation_input_tokens =
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                self.cache_read_input_tokens =
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
             }
             Some("content_block_start") => {
                 let index = event["index"].as_u64().unwrap_or(0);
@@ -602,6 +609,8 @@ impl SseDecoder {
                     out.push_back(Ok(ModelEvent::Usage(TokenUsage {
                         input_tokens: self.input_tokens,
                         output_tokens,
+                        cache_creation_input_tokens: self.cache_creation_input_tokens,
+                        cache_read_input_tokens: self.cache_read_input_tokens,
                     })));
                 }
                 if let Some(reason) = event["delta"]["stop_reason"].as_str() {
@@ -763,6 +772,34 @@ mod tests {
             Ok(ModelEvent::Usage(u)) if u.input_tokens == 7 && u.output_tokens == 5
         )));
         assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn parses_prompt_cache_usage_from_message_start() {
+        // Cache tokens are reported on message_start (alongside input_tokens),
+        // not on the message_delta that carries output_tokens; the decoder must
+        // carry them forward onto the emitted usage.
+        let events = collect_sse(&[
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":100000}}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Ok(ModelEvent::Usage(u)) => Some(*u),
+                _ => None,
+            })
+            .expect("a usage event");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.cache_creation_input_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, 100_000);
+        assert_eq!(usage.output_tokens, 3);
+        // Effective input = fresh + created + read (the whole prompt the model saw).
+        assert_eq!(usage.effective_input_tokens(), 100_062);
     }
 
     #[test]
