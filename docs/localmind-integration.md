@@ -194,6 +194,20 @@ commits).
   block. Each injected block is recorded under its own layer: the repository
   primer as `primer`, ranked accepted memory as `memory`, and (legacy push-mode)
   ingested chunks as `ingest`.
+- **Hybrid ranking.** With the stored-vector rerank enabled (`[retrieval] rerank`
+  + an embedding endpoint), the ranked accepted-memory candidates are ordered by
+  **Reciprocal Rank Fusion** of the keyword (bm25) ranking and the dense (cosine)
+  ranking, so a memory both retrievers agree on rises instead of a single noisy
+  cosine dominating; ties break toward the semantically closer memory. Keyword
+  search stays the candidate floor (a dense-only memory is never selected), and
+  with the rerank off or no embedding endpoint the single-list fusion is
+  order-preserving — the default lexical path is unchanged. A cross-encoder
+  reranker is deliberately not used.
+- **Injection dedup** (`[memory] injection_dedup_ttl_turns`, default off): a
+  memory injected within the last N turns is suppressed so a persistently-relevant
+  lesson does not spend the per-turn budget every turn. A suppressed memory is
+  dropped from both the injected block and the audit, so audit-equals-injection
+  still holds.
 - Interactive sessions build the project ingest index in the background on first
   use (trust-gated, off the turn path), so `knowledge_search` has data without
   the first turn paying for a full walk; they close out into LocalMind on exit,
