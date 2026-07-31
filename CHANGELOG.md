@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: Anthropic prompt caching (opt-in per provider).** Set
+  `prompt_caching = true` on an `anthropic` provider to place an ephemeral
+  `cache_control` breakpoint on the stable prefix (tools + the stable system
+  prompt), so it is cached across turns and re-served at ~0.1× cost instead of
+  re-sent in full — a large cost/latency cut on a multi-turn session. The
+  per-turn volatile context (memory, project instructions) stays after the
+  breakpoint. Off by default. Cache tokens are now accounted (`cache_creation` /
+  `cache_read`) and served-from-cache tokens show as `cached:N` in the footer;
+  OpenAI's automatic `cached_tokens` are accounted the same way.
+
 - **Cleanup: removed dead surfaces and corrected drifted docs.** Deleted unused
   internal code (an unwired provider retry policy, an unpopulated `cost_usd`
   footer estimate with no pricing source, and the unwired `write_loop_lesson`

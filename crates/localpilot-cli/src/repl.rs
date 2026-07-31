@@ -2322,13 +2322,16 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
             output,
         }),
         RuntimeEvent::Usage(usage) => Some(UiEvent::Usage {
-            tokens_in: usage.input_tokens,
+            // The whole prompt the model saw, cached prefix included, so a cache
+            // hit does not appear to shrink the input.
+            tokens_in: usage.effective_input_tokens(),
             tokens_out: usage.output_tokens,
             tokens_per_sec: if elapsed_secs > 0.0 {
                 usage.output_tokens as f64 / elapsed_secs
             } else {
                 0.0
             },
+            cached_in: usage.cache_read_input_tokens,
         }),
         RuntimeEvent::ContextUsage { used, limit } => Some(UiEvent::ContextUsage {
             context_used: used,

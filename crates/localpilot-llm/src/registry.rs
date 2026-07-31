@@ -130,7 +130,8 @@ fn build_provider(
             AnthropicProvider::new(id, id, base_url, credential)
                 .with_timeout(timeout)
                 .with_default_options(options)
-                .with_max_context_tokens(entry.context_window),
+                .with_max_context_tokens(entry.context_window)
+                .with_prompt_caching(entry.prompt_caching == Some(true)),
         ));
     }
 

@@ -914,6 +914,12 @@ pub struct ProviderConfig {
     /// precedence over the best-effort discovery probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_vision: Option<bool>,
+    /// Enable prompt caching for this provider (Anthropic): place an ephemeral
+    /// `cache_control` breakpoint on the stable prefix (tools + the stable system
+    /// prompt) so it is cached across turns. Off by default; only pays off against
+    /// a backend that implements prompt caching, and is harmless otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<bool>,
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,

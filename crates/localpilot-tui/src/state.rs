@@ -73,6 +73,8 @@ pub struct FooterStats {
     pub tokens_per_sec: f64,
     pub context_used: usize,
     pub context_limit: usize,
+    /// Tokens served from the prompt cache on the last request (0 when uncached).
+    pub cached_in: u64,
     pub quota_reset: Option<String>,
     /// The requested reasoning-effort level, when one is set.
     pub effort: Option<String>,
@@ -1069,10 +1071,12 @@ impl AppState {
                 tokens_in,
                 tokens_out,
                 tokens_per_sec,
+                cached_in,
             } => {
                 self.footer.tokens_in = tokens_in;
                 self.footer.tokens_out = tokens_out;
                 self.footer.tokens_per_sec = tokens_per_sec;
+                self.footer.cached_in = cached_in;
             }
             UiEvent::ContextUsage {
                 context_used,
@@ -1218,6 +1222,7 @@ pub enum UiEvent {
         tokens_in: u64,
         tokens_out: u64,
         tokens_per_sec: f64,
+        cached_in: u64,
     },
     ContextUsage {
         context_used: usize,

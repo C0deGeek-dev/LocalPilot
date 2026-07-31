@@ -623,11 +623,18 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
         .as_deref()
         .map(|level| format!(" effort:{level}"))
         .unwrap_or_default();
+    // Prompt-cache hit indicator: only shown when a cached prefix was served, so
+    // the footer stays quiet for providers/turns without caching.
+    let cached = if f.cached_in > 0 {
+        format!(" cached:{}", f.cached_in)
+    } else {
+        String::new()
+    };
     let line1 = Line::from(vec![
         Span::raw(format!("mode:{} ", state.mode.label())),
         Span::styled(format!("profile:{} ", state.profile.label()), profile_style),
         Span::raw(format!(
-            "tok in/out:{}/{} {:.0} t/s ctx:~{context}{effort}",
+            "tok in/out:{}/{} {:.0} t/s ctx:~{context}{cached}{effort}",
             f.tokens_in, f.tokens_out, f.tokens_per_sec
         )),
     ]);
