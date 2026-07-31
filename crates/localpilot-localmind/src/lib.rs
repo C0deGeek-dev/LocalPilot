@@ -17,6 +17,7 @@ mod context_prefix;
 mod defs;
 mod defs_tool;
 mod error;
+mod fuse;
 mod ingest;
 mod inspector;
 mod knowledge_tool;

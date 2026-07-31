@@ -357,14 +357,38 @@ pub fn context_hits(
     // as today, so a no-embed run is byte-identical.
     let cosines = relevance_cosines(&persistence, query);
     // The opt-in rerank stage (`[retrieval] rerank` + an embedding endpoint):
-    // reorder the top keyword candidates by the same stored-vector cosines the
-    // gate uses, through the engine's rerank policy — keyword stays the
-    // candidate floor, a hit without a stored vector keeps its slot, and with
-    // the flag off (the default) the order is byte-identical.
+    // fuse the keyword (bm25) ranking with the dense (cosine) ranking by
+    // Reciprocal Rank Fusion, so a candidate the two retrievers agree on rises.
+    // Keyword stays the candidate floor — RRF only reorders the bm25 candidates
+    // (a dense-only memory is never selected), a hit absent from the dense list
+    // keeps only its keyword contribution, and with the flag off (the default,
+    // or when no embedding endpoint is configured) the order is byte-identical.
     let hits = match (&cosines, active_rerank_window(project_root)) {
-        (Some(by_id), Some(window)) => localmind_search::rerank_scored(hits, window, |hit| {
-            by_id.get(&hit.memory_id.to_string()).copied()
-        }),
+        (Some((by_id, dense_ids)), Some(_)) => {
+            let bm25_ids: Vec<String> = hits.iter().map(|h| h.memory_id.to_string()).collect();
+            let fused =
+                crate::fuse::reciprocal_rank_fusion(&[bm25_ids, dense_ids.clone()], crate::fuse::RRF_K);
+            let score: std::collections::HashMap<&str, f64> =
+                fused.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let mut reordered = hits;
+            // Higher fused score first; break a tie toward the semantically closer
+            // memory (higher cosine), then by id so the order is deterministic. A
+            // bm25 candidate always has a fused score (it was an input list).
+            reordered.sort_by(|a, b| {
+                let (ia, ib) = (a.memory_id.to_string(), b.memory_id.to_string());
+                let sa = score.get(ia.as_str()).copied().unwrap_or(0.0);
+                let sb = score.get(ib.as_str()).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let ca = by_id.get(&ia).copied().unwrap_or(0.0);
+                        let cb = by_id.get(&ib).copied().unwrap_or(0.0);
+                        cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| ia.cmp(&ib))
+            });
+            reordered
+        }
         _ => hits,
     };
     Ok(hits
@@ -374,7 +398,7 @@ pub fn context_hits(
             let memory_id = hit.memory_id.to_string();
             let cosine = cosines
                 .as_ref()
-                .and_then(|by_id| by_id.get(&memory_id).copied());
+                .and_then(|(by_id, _)| by_id.get(&memory_id).copied());
             SearchHit {
                 memory_id,
                 score: hit.score,
@@ -402,21 +426,25 @@ fn active_rerank_window(project_root: &Path) -> Option<usize> {
 /// caller then attaches no cosine and the keyword path is unchanged. Reuses the
 /// engine's `embed_query` + global-aware `vector_search` (the same primitives the
 /// review-mode semantic dedup uses); no new retrieval engine.
+/// Returns `(id -> cosine, dense-ranked memory ids)`: the map is the per-hit gate
+/// value; the `Vec` is the memory ids in dense-similarity order (best first), the
+/// dense retriever's ranked list for RRF. `vector_search` already returns rows
+/// sorted by descending cosine, so the `Vec` position is the dense rank.
 fn relevance_cosines(
     persistence: &MemoryPersistence,
     query: &str,
-) -> Option<std::collections::HashMap<String, f32>> {
+) -> Option<(std::collections::HashMap<String, f32>, Vec<String>)> {
     let vector = persistence.embed_query(query).ok().flatten()?;
     let scored = persistence
         .vector_search(&vector, RELEVANCE_VECTOR_WINDOW)
         .ok()?;
-    Some(
-        scored
-            .into_iter()
-            .filter(|result| result.subject_kind == "memory")
-            .map(|result| (result.subject_id, result.score))
-            .collect(),
-    )
+    let memories: Vec<(String, f32)> = scored
+        .into_iter()
+        .filter(|result| result.subject_kind == "memory")
+        .map(|result| (result.subject_id, result.score))
+        .collect();
+    let order: Vec<String> = memories.iter().map(|(id, _)| id.clone()).collect();
+    Some((memories.into_iter().collect(), order))
 }
 
 /// How many nearest vectors to score for the injection relevance gate. Generous
@@ -1220,7 +1248,9 @@ mod tests {
             hits.iter().map(|h| h.snippet.clone()).collect::<Vec<_>>()
         );
 
-        // On: the stored-vector rerank reorders the top candidates.
+        // On: RRF fuses the keyword and stored-vector rankings; the two retrievers
+        // tie on this symmetric pair, so the cosine tiebreak lifts the
+        // semantically closer memory.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(crate::CONFIG_FILE),
