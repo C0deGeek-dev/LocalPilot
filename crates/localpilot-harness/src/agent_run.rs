@@ -246,10 +246,23 @@ pub async fn run_agent(
 
 /// Cut a child's answer to the summary bound, on a line boundary where possible.
 fn bound(text: &str) -> (String, bool) {
-    if text.len() <= MAX_SUMMARY_BYTES {
+    bound_summary(text, MAX_SUMMARY_BYTES)
+}
+
+/// Cut `text` to `limit` bytes, preferring a line boundary, and say whether it
+/// was cut.
+///
+/// Shared rather than reimplemented: anything that hands one session's answer to
+/// another session has the same problem — a verbose child must not be able to
+/// grow its reader's context without limit — and two slightly different
+/// truncations would differ in exactly the case that matters, a report cut
+/// mid-word.
+#[must_use]
+pub fn bound_summary(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
         return (text.to_string(), false);
     }
-    let mut end = MAX_SUMMARY_BYTES;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }

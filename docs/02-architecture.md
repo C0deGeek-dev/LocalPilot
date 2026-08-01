@@ -473,6 +473,22 @@ single-agent turn takes.
   all proceed. Idempotency keys are answered from the reservation table as well
   as the member table, so a retry whose first attempt is still building is told
   so rather than starting a second worker.
+- **Workers.** A swarm worker is an *ordinary hosted session with a swarm edge*
+  — not a second process, not a second loop, and not a special case anywhere on
+  the session path, so the registry, the `SessionHost`, cancel/steer, and the
+  reaper all work on it unchanged. Building the session is behind a
+  `WorkerFactory` the host supplies, because narrowing tools to the spawner's,
+  attributing permission asks to the spawner's approver, and resolving a provider
+  all need wiring this crate does not have. A spawn that names a model is
+  **refused** if the built session is on a different one: running anyway produces
+  work that reads normally and never says the wrong model produced it.
+- **Flow-back.** When a worker's turn ends, its final assistant text is bounded
+  (the same 4 KiB the in-process delegation path uses), recorded on its
+  membership, and injected into whoever it reports back to as a
+  `BackgroundTask`-sourced soft interrupt — labelled, so a coordinator can tell a
+  worker's report from something its user typed. If the spawner is no longer
+  hosted the report is still recorded, because a re-elected coordinator will need
+  it.
 - **The plan.** A swarm's `TaskPlan` (see `localpilot-taskgraph`) is read,
   mutated, and stored under one write lock rather than by
   read → change → write-back, which would leave a gap in the middle of exactly

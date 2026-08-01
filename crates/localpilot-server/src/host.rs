@@ -34,7 +34,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use localpilot_core::SessionId;
-use localpilot_harness::{RuntimeEvent, SteerQueue, StopReason};
+use localpilot_harness::{RuntimeEvent, SoftInterrupt, SteerQueue, StopReason};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -181,6 +181,18 @@ impl SessionHost {
     /// lands while [`drive`](Self::drive) holds the runtime mutex.
     pub fn steer(&self, text: impl Into<String>) {
         self.steer.push(text);
+    }
+
+    /// Inject a non-user message into the in-flight (or next) turn.
+    ///
+    /// Same substrate and same safe-point discipline as [`steer`](Self::steer),
+    /// but the interrupt carries its own source, so a peer's message or a
+    /// background report is labelled as such in the transcript instead of
+    /// arriving indistinguishable from something the user typed. That
+    /// distinction is not cosmetic: a model that cannot tell the two apart will
+    /// treat another agent's suggestion as an instruction.
+    pub fn inject(&self, interrupt: SoftInterrupt) {
+        self.steer.push_interrupt(interrupt);
     }
 
     /// Whether a turn is in flight, read without blocking on it.

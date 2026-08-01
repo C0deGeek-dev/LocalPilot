@@ -6,6 +6,23 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: swarm state and parallel headless workers for the opt-in server.** A
+  server can now host several sessions in one repository working on one plan.
+  Swarms are scoped by *repository* rather than by path — every git worktree of
+  one repo resolves to one swarm, read from git's own on-disk layout with no
+  `git` subprocess — so a worker spawned into a worktree joins the coordinator
+  instead of founding an invisible second swarm. Membership stores exactly one
+  structural edge (who a member reports back to) and derives children, ancestry,
+  and subtrees from it. Fan-out is bounded by two caps enforced as a
+  *reservation* taken before the expensive part: a lifetime member cap and a
+  concurrency budget, with idempotency keys so a retried spawn is answered rather
+  than starting a second worker. A worker is an ordinary hosted session, so
+  cancel, steer, event fanout, and reaping all work on it unchanged; when its
+  turn ends its answer is bounded, recorded, and injected into its spawner as a
+  labelled background message. A spawn that names a model is refused if the built
+  session is on a different one. Still strictly opt-in: nothing on the
+  single-agent path changed.
+
 - **Added: `localpilot-taskgraph`, a pure task-graph engine.** A new leaf crate
   holding the plan several workers can share and the rules that keep it coherent
   while they mutate it: validated `seed` / `expand` / `complete` /

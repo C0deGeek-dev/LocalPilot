@@ -162,6 +162,20 @@ impl SessionRegistry {
         self.resume_by_id(entry.id, factory).await
     }
 
+    /// Register a runtime that was built elsewhere, under its own id.
+    ///
+    /// [`open_new`](Self::open_new) covers the case where the registry should do
+    /// the building. This covers the case where the caller already has a runtime
+    /// and needs it hosted — a swarm worker, whose construction is decided by a
+    /// spawn request the registry knows nothing about.
+    ///
+    /// # Errors
+    /// [`RegistryError::AlreadyPresent`] if that id is already registered.
+    pub async fn register(&self, runtime: SessionRuntime) -> Result<SessionId, RegistryError> {
+        let id = runtime.session_id();
+        self.insert(id, runtime).await
+    }
+
     /// Look up a session's handle, cloning the [`Arc`]. The structural read-lock
     /// is held only for the clone, never across the returned handle's use, so
     /// this stays prompt even while another session's turn is in flight.

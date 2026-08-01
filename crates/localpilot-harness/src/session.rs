@@ -1291,6 +1291,17 @@ impl SessionRuntime {
         self.session_id
     }
 
+    /// The model this session will actually call.
+    ///
+    /// Exposed so a caller that *asked* for a particular model can check it got
+    /// one. A request for a specific model that quietly runs on the default is
+    /// the worst kind of wrong: the work completes, the report reads normally,
+    /// and nothing anywhere says the wrong thing produced it.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.config.model
+    }
+
     /// The current model health.
     #[must_use]
     pub fn health(&self) -> ModelHealth {
