@@ -75,6 +75,10 @@ ratatui = { workspace = true, features = [
 reqwest.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# A scratch directory for the self-dev publish gauntlet's throwaway smoke config
+# (`selfdev publish`). Also a dev-dependency for tests; declared here because it
+# is used on a non-test code path.
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -113,5 +117,4 @@ localpilot-tui = { path = "../localpilot-tui", optional = true }
 assert_cmd = { workspace = true }
 crossterm = { workspace = true }
 insta = { workspace = true }
-tempfile = { workspace = true }
 wiremock = { workspace = true }

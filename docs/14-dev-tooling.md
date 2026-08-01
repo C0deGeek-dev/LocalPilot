@@ -390,6 +390,22 @@ holds a candidate to three checks in rising cost:
 
 Only a binary that passes all three may be promoted.
 
+**The `selfdev` command.** All of the above is driven from the command line:
+
+```powershell
+localpilot selfdev build             # fingerprint the tree and build it
+localpilot selfdev publish            # build -> gauntlet -> install -> promote `current`
+localpilot selfdev publish --channel stable
+localpilot selfdev status            # installed versions, channel targets, breaker state
+```
+
+`publish` is the guardrailed release step: it refuses a stale or broken build
+before any channel moves. This is the **manual** self-dev capability — a developer
+or a CI job drives it. It never swaps the running process; promoting a channel
+only changes what a *future* launch resolves to. The autonomous in-session loop —
+the model building and reloading *itself* mid-session — is a separate, opt-in
+product decision that this build deliberately does not ship (see ADR-0128).
+
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers
 must be plan-agnostic — no box/decision IDs or plan filenames; and a decision

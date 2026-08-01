@@ -35,6 +35,7 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod self_review_cmd;
+mod selfdev_cmd;
 mod selfdev_reload;
 mod server_cmd;
 mod session_cmd;
@@ -119,6 +120,12 @@ enum Command {
         /// together. Does not check for a newer release.
         #[arg(long)]
         all: bool,
+    },
+    /// Build LocalPilot from its own source, vet it, and promote it (developer
+    /// self-dev surface; the autonomous self-editing loop is a separate opt-in).
+    Selfdev {
+        #[command(subcommand)]
+        command: SelfdevCommand,
     },
     /// Inspect and choose between installed versions.
     Version {
@@ -507,6 +514,29 @@ enum HandoffCommand {
         /// The handoff id (see the writer's output).
         id: String,
     },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum SelfdevCommand {
+    /// Fingerprint the working tree and build it into an isolated target dir.
+    Build {
+        /// Where cargo writes the build (default: `build-target/` in the workspace).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+    },
+    /// Build, run the publish gauntlet, and — only if it passes — install the
+    /// binary immutably and point a channel at it.
+    Publish {
+        /// The channel to promote (`current`, `stable`, `slow`, or a bare name).
+        #[arg(long, default_value = "current")]
+        channel: String,
+        /// Where cargo writes the build (default: `build-target/` in the workspace).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+    },
+    /// Show installed self-dev versions, channel targets, and the auto-reload
+    /// breaker state.
+    Status,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -1444,6 +1474,34 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             // that and exits 0.
             let profile = session_cmd::resolve_profile(None, false);
             server_cmd::serve(None, None, profile).await?;
+        }
+        Command::Selfdev { command } => {
+            let mut stdout = io::stdout().lock();
+            let cwd = std::env::current_dir()?;
+            let selfdev_root = localpilot_selfdev::default_root().ok_or_else(|| {
+                anyhow::anyhow!("this platform reports no per-user data directory")
+            })?;
+            match command {
+                SelfdevCommand::Build { target_dir } => {
+                    selfdev_cmd::run_build(&cwd, &selfdev_root, target_dir, &mut stdout)?;
+                }
+                SelfdevCommand::Publish {
+                    channel,
+                    target_dir,
+                } => {
+                    selfdev_cmd::run_publish(
+                        &cwd,
+                        &selfdev_root,
+                        &channel,
+                        target_dir,
+                        &mut stdout,
+                    )?;
+                }
+                SelfdevCommand::Status => {
+                    selfdev_cmd::run_status(&selfdev_root, &mut stdout)?;
+                }
+            }
+            stdout.flush()?;
         }
         Command::Version { command, json } => {
             let mut stdout = io::stdout().lock();
