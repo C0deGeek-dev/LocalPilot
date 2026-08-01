@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::SessionId;
@@ -50,6 +51,7 @@ use localpilot_server::{
 use localpilot_store::Store;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 // --- The shared session-construction recipe ---------------------------------
 
@@ -363,6 +365,175 @@ fn existing_id(target: &AttachTarget, store: &Store) -> Result<Option<SessionId>
         // A newer attach mode this build does not know: let `attach` report it.
         _ => Ok(None),
     }
+}
+
+// --- Session reaping --------------------------------------------------------
+
+/// After the last client of a session detaches, the reaper waits this long
+/// before removing the session, so a client that reconnects promptly rejoins the
+/// same live session rather than a rebuilt one.
+const REAP_GRACE_SECS: u64 = 60;
+/// A session with no activity (no turn started) for at least this long is reaped
+/// even while a client is still nominally attached — a stalled or abandoned
+/// client must not pin a session's RAM forever.
+const REAP_IDLE_SECS: u64 = 30 * 60;
+/// How often the reaper wakes to scan the live sessions.
+const REAP_TICK_SECS: u64 = 30;
+
+/// Tuning for the [`Reaper`]. Production uses [`ReaperConfig::default`]; tests
+/// inject tiny (or huge) durations to drive each branch deterministically.
+#[derive(Clone, Copy, Debug)]
+struct ReaperConfig {
+    /// Grace after the last client detaches before the session is reaped.
+    grace: Duration,
+    /// Idle time (no turn started) before the session is reaped regardless of
+    /// attached clients.
+    idle: Duration,
+    /// How often [`Reaper::run`] scans.
+    tick: Duration,
+}
+
+impl Default for ReaperConfig {
+    fn default() -> Self {
+        Self {
+            grace: Duration::from_secs(REAP_GRACE_SECS),
+            idle: Duration::from_secs(REAP_IDLE_SECS),
+            tick: Duration::from_secs(REAP_TICK_SECS),
+        }
+    }
+}
+
+/// Removes sessions no client needs any more, persisting each before it goes.
+///
+/// A session is reaped when either its last client detached at least `grace` ago,
+/// or it has been idle for at least `idle` — but **never** while a turn is in
+/// flight. Busy-safety is the [`SessionHandle`]'s own async mutex: a running turn
+/// holds it for the whole turn, so the reaper only closes a session it can
+/// [`try_lock`](tokio::sync::Mutex::try_lock). It persists the event log
+/// ([`SessionRuntime::close`](localpilot_harness::SessionRuntime::close)) *before*
+/// removing the session from the registry and host map.
+struct Reaper {
+    registry: SessionRegistry,
+    hosts: HostMap,
+    config: ReaperConfig,
+    /// When each currently client-less session was first observed empty, so the
+    /// grace window is measured from the disconnect rather than from start-up.
+    first_empty: HashMap<SessionId, Instant>,
+}
+
+impl Reaper {
+    fn new(registry: SessionRegistry, hosts: HostMap, config: ReaperConfig) -> Self {
+        Self {
+            registry,
+            hosts,
+            config,
+            first_empty: HashMap::new(),
+        }
+    }
+
+    /// Run one reap scan as of `now`, returning the ids reaped. The instant is a
+    /// parameter, so a test drives every timing branch without real timers.
+    ///
+    /// The whole scan holds the host-map lock — the same lock
+    /// [`HostMap::bind`] takes to attach — so no client can bind a session
+    /// between the decision to reap it and its removal (no attach/reap race).
+    async fn reap_once(&mut self, now: Instant) -> Vec<SessionId> {
+        // Clone the host-map handle so the guard borrows this local `Arc`, not
+        // `self` — leaving `self.first_empty` and `self.registry` free to mutate
+        // during the scan. Same underlying mutex, so the scan still serialises
+        // against `HostMap::bind` (no attach/reap race).
+        let hosts = self.hosts.inner.clone();
+        let mut map = hosts.lock().await;
+
+        // Phase 1: decide, reading only the lock-free host signals.
+        let mut candidates = Vec::new();
+        for (id, host) in map.iter() {
+            if host.is_busy() {
+                // A turn is in flight: never a candidate, and do not accrue grace.
+                self.first_empty.remove(id);
+                continue;
+            }
+            let idle_expired =
+                now.saturating_duration_since(host.last_active()) >= self.config.idle;
+            let reap = if host.subscriber_count() == 0 {
+                let since = *self.first_empty.entry(*id).or_insert(now);
+                now.saturating_duration_since(since) >= self.config.grace || idle_expired
+            } else {
+                // A client is attached: the grace window does not apply, but a
+                // long-idle (zombie) session is still reaped.
+                self.first_empty.remove(id);
+                idle_expired
+            };
+            if reap {
+                candidates.push(*id);
+            }
+        }
+        // Forget bookkeeping for ids no longer hosted.
+        self.first_empty.retain(|id, _| map.contains_key(id));
+
+        // Phase 2: persist-then-remove, each guarded by a non-blocking try_lock so
+        // a turn that started after the busy check above is still never reaped.
+        let mut reaped = Vec::new();
+        for id in candidates {
+            let Some(handle) = self.registry.get(id).await else {
+                // Already gone from the registry: drop the stale host entry.
+                map.remove(&id);
+                self.first_empty.remove(&id);
+                continue;
+            };
+            // A turn that started after the busy check above still holds this
+            // lock, so a failed `try_lock` leaves the session for the next scan
+            // rather than racing the turn.
+            let Ok(mut runtime) = handle.try_lock() else {
+                continue;
+            };
+            // Persist the event log before the session disappears.
+            runtime.close();
+            drop(runtime);
+            self.registry.remove(id).await;
+            map.remove(&id);
+            self.first_empty.remove(&id);
+            reaped.push(id);
+        }
+        reaped
+    }
+
+    /// Scan on a fixed interval until `shutdown` fires.
+    async fn run(mut self, shutdown: CancellationToken) {
+        let mut ticker = tokio::time::interval(self.config.tick);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval`'s first tick is immediate; consume it so a just-started
+        // server does not scan before any session can exist.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = ticker.tick() => {
+                    let reaped = self.reap_once(Instant::now()).await;
+                    if !reaped.is_empty() {
+                        tracing::debug!(
+                            "localpilot server reaped {} idle/detached session(s)",
+                            reaped.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Persist and drop every remaining session at shutdown. The accept loop has
+/// already stopped, so no new turn can start; this waits out any in-flight turn
+/// (locking each runtime), records its `SessionClosed`, and clears the registry
+/// and host map so the endpoint is released with nothing left in memory.
+async fn close_all_sessions(registry: &SessionRegistry, hosts: &HostMap) {
+    for id in registry.list().await {
+        if let Some(handle) = registry.get(id).await {
+            handle.lock().await.close();
+        }
+        registry.remove(id).await;
+    }
+    hosts.inner.lock().await.clear();
 }
 
 // --- The per-connection serve loop ------------------------------------------
@@ -718,14 +889,26 @@ pub async fn serve(
     let hosts = HostMap::default();
     let factory = Arc::new(ServerFactory::new(setup));
 
+    // The session reaper runs beside the accept loop, sharing its registry and
+    // host map: it removes sessions whose clients have all detached (after a
+    // grace period) or that have gone idle, persisting each first and never
+    // touching a session with an in-flight turn.
+    let reaper_shutdown = CancellationToken::new();
+    let reaper = Reaper::new(registry.clone(), hosts.clone(), ReaperConfig::default());
+    let reaper_task = tokio::spawn(reaper.run(reaper_shutdown.clone()));
+
     eprintln!(
         "localpilot server listening at {} — Ctrl-C to stop",
         endpoint.display()
     );
     accept_loop(&listener, &registry, &hosts, &factory, &store, profile).await;
 
-    // Clean shutdown: dropping the listener (Unix unlinks the socket) and the
-    // singleton (Unix removes the lock file) releases the endpoint.
+    // Clean shutdown: stop the reaper, then persist and drop every remaining
+    // session, then drop the listener (Unix unlinks the socket) and the singleton
+    // (Unix removes the lock file) to release the endpoint.
+    reaper_shutdown.cancel();
+    let _ = reaper_task.await;
+    close_all_sessions(&registry, &hosts).await;
     drop(listener);
     drop(singleton);
     eprintln!("localpilot server stopped");
@@ -1000,8 +1183,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    use localpilot_harness::RuntimeEvent;
     use localpilot_llm::FakeProvider;
     use localpilot_sandbox::{ScriptedApprover, Workspace};
+    use localpilot_store::SessionEventKind;
     use localpilot_tools::ToolRegistry;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
@@ -1381,5 +1566,249 @@ mod tests {
             render_event(ServerEvent::Closed, &mut last_ask).unwrap(),
             "a `closed` event signals the client to stop"
         );
+    }
+
+    // --- 06.1 shared resource pool -------------------------------------------
+
+    /// Register a session and wrap it in a host, mirroring what `HostMap::bind`
+    /// does on a fresh attach, but directly — so a reaper test controls the
+    /// registry and host map without a wire round-trip.
+    async fn open_hosted_session(
+        factory: &Arc<FakeFactory>,
+        registry: &SessionRegistry,
+        hosts: &HostMap,
+    ) -> (SessionId, Arc<SessionHost>) {
+        let id = registry.open_new(factory.as_ref()).await.unwrap();
+        let handle = registry.get(id).await.unwrap();
+        let host = Arc::new(SessionHost::new(handle).await);
+        hosts.inner.lock().await.insert(id, host.clone());
+        (id, host)
+    }
+
+    /// One `SessionSetup` builds many sessions that share its single provider
+    /// stack (not a fresh provider each), while their mutable per-session state
+    /// stays isolated (subject 02.3): a turn on A does not appear in B.
+    ///
+    /// A real-MCP variant would additionally assert both sessions' tool calls
+    /// reach the *one* connected MCP transport; that pool-identity property is
+    /// covered offline by `one_mcp_connection_pool_is_shared_across_registries`
+    /// in `crate::mcp` (no MCP subprocess needed).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_setup_shares_the_provider_pool_across_isolated_sessions() {
+        use localpilot_config::Config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn ModelProvider> = Arc::new(FakeProvider::new().text("alpha only"));
+        let setup = SessionSetup {
+            config: Config::default(),
+            cwd: dir.path().to_path_buf(),
+            provider: provider.clone(),
+            model: "fake-model".to_string(),
+            profile: Profile::Bypass,
+            mcp: crate::mcp::McpTools::default(),
+            agents: None,
+        };
+
+        // The one provider stack the setup captured, before any session is built.
+        let shared = Arc::strong_count(&provider);
+
+        let mut a = setup.build().unwrap();
+        let b = setup.build().unwrap();
+
+        // Both sessions cloned the *one* provider Arc — the stack was shared, not
+        // rebuilt. Two builds add exactly two strong refs on the same allocation.
+        assert_eq!(
+            Arc::strong_count(&provider),
+            shared + 2,
+            "each built session shares the one provider pool, not a fresh provider"
+        );
+
+        // 02.3 isolation still holds: a turn on A must not appear in B.
+        let (events, _rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        a.runtime.run_turn("hi", &events, &cancel).await;
+
+        assert_eq!(
+            a.runtime.last_assistant_text().as_deref(),
+            Some("alpha only"),
+            "A ran its turn against the shared provider"
+        );
+        assert_eq!(
+            b.runtime.last_assistant_text(),
+            None,
+            "a turn on A must not bleed into B"
+        );
+    }
+
+    // --- 06.2 session reaping ------------------------------------------------
+
+    /// A session whose client detached and whose grace has elapsed is reaped:
+    /// gone from the registry and host map, event log persisted first.
+    #[tokio::test]
+    async fn a_detached_session_past_grace_is_reaped_and_persisted() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("bye")));
+        let store = factory.store();
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, _host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        // No client ever attached (subscriber_count == 0); with zero grace the
+        // first scan reaps it.
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::ZERO,
+                idle: Duration::from_secs(3600),
+                tick: Duration::from_secs(1),
+            },
+        );
+        let reaped = reaper.reap_once(Instant::now()).await;
+
+        assert_eq!(
+            reaped,
+            vec![id],
+            "the detached, past-grace session was reaped"
+        );
+        assert!(registry.get(id).await.is_none(), "gone from the registry");
+        assert!(
+            hosts.inner.lock().await.get(&id).is_none(),
+            "gone from the host map"
+        );
+        let events = store.read_events(id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == SessionEventKind::SessionClosed),
+            "the reaped session persisted its close first: {events:?}"
+        );
+    }
+
+    /// A session with an in-flight turn (its mutex held, exactly as `drive`
+    /// holds it for the whole turn) is never reaped, even past every deadline.
+    #[tokio::test]
+    async fn a_busy_session_is_not_reaped_even_past_the_deadline() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("busy")));
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, _host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        // Hold the session mutex, the way a running turn does for its duration.
+        let handle = registry.get(id).await.unwrap();
+        let _turn_guard = handle.lock().await;
+
+        // Zero grace and zero idle would reap any *free* session at once; the
+        // held lock must still protect this one (the reaper only closes what it
+        // can `try_lock`).
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::ZERO,
+                idle: Duration::ZERO,
+                tick: Duration::from_secs(1),
+            },
+        );
+        let reaped = reaper.reap_once(Instant::now()).await;
+
+        assert!(
+            reaped.is_empty(),
+            "a session with a held turn-lock must never be reaped"
+        );
+        assert!(
+            registry.get(id).await.is_some(),
+            "the busy session survives"
+        );
+        assert!(hosts.inner.lock().await.get(&id).is_some());
+    }
+
+    /// A session with a still-attached client is not reaped while it is active,
+    /// even with a zero grace window.
+    #[tokio::test]
+    async fn a_session_with_an_attached_client_is_not_reaped() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("attached")));
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        // A client attaches: its live receiver keeps subscriber_count at 1.
+        let _client = host.subscribe();
+        assert_eq!(host.subscriber_count(), 1);
+
+        // Zero grace (would reap a detached session at once) but a long idle
+        // window, so this recently-active, still-attached session stays.
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::ZERO,
+                idle: Duration::from_secs(3600),
+                tick: Duration::from_secs(1),
+            },
+        );
+        let reaped = reaper.reap_once(Instant::now()).await;
+
+        assert!(
+            reaped.is_empty(),
+            "a session with a live client must not be reaped"
+        );
+        assert!(registry.get(id).await.is_some());
+    }
+
+    /// The idle rule reaps independently of the disconnect grace: a session idle
+    /// past the timeout is reaped even with a huge grace window still open.
+    #[tokio::test]
+    async fn an_idle_session_past_the_idle_timeout_is_reaped() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("idle")));
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id, _host) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        let mut reaper = Reaper::new(
+            registry.clone(),
+            hosts.clone(),
+            ReaperConfig {
+                grace: Duration::from_secs(3600),
+                idle: Duration::ZERO,
+                tick: Duration::from_secs(1),
+            },
+        );
+        let reaped = reaper.reap_once(Instant::now()).await;
+
+        assert_eq!(
+            reaped,
+            vec![id],
+            "the idle rule reaps independently of grace"
+        );
+        assert!(registry.get(id).await.is_none());
+    }
+
+    /// Clean shutdown (the subject-05 deferral): every remaining session is
+    /// persisted (`SessionClosed`) and both the registry and host map are cleared.
+    #[tokio::test]
+    async fn clean_shutdown_persists_and_clears_all_sessions() {
+        let factory = Arc::new(FakeFactory::new(FakeProvider::new().text("shutting down")));
+        let store = factory.store();
+        let registry = SessionRegistry::new();
+        let hosts = HostMap::default();
+        let (id_a, _a) = open_hosted_session(&factory, &registry, &hosts).await;
+        let (id_b, _b) = open_hosted_session(&factory, &registry, &hosts).await;
+
+        close_all_sessions(&registry, &hosts).await;
+
+        assert!(registry.is_empty().await, "registry cleared at shutdown");
+        assert!(
+            hosts.inner.lock().await.is_empty(),
+            "host map cleared at shutdown"
+        );
+        for id in [id_a, id_b] {
+            let events = store.read_events(id).unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.kind == SessionEventKind::SessionClosed),
+                "session {id} persisted its close at shutdown: {events:?}"
+            );
+        }
     }
 }

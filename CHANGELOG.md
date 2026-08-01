@@ -6,6 +6,24 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: multi-session resource pooling + session reaping for the opt-in
+  server.** A `serve` process now shares one provider stack and one MCP
+  connection pool across every hosted session — the MCP server subprocesses are
+  spawned once at start-up, and each session projects a fresh tool registry that
+  only *references* that one pool rather than re-spawning it, so N concurrent
+  sessions speak to one set of MCP servers, not N. Only the mutable per-session
+  state (the `SessionRuntime`, its transcript/compaction/config, a fresh
+  approver) is built per session, and it stays isolated between sessions. A new
+  periodic **reaper** keeps the resident set bounded: it removes a session once
+  its last client has been detached beyond a grace period, or it has gone idle
+  past a timeout, persisting the session's event log first
+  (`SessionRuntime::close`) and **never** touching a session with an in-flight
+  turn (it only closes what it can `try_lock`). Clean shutdown now stops the
+  reaper and persists every remaining session before releasing the endpoint.
+  Measured per-session resident-memory cost stays on the order of tens of KiB
+  (an `#[ignore]`d RAM soak records the numbers). Still strictly opt-in (D003):
+  the default in-process path is unchanged.
+
 - **Added: `localpilot serve` + `localpilot connect` — the opt-in local-IPC
   server.** A new `serve` command hosts this workspace's sessions in one
   long-lived process over the local transport (a Unix domain socket or a Windows

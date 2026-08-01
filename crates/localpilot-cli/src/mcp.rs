@@ -298,4 +298,53 @@ mod tests {
         assert!(registry.get("search_lookup").is_none());
         assert_unique_spec_names(&registry);
     }
+
+    // --- 06.1 one MCP pool, shared across sessions, never re-spawned ----------
+
+    #[test]
+    fn one_mcp_connection_pool_is_shared_across_registries() {
+        // The MCP "pool" is the connected transport, held once by `McpTools`.
+        // Each session projects a fresh `ToolRegistry` from the *same* `McpTools`
+        // (`SessionSetup::build` does this per session), so the transport must be
+        // cloned into each registry — never re-spawned per session.
+        let transport: Arc<dyn Transport> = Arc::new(ScriptedTransport::new());
+        let tools = McpTools {
+            entries: vec![(
+                "search".to_string(),
+                McpToolDescriptor {
+                    name: "lookup".to_string(),
+                    description: "an MCP tool".to_string(),
+                    input_schema: json!({ "type": "object" }),
+                },
+                Arc::clone(&transport),
+            )],
+            skills_autonomous: false,
+        };
+
+        // External handle + the one held by `McpTools`, before any projection.
+        let before = Arc::strong_count(&transport);
+
+        let reg_a = tools.registry();
+        let reg_b = tools.registry();
+        assert!(reg_a.is_mcp("lookup"), "session A sees the pooled MCP tool");
+        assert!(reg_b.is_mcp("lookup"), "session B sees the pooled MCP tool");
+
+        // Each registry cloned the one shared transport Arc — two sessions add
+        // exactly two strong refs to the same connection, proving the pool was
+        // not re-spawned per session.
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 2,
+            "both session registries share the one MCP transport, not a fresh spawn"
+        );
+
+        // Dropping a session's registry releases only its clone of the shared
+        // pool; the connection lives on for the other session.
+        drop(reg_a);
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 1,
+            "the shared connection survives one session's teardown"
+        );
+    }
 }

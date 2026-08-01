@@ -130,6 +130,18 @@ Only local servers launched over stdio are supported. The connection is used by
 the interactive REPL, `print`, and `harness` runs; harness connects each server
 once and reuses it across steps.
 
+### One MCP pool per server process
+
+Under `serve` (the opt-in local server that hosts many sessions for multiple
+attached clients), the configured MCP servers are spawned **once** at start-up
+and their connections form a single shared pool for the whole server process.
+Each hosted session projects its own tool registry, but that registry only
+references the one pool's MCP clients — MCP subprocesses are never re-spawned per
+session. So N concurrent sessions still speak to one set of MCP servers, not N,
+and the per-session RAM cost stays small (see the multi-session RAM model in
+[02-architecture.md](02-architecture.md)). Redaction and permission gating are
+per session as always; only the underlying connections are shared.
+
 ## Research search tools
 
 Web research (see [`docs/configuration.md`](configuration.md) `[research]`)

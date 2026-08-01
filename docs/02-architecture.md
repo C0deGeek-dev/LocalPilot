@@ -372,11 +372,11 @@ supported embedding surface stays the in-process session runtime
 
 ### `localpilot-server`
 
-Groundwork for an opt-in, single-machine local server: a cross-platform framed
-local-IPC transport and the daemon lifecycle around it. This is **transport and
-lifecycle only** — it does not host a `SessionRuntime` yet (that is a later
-subject), and there is no `serve`/`connect` CLI command. A tiny echo/ping serve
-loop proves the transport end to end.
+The opt-in, single-machine local server behind `serve`/`connect`: a
+cross-platform framed local-IPC transport, the daemon lifecycle around it, and a
+process-local registry that hosts many `SessionRuntime`s at once for multiple
+attached clients. It is strictly opt-in — the default in-process
+`chat`/`ask`/`print`/`harness` path never touches it (D003).
 
 Owns:
 
@@ -395,12 +395,52 @@ Owns:
   lock file next to the socket on Unix, the first-pipe-instance flag on Windows;
   a failed acquire probes for a live daemon and either reuses it or reaps a
   stale socket/lock and retries
+- a session registry keyed by `SessionId` (a structural `RwLock` over the map
+  plus a per-session async `Mutex` held for the whole of a turn), a per-session
+  `SessionHost` (multi-client event fanout over a session-lifetime broadcast,
+  plus lock-free out-of-band cancel/steer), and the connection-scoped attach seam
+  (open-new / resume-by-id / resume-by-name → the bound session id)
 
 Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
 `libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`
-(`process_group`, `creation_flags`, `create_new`, `PermissionsExt`). The model
-is one connection per session (session hosting arrives later). The transport is
-opt-in and sits alongside — never replacing — the stdio embedding surface.
+(`process_group`, `creation_flags`, `create_new`, `PermissionsExt`). The
+transport is opt-in and sits alongside — never replacing — the stdio embedding
+surface.
+
+#### Multi-session RAM model
+
+One `serve` process hosts many sessions cheaply because the heavy, immutable
+inputs are a **shared pool**, resolved once at start-up and cloned (an `Arc`
+bump) into every session, while only the light, mutable per-session state is
+built per session:
+
+- **Shared, one per server** (captured in the CLI's `SessionSetup`, injected
+  into each `factory.create()`): the provider stack (`Arc<dyn ModelProvider>`)
+  and the connected MCP pool — the spawned MCP server subprocesses and their
+  transports are launched **once** and held for the life of the setup. Each
+  session projects a *fresh* `ToolRegistry` from that setup, but the registry
+  only references the one pool's MCP clients (`Arc<dyn Transport>` clones) — MCP
+  servers are never re-spawned per session. See [`mcp.md`](mcp.md).
+- **Per session, mutable** (isolated so no state bleeds between sessions): the
+  `SessionRuntime` itself with its transcript, compaction cache, and
+  `SessionConfig`, a fresh permission engine and workspace read-roots, and a
+  fresh wire approver. A turn on one session can never appear in another.
+
+The measured cost of an extra session is therefore only its mutable state — on
+the order of tens of KiB of resident memory, not the megabytes a fresh provider
+or MCP pool would add.
+
+**Reaping.** A periodic reaper keeps the resident set bounded by removing
+sessions no client needs any more. A session is reaped when either its last
+client detached at least a grace period ago, or it has been idle past a timeout
+— but **never** while a turn is in flight: busy-safety is the per-session mutex
+itself (a running turn holds it for the whole turn), so the reaper only closes a
+session it can `try_lock`, and it persists the event log
+(`SessionRuntime::close` records `SessionClosed`) **before** removing the session
+from the registry and host map. The scan holds the host-map lock — the same lock
+an attach takes — so no client can bind a session between the decision to reap it
+and its removal. On clean shutdown the reaper stops and every remaining session
+is persisted and dropped before the endpoint is released.
 
 ### `localpilot-sandbox`
 

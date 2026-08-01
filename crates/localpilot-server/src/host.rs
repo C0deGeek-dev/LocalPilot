@@ -31,6 +31,7 @@
 //! turn and never trips `clippy::await_holding_lock`.
 
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use localpilot_core::SessionId;
 use localpilot_harness::{RuntimeEvent, SteerQueue, StopReason};
@@ -66,6 +67,11 @@ pub struct SessionHost {
     /// The current turn's cancellation token, or `None` when idle. Guarded by a
     /// std mutex held only for a trivial read/assign, never across an `.await`.
     turn_cancel: Mutex<Option<CancellationToken>>,
+    /// The instant of this session's most recent activity: its creation, then
+    /// bumped at the start of every turn. Read by the server's session reaper to
+    /// measure idle time. Guarded by a std mutex held only for a trivial
+    /// read/assign, never across an `.await`.
+    last_active: Mutex<Instant>,
     /// The hosted session's id, read once at construction.
     id: SessionId,
 }
@@ -91,6 +97,7 @@ impl SessionHost {
             events,
             steer,
             turn_cancel: Mutex::new(None),
+            last_active: Mutex::new(Instant::now()),
             id,
         }
     }
@@ -132,6 +139,7 @@ impl SessionHost {
     /// though this method holds the runtime mutex — since they read only the
     /// short token slot and the steer queue, never the runtime mutex.
     pub async fn drive(&self, input: &str) -> StopReason {
+        self.touch();
         let token = CancellationToken::new();
         // Acquire the runtime mutex first, then publish this turn's token, so the
         // slot always names the turn that actually holds the mutex (a concurrent
@@ -187,6 +195,26 @@ impl SessionHost {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some()
+    }
+
+    /// The instant of this session's most recent activity — its creation, or the
+    /// start of its last turn. The server's session reaper measures idle time
+    /// from here; a session idle past the configured timeout is a reap candidate.
+    #[must_use]
+    pub fn last_active(&self) -> Instant {
+        *self
+            .last_active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Record activity now (a turn is starting). Held only for the assignment,
+    /// never across an `.await`, so it never contends the runtime mutex.
+    fn touch(&self) {
+        *self
+            .last_active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
     }
 
     /// A non-blocking snapshot of the host: its id, whether a turn is in flight,
