@@ -393,18 +393,30 @@ Only a binary that passes all three may be promoted.
 **The `selfdev` command.** All of the above is driven from the command line:
 
 ```powershell
-localpilot selfdev build             # fingerprint the tree and build it
+localpilot selfdev build              # fingerprint the tree and build it
 localpilot selfdev publish            # build -> gauntlet -> install -> promote `current`
 localpilot selfdev publish --channel stable
-localpilot selfdev status            # installed versions, channel targets, breaker state
+localpilot selfdev status             # installed versions, channel targets, breaker state
+localpilot selfdev gc --keep 5        # reclaim old versions (channel targets always kept)
+localpilot selfdev reload -- <args>   # build+vet+promote, then swap this process onto it
 ```
 
 `publish` is the guardrailed release step: it refuses a stale or broken build
-before any channel moves. This is the **manual** self-dev capability — a developer
-or a CI job drives it. It never swaps the running process; promoting a channel
-only changes what a *future* launch resolves to. The autonomous in-session loop —
-the model building and reloading *itself* mid-session — is a separate, opt-in
-product decision that this build deliberately does not ship (see ADR-0128).
+before any channel moves, and afterwards sweeps versions beyond the most recent
+few so a copy-in store does not grow without bound — a version a channel points at
+is never swept. `gc` runs that sweep on demand.
+
+`reload` is the one command that *does* swap the running process, and only because
+you asked it to: it builds, vets, promotes `current`, then replaces this process
+with the new binary (`exec` on Unix, spawn-then-exit on Windows) running the
+arguments after `--` (default `status`, so you can see it came up on the new
+version). It carries no session continuation — a one-shot CLI invocation has no
+session to continue.
+
+All of this is the **manual** self-dev capability — a developer or a CI job drives
+it explicitly. The autonomous in-session loop — the model building and reloading
+*itself* mid-session — is a separate, opt-in product decision that this build
+deliberately does not ship (see ADR-0128).
 
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers

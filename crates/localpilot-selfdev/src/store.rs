@@ -178,12 +178,67 @@ impl VersionStore {
             SelfDevError::Io("the install committed but did not become resolvable".to_string())
         })
     }
+
+    /// Reclaim disk by removing stored versions beyond the `keep` most recent,
+    /// never touching a label in `protected` (a channel points at it, or a
+    /// process is running from it).
+    ///
+    /// A copy-in immutable store grows by one whole binary per distinct build; a
+    /// self-dev loop that rebuilds often would otherwise fill the disk. Recency is
+    /// by directory modification time — the moment the version was committed into
+    /// place — so the freshest builds are kept. A protected label is kept
+    /// regardless of age or the `keep` budget; that is the whole point of
+    /// protecting it. Leftover staging directories from a killed install are swept
+    /// too.
+    ///
+    /// Returns the labels actually removed, so a caller can report the sweep
+    /// rather than silently reclaiming disk. A directory that will not delete
+    /// (still in use) is skipped, not fatal.
+    pub fn sweep(&self, keep: usize, protected: &[String]) -> Vec<String> {
+        let mut versions = self.installed();
+        // Newest first by commit-time (mtime). An unreadable mtime sorts oldest,
+        // so a torn or foreign directory is a sweep candidate rather than a
+        // protected one.
+        versions.sort_by(|a, b| dir_mtime(&b.dir).cmp(&dir_mtime(&a.dir)));
+
+        let mut removed = Vec::new();
+        for (index, version) in versions.iter().enumerate() {
+            if protected.contains(&version.label) || index < keep {
+                continue;
+            }
+            if std::fs::remove_dir_all(&version.dir).is_ok() {
+                removed.push(version.label.clone());
+            }
+        }
+
+        // A killed install leaves a `.staging-*` tree nothing ever reads.
+        if let Ok(entries) = std::fs::read_dir(self.root.join(VERSIONS_DIR)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(".staging-"))
+                {
+                    let _ = std::fs::remove_dir_all(&path);
+                }
+            }
+        }
+        removed
+    }
 }
 
 /// Read and parse the marker in `dir`, if any.
 fn read_marker(dir: &Path) -> Option<BuildMarker> {
     let body = std::fs::read_to_string(dir.join(MARKER_FILE)).ok()?;
     serde_json::from_str(&body).ok()
+}
+
+/// A directory's modification time, for recency ordering. `None` (unreadable)
+/// sorts as oldest.
+fn dir_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir).and_then(|meta| meta.modified()).ok()
 }
 
 #[cfg(test)]
@@ -303,5 +358,73 @@ mod tests {
             .expect("install");
         assert!(stored.executable().ends_with(executable_name()));
         assert!(stored.executable().is_file());
+    }
+
+    /// Install `count` distinct labels `v0..v{count}`.
+    fn install_many(store: &VersionStore, built: &Path, count: usize) {
+        for i in 0..count {
+            let label = format!("v{i}");
+            let exe = write_exe(built, &label);
+            store
+                .install(&label, &exe, &marker(&label))
+                .expect("install");
+        }
+    }
+
+    #[test]
+    fn sweep_keeps_everything_when_keep_exceeds_the_count() {
+        let temp = tempfile::tempdir().expect("temp");
+        let store = VersionStore::new(temp.path());
+        install_many(&store, &temp.path().join("build"), 2);
+
+        let removed = store.sweep(10, &[]);
+        assert!(removed.is_empty());
+        assert_eq!(store.installed().len(), 2);
+    }
+
+    #[test]
+    fn sweep_always_keeps_a_protected_label_even_at_keep_zero() {
+        let temp = tempfile::tempdir().expect("temp");
+        let store = VersionStore::new(temp.path());
+        install_many(&store, &temp.path().join("build"), 3);
+
+        // keep=0 means recency does not matter; only the protected survives.
+        let removed = store.sweep(0, &["v1".to_string()]);
+        let survivors: Vec<_> = store.installed().into_iter().map(|v| v.label).collect();
+        assert_eq!(
+            survivors,
+            vec!["v1".to_string()],
+            "only the protected label remains"
+        );
+        assert_eq!(removed.len(), 2);
+        assert!(!removed.contains(&"v1".to_string()));
+    }
+
+    #[test]
+    fn sweep_removes_down_to_the_keep_count() {
+        let temp = tempfile::tempdir().expect("temp");
+        let store = VersionStore::new(temp.path());
+        install_many(&store, &temp.path().join("build"), 3);
+
+        let removed = store.sweep(1, &[]);
+        assert_eq!(removed.len(), 2, "three installed, keep one, remove two");
+        assert_eq!(store.installed().len(), 1);
+    }
+
+    #[test]
+    fn sweep_reclaims_leftover_staging_directories() {
+        let temp = tempfile::tempdir().expect("temp");
+        let store = VersionStore::new(temp.path());
+        let versions = temp.path().join("versions");
+        std::fs::create_dir_all(&versions).expect("versions dir");
+        // Simulate a killed install.
+        let staging = versions.join(".staging-vX-123");
+        std::fs::create_dir_all(&staging).expect("staging");
+
+        store.sweep(10, &[]);
+        assert!(
+            !staging.exists(),
+            "a leftover staging tree must be reclaimed"
+        );
     }
 }

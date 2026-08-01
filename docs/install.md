@@ -194,6 +194,12 @@ path a later build can overwrite. The pointer is a marker file, not a symlink, o
 every platform — identical behaviour on Windows, Linux, and macOS, and no
 elevated privilege required.
 
+Each build copies a whole binary in, so `selfdev publish` reclaims versions
+beyond the most recent few afterwards, and `selfdev gc` does it on demand; a
+version a channel points at is never reclaimed. You can delete the whole
+`selfdev/` subtree at any time — it is rebuilt on the next `selfdev` command and
+never affects an installed release.
+
 ## From source
 
 Use this when you want to build from a working tree, or on a platform with no

@@ -138,6 +138,23 @@ Builtin v1 tools:
 - `git_status`
 - `git_commit`
 
+### `localpilot-agents`
+
+Owns the **data** half of declarative subagents:
+
+- parsing and validating a subagent definition (a YAML file, not compiled in)
+- discovering definitions with the same precedence users know from skills
+- resolving a definition's tool list into the child's actual grants by
+  intersecting it with the parent's — a subagent's authority is always a subset
+  of the caller's
+
+Must not own: execution. Running a child session needs the harness (which depends
+on this crate), so containment is structural — a subagent is a bounded child
+session with its own context window, prompt, and always-narrower tool set.
+Subagents are not skills: a skill is text the model may read and grants nothing; a
+subagent is an execution with authority. The two share no loader, registry, or
+file format.
+
 ### `localpilot-harness`
 
 Owns:
@@ -305,6 +322,24 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - scope/path containment and minimal-diff checks
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
+
+### `localpilot-dist`
+
+Owns the **on-disk contract** for what is installed, which version runs, and how a
+new one lands — the reuse base the self-dev store and the updater share:
+
+- the version-per-directory cache (every version in its own directory, so
+  switching is a rename and rollback is free — the only layout that behaves the
+  same on Windows, where a running executable cannot be replaced in place)
+- the install marker (its presence makes a version resolvable) and SHA-256
+  verification recorded at install, not re-checked on the hot path
+- resolution order (newest / pinned / rolled-back) and the pin/rollback state
+- a `PATH`-visible `bin/` refreshed from the resolver on every change, by copy
+  (a symlink needs a privilege on Windows; a copy works everywhere), replaced
+  rename-then-copy so a running executable can be moved aside and swept later
+
+Must not own: the download. It deliberately reaches no network — it is the small,
+testable on-disk half the networked updater commits into.
 
 ### `localpilot-selfdev`
 

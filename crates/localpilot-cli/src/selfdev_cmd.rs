@@ -16,13 +16,28 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use localpilot_selfdev::{
-    build, executable_name, vet, AutoReloadBreaker, BuildMarker, BuildOptions, ChannelName,
-    Channels, SourceState, VersionStore, CURRENT, DEFAULT_HANDSHAKE_TIMEOUT, SLOW, STABLE,
+    build, executable_name, relaunch, relaunch_plan, vet, AutoReloadBreaker, BuildMarker,
+    BuildOptions, ChannelName, Channels, SourceState, StoredVersion, VersionStore, CURRENT,
+    DEFAULT_HANDSHAKE_TIMEOUT, SLOW, STABLE,
 };
 
 /// How many failed auto-reloads the breaker tolerates. Reported by `status`; the
 /// autonomous loop that would consume it is deferred (ADR-0128).
 const AUTO_RELOAD_LIMIT: u32 = 3;
+
+/// How many recent self-dev versions a publish keeps around; older ones are swept
+/// so a copy-in store does not grow without bound. Channel-referenced versions are
+/// always kept regardless of this count.
+const KEEP_VERSIONS: usize = 5;
+
+/// The set of version labels no sweep may remove: whatever each channel currently
+/// resolves to.
+fn protected_labels(channels: &Channels) -> Vec<String> {
+    [CURRENT, STABLE, SLOW]
+        .into_iter()
+        .filter_map(|channel| channels.label(channel))
+        .collect()
+}
 
 /// `selfdev build`: fingerprint the working tree and build it, reporting the
 /// source label and where the binary landed.
@@ -70,6 +85,81 @@ pub fn run_publish(
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let channel = ChannelName::parse(channel).context("channel name")?;
+    let installed =
+        build_gauntlet_promote(workspace, selfdev_root, channel.clone(), target_dir, out)?;
+    writeln!(
+        out,
+        "published {} to channel '{}'",
+        installed.label,
+        channel.as_str()
+    )?;
+    Ok(())
+}
+
+/// `selfdev reload`: build, vet, promote `current`, and swap **this** process onto
+/// the new binary, running `successor_args` (default `status`) under it.
+///
+/// This is a manual, explicit process reload — the developer typed the command.
+/// It is not the autonomous in-session loop (the model swapping itself mid-session,
+/// which stays off, ADR-0128) and it carries no session continuation, because a
+/// one-shot CLI invocation has no session to continue: it simply becomes the new
+/// binary.
+///
+/// On Unix this never returns on success (the process is replaced in place). On
+/// Windows it spawns the successor, waits for it, and exits with its status.
+///
+/// # Errors
+/// Returns an error if the build, the gauntlet, the install/promotion, or the
+/// swap fails — each *before* the swap, so a failure leaves this process running
+/// the old binary.
+pub fn run_reload(
+    workspace: &Path,
+    selfdev_root: &Path,
+    target_dir: Option<PathBuf>,
+    successor_args: &[String],
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let installed =
+        build_gauntlet_promote(workspace, selfdev_root, CURRENT.into(), target_dir, out)?;
+
+    // Default the successor to `selfdev status` so a bare `selfdev reload` visibly
+    // comes up on the new version.
+    let args: Vec<String> = if successor_args.is_empty() {
+        vec!["selfdev".to_string(), "status".to_string()]
+    } else {
+        successor_args.to_vec()
+    };
+    writeln!(
+        out,
+        "reloading onto {} (running: {})...",
+        installed.label,
+        args.join(" ")
+    )?;
+    out.flush().ok();
+
+    let program = installed.executable();
+    let plan = relaunch_plan(&program, &args);
+    match relaunch(&plan) {
+        // Unix `exec` never returns on success; this arm is Windows, where the
+        // successor was spawned and the parent must now exit to complete the swap.
+        Ok(mut child) => {
+            let status = child.wait().context("waiting for the reloaded process")?;
+            std::process::exit(status.code().unwrap_or(0));
+        }
+        Err(error) => Err(anyhow::anyhow!("relaunch failed: {error}")),
+    }
+}
+
+/// Build the working tree, run it through the gauntlet, install it immutably,
+/// promote `channel` to it, and sweep old versions. Shared by `publish` and
+/// `reload`.
+fn build_gauntlet_promote(
+    workspace: &Path,
+    selfdev_root: &Path,
+    channel: ChannelName,
+    target_dir: Option<PathBuf>,
+    out: &mut dyn Write,
+) -> anyhow::Result<StoredVersion> {
     let source = SourceState::read(workspace).context("reading the source tree")?;
     let target = target_dir.unwrap_or_else(|| localpilot_selfdev::default_target_dir(selfdev_root));
 
@@ -103,15 +193,34 @@ pub fn run_publish(
         .install(&source.version_label, &built.executable, &marker)
         .context("installing the vetted binary")?;
     channels
-        .set(channel.clone(), &installed.label)
+        .set(channel, &installed.label)
         .context("promoting the channel")?;
 
-    writeln!(
-        out,
-        "published {} to channel '{}'",
-        installed.label,
-        channel.as_str()
-    )?;
+    // Reclaim disk: keep the recent versions plus everything a channel points at.
+    let reclaimed = store.sweep(KEEP_VERSIONS, &protected_labels(&channels));
+    if !reclaimed.is_empty() {
+        writeln!(out, "reclaimed {} old version(s)", reclaimed.len())?;
+    }
+    Ok(installed)
+}
+
+/// `selfdev gc`: reclaim disk by removing self-dev versions beyond the `keep` most
+/// recent, never touching one a channel points at.
+///
+/// # Errors
+/// Never fails on an empty store — it reports "nothing to reclaim".
+pub fn run_gc(selfdev_root: &Path, keep: usize, out: &mut dyn Write) -> anyhow::Result<()> {
+    let store = VersionStore::new(selfdev_root);
+    let channels = Channels::new(selfdev_root);
+    let reclaimed = store.sweep(keep, &protected_labels(&channels));
+    if reclaimed.is_empty() {
+        writeln!(out, "nothing to reclaim")?;
+    } else {
+        writeln!(out, "reclaimed {} version(s):", reclaimed.len())?;
+        for label in &reclaimed {
+            writeln!(out, "  {label}")?;
+        }
+    }
     Ok(())
 }
 
@@ -206,6 +315,48 @@ mod tests {
 
         assert!(text.contains("ab12cd3 (git ab12cd3def)"));
         assert!(text.contains("current -> ab12cd3"));
+    }
+
+    #[test]
+    fn gc_reclaims_old_versions_but_never_the_one_a_channel_points_at() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let store = VersionStore::new(root);
+        let channels = Channels::new(root);
+
+        for label in ["v0", "v1", "v2"] {
+            let src = root.join(format!("built-{label}"));
+            std::fs::write(&src, "bin").unwrap();
+            let marker = BuildMarker::new(
+                label,
+                "hash",
+                "fp",
+                false,
+                format!("2.6.0-selfdev-{label}"),
+                executable_name(),
+            );
+            store.install(label, &src, &marker).unwrap();
+        }
+        channels.set(CURRENT, "v1").unwrap();
+
+        // keep=0: recency does not matter; only the channel-protected version stays.
+        let mut out = Vec::new();
+        run_gc(root, 0, &mut out).unwrap();
+
+        let survivors: Vec<_> = store.installed().into_iter().map(|v| v.label).collect();
+        assert_eq!(survivors, vec!["v1".to_string()]);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("reclaimed 2 version(s):"));
+    }
+
+    #[test]
+    fn gc_on_an_empty_store_reports_nothing_to_reclaim() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        run_gc(temp.path(), 5, &mut out).unwrap();
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("nothing to reclaim"));
     }
 
     #[test]

@@ -537,6 +537,23 @@ enum SelfdevCommand {
     /// Show installed self-dev versions, channel targets, and the auto-reload
     /// breaker state.
     Status,
+    /// Reclaim disk: remove self-dev versions beyond the most recent, keeping any
+    /// a channel points at.
+    Gc {
+        /// How many recent versions to keep.
+        #[arg(long, default_value_t = 5)]
+        keep: usize,
+    },
+    /// Build, vet, promote `current`, and swap this process onto the new binary.
+    /// A manual, explicit process reload — not the autonomous in-session loop.
+    Reload {
+        /// Where cargo writes the build (default: `build-target/` in the data root).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+        /// Arguments to run under the new binary after the swap (default: `status`).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -1499,6 +1516,13 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 }
                 SelfdevCommand::Status => {
                     selfdev_cmd::run_status(&selfdev_root, &mut stdout)?;
+                }
+                SelfdevCommand::Gc { keep } => {
+                    selfdev_cmd::run_gc(&selfdev_root, keep, &mut stdout)?;
+                }
+                SelfdevCommand::Reload { target_dir, args } => {
+                    // Never returns on success (Unix): the process is replaced.
+                    selfdev_cmd::run_reload(&cwd, &selfdev_root, target_dir, &args, &mut stdout)?;
                 }
             }
             stdout.flush()?;

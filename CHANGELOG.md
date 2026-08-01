@@ -6,15 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- **Added: `localpilot selfdev` — build, vet, and publish LocalPilot from its own
-  source.** `selfdev build` fingerprints the working tree and builds it; `selfdev
-  publish` runs the build through the publish gauntlet and, only if it passes,
-  installs the binary immutably and points a channel at it; `selfdev status` shows
+- **Added: `localpilot selfdev` — build, vet, publish, and reload LocalPilot from
+  its own source.** `selfdev build` fingerprints the working tree and builds it;
+  `selfdev publish` runs the build through the publish gauntlet and, only if it
+  passes, installs the binary immutably and points a channel at it, then reclaims
+  old versions beyond the most recent few (a version a channel points at is never
+  reclaimed); `selfdev gc` runs that reclaim on demand; `selfdev status` shows
   what is installed, what each channel points at, and the auto-reload breaker's
-  state. This is the manual capability — a developer or a CI job drives it, and it
-  never swaps the running process. The autonomous in-session loop, where the model
-  builds and reloads itself mid-session, is a separate opt-in this build does not
-  ship (ADR-0128).
+  state; and `selfdev reload -- <args>` builds, vets, promotes, and then swaps this
+  process onto the new binary running `<args>`. Everything here is the manual
+  capability — a developer or a CI job drives it explicitly (`reload` swaps the
+  process only because you asked it to, and carries no session continuation). The
+  autonomous in-session loop, where the model builds and reloads itself
+  mid-session, is a separate opt-in this build does not ship (ADR-0128).
 
 - **Added: reload is safe to fail — a rollback token, a no-phantom version
   comparison, and a circuit breaker.** Before a channel is pointed at a new build,
