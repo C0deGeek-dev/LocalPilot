@@ -56,7 +56,8 @@ impl Default for SwarmLimits {
 }
 
 /// What a member is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemberRole {
     /// Owns the plan and may address the whole swarm.
     Coordinator,
@@ -65,7 +66,8 @@ pub enum MemberRole {
 }
 
 /// Where a member is in its life.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum MemberStatus {
     /// Running, or waiting for work.
     Active,
@@ -89,7 +91,7 @@ impl MemberStatus {
 }
 
 /// One session's membership of one swarm.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SwarmMember {
     /// The session this member is.
     pub session: SessionId,
@@ -208,6 +210,11 @@ struct Swarm {
     admitted: usize,
     coordinator: Option<SessionId>,
     plan: Option<TaskPlan>,
+    /// When each member was last known to be alive. Kept beside the members
+    /// rather than on them: a heartbeat is an observation about a member, not a
+    /// property of one, and putting an `Instant` on `SwarmMember` would make the
+    /// record unserialisable for no benefit.
+    heartbeats: HashMap<SessionId, std::time::Instant>,
 }
 
 impl Swarm {
@@ -436,6 +443,177 @@ impl SwarmRegistry {
     /// Whether `session` is the coordinator of its swarm.
     pub async fn is_coordinator(&self, swarm: &SwarmId, session: SessionId) -> bool {
         self.coordinator(swarm).await == Some(session)
+    }
+
+    /// Record that a member is alive now.
+    ///
+    /// Called whenever a member does anything observable. A heartbeat is cheap
+    /// and a missed one is expensive, so this is deliberately not gated on
+    /// anything.
+    pub async fn heartbeat(&self, swarm: &SwarmId, session: SessionId) {
+        self.heartbeat_at(swarm, session, std::time::Instant::now())
+            .await;
+    }
+
+    /// [`heartbeat`](Self::heartbeat) at an explicit instant.
+    ///
+    /// Time is a parameter for the same reason it is on the touch index: a test
+    /// for "this member went quiet ninety seconds ago" cannot wait ninety
+    /// seconds, and one that reads the clock itself can only be written to pass.
+    pub async fn heartbeat_at(&self, swarm: &SwarmId, session: SessionId, at: std::time::Instant) {
+        let mut guard = self.inner.write().await;
+        if let Some(entry) = guard.swarms.get_mut(swarm) {
+            entry.heartbeats.insert(session, at);
+        }
+    }
+
+    /// Active members that have not been heard from within `within`, in id
+    /// order.
+    ///
+    /// A member with no heartbeat at all is *not* stale: it has never had the
+    /// chance to beat. Treating silence-since-birth as death would reap every
+    /// worker the instant it was admitted.
+    pub async fn stale_members(
+        &self,
+        swarm: &SwarmId,
+        within: std::time::Duration,
+        now: std::time::Instant,
+    ) -> Vec<SessionId> {
+        let guard = self.inner.read().await;
+        let Some(entry) = guard.swarms.get(swarm) else {
+            return Vec::new();
+        };
+        let mut out: Vec<SessionId> = entry
+            .members
+            .values()
+            .filter(|member| member.status.is_active())
+            .filter(|member| {
+                entry
+                    .heartbeats
+                    .get(&member.session)
+                    .is_some_and(|last| now.duration_since(*last) > within)
+            })
+            .map(|member| member.session)
+            .collect();
+        out.sort_by_key(SessionId::as_uuid);
+        out
+    }
+
+    /// Elect a coordinator, if the seat is empty and anyone is left.
+    ///
+    /// The successor is the lowest active member id. Deterministic on purpose:
+    /// every observer of the same state elects the same member, so there is no
+    /// window in which two of them believe different things.
+    ///
+    /// Returns the new coordinator, or `None` if the seat was filled or there is
+    /// nobody to fill it.
+    pub async fn elect_coordinator(&self, swarm: &SwarmId) -> Option<SessionId> {
+        let mut guard = self.inner.write().await;
+        let entry = guard.swarms.get_mut(swarm)?;
+        if entry
+            .coordinator
+            .is_some_and(|id| entry.members.get(&id).is_some_and(|m| m.status.is_active()))
+        {
+            return None;
+        }
+        let successor = entry
+            .members
+            .values()
+            .filter(|member| member.status.is_active())
+            .map(|member| member.session)
+            .min_by_key(SessionId::as_uuid)?;
+        entry.coordinator = Some(successor);
+        if let Some(member) = entry.members.get_mut(&successor) {
+            member.role = MemberRole::Coordinator;
+        }
+        Some(successor)
+    }
+
+    /// Hand a departed member's children to the nearest surviving ancestor.
+    ///
+    /// Grandparent first, then the coordinator, then nothing — a child whose
+    /// whole line is gone becomes a root rather than pointing at a member that
+    /// no longer exists, because a dangling report-back edge is a completion
+    /// report delivered nowhere.
+    ///
+    /// Returns the children that were moved.
+    pub async fn reparent_children(&self, swarm: &SwarmId, departed: SessionId) -> Vec<SessionId> {
+        let mut guard = self.inner.write().await;
+        let Some(entry) = guard.swarms.get_mut(swarm) else {
+            return Vec::new();
+        };
+        let grandparent = entry
+            .members
+            .get(&departed)
+            .and_then(|member| member.report_back_to)
+            .filter(|id| {
+                entry
+                    .members
+                    .get(id)
+                    .is_some_and(|m| m.status.is_active() && m.session != departed)
+            });
+        let new_parent = grandparent.or_else(|| {
+            entry
+                .coordinator
+                .filter(|id| *id != departed && entry.members.contains_key(id))
+        });
+
+        let moved: Vec<SessionId> = entry
+            .members
+            .values()
+            .filter(|member| member.report_back_to == Some(departed))
+            .map(|member| member.session)
+            .collect();
+        for id in &moved {
+            if let Some(member) = entry.members.get_mut(id) {
+                // Never reparent a member onto itself: that is a cycle the tree
+                // walks would then have to defend against forever.
+                member.report_back_to = new_parent.filter(|parent| parent != id);
+            }
+        }
+        let mut moved = moved;
+        moved.sort_by_key(SessionId::as_uuid);
+        moved
+    }
+
+    /// Every member in a terminal state, in id order — the reaper's candidates.
+    pub async fn terminal_members(&self, swarm: &SwarmId) -> Vec<SessionId> {
+        let guard = self.inner.read().await;
+        let Some(entry) = guard.swarms.get(swarm) else {
+            return Vec::new();
+        };
+        let mut out: Vec<SessionId> = entry
+            .members
+            .values()
+            .filter(|member| !member.status.is_active())
+            .map(|member| member.session)
+            .collect();
+        out.sort_by_key(SessionId::as_uuid);
+        out
+    }
+
+    /// Replace this swarm's members and plan wholesale — the restore path.
+    pub async fn restore(
+        &self,
+        swarm: &SwarmId,
+        members: Vec<SwarmMember>,
+        coordinator: Option<SessionId>,
+        plan: Option<TaskPlan>,
+    ) {
+        let mut guard = self.inner.write().await;
+        let admitted = members.len();
+        let mut map = HashMap::new();
+        for member in members {
+            guard.by_session.insert(member.session, swarm.clone());
+            map.insert(member.session, member);
+        }
+        let entry = guard.swarms.entry(swarm.clone()).or_default();
+        entry.members = map;
+        entry.coordinator = coordinator;
+        entry.plan = plan;
+        // A restored swarm has already spent those admissions; resetting the
+        // count would hand a recovered coordinator a fresh budget to burn.
+        entry.admitted = entry.admitted.max(admitted);
     }
 
     /// Move a member to a new status.

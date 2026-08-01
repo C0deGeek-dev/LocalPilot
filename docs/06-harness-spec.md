@@ -826,3 +826,41 @@ harness: <step description>
 User can disable auto-commit, but the harness must then report reduced
 recoverability.
 
+## Swarm failure lifecycle (opt-in)
+
+When several agents share one plan, one of them will die holding an assignment,
+and everything waiting on that assignment waits forever unless something
+notices. Four things happen, in order, and each replaces something that does not
+work:
+
+1. **Notice.** Members heartbeat; staleness is measured from the *last beat*. A
+   member that has never beaten is not stale — it has not had the chance, and
+   treating silence-since-birth as death reaps every worker the instant it is
+   admitted.
+2. **Salvage.** The departed member's non-terminal assignments go back into the
+   plan, bounded by a per-task reclaim counter. Past the budget the task is
+   **failed loudly** instead: a task that keeps outliving its workers is failing,
+   not unlucky, and requeuing it forever turns one bad task into a plan that
+   never finishes and never says why.
+3. **Repair the tree.** Children are reparented onto the nearest surviving
+   ancestor — grandparent, then the coordinator, then nothing, because a child
+   pointing at a member that no longer exists is a completion report delivered
+   nowhere. A departed coordinator is replaced by the **lowest surviving member
+   id**: deterministic, so every observer of the same state elects the same
+   successor without coordinating.
+4. **Say so.** A salvage report reaches whoever now owns the work, naming each
+   task and what became of it. A plan that silently re-runs a task is
+   indistinguishable from one that is stuck.
+
+**Reaping** releases the *hosting* of members that are finished and have no
+children still reporting to them — the runtime, the event broadcast, the
+subscriber task. Their membership records stay: a coordinator reading the plan
+later still needs to know what a finished worker reported.
+
+**Durable snapshots** hold a swarm's plan and membership in their own stream,
+separate from session event logs, so recovering a plan never requires replaying
+anybody's transcript. Writes are serialised, land atomically (temp then rename),
+keep the previous good file as a backup, and **refuse to go backwards**: a write
+whose revision is not newer than what is on disk is dropped, so a slow writer
+cannot restore an older plan over a newer one. A torn primary falls back to the
+backup, costing the newest revision rather than the plan.

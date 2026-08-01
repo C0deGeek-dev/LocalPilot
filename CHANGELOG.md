@@ -6,6 +6,22 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: the swarm failure lifecycle.** A worker that dies holding an
+  assignment no longer strands the plan. Members heartbeat, and staleness is
+  measured from the last beat rather than from admission — a member that has
+  never beaten has not had the chance, and reaping it would reap every worker at
+  birth. A departed member's unfinished tasks return to the plan, bounded by a
+  per-task reclaim counter; past the budget the task is failed loudly, because a
+  task that keeps outliving its workers is failing rather than unlucky. Its
+  children are reparented onto the nearest surviving ancestor, and a departed
+  coordinator is replaced by the lowest surviving member id — deterministic, so
+  every observer elects the same successor without coordinating. A salvage report
+  naming each task and its fate reaches whoever now owns the work. A reaper
+  releases the hosting of finished members while keeping what they reported.
+  Durable per-swarm snapshots hold the plan and membership in their own stream,
+  so recovering a plan never requires replaying a transcript; writes are atomic,
+  keep a backup, and refuse to go backwards.
+
 - **Added: advisory file-conflict alerts.** When several agents share one
   working tree, an agent that changes a file another agent is working in now
   hears about it mid-turn. Every file-mutating builtin, and `read_file`, report
