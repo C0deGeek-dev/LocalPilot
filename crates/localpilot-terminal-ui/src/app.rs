@@ -365,6 +365,13 @@ fn format_tool_duration(duration_ms: u64) -> String {
     }
 }
 
+fn tool_output_body(output: &str) -> &str {
+    output
+        .split_once("\noutput:\n")
+        .map_or(output, |(_, body)| body)
+        .trim()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ThemePickerState {
     original: Theme,
@@ -565,6 +572,93 @@ pub enum DialogState {
         target: String,
         risk_class: String,
     },
+    Question(QuestionDialog),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct QuestionDialog {
+    question: String,
+    options: Vec<String>,
+    selected: usize,
+    editing_other: bool,
+    other: String,
+    other_cursor: usize,
+}
+
+impl fmt::Debug for QuestionDialog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuestionDialog")
+            .field(
+                "question",
+                &format_args!("<{} bytes redacted>", self.question.len()),
+            )
+            .field(
+                "options",
+                &format_args!("<{} redacted>", self.options.len()),
+            )
+            .field("selected", &self.selected)
+            .field("editing_other", &self.editing_other)
+            .field(
+                "other",
+                &format_args!("<{} bytes redacted>", self.other.len()),
+            )
+            .field("other_cursor", &self.other_cursor)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct QuestionView<'a> {
+    pub question: &'a str,
+    pub options: &'a [String],
+    pub selected: usize,
+    pub editing_other: bool,
+    pub other: &'a str,
+    pub other_cursor: usize,
+}
+
+impl fmt::Debug for QuestionView<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuestionView")
+            .field(
+                "question",
+                &format_args!("<{} bytes redacted>", self.question.len()),
+            )
+            .field(
+                "options",
+                &format_args!("<{} redacted>", self.options.len()),
+            )
+            .field("selected", &self.selected)
+            .field("editing_other", &self.editing_other)
+            .field(
+                "other",
+                &format_args!("<{} bytes redacted>", self.other.len()),
+            )
+            .field("other_cursor", &self.other_cursor)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum QuestionAction {
+    None,
+    Submit(String),
+    Cancel,
+}
+
+impl fmt::Debug for QuestionAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::Submit(answer) => formatter
+                .debug_tuple("Submit")
+                .field(&format_args!("<{} bytes redacted>", answer.len()))
+                .finish(),
+            Self::Cancel => formatter.write_str("Cancel"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -725,6 +819,13 @@ impl AppModel {
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
+        if self.dialog.is_some() {
+            if !matches!(action, InputAction::CancelOrExit) {
+                self.exit_armed = false;
+                return AppCommand::None;
+            }
+            return self.cancel_or_exit();
+        }
         if matches!(action, InputAction::CancelOrExit) && self.theme_picker.is_some() {
             self.exit_armed = false;
             self.close_theme_picker(true);
@@ -753,9 +854,6 @@ impl AppModel {
         }
         if matches!(action, InputAction::CancelOrExit) {
             return self.cancel_or_exit();
-        }
-        if self.dialog.is_some() {
-            return AppCommand::None;
         }
         if self.theme_picker.is_some() {
             return self.handle_theme_picker_input(action);
@@ -977,12 +1075,22 @@ impl AppModel {
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
                 let detail = bounded_inline_text(&detail, MAX_TOOL_DETAIL_BYTES);
-                let mut text = sanitize_inline(&name);
-                if !detail.is_empty() {
+                let question = name == "ask_user";
+                let mut text = if question {
+                    format!("Asking user {detail}")
+                } else {
+                    sanitize_inline(&name)
+                };
+                if !question && !detail.is_empty() {
                     text.push('\n');
                     text.push_str(&detail);
                 }
-                if let Some(item) = self.push_runtime_item(ItemKind::Tool, text) {
+                let kind = if question {
+                    ItemKind::Question
+                } else {
+                    ItemKind::Tool
+                };
+                if let Some(item) = self.push_runtime_item(kind, text) {
                     let _ = self
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
@@ -1003,6 +1111,38 @@ impl AppModel {
                 output,
                 duration_ms,
             } => {
+                if name == "ask_user" {
+                    let output =
+                        bounded_inline_text(tool_output_body(&output), MAX_TOOL_DETAIL_BYTES);
+                    if let Some(active) = self.active_tools.remove(&id) {
+                        let mut text = format!("Asked user {}", active.detail);
+                        if !output.is_empty() {
+                            text.push('\n');
+                            text.push_str(&output);
+                        }
+                        let _ = self.timeline.replace_text(active.item_id, text);
+                        let activity = if cancelled {
+                            ActivityState::Cancelled
+                        } else if is_error {
+                            ActivityState::Error
+                        } else {
+                            ActivityState::Success
+                        };
+                        let _ = self.timeline.set_activity(active.item_id, Some(activity));
+                        self.style_activity(active.item_id, activity);
+                    } else {
+                        let mut text = "Asked user".to_string();
+                        if !output.is_empty() {
+                            text.push('\n');
+                            text.push_str(&output);
+                        }
+                        let _ = self.push_runtime_item(ItemKind::Question, text);
+                    }
+                    if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+                        self.refresh_timeline_search();
+                    }
+                    return;
+                }
                 let state = if cancelled {
                     "cancelled"
                 } else if is_error {
@@ -1644,6 +1784,7 @@ impl AppModel {
     }
 
     pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
+        self.claim_dialog_focus();
         self.dialog = Some(DialogState::Trust {
             path: sanitize_inline(&path.into()),
         });
@@ -1660,6 +1801,7 @@ impl AppModel {
         target: impl Into<String>,
         risk_class: impl Into<String>,
     ) {
+        self.claim_dialog_focus();
         self.dialog = Some(DialogState::Approval {
             tool: sanitize_inline(&tool.into()),
             target: sanitize_inline(&target.into()),
@@ -1667,8 +1809,147 @@ impl AppModel {
         });
     }
 
+    pub fn request_question(
+        &mut self,
+        question: impl Into<String>,
+        options: impl IntoIterator<Item = String>,
+    ) {
+        self.claim_dialog_focus();
+        let options = options
+            .into_iter()
+            .map(|option| bounded_inline_text(&option, 1024))
+            .filter(|option| !option.is_empty())
+            .take(8)
+            .collect();
+        self.dialog = Some(DialogState::Question(QuestionDialog {
+            question: bounded_inline_text(&question.into(), MAX_TOOL_DETAIL_BYTES),
+            options,
+            selected: 0,
+            editing_other: false,
+            other: String::new(),
+            other_cursor: 0,
+        }));
+    }
+
+    #[must_use]
+    pub(crate) fn question(&self) -> Option<QuestionView<'_>> {
+        let Some(DialogState::Question(question)) = &self.dialog else {
+            return None;
+        };
+        Some(QuestionView {
+            question: &question.question,
+            options: &question.options,
+            selected: question.selected,
+            editing_other: question.editing_other,
+            other: &question.other,
+            other_cursor: question.other_cursor,
+        })
+    }
+
+    pub fn select_question_option(&mut self, index: usize) {
+        let Some(DialogState::Question(question)) = &mut self.dialog else {
+            return;
+        };
+        question.selected = index.min(question.options.len());
+        question.editing_other = false;
+    }
+
+    pub fn handle_question_input(&mut self, action: InputAction) -> QuestionAction {
+        let Some(DialogState::Question(question)) = &mut self.dialog else {
+            return QuestionAction::None;
+        };
+        if question.editing_other {
+            match action {
+                InputAction::Escape => question.editing_other = false,
+                InputAction::Insert(text) | InputAction::Paste(text) => {
+                    let text = sanitize_inline(&text);
+                    let remaining = MAX_TOOL_DETAIL_BYTES.saturating_sub(question.other.len());
+                    let end = previous_char_boundary(&text, remaining);
+                    question
+                        .other
+                        .insert_str(question.other_cursor, &text[..end]);
+                    question.other_cursor = question.other_cursor.saturating_add(end);
+                }
+                InputAction::Backspace => {
+                    if question.other_cursor > 0 {
+                        let start = previous_char_boundary(
+                            &question.other,
+                            question.other_cursor.saturating_sub(1),
+                        );
+                        question.other.drain(start..question.other_cursor);
+                        question.other_cursor = start;
+                    }
+                }
+                InputAction::Delete => {
+                    if question.other_cursor < question.other.len() {
+                        let end = next_char_boundary(
+                            &question.other,
+                            question.other_cursor.saturating_add(1),
+                        );
+                        question.other.drain(question.other_cursor..end);
+                    }
+                }
+                InputAction::MoveLeft => {
+                    question.other_cursor = previous_char_boundary(
+                        &question.other,
+                        question.other_cursor.saturating_sub(1),
+                    );
+                }
+                InputAction::MoveRight | InputAction::ForwardCharOrSearch => {
+                    question.other_cursor = next_char_boundary(
+                        &question.other,
+                        question.other_cursor.saturating_add(1),
+                    );
+                }
+                InputAction::Submit => {
+                    let answer = question.other.trim();
+                    if !answer.is_empty() {
+                        return QuestionAction::Submit(answer.to_string());
+                    }
+                }
+                _ => {}
+            }
+            return QuestionAction::None;
+        }
+        match action {
+            InputAction::MoveUp => {
+                question.selected = question.selected.saturating_sub(1);
+                QuestionAction::None
+            }
+            InputAction::MoveDown => {
+                question.selected = question
+                    .selected
+                    .saturating_add(1)
+                    .min(question.options.len());
+                QuestionAction::None
+            }
+            InputAction::Submit | InputAction::AcceptCompletion => {
+                if let Some(answer) = question.options.get(question.selected) {
+                    QuestionAction::Submit(answer.clone())
+                } else {
+                    question.editing_other = true;
+                    question.other_cursor = question.other.len();
+                    QuestionAction::None
+                }
+            }
+            InputAction::Escape => QuestionAction::Cancel,
+            _ => QuestionAction::None,
+        }
+    }
+
     pub fn clear_dialog(&mut self) {
         self.dialog = None;
+    }
+
+    fn claim_dialog_focus(&mut self) {
+        self.quick_help = false;
+        if self.theme_picker.is_some() {
+            self.close_theme_picker(true);
+        }
+        self.takeover = None;
+        if self.input_overlay.is_some() {
+            self.cancel_input_overlay();
+        }
     }
 
     pub fn disarm_exit(&mut self) {
@@ -2384,11 +2665,17 @@ impl AppModel {
         let Some(end_byte) = self.timeline.item(id).map(|item| item.text.len()) else {
             return;
         };
-        let role = match activity {
-            ActivityState::Running => SemanticRole::Tool,
-            ActivityState::Success => SemanticRole::Success,
-            ActivityState::Error => SemanticRole::Error,
-            ActivityState::Cancelled => SemanticRole::Muted,
+        let role = match (self.timeline.item(id).map(|item| item.kind), activity) {
+            (Some(ItemKind::Question), ActivityState::Running | ActivityState::Success) => {
+                SemanticRole::Tool
+            }
+            (Some(ItemKind::Question), ActivityState::Error | ActivityState::Cancelled) => {
+                SemanticRole::Muted
+            }
+            (_, ActivityState::Running) => SemanticRole::Tool,
+            (_, ActivityState::Success) => SemanticRole::Success,
+            (_, ActivityState::Error) => SemanticRole::Error,
+            (_, ActivityState::Cancelled) => SemanticRole::Muted,
         };
         let styles = (end_byte > 0)
             .then_some(StyledRange {
@@ -3892,6 +4179,31 @@ mod tests {
     }
 
     #[test]
+    fn a_dialog_claims_focus_before_transient_overlays_and_ctrl_c() {
+        let mut app = model();
+        app.quick_help = true;
+        app.open_theme_picker();
+        let _ = app.handle_theme_picker_input(InputAction::MoveDown);
+        assert_eq!(app.theme, Theme::Dim);
+
+        app.begin_work();
+        app.request_approval("write_file", "src/main.rs", "project write");
+        assert!(!app.quick_help());
+        assert!(!app.has_theme_picker());
+        assert_eq!(app.theme, Theme::Default);
+        assert_eq!(
+            app.handle_input(InputAction::Insert("x".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::CancelWork
+        );
+        assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
+    }
+
+    #[test]
     fn truthful_tab_configuration_preserves_order_and_removes_duplicates() {
         let mut app = model();
         app.set_tabs([TabId::Activity, TabId::Session, TabId::Activity]);
@@ -3964,6 +4276,72 @@ mod tests {
         assert_eq!(
             app.timeline.rows(80)[0].text,
             "run_shell cancelled · 750 ms"
+        );
+    }
+
+    #[test]
+    fn question_dialog_owns_choices_other_text_and_cancellation() {
+        let mut app = model();
+        app.request_question("Pick a color", ["Red".to_string(), "Blue".to_string()]);
+        assert_eq!(
+            app.handle_question_input(InputAction::MoveDown),
+            QuestionAction::None
+        );
+        assert_eq!(
+            app.handle_question_input(InputAction::Submit),
+            QuestionAction::Submit("Blue".to_string())
+        );
+
+        app.select_question_option(2);
+        assert_eq!(
+            app.handle_question_input(InputAction::Submit),
+            QuestionAction::None
+        );
+        let _ = app.handle_question_input(InputAction::Insert("Cyan界".to_string()));
+        let _ = app.handle_question_input(InputAction::MoveLeft);
+        let _ = app.handle_question_input(InputAction::Backspace);
+        let submitted = app.handle_question_input(InputAction::Submit);
+        assert_eq!(submitted, QuestionAction::Submit("Cya界".to_string()));
+        assert!(!format!("{submitted:?}").contains("Cya"));
+        let _ = app.handle_question_input(InputAction::Escape);
+        assert_eq!(
+            app.handle_question_input(InputAction::Escape),
+            QuestionAction::Cancel
+        );
+        let debug = format!("{:?}", app.dialog);
+        assert!(!debug.contains("Pick a color"));
+        assert!(!debug.contains("Cya"));
+    }
+
+    #[test]
+    fn ask_user_runtime_row_resolves_in_place_with_the_selected_answer() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "ask-1".to_string(),
+            name: "ask_user".to_string(),
+            detail: "Do you prefer Red or Blue?".to_string(),
+        });
+        assert_eq!(app.timeline.items()[0].kind, ItemKind::Question);
+        assert_eq!(
+            app.timeline.items()[0].text,
+            "Asking user Do you prefer Red or Blue?"
+        );
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "ask-1".to_string(),
+            name: "ask_user".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "tool: ask_user\nstatus: success\noutput:\nUser selected: Blue".to_string(),
+            duration_ms: 100,
+        });
+        assert_eq!(app.timeline.items().len(), 1);
+        assert_eq!(
+            app.timeline.items()[0].text,
+            "Asked user Do you prefer Red or Blue?\nUser selected: Blue"
+        );
+        assert_eq!(
+            app.timeline.items()[0].activity,
+            Some(ActivityState::Success)
         );
     }
 

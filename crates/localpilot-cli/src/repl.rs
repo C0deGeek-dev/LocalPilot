@@ -29,7 +29,9 @@ use localpilot_sandbox::{
     Profile,
 };
 use localpilot_store::Store;
-use localpilot_tools::BackgroundProcesses;
+use localpilot_tools::{
+    AskUser, BackgroundProcesses, ElicitationOutcome, ElicitationRequest, UserElicitor,
+};
 use localpilot_tui::{
     banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
     AppInput, AppState, ApprovalRequest, BackgroundCommand, BackgroundProcess, Header,
@@ -107,6 +109,14 @@ pub(crate) struct ApprovalCall {
     pub(crate) reply: oneshot::Sender<bool>,
 }
 
+/// A pending model question handed to the full-screen event loop. Elicitation
+/// is registered only for that host, so the rollback inline renderer never
+/// advertises an interaction it cannot present.
+pub(crate) struct ElicitationCall {
+    pub(crate) request: ElicitationRequest,
+    pub(crate) reply: oneshot::Sender<ElicitationOutcome>,
+}
+
 /// Host context needed by slash commands that leave pure UI state and run CLI
 /// workflows.
 struct CommandHost<'a> {
@@ -124,6 +134,26 @@ struct CommandHost<'a> {
 /// An [`Approver`] that suspends the turn and asks the user through the TUI.
 struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalCall>,
+}
+
+struct TuiElicitor {
+    tx: mpsc::UnboundedSender<ElicitationCall>,
+}
+
+impl UserElicitor for TuiElicitor {
+    fn ask(
+        &self,
+        request: ElicitationRequest,
+    ) -> Pin<Box<dyn Future<Output = ElicitationOutcome> + Send + '_>> {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.tx.send(ElicitationCall { request, reply });
+        Box::pin(async move {
+            if sent.is_err() {
+                return ElicitationOutcome::Cancelled;
+            }
+            answer.await.unwrap_or(ElicitationOutcome::Cancelled)
+        })
+    }
 }
 
 impl Approver for TuiApprover {
@@ -281,7 +311,15 @@ pub async fn run_chat(
     // Ask-gated actions suspend the turn and prompt in the TUI; the user's
     // y/n answer flows back through this channel to the permission engine.
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
+    let (elicitation_tx, mut elicitation_rx) = mpsc::unbounded_channel::<ElicitationCall>();
+    let mcp_tools = crate::mcp::McpTools::load(&config).await;
+    let mut registry = if chat_ui == ChatUi::Fullscreen {
+        mcp_tools.registry_with_builtin(Box::new(AskUser::new(Arc::new(TuiElicitor {
+            tx: elicitation_tx,
+        }))))
+    } else {
+        mcp_tools.registry()
+    };
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     timer.mark("mcp servers + tools");
     // Interactive session: apply the built-in safety rails so an unconfigured
@@ -409,6 +447,7 @@ pub async fn run_chat(
             crate::fullscreen::HostContext {
                 runtime: &mut runtime,
                 approval_rx: &mut approval_rx,
+                elicitation_rx: &mut elicitation_rx,
                 cwd: &cwd,
                 history: &history,
                 ingest: &config.ingest,
@@ -2860,6 +2899,30 @@ mod tests {
 
     use super::*;
     use localpilot_tui::TranscriptLine;
+
+    #[tokio::test]
+    async fn tui_elicitor_round_trips_answers_and_cancels_when_the_host_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let elicitor = TuiElicitor { tx };
+        let request = ElicitationRequest {
+            question: "Pick one".to_string(),
+            options: vec!["Red".to_string(), "Blue".to_string()],
+        };
+
+        let answer = elicitor.ask(request.clone());
+        let call = rx.recv().await.expect("question forwarded to host");
+        assert_eq!(call.request, request);
+        call.reply
+            .send(ElicitationOutcome::Answered("Blue".to_string()))
+            .expect("host answer accepted");
+        assert_eq!(
+            answer.await,
+            ElicitationOutcome::Answered("Blue".to_string())
+        );
+
+        drop(rx);
+        assert_eq!(elicitor.ask(request).await, ElicitationOutcome::Cancelled);
+    }
 
     #[test]
     fn full_screen_git_status_is_best_effort_and_truthful() {

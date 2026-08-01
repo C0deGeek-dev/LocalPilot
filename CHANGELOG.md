@@ -27,7 +27,11 @@ is SemVer-stable; the configuration schema stability policy is in
   scrollbar navigation, precise composer clicks, boundary-aware history,
   reverse and timeline search, fuzzy slash/file completion, atomic compact
   multiline paste, and clipboard-image placeholders whose bytes stay out of
-  prompt history. Ctrl+G temporarily restores the ordinary terminal, opens the
+  prompt history. The full-screen-only `ask_user` tool now pauses a model turn
+  in a numbered choice dialog with an automatic free-text Other option, resolves
+  the same timeline row with the answer, and cancels explicitly without guessing
+  when the user presses Escape or the host closes. Ctrl+G temporarily restores
+  the ordinary terminal, opens the
   draft in a foreground external editor, then rebuilds the full-screen frame
   without losing its timeline or opaque attachment identity. Detailed pickers/
   conversation surfaces, accessibility and the remaining terminal matrix remain

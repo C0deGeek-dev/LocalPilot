@@ -315,6 +315,27 @@ Rules:
   session starts). No background process outlives the session — there are no
   cross-invocation daemons.
 
+### `ask_user`
+
+Asks one bounded multiple-choice question through the full-screen interactive
+host when the model cannot proceed without a user's decision. The typed input
+contains one question and 2–8 mutually exclusive options; the host always adds
+a free-text Other choice.
+
+Rules:
+
+- it is registered only when the full-screen host has wired an elicitation
+  channel, so non-interactive and rollback-inline sessions never advertise a
+  question they cannot present
+- it declares no external effect, but still dispatches through the ordinary
+  registry validation, permission, redaction and result-normalization path
+- arrows move the focused option, Enter confirms, Escape cancels, and mouse
+  clicks focus options; selecting Other opens a bounded inline answer editor
+- a closed host or Escape returns an explicit cancelled tool result; LocalPilot
+  never invents or defaults an answer
+- question, option and answer text is bounded and terminal-sanitized; Debug
+  projections redact the content
+
 ### quality-gate checks
 
 The harness quality gate ([`docs/06`](06-harness-spec.md)) runs its ratified
@@ -549,5 +570,7 @@ the failure-driven seam / marker parse: [`docs/extending.md`](extending.md).
 - A failed tool call is represented as data, not a process crash.
 - A cancelled tool execution is aborted (child processes killed), answered
   with a synthesized error result, and recorded in the session event log.
+- A user-elicitation cancellation is returned to the model as data and never
+  interpreted as consent or as an implicit option selection.
 - Revealing a tool (pull-discovery broker) changes only what is advertised; it
   grants no authority, so a revealed tool still passes the full permission gate.

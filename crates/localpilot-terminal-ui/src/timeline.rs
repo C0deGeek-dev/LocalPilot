@@ -24,6 +24,7 @@ pub enum ItemKind {
     Assistant,
     Reasoning,
     Tool,
+    Question,
     Shell,
     Notice,
 }
@@ -59,6 +60,7 @@ impl From<ItemKind> for SemanticRole {
             ItemKind::Assistant => Self::Assistant,
             ItemKind::Reasoning => Self::Reasoning,
             ItemKind::Tool => Self::Tool,
+            ItemKind::Question => Self::Tool,
             ItemKind::Shell => Self::Tool,
             ItemKind::Notice => Self::Notice,
         }
@@ -858,6 +860,7 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
         ItemKind::Assistant
         | ItemKind::Reasoning
         | ItemKind::Tool
+        | ItemKind::Question
         | ItemKind::Shell
         | ItemKind::Notice => 2,
     };
@@ -994,6 +997,7 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
             ItemKind::Assistant
             | ItemKind::Reasoning
             | ItemKind::Tool
+            | ItemKind::Question
             | ItemKind::Shell
             | ItemKind::Notice => 2,
         },

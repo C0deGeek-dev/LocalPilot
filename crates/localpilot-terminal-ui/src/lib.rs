@@ -17,14 +17,15 @@ mod timeline;
 
 pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
-    DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PlanEntry, RecoveryState,
-    RuntimeUpdate, SettingEntry, StopState, TabId, TakeoverKind, TakeoverNavigation,
+    DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PlanEntry, QuestionAction,
+    RecoveryState, RuntimeUpdate, SettingEntry, StopState, TabId, TakeoverKind, TakeoverNavigation,
     TerminalCapabilities, TimelineNavigation, UserShellCommand, UserShellOutput, WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
 pub use render::{
-    render, CompletionHit, HitMap, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit, TimelineRowHit,
+    render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,
+    TimelineRowHit,
 };
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};

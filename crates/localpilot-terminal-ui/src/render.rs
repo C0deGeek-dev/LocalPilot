@@ -5,7 +5,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{CompletionKind, DiffPane, TakeoverView};
+use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView};
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
     TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
@@ -14,7 +14,8 @@ use crate::{
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
 const BANNER_ROWS: u16 = 7;
-const SCREEN_READER_PREFIX_EXTRA: u16 = 15;
+/// Width of the widest screen-reader timeline role label (`Shell completed: `).
+const SCREEN_READER_PREFIX_EXTRA: u16 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabHit {
@@ -36,6 +37,12 @@ pub struct ThemeHit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TakeoverHit {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuestionHit {
     pub index: usize,
     pub area: Rect,
 }
@@ -138,6 +145,7 @@ pub struct HitMap {
     pub timeline_rows: Vec<TimelineRowHit>,
     pub completion_rows: Vec<CompletionHit>,
     pub theme_rows: Vec<ThemeHit>,
+    pub question_rows: Vec<QuestionHit>,
     pub takeover_rows: Vec<TakeoverHit>,
     pub takeover_file_rows: Vec<TakeoverHit>,
     pub scrollbar: ScrollbarGeometry,
@@ -193,6 +201,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
+            question_rows: Vec::new(),
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
@@ -214,7 +223,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
-    render_dialog(frame, area, app);
+    let question_rows = render_dialog(frame, area, app);
     HitMap {
         takeover: false,
         frame: Some(layout),
@@ -224,6 +233,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         timeline_rows,
         completion_rows,
         theme_rows,
+        question_rows,
         takeover_rows: Vec::new(),
         takeover_file_rows: Vec::new(),
         scrollbar,
@@ -328,7 +338,7 @@ fn render_takeover(
             Paragraph::new(format!("{APP_NAME}\nresize to view help")).wrap(Wrap { trim: false }),
             area,
         );
-        render_dialog(frame, area, app);
+        let question_rows = render_dialog(frame, area, app);
         return HitMap {
             takeover: true,
             frame: None,
@@ -338,6 +348,7 @@ fn render_takeover(
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
+            question_rows,
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
@@ -488,7 +499,7 @@ fn render_takeover(
             1,
         ),
     );
-    render_dialog(frame, area, app);
+    let question_rows = render_dialog(frame, area, app);
 
     HitMap {
         takeover: true,
@@ -499,6 +510,7 @@ fn render_takeover(
         timeline_rows: Vec::new(),
         completion_rows: Vec::new(),
         theme_rows: Vec::new(),
+        question_rows,
         takeover_rows,
         takeover_file_rows,
         scrollbar,
@@ -1404,6 +1416,7 @@ fn role_prefix(
                     UiRole::Code,
                 ),
             },
+            ItemKind::Question => ("  ", UiRole::Foreground),
             ItemKind::Shell => match activity {
                 Some(ActivityState::Success) => (
                     if first {
@@ -1467,6 +1480,17 @@ fn role_prefix(
             };
             vec![Span::styled(
                 if first { glyph } else { "  " },
+                theme.ui(role),
+            )]
+        }
+        ItemKind::Question => {
+            let (glyph, role) = match activity {
+                Some(ActivityState::Running) | None => ("○ ", UiRole::Foreground),
+                Some(ActivityState::Success) => ("● ", UiRole::Foreground),
+                Some(ActivityState::Error | ActivityState::Cancelled) => ("● ", UiRole::Muted),
+            };
+            vec![Span::styled(
+                if first { glyph } else { "└ " },
                 theme.ui(role),
             )]
         }
@@ -1654,18 +1678,22 @@ fn timeline_search_projection(app: &AppModel, width: u16) -> Option<(String, usi
     Some((text, cursor))
 }
 
-fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
+fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec<QuestionHit> {
     let Some(dialog) = &app.dialog else {
-        return;
+        return Vec::new();
     };
     if app.capabilities.screen_reader {
-        render_screen_reader_dialog(frame, frame_area, app, dialog);
-        return;
+        return render_screen_reader_dialog(frame, frame_area, app, dialog);
+    }
+    if let DialogState::Question(_) = dialog {
+        return app.question().map_or_else(Vec::new, |question| {
+            render_question_dialog(frame, frame_area, app, question, false)
+        });
     }
     let width = frame_area.width.saturating_sub(4).min(72);
     let height = frame_area.height.saturating_sub(2).min(7);
     if width < 20 || height < 5 {
-        return;
+        return Vec::new();
     }
     let area = Rect::new(
         frame_area.x + frame_area.width.saturating_sub(width) / 2,
@@ -1714,6 +1742,7 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
             Line::styled(target.clone(), theme.ui(UiRole::Muted)),
             Line::styled("Y allow once · N deny", theme.ui(UiRole::Muted)),
         ],
+        DialogState::Question(_) => Vec::new(),
     };
     frame.render_widget(
         Paragraph::new(lines)
@@ -1721,6 +1750,7 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+    Vec::new()
 }
 
 fn render_screen_reader_dialog(
@@ -1728,11 +1758,16 @@ fn render_screen_reader_dialog(
     frame_area: Rect,
     app: &AppModel,
     dialog: &DialogState,
-) {
+) -> Vec<QuestionHit> {
+    if let DialogState::Question(_) = dialog {
+        return app.question().map_or_else(Vec::new, |question| {
+            render_question_dialog(frame, frame_area, app, question, true)
+        });
+    }
     let width = frame_area.width.saturating_sub(4).min(72);
     let height = frame_area.height.saturating_sub(2).min(7);
     if width < 20 || height < 5 {
-        return;
+        return Vec::new();
     }
     let area = Rect::new(
         frame_area.x + frame_area.width.saturating_sub(width) / 2,
@@ -1749,8 +1784,8 @@ fn render_screen_reader_dialog(
                 "LocalPilot will use the active permission profile.",
                 theme.ui(UiRole::Muted),
             ),
-            Line::styled("Current selection: 1. Yes", theme.ui(UiRole::Foreground)),
-            Line::styled("1. Yes · 2. No · Enter confirm", theme.ui(UiRole::Muted)),
+            Line::styled("Y trust and continue", theme.ui(UiRole::Foreground)),
+            Line::styled("N or Esc exit", theme.ui(UiRole::Muted)),
         ],
         DialogState::Approval {
             tool,
@@ -1763,12 +1798,10 @@ fn render_screen_reader_dialog(
                 theme.ui(UiRole::Foreground),
             ),
             Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
-            Line::styled(
-                "Current selection: 1. Allow once",
-                theme.ui(UiRole::Foreground),
-            ),
-            Line::styled("1. Allow once · 2. Deny", theme.ui(UiRole::Muted)),
+            Line::styled("Y allow once", theme.ui(UiRole::Foreground)),
+            Line::styled("N or Esc deny", theme.ui(UiRole::Muted)),
         ],
+        DialogState::Question(_) => Vec::new(),
     };
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -1777,6 +1810,154 @@ fn render_screen_reader_dialog(
             .wrap(Wrap { trim: false }),
         area,
     );
+    Vec::new()
+}
+
+fn render_question_dialog(
+    frame: &mut Frame<'_>,
+    frame_area: Rect,
+    app: &AppModel,
+    question: QuestionView<'_>,
+    screen_reader: bool,
+) -> Vec<QuestionHit> {
+    let width = frame_area
+        .width
+        .saturating_sub(4)
+        .min(if screen_reader { 72 } else { 44 });
+    let horizontal_chrome = if screen_reader { 0 } else { 4 };
+    let projected_content_width = width.saturating_sub(horizontal_chrome);
+    let footer = if question.editing_other {
+        "enter to confirm · esc to return to choices"
+    } else {
+        "↑/↓ to select · enter to confirm · esc to cancel"
+    };
+    let footer_rows =
+        if screen_reader && UnicodeWidthStr::width(footer) > usize::from(projected_content_width) {
+            2
+        } else {
+            1
+        };
+    let fixed_rows = if screen_reader { 3 } else { 6 };
+    let requested_height = u16::try_from(question.options.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(fixed_rows)
+        .saturating_add(footer_rows);
+    let height = frame_area.height.saturating_sub(2).min(requested_height);
+    let minimum_height = if screen_reader { 6 } else { 9 };
+    if width < 20 || height < minimum_height {
+        return Vec::new();
+    }
+    let area = Rect::new(
+        frame_area.x + frame_area.width.saturating_sub(width) / 2,
+        frame_area.y + frame_area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, area);
+    let inner = if screen_reader {
+        frame.render_widget(Block::default().style(theme.ui(UiRole::Background)), area);
+        area
+    } else {
+        let block = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .style(theme.ui(UiRole::Surface))
+            .border_style(theme.ui(UiRole::Border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
+    if inner.height < 5 {
+        return Vec::new();
+    }
+
+    let left = inner.x.saturating_add(u16::from(!screen_reader));
+    let content_width = inner
+        .right()
+        .saturating_sub(left)
+        .saturating_sub(u16::from(!screen_reader));
+    frame.render_widget(
+        Paragraph::new("Question").style(theme.ui(UiRole::Prompt)),
+        Rect::new(left, inner.y, content_width, 1),
+    );
+    if !screen_reader {
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(content_width))).style(theme.ui(UiRole::Border)),
+            Rect::new(left, inner.y.saturating_add(1), content_width, 1),
+        );
+    }
+    let question_y = inner.y.saturating_add(if screen_reader { 1 } else { 2 });
+    frame.render_widget(
+        Paragraph::new(truncate_end(question.question, content_width))
+            .style(theme.ui(UiRole::Foreground)),
+        Rect::new(left, question_y, content_width, 1),
+    );
+
+    let options_y = question_y.saturating_add(1);
+    let footer_y = inner.bottom().saturating_sub(footer_rows);
+    let mut hits = Vec::new();
+    for index in 0..=question.options.len() {
+        let y = options_y.saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= footer_y {
+            break;
+        }
+        let selected = question.selected == index;
+        let marker = if selected { "❯" } else { " " };
+        let label = if let Some(option) = question.options.get(index) {
+            option.as_str()
+        } else if question.editing_other {
+            question.other
+        } else {
+            "Other (type your answer)"
+        };
+        let shown = if index == question.options.len() && question.editing_other {
+            let value = if label.is_empty() {
+                "Type your answer"
+            } else {
+                label
+            };
+            format!("{marker} {}. {value}", index + 1)
+        } else {
+            format!("{marker} {}. {label}", index + 1)
+        };
+        let role = if selected {
+            UiRole::Focus
+        } else {
+            UiRole::Foreground
+        };
+        let hit = Rect::new(left, y, content_width, 1);
+        frame.render_widget(
+            Paragraph::new(truncate_end(&shown, content_width)).style(theme.ui(role)),
+            hit,
+        );
+        hits.push(QuestionHit { index, area: hit });
+
+        if selected && question.editing_other {
+            let prefix = format!("{marker} {}. ", index + 1);
+            let prefix_width =
+                u16::try_from(UnicodeWidthStr::width(prefix.as_str())).unwrap_or(content_width);
+            let before = &question.other[..question.other_cursor.min(question.other.len())];
+            let answer_width = u16::try_from(UnicodeWidthStr::width(before)).unwrap_or(u16::MAX);
+            frame.set_cursor_position((
+                left.saturating_add(prefix_width)
+                    .saturating_add(answer_width)
+                    .min(hit.right().saturating_sub(1)),
+                y,
+            ));
+        }
+    }
+    let footer = if screen_reader {
+        footer.to_string()
+    } else {
+        truncate_end(footer, content_width)
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .style(theme.ui(UiRole::Muted))
+            .wrap(Wrap { trim: false }),
+        Rect::new(left, footer_y, content_width, footer_rows),
+    );
+    hits
 }
 
 fn render_slim_frame(
@@ -2353,6 +2534,77 @@ mod tests {
     }
 
     #[test]
+    fn question_dialog_matches_the_numbered_choice_lifecycle_and_exposes_hits() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "ask-1".into(),
+            name: "ask_user".into(),
+            detail: "Do you prefer Red or Blue?".into(),
+        });
+        app.request_question(
+            "Do you prefer Red or Blue?",
+            ["Red".to_string(), "Blue".to_string()],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        let mut hits = None;
+        terminal
+            .draw(|frame| hits = Some(render(frame, &app)))
+            .expect("draw question");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("○ Asking user Do you prefer Red or Blue?"));
+        assert!(rendered.contains("Question"));
+        assert!(rendered.contains("❯ 1. Red"));
+        assert!(rendered.contains("2. Blue"));
+        assert!(rendered.contains("3. Other (type your answer)"));
+        assert!(rendered.contains("↑/↓ to select · enter to confirm · esc …"));
+        let hits = hits.expect("hit map");
+        assert_eq!(hits.question_rows.len(), 3);
+        assert_eq!(hits.question_rows[2].index, 2);
+        assert_eq!(hits.question_rows[0].area.width, 40);
+
+        app.capabilities.screen_reader = true;
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw accessible question");
+        let accessible = terminal.backend().to_string();
+        assert!(accessible.contains("Asking user Do you prefer Red or Blue?"));
+        assert!(!accessible.contains("○ Asking user"));
+        assert!(accessible.contains("❯ 1. Red"));
+
+        let mut narrow = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");
+        narrow
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw narrow accessible question");
+        let narrow = narrow.backend().to_string();
+        assert!(narrow.contains("↑/↓ to select · enter to confirm ·"));
+        assert!(narrow.contains("esc to cancel"));
+
+        app.clear_dialog();
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "ask-1".into(),
+            name: "ask_user".into(),
+            is_error: false,
+            cancelled: false,
+            output: "tool: ask_user\nstatus: success\noutput:\nUser selected: Red".into(),
+            duration_ms: 100,
+        });
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw accessible answer");
+        let resolved = terminal.backend().to_string();
+        assert!(resolved.contains("Asked user Do you prefer Red or Blue?"));
+        assert!(resolved.contains("User selected: Red"));
+        assert!(!resolved.contains("● Asked user"));
+        assert!(!resolved.contains("└ User selected"));
+    }
+
+    #[test]
     fn banner_remains_the_scrollable_conversation_header() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -2679,6 +2931,13 @@ mod tests {
             output: String::new(),
             duration_ms: 25,
         });
+        let shell = app
+            .timeline
+            .push(ItemKind::Shell, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            .expect("shell row");
+        let _ = app
+            .timeline
+            .set_activity(shell, Some(ActivityState::Success));
 
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         let mut hit_map = None;
@@ -2690,8 +2949,19 @@ mod tests {
         assert!(rendered.contains("User message"));
         assert!(rendered.contains("Reasoning: Checking context"));
         assert!(rendered.contains("Tool completed: inspect completed"));
+        assert!(rendered.contains("Shell completed: "));
         assert!(!rendered.contains("● Ready"));
         assert!(!rendered.contains(">_"));
+
+        let mut wrapped_roles = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");
+        wrapped_roles
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw wrapped role labels");
+        let wrapped_roles = wrapped_roles.backend().to_string();
+        assert!(wrapped_roles.contains("Shell completed: "));
+        assert!(wrapped_roles.contains("XYZ"));
 
         for number in 0..80 {
             let _ = app
@@ -2714,7 +2984,9 @@ mod tests {
             .expect("draw accessible approval");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("Permission required"));
-        assert!(rendered.contains("Current selection: 1. Allow once"));
+        assert!(rendered.contains("Y allow once"));
+        assert!(rendered.contains("N or Esc deny"));
+        assert!(!rendered.contains("Current selection"));
         assert!(!rendered.contains("╭"));
 
         let mut narrow = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");

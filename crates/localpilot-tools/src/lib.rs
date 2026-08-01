@@ -9,6 +9,7 @@
 
 mod broker;
 mod builtins;
+mod builtins_ask_user;
 mod builtins_background;
 mod builtins_shell;
 mod catalog;
@@ -28,6 +29,7 @@ pub use builtins::{
     ApplyPatch, EditFile, Fetch, GitCommit, GitStatus, ListFiles, ReadFile, ReadToolOutput,
     ReplaceInFile, SearchText, WriteFile,
 };
+pub use builtins_ask_user::{AskUser, ElicitationOutcome, ElicitationRequest, UserElicitor};
 pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
 pub use builtins_shell::RunShell;
 pub use catalog::{

@@ -56,7 +56,10 @@ not need a real console:
   whole-UI theme preview and mouse selection, contained settings and bounded
   two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
   bounded compact/expanded tool details with elapsed time, local refusal during
-  active work, and the
+  active work, and the full `ask_user` lifecycle: bounded typed schema, pending/
+  resolved row identity, numbered modal, automatic Other editor, keyboard/mouse
+  focus, Escape/closed-host cancellation, screen-reader projection and buffered
+  reply cleanup. Tests also preserve the
   invariant that slash input never enters the provider FIFO or prompt-history
   store.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run

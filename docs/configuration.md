@@ -62,6 +62,15 @@ finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
 with an explicit middle-omission marker, while the provider transcript and
 retained tool-output path keep their existing independent limits.
 
+The full-screen host also advertises the builtin `ask_user` tool. A pending
+question appears as an asking timeline row and a centered numbered-choice
+dialog with an automatic free-text Other option; the same state is projected as
+borderless role-labeled text in screen-reader mode. Arrows, Enter, Escape and
+mouse focus stay inside the dialog, while wheel/Page navigation can continue to
+move the conversation behind it. Answered or cancelled questions resolve their
+existing timeline row in place. The inline rollback and non-interactive hosts do
+not advertise this tool because they do not own that dialog.
+
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
 as an atomic placeholder; the encoded image is sent only with that submitted

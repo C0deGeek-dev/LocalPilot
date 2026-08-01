@@ -9,7 +9,9 @@ use std::sync::Arc;
 use localpilot_config::{Config, CredentialStore, McpServerConfig, ToolsConfig};
 use localpilot_mcp::{McpClient, McpTool, McpToolDescriptor, Transport};
 use localpilot_sandbox::Effect;
-use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
+use localpilot_tools::{
+    Broker, BrokerConfig, Tool, ToolLoad, ToolRegistry, ToolSearch, ToolSource,
+};
 
 use crate::mcp_env::{spawn_server, ServerLaunchError};
 
@@ -56,6 +58,22 @@ impl McpTools {
     #[must_use]
     pub fn registry(&self) -> ToolRegistry {
         let mut registry = ToolRegistry::with_builtins();
+        self.extend_registry(&mut registry);
+        registry
+    }
+
+    /// Build the ordinary registry after reserving a host-owned builtin name.
+    /// MCP collision handling then prefixes a remote tool with the same name,
+    /// keeping the host capability reachable without duplicate model specs.
+    #[must_use]
+    pub fn registry_with_builtin(&self, tool: Box<dyn Tool>) -> ToolRegistry {
+        let mut registry = ToolRegistry::with_builtins();
+        registry.register(tool);
+        self.extend_registry(&mut registry);
+        registry
+    }
+
+    fn extend_registry(&self, registry: &mut ToolRegistry) {
         // The project knowledge base is reachable on demand as a read-only tool,
         // so ingested knowledge is pulled when relevant instead of seeded into
         // every turn. Harmless when no project is ingested (it returns an empty
@@ -116,7 +134,6 @@ impl McpTools {
             }
             registry.register_from(Box::new(tool), ToolSource::Mcp(server.clone()));
         }
-        registry
     }
 }
 
@@ -183,7 +200,20 @@ async fn connect(
 mod tests {
     use super::*;
     use localpilot_mcp::ScriptedTransport;
+    use localpilot_tools::{AskUser, ElicitationOutcome, ElicitationRequest, UserElicitor};
     use serde_json::json;
+
+    struct CancellingElicitor;
+
+    impl UserElicitor for CancellingElicitor {
+        fn ask(
+            &self,
+            _request: ElicitationRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ElicitationOutcome> + Send + '_>>
+        {
+            Box::pin(std::future::ready(ElicitationOutcome::Cancelled))
+        }
+    }
 
     fn mcp_entry(server: &str, name: &str) -> (String, McpToolDescriptor, Arc<dyn Transport>) {
         (
@@ -259,6 +289,21 @@ mod tests {
         assert!(!registry.is_mcp("fetch"));
         assert!(registry.get("duckduckgo_fetch").is_some());
         assert!(registry.is_mcp("duckduckgo_fetch"));
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn host_builtin_is_registered_before_mcp_collision_resolution() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("remote", "ask_user")],
+            skills_autonomous: false,
+        }
+        .registry_with_builtin(Box::new(AskUser::new(Arc::new(CancellingElicitor))));
+
+        assert!(registry.get("ask_user").is_some());
+        assert!(!registry.is_mcp("ask_user"));
+        assert!(registry.get("remote_ask_user").is_some());
+        assert!(registry.is_mcp("remote_ask_user"));
         assert_unique_spec_names(&registry);
     }
 

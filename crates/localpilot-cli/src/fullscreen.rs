@@ -25,6 +25,7 @@ use crossterm::terminal::{
 };
 use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
+use localpilot_terminal_ui::QuestionAction;
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, DiffFile,
     DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, KeyboardSupport, PlanEntry,
@@ -32,6 +33,7 @@ use localpilot_terminal_ui::{
     TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand, UserShellOutput,
     VisualRowPart,
 };
+use localpilot_tools::ElicitationOutcome;
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -39,7 +41,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{is_cancel, is_clipboard_image_key, is_key_action};
-use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead};
+use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead, ElicitationCall};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
@@ -63,6 +65,7 @@ pub(crate) fn capture_local_utc_offset() {
 pub(crate) struct HostContext<'a> {
     pub(crate) runtime: &'a mut SessionRuntime,
     pub(crate) approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
+    pub(crate) elicitation_rx: &'a mut mpsc::UnboundedReceiver<ElicitationCall>,
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
@@ -1140,7 +1143,7 @@ async fn execute_fullscreen_slash(
                 ));
             } else {
                 app.apply_runtime(RuntimeUpdate::Notice(
-                    "choose a provider from the /model picker".to_string(),
+                    "type /model <provider> or choose one from the completion list".to_string(),
                 ));
             }
         }
@@ -1156,6 +1159,8 @@ async fn execute_fullscreen_slash(
             app.clear_conversation();
             app.header.session_id = runtime.session_id().to_string();
             app.header.session_name = None;
+            let (used, limit) = runtime.context_usage();
+            app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
             app.apply_runtime(RuntimeUpdate::Notice(format!(
                 "started new session {}",
                 runtime.session_id()
@@ -1212,6 +1217,7 @@ async fn run_event_loop(
     let HostContext {
         runtime,
         approval_rx,
+        elicitation_rx,
         cwd,
         history,
         ingest,
@@ -1274,6 +1280,7 @@ async fn run_event_loop(
                             app,
                             runtime,
                             approval_rx,
+                            elicitation_rx,
                             operation,
                             &mut queue,
                             history,
@@ -1295,6 +1302,7 @@ async fn run_event_loop(
                             app,
                             runtime,
                             approval_rx,
+                            elicitation_rx,
                             operation,
                             &mut queue,
                             history,
@@ -1339,6 +1347,7 @@ async fn drive_operation_chain(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>,
     first: QueuedOperation,
     queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
@@ -1358,6 +1367,7 @@ async fn drive_operation_chain(
                     app,
                     runtime,
                     approval_rx,
+                    elicitation_rx,
                     &prompt.text,
                     &prompt.attachments,
                     queue,
@@ -1526,7 +1536,13 @@ fn handle_trust_event(
         app.disarm_exit();
     }
     match key.code {
-        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+        KeyCode::Char('y' | 'Y') => {
+            crate::trust::remember(cwd);
+            crate::repl::start_session_knowledge_index(cwd, ingest);
+            app.clear_dialog();
+            false
+        }
+        KeyCode::Enter if !app.capabilities.screen_reader => {
             crate::trust::remember(cwd);
             crate::repl::start_session_knowledge_index(cwd, ingest);
             app.clear_dialog();
@@ -1547,6 +1563,7 @@ async fn drive_turn(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>,
     prompt: &str,
     attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedOperation>,
@@ -1565,6 +1582,7 @@ async fn drive_turn(
         vision_capable: runtime.active_accepts_images(),
     };
     let mut pending: Option<oneshot::Sender<bool>> = None;
+    let mut pending_elicitation: Option<oneshot::Sender<ElicitationOutcome>> = None;
     let outcome = {
         let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
         tokio::pin!(operation);
@@ -1583,7 +1601,15 @@ async fn drive_turn(
                     }
                     let next = event::read().context("read full-screen turn input")?;
                     let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
-                    let exit = if pending.is_some() {
+                    let exit = if pending_elicitation.is_some() {
+                        handle_question_event(
+                            app,
+                            next,
+                            &mut pending_elicitation,
+                            &cancel,
+                            &hit_map,
+                        )
+                    } else if pending.is_some() {
                         handle_approval_event(app, next, &mut pending, &cancel)
                     } else {
                         match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
@@ -1621,7 +1647,7 @@ async fn drive_turn(
                 let _ = draw_synchronized(terminal, app)?;
                 return Ok(false);
             }
-            Some(call) = approval_rx.recv(), if pending.is_none() => {
+            Some(call) = approval_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
                 mouse_state.reset_gesture();
                 app.request_approval(
                     call.request.tool,
@@ -1637,6 +1663,11 @@ async fn drive_turn(
                     Err(broadcast::error::RecvError::Closed) => {}
                 }
             }
+            Some(call) = elicitation_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
+                mouse_state.reset_gesture();
+                app.request_question(call.request.question, call.request.options);
+                pending_elicitation = Some(call.reply);
+            }
         }
             }
         }
@@ -1644,6 +1675,8 @@ async fn drive_turn(
     };
     deny_pending(app, &mut pending);
     deny_buffered_approvals(approval_rx);
+    cancel_pending_elicitation(app, &mut pending_elicitation);
+    cancel_buffered_elicitations(elicitation_rx);
     outcome
 }
 
@@ -1740,6 +1773,10 @@ fn route_pointer_or_navigation(
 ) -> RoutedEvent {
     match event {
         Event::Mouse(mouse) => handle_mouse_event(app, *mouse, hit_map, mouse_state),
+        Event::FocusLost => {
+            mouse_state.reset_gesture();
+            RoutedEvent::Handled
+        }
         Event::Key(key) if is_key_action(*key) => {
             let Some(InputAction::NavigateTimeline(navigation)) = map_key(*key) else {
                 return RoutedEvent::Unhandled;
@@ -1759,11 +1796,9 @@ fn route_pointer_or_navigation(
             }
             RoutedEvent::Handled
         }
-        Event::FocusGained
-        | Event::FocusLost
-        | Event::Paste(_)
-        | Event::Resize(_, _)
-        | Event::Key(_) => RoutedEvent::Unhandled,
+        Event::FocusGained | Event::Paste(_) | Event::Resize(_, _) | Event::Key(_) => {
+            RoutedEvent::Unhandled
+        }
     }
 }
 
@@ -1800,7 +1835,11 @@ fn handle_mouse_event(
         }
         return RoutedEvent::Handled;
     }
-    if !matches!(mouse.kind, MouseEventKind::Moved) && app.dismiss_quick_help() {
+    if !matches!(
+        mouse.kind,
+        MouseEventKind::Moved | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) && app.dismiss_quick_help()
+    {
         app.disarm_exit();
         mouse_state.reset_gesture();
         return RoutedEvent::Handled;
@@ -2001,10 +2040,13 @@ fn handle_mouse_event(
                 .selected_text()
                 .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
         }
+        MouseEventKind::Moved => {
+            mouse_state.reset_gesture();
+            RoutedEvent::Handled
+        }
         MouseEventKind::Down(_)
         | MouseEventKind::Up(_)
         | MouseEventKind::Drag(_)
-        | MouseEventKind::Moved
         | MouseEventKind::ScrollLeft
         | MouseEventKind::ScrollRight => {
             if hit_map.takeover {
@@ -2174,12 +2216,27 @@ fn handle_approval_event(
     }
     if is_cancel(key) {
         let command = app.handle_input(InputAction::CancelOrExit, 1);
-        deny_pending(app, pending);
-        cancel.cancel();
-        return command == AppCommand::Exit;
+        return match command {
+            AppCommand::Copy(text) => {
+                copy_to_clipboard(app, text);
+                false
+            }
+            AppCommand::Exit => {
+                deny_pending(app, pending);
+                cancel.cancel();
+                true
+            }
+            AppCommand::CancelWork => {
+                deny_pending(app, pending);
+                cancel.cancel();
+                false
+            }
+            _ => false,
+        };
     }
     let answer = match key.code {
-        KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(true),
+        KeyCode::Char('y' | 'Y') => Some(true),
+        KeyCode::Enter if !app.capabilities.screen_reader => Some(true),
         KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(false),
         _ => None,
     };
@@ -2192,6 +2249,109 @@ fn handle_approval_event(
     false
 }
 
+fn handle_question_event(
+    app: &mut AppModel,
+    event: Event,
+    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+    cancel: &CancellationToken,
+    hit_map: &HitMap,
+) -> bool {
+    match event {
+        Event::Mouse(mouse) => {
+            app.disarm_exit();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.timeline.scroll_by(
+                    -WHEEL_SCROLL_ROWS,
+                    hit_map.timeline_wrap_width,
+                    hit_map.timeline.height,
+                ),
+                MouseEventKind::ScrollDown => app.timeline.scroll_by(
+                    WHEEL_SCROLL_ROWS,
+                    hit_map.timeline_wrap_width,
+                    hit_map.timeline.height,
+                ),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(hit) = hit_map
+                        .question_rows
+                        .iter()
+                        .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                    {
+                        app.select_question_option(hit.index);
+                    }
+                }
+                _ => {}
+            }
+            false
+        }
+        Event::Paste(text) => {
+            app.disarm_exit();
+            let resolution = app.handle_question_input(InputAction::Paste(text));
+            resolve_question_action(app, resolution, pending)
+        }
+        Event::Key(key) if is_key_action(key) => {
+            if is_cancel(key) {
+                return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
+                    AppCommand::Exit => {
+                        finish_question(app, pending, ElicitationOutcome::Cancelled);
+                        cancel.cancel();
+                        true
+                    }
+                    AppCommand::CancelWork => {
+                        finish_question(app, pending, ElicitationOutcome::Cancelled);
+                        cancel.cancel();
+                        false
+                    }
+                    AppCommand::Copy(text) => {
+                        copy_to_clipboard(app, text);
+                        false
+                    }
+                    _ => false,
+                };
+            }
+            app.disarm_exit();
+            let Some(action) = map_key(key) else {
+                return false;
+            };
+            if let InputAction::NavigateTimeline(navigation) = action {
+                apply_timeline_navigation(app, navigation, hit_map);
+                return false;
+            }
+            let resolution = app.handle_question_input(action);
+            resolve_question_action(app, resolution, pending)
+        }
+        Event::FocusGained | Event::FocusLost | Event::Resize(_, _) | Event::Key(_) => false,
+    }
+}
+
+fn resolve_question_action(
+    app: &mut AppModel,
+    action: QuestionAction,
+    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+) -> bool {
+    match action {
+        QuestionAction::None => false,
+        QuestionAction::Submit(answer) => {
+            finish_question(app, pending, ElicitationOutcome::Answered(answer));
+            false
+        }
+        QuestionAction::Cancel => {
+            finish_question(app, pending, ElicitationOutcome::Cancelled);
+            false
+        }
+    }
+}
+
+fn finish_question(
+    app: &mut AppModel,
+    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+    outcome: ElicitationOutcome,
+) {
+    if let Some(reply) = pending.take() {
+        let _ = reply.send(outcome);
+    }
+    app.clear_dialog();
+}
+
 fn deny_pending(app: &mut AppModel, pending: &mut Option<oneshot::Sender<bool>>) {
     if let Some(reply) = pending.take() {
         let _ = reply.send(false);
@@ -2202,6 +2362,19 @@ fn deny_pending(app: &mut AppModel, pending: &mut Option<oneshot::Sender<bool>>)
 fn deny_buffered_approvals(approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>) {
     while let Ok(call) = approval_rx.try_recv() {
         let _ = call.reply.send(false);
+    }
+}
+
+fn cancel_pending_elicitation(
+    app: &mut AppModel,
+    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+) {
+    finish_question(app, pending, ElicitationOutcome::Cancelled);
+}
+
+fn cancel_buffered_elicitations(elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>) {
+    while let Ok(call) = elicitation_rx.try_recv() {
+        let _ = call.reply.send(ElicitationOutcome::Cancelled);
     }
 }
 
@@ -3042,6 +3215,70 @@ mod tests {
     }
 
     #[test]
+    fn lost_mouse_release_self_heals_on_focus_loss_or_unpressed_motion() {
+        let mut app = app();
+        let _ = app.timeline.push(ItemKind::Assistant, "select me");
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Assistant)
+            .expect("assistant row hit");
+        let mut mouse_state = MouseState::default();
+
+        for recovery in [
+            Event::FocusLost,
+            Event::Mouse(mouse(MouseEventKind::Moved, 0, 0)),
+        ] {
+            let _ = route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hit.content_x,
+                    hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            );
+            assert!(mouse_state.selection_pointer.is_some());
+            assert_eq!(
+                route_pointer_or_navigation(&mut app, &recovery, &hit_map, &mut mouse_state),
+                RoutedEvent::Handled
+            );
+            assert!(mouse_state.selection.is_none());
+            assert!(mouse_state.selection_pointer.is_none());
+        }
+    }
+
+    #[test]
+    fn quick_help_wheel_scrolls_the_timeline_without_consuming_the_first_step() {
+        let mut app = app();
+        for number in 0..80 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let _ = app.handle_input(InputAction::Insert("?".to_string()), 76);
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::ScrollUp, 10, 8)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.dismiss_quick_help());
+        assert!(matches!(
+            app.timeline.viewport,
+            localpilot_terminal_ui::ViewportAnchor::Held(_)
+        ));
+    }
+
+    #[test]
     fn held_edge_selection_continues_to_autoscroll_without_new_mouse_events() {
         let mut app = app();
         for number in 0..120 {
@@ -3734,6 +3971,135 @@ mod tests {
         assert_eq!(answer.try_recv(), Ok(false));
         assert!(app.dialog.is_none());
         assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn screen_reader_approval_has_no_enter_default_and_exposes_a_real_deny_key() {
+        let mut app = app();
+        app.capabilities.screen_reader = true;
+        app.begin_work();
+        app.request_approval("write_file", "fixture", "write");
+        let (reply, mut answer) = oneshot::channel();
+        let mut pending = Some(reply);
+        let cancel = CancellationToken::new();
+
+        assert!(!handle_approval_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut pending,
+            &cancel,
+        ));
+        assert!(matches!(
+            answer.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(app.dialog.is_some());
+
+        assert!(!handle_approval_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
+            &mut pending,
+            &cancel,
+        ));
+        assert_eq!(answer.try_recv(), Ok(false));
+        assert!(app.dialog.is_none());
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn selected_text_keeps_first_ctrl_c_copy_precedence_during_approval() {
+        let mut app = app();
+        let item = app
+            .timeline
+            .push(localpilot_terminal_ui::ItemKind::Assistant, "copy me")
+            .expect("timeline item");
+        app.timeline.start_selection(ContentPoint {
+            item_id: item,
+            byte: 0,
+        });
+        app.timeline.extend_selection(ContentPoint {
+            item_id: item,
+            byte: 4,
+        });
+        app.begin_work();
+        app.request_approval("write_file", "fixture", "write");
+        let (reply, mut answer) = oneshot::channel();
+        let mut pending = Some(reply);
+        let cancel = CancellationToken::new();
+
+        assert!(!handle_approval_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &mut pending,
+            &cancel,
+        ));
+        assert!(matches!(
+            answer.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(app.dialog.is_some());
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn question_mouse_focus_and_enter_resolve_reply_without_cancelling_work() {
+        let mut app = app();
+        app.begin_work();
+        app.request_question("Pick one", ["Red".to_string(), "Blue".to_string()]);
+        let hit_map = draw_hit_map(&app, 120, 30);
+        let (reply, mut answer) = oneshot::channel();
+        let mut pending = Some(reply);
+        let cancel = CancellationToken::new();
+
+        let blue = hit_map.question_rows[1].area;
+        assert!(!handle_question_event(
+            &mut app,
+            Event::Mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                blue.x,
+                blue.y,
+            )),
+            &mut pending,
+            &cancel,
+            &hit_map,
+        ));
+        assert!(!handle_question_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut pending,
+            &cancel,
+            &hit_map,
+        ));
+        assert_eq!(
+            answer.try_recv(),
+            Ok(ElicitationOutcome::Answered("Blue".to_string()))
+        );
+        assert!(app.dialog.is_none());
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn buffered_questions_are_cancelled_at_a_driver_boundary() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            let (reply, answer) = oneshot::channel();
+            sender
+                .send(ElicitationCall {
+                    request: localpilot_tools::ElicitationRequest {
+                        question: "fixture".to_string(),
+                        options: vec!["A".to_string(), "B".to_string()],
+                    },
+                    reply,
+                })
+                .expect("queue question");
+            answers.push(answer);
+        }
+
+        cancel_buffered_elicitations(&mut receiver);
+        for mut answer in answers {
+            assert_eq!(answer.try_recv(), Ok(ElicitationOutcome::Cancelled));
+        }
     }
 
     #[test]
