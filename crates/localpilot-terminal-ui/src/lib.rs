@@ -19,13 +19,14 @@ pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
     DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PlanEntry, QuestionAction,
     RecoveryState, RuntimeUpdate, SettingEntry, StopState, TabId, TakeoverKind, TakeoverNavigation,
-    TerminalCapabilities, TimelineNavigation, UserShellCommand, UserShellOutput, WorkState,
+    TerminalCapabilities, TimelineNavigation, TrustAction, UserShellCommand, UserShellOutput,
+    WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,
-    TimelineRowHit,
+    TimelineRowHit, TrustHit, TrustPathHit,
 };
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};

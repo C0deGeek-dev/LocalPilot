@@ -30,7 +30,11 @@ is SemVer-stable; the configuration schema stability policy is in
   prompt history. The full-screen-only `ask_user` tool now pauses a model turn
   in a numbered choice dialog with an automatic free-text Other option, resolves
   the same timeline row with the answer, and cancels explicitly without guessing
-  when the user presses Escape or the host closes. Ctrl+G temporarily restores
+  when the user presses Escape or the host closes. Workspace trust now uses the
+  same full-width, numbered, keyboard/mouse-focusable timeline treatment, with
+  distinct session-only, remember, and deny choices plus explicit screen-reader
+  selection text; session-only trust does not write the trusted-folder list.
+  Ctrl+G temporarily restores
   the ordinary terminal, opens the
   draft in a foreground external editor, then rebuilds the full-screen frame
   without losing its timeline or opaque attachment identity. Detailed pickers/

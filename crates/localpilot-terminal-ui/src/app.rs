@@ -564,15 +564,87 @@ pub struct PlanEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogState {
-    Trust {
-        path: String,
-    },
+    Trust(TrustDialog),
     Approval {
         tool: String,
         target: String,
         risk_class: String,
     },
     Question(QuestionDialog),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TrustDialog {
+    path: String,
+    selected: usize,
+    path_selection: Option<TrustPathSelection>,
+}
+
+impl fmt::Debug for TrustDialog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustDialog")
+            .field(
+                "path",
+                &format_args!("<{} bytes redacted>", self.path.len()),
+            )
+            .field("selected", &self.selected)
+            .field(
+                "path_selection",
+                &self.path_selection.as_ref().map(|selection| {
+                    format_args!("<{} bytes redacted>", selection.source.len()).to_string()
+                }),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct TrustPathSelection {
+    source: String,
+    anchor: usize,
+    focus: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TrustPathSelectionView<'a> {
+    pub source: &'a str,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TrustView<'a> {
+    pub path: &'a str,
+    pub selected: usize,
+    pub path_selection: Option<TrustPathSelectionView<'a>>,
+}
+
+impl fmt::Debug for TrustView<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustView")
+            .field(
+                "path",
+                &format_args!("<{} bytes redacted>", self.path.len()),
+            )
+            .field("selected", &self.selected)
+            .field(
+                "path_selection",
+                &self.path_selection.map(|selection| {
+                    format_args!("<{} bytes redacted>", selection.source.len()).to_string()
+                }),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustAction {
+    None,
+    ContinueSession,
+    Remember,
+    Deny,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1785,14 +1857,123 @@ impl AppModel {
 
     pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
         self.claim_dialog_focus();
-        self.dialog = Some(DialogState::Trust {
-            path: sanitize_inline(&path.into()),
-        });
+        self.dialog = Some(DialogState::Trust(TrustDialog {
+            path: bounded_inline_text(&path.into(), MAX_TOOL_DETAIL_BYTES),
+            selected: 0,
+            path_selection: None,
+        }));
     }
 
     #[must_use]
     pub fn workspace_trust_pending(&self) -> bool {
-        matches!(self.dialog, Some(DialogState::Trust { .. }))
+        matches!(self.dialog, Some(DialogState::Trust(_)))
+    }
+
+    #[must_use]
+    pub(crate) fn trust(&self) -> Option<TrustView<'_>> {
+        let Some(DialogState::Trust(trust)) = &self.dialog else {
+            return None;
+        };
+        Some(TrustView {
+            path: &trust.path,
+            selected: trust.selected,
+            path_selection: trust.path_selection.as_ref().map(|selection| {
+                let (start, end) = if selection.anchor <= selection.focus {
+                    (selection.anchor, selection.focus)
+                } else {
+                    (selection.focus, selection.anchor)
+                };
+                TrustPathSelectionView {
+                    source: &selection.source,
+                    start,
+                    end,
+                }
+            }),
+        })
+    }
+
+    pub fn select_trust_option(&mut self, index: usize) {
+        let Some(DialogState::Trust(trust)) = &mut self.dialog else {
+            return;
+        };
+        trust.selected = index.min(2);
+        trust.path_selection = None;
+    }
+
+    pub fn start_trust_path_selection(&mut self, source: String, byte: usize) {
+        let Some(DialogState::Trust(trust)) = &mut self.dialog else {
+            return;
+        };
+        let byte = previous_char_boundary(&source, byte.min(source.len()));
+        trust.path_selection = Some(TrustPathSelection {
+            source,
+            anchor: byte,
+            focus: byte,
+        });
+    }
+
+    pub fn extend_trust_path_selection(&mut self, source: &str, byte: usize) {
+        let Some(DialogState::Trust(trust)) = &mut self.dialog else {
+            return;
+        };
+        let Some(selection) = &mut trust.path_selection else {
+            return;
+        };
+        if selection.source != source {
+            trust.path_selection = None;
+            return;
+        }
+        selection.focus = previous_char_boundary(source, byte.min(source.len()));
+    }
+
+    #[must_use]
+    pub fn trust_path_selection_active(&self) -> bool {
+        matches!(
+            &self.dialog,
+            Some(DialogState::Trust(TrustDialog {
+                path_selection: Some(_),
+                ..
+            }))
+        )
+    }
+
+    #[must_use]
+    fn trust_selected_text(&self) -> Option<String> {
+        let Some(DialogState::Trust(trust)) = &self.dialog else {
+            return None;
+        };
+        let selection = trust.path_selection.as_ref()?;
+        let (start, end) = if selection.anchor <= selection.focus {
+            (selection.anchor, selection.focus)
+        } else {
+            (selection.focus, selection.anchor)
+        };
+        (start < end).then(|| selection.source[start..end].to_string())
+    }
+
+    pub fn handle_trust_input(&mut self, action: InputAction) -> TrustAction {
+        let Some(DialogState::Trust(trust)) = &mut self.dialog else {
+            return TrustAction::None;
+        };
+        match action {
+            InputAction::MoveUp => {
+                trust.selected = trust.selected.saturating_sub(1);
+                trust.path_selection = None;
+                TrustAction::None
+            }
+            InputAction::MoveDown => {
+                trust.selected = trust.selected.saturating_add(1).min(2);
+                trust.path_selection = None;
+                TrustAction::None
+            }
+            InputAction::Submit | InputAction::AcceptCompletion => match trust.selected {
+                0 => TrustAction::ContinueSession,
+                1 => TrustAction::Remember,
+                _ => TrustAction::Deny,
+            },
+            InputAction::Escape => TrustAction::Deny,
+            _ => TrustAction::None,
+        }
     }
 
     pub fn request_approval(
@@ -2695,6 +2876,9 @@ impl AppModel {
         }
 
         self.exit_armed = true;
+        if let Some(text) = self.trust_selected_text() {
+            return AppCommand::Copy(text);
+        }
         if let Some(text) = self.timeline.selected_text() {
             return AppCommand::Copy(text);
         }
@@ -4160,12 +4344,21 @@ mod tests {
         assert!(app.workspace_trust_pending());
         assert_eq!(
             app.dialog,
-            Some(DialogState::Trust {
-                path: "safe-path".to_string()
-            })
+            Some(DialogState::Trust(TrustDialog {
+                path: "safe-path".to_string(),
+                selected: 0,
+                path_selection: None,
+            }))
         );
+        assert!(!format!("{:?}", app.dialog).contains("safe-path"));
         app.clear_dialog();
         assert!(!app.workspace_trust_pending());
+
+        app.require_workspace_trust("界".repeat(MAX_TOOL_DETAIL_BYTES));
+        let bounded = app.trust().expect("trust view").path;
+        assert!(bounded.len() <= MAX_TOOL_DETAIL_BYTES);
+        assert!(bounded.is_char_boundary(bounded.len()));
+        app.clear_dialog();
 
         app.request_approval("tool", "target\0", "write");
         assert_eq!(
@@ -4175,6 +4368,38 @@ mod tests {
                 target: "target".to_string(),
                 risk_class: "write".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn trust_choices_distinguish_session_remember_and_deny() {
+        let mut app = model();
+        app.require_workspace_trust("fixture");
+        assert_eq!(app.trust().map(|trust| trust.selected), Some(0));
+        assert_eq!(
+            app.handle_trust_input(InputAction::Submit),
+            TrustAction::ContinueSession
+        );
+
+        assert_eq!(
+            app.handle_trust_input(InputAction::MoveDown),
+            TrustAction::None
+        );
+        assert_eq!(app.trust().map(|trust| trust.selected), Some(1));
+        assert_eq!(
+            app.handle_trust_input(InputAction::Submit),
+            TrustAction::Remember
+        );
+
+        app.select_trust_option(99);
+        assert_eq!(app.trust().map(|trust| trust.selected), Some(2));
+        assert_eq!(
+            app.handle_trust_input(InputAction::Submit),
+            TrustAction::Deny
+        );
+        assert_eq!(
+            app.handle_trust_input(InputAction::Escape),
+            TrustAction::Deny
         );
     }
 

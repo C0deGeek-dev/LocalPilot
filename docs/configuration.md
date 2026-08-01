@@ -71,6 +71,14 @@ move the conversation behind it. Answered or cancelled questions resolve their
 existing timeline row in place. The inline rollback and non-interactive hosts do
 not advertise this tool because they do not own that dialog.
 
+When workspace trust is required, the full-screen host presents it as a
+full-width timeline dialog. The first choice trusts the workspace for the
+current process only, the second also remembers it for later sessions, and the
+third exits without trusting. Arrow keys or the mouse move the focused choice;
+Enter confirms it and Escape exits. Screen-reader mode exposes the same three
+choices and current selection as text. Session-only trust starts the same
+trust-gated workspace services without writing the trusted-folder list.
+
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
 as an atomic placeholder; the encoded image is sent only with that submitted

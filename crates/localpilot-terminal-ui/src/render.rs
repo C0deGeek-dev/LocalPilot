@@ -5,7 +5,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView};
+use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView};
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
     TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
@@ -16,6 +16,7 @@ use crate::{
 const BANNER_ROWS: u16 = 7;
 /// Width of the widest screen-reader timeline role label (`Shell completed: `).
 const SCREEN_READER_PREFIX_EXTRA: u16 = 17;
+const TRUST_OPTIONS: [&str; 3] = ["Yes", "Yes, remember this workspace", "No, exit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabHit {
@@ -45,6 +46,70 @@ pub struct TakeoverHit {
 pub struct QuestionHit {
     pub index: usize,
     pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustHit {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TrustPathHit {
+    pub area: Rect,
+    text: String,
+}
+
+impl std::fmt::Debug for TrustPathHit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrustPathHit")
+            .field("area", &self.area)
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .finish()
+    }
+}
+
+impl TrustPathHit {
+    #[must_use]
+    pub fn byte_for_column(&self, column: u16, trailing: bool) -> usize {
+        let target = usize::from(column.saturating_sub(self.area.x));
+        let mut display_column = 0usize;
+        for (byte, grapheme) in self.text.grapheme_indices(true) {
+            let width = UnicodeWidthStr::width(grapheme).max(1);
+            if target < display_column.saturating_add(width) {
+                let past_midpoint = target.saturating_sub(display_column) >= width.div_ceil(2);
+                return if trailing && past_midpoint {
+                    byte.saturating_add(grapheme.len())
+                } else {
+                    byte
+                };
+            }
+            display_column = display_column.saturating_add(width);
+        }
+        self.text.len()
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+#[derive(Debug, Default)]
+struct TrustRenderHits {
+    rows: Vec<TrustHit>,
+    path: Option<TrustPathHit>,
+}
+
+#[derive(Debug, Default)]
+struct DialogHits {
+    question_rows: Vec<QuestionHit>,
+    trust_rows: Vec<TrustHit>,
+    trust_path: Option<TrustPathHit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +211,8 @@ pub struct HitMap {
     pub completion_rows: Vec<CompletionHit>,
     pub theme_rows: Vec<ThemeHit>,
     pub question_rows: Vec<QuestionHit>,
+    pub trust_rows: Vec<TrustHit>,
+    pub trust_path: Option<TrustPathHit>,
     pub takeover_rows: Vec<TakeoverHit>,
     pub takeover_file_rows: Vec<TakeoverHit>,
     pub scrollbar: ScrollbarGeometry,
@@ -202,6 +269,8 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
             question_rows: Vec::new(),
+            trust_rows: Vec::new(),
+            trust_path: None,
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
@@ -223,7 +292,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
-    let question_rows = render_dialog(frame, area, app);
+    let dialog_hits = render_dialog(frame, area, layout.timeline_content, app);
     HitMap {
         takeover: false,
         frame: Some(layout),
@@ -233,7 +302,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         timeline_rows,
         completion_rows,
         theme_rows,
-        question_rows,
+        question_rows: dialog_hits.question_rows,
+        trust_rows: dialog_hits.trust_rows,
+        trust_path: dialog_hits.trust_path,
         takeover_rows: Vec::new(),
         takeover_file_rows: Vec::new(),
         scrollbar,
@@ -338,7 +409,7 @@ fn render_takeover(
             Paragraph::new(format!("{APP_NAME}\nresize to view help")).wrap(Wrap { trim: false }),
             area,
         );
-        let question_rows = render_dialog(frame, area, app);
+        let dialog_hits = render_dialog(frame, area, area, app);
         return HitMap {
             takeover: true,
             frame: None,
@@ -348,7 +419,9 @@ fn render_takeover(
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
-            question_rows,
+            question_rows: dialog_hits.question_rows,
+            trust_rows: dialog_hits.trust_rows,
+            trust_path: dialog_hits.trust_path,
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
@@ -499,7 +572,7 @@ fn render_takeover(
             1,
         ),
     );
-    let question_rows = render_dialog(frame, area, app);
+    let dialog_hits = render_dialog(frame, area, content, app);
 
     HitMap {
         takeover: true,
@@ -510,7 +583,9 @@ fn render_takeover(
         timeline_rows: Vec::new(),
         completion_rows: Vec::new(),
         theme_rows: Vec::new(),
-        question_rows,
+        question_rows: dialog_hits.question_rows,
+        trust_rows: dialog_hits.trust_rows,
+        trust_path: dialog_hits.trust_path,
         takeover_rows,
         takeover_file_rows,
         scrollbar,
@@ -1678,22 +1753,49 @@ fn timeline_search_projection(app: &AppModel, width: u16) -> Option<(String, usi
     Some((text, cursor))
 }
 
-fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec<QuestionHit> {
+fn render_dialog(
+    frame: &mut Frame<'_>,
+    frame_area: Rect,
+    timeline_area: Rect,
+    app: &AppModel,
+) -> DialogHits {
     let Some(dialog) = &app.dialog else {
-        return Vec::new();
+        return DialogHits::default();
     };
+    if let DialogState::Trust(_) = dialog {
+        return app.trust().map_or_else(DialogHits::default, |trust| {
+            let hits = render_trust_dialog(
+                frame,
+                timeline_area,
+                app,
+                trust,
+                app.capabilities.screen_reader,
+            );
+            DialogHits {
+                trust_rows: hits.rows,
+                trust_path: hits.path,
+                ..DialogHits::default()
+            }
+        });
+    }
     if app.capabilities.screen_reader {
-        return render_screen_reader_dialog(frame, frame_area, app, dialog);
+        return DialogHits {
+            question_rows: render_screen_reader_dialog(frame, frame_area, app, dialog),
+            ..DialogHits::default()
+        };
     }
     if let DialogState::Question(_) = dialog {
-        return app.question().map_or_else(Vec::new, |question| {
-            render_question_dialog(frame, frame_area, app, question, false)
-        });
+        return app
+            .question()
+            .map_or_else(DialogHits::default, |question| DialogHits {
+                question_rows: render_question_dialog(frame, frame_area, app, question, false),
+                ..DialogHits::default()
+            });
     }
     let width = frame_area.width.saturating_sub(4).min(72);
     let height = frame_area.height.saturating_sub(2).min(7);
     if width < 20 || height < 5 {
-        return Vec::new();
+        return DialogHits::default();
     }
     let area = Rect::new(
         frame_area.x + frame_area.width.saturating_sub(width) / 2,
@@ -1711,21 +1813,7 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().style(theme.ui(UiRole::Surface)), area);
     let lines = match dialog {
-        DialogState::Trust { path } => vec![
-            Line::from(vec![
-                Span::styled("● ", theme.ui(UiRole::Accent)),
-                Span::styled("Trust this workspace?", theme.ui(UiRole::Prompt)),
-            ]),
-            Line::styled(
-                middle_elide(path, inner.width),
-                theme.ui(UiRole::Foreground),
-            ),
-            Line::styled(
-                "LocalPilot will use the permissions in the active profile.",
-                theme.ui(UiRole::Muted),
-            ),
-            Line::styled("Y trust and continue · N exit", theme.ui(UiRole::Muted)),
-        ],
+        DialogState::Trust(_) => Vec::new(),
         DialogState::Approval {
             tool,
             target,
@@ -1750,7 +1838,199 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec
             .wrap(Wrap { trim: false }),
         inner,
     );
-    Vec::new()
+    DialogHits::default()
+}
+
+fn render_trust_dialog(
+    frame: &mut Frame<'_>,
+    timeline_area: Rect,
+    app: &AppModel,
+    trust: TrustView<'_>,
+    screen_reader: bool,
+) -> TrustRenderHits {
+    let requested_height = if screen_reader { 9 } else { 11 };
+    let height = timeline_area.height.min(requested_height);
+    let minimum_height = if screen_reader { 8 } else { 10 };
+    if timeline_area.width < 20 || height < minimum_height {
+        return TrustRenderHits::default();
+    }
+    let area = Rect::new(
+        timeline_area.x,
+        timeline_area.y + timeline_area.height.saturating_sub(height) / 2,
+        timeline_area.width,
+        height,
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, timeline_area);
+    frame.render_widget(
+        Block::default().style(theme.ui(UiRole::Background)),
+        timeline_area,
+    );
+
+    if screen_reader {
+        let content_x = area.x.saturating_add(1);
+        let content_width = area.width.saturating_sub(2);
+        let shown_path = middle_elide(trust.path, content_width);
+        let mut rows = vec![
+            Line::styled("Trust this workspace?", theme.ui(UiRole::Prompt)),
+            trust_path_line(&shown_path, trust, app),
+            Line::styled(
+                "Choose how LocalPilot may use this workspace.",
+                theme.ui(UiRole::Muted),
+            ),
+        ];
+        rows.extend(TRUST_OPTIONS.iter().enumerate().map(|(index, label)| {
+            Line::styled(
+                truncate_end(&format!("{}. {label}", index + 1), content_width),
+                theme.ui(if trust.selected == index {
+                    UiRole::Focus
+                } else {
+                    UiRole::Foreground
+                }),
+            )
+        }));
+        rows.push(Line::styled(
+            truncate_end(
+                &format!(
+                    "Current selection: {}. {}",
+                    trust.selected + 1,
+                    TRUST_OPTIONS[trust.selected.min(TRUST_OPTIONS.len() - 1)]
+                ),
+                content_width,
+            ),
+            theme.ui(UiRole::Foreground),
+        ));
+        rows.push(Line::styled(
+            "Up/Down select · Enter confirm · Escape exit",
+            theme.ui(UiRole::Muted),
+        ));
+        frame.render_widget(
+            Paragraph::new(rows)
+                .style(theme.ui(UiRole::Background))
+                .wrap(Wrap { trim: false }),
+            Rect::new(content_x, area.y, content_width, area.height),
+        );
+        let rows = TRUST_OPTIONS
+            .iter()
+            .enumerate()
+            .map(|(index, _)| TrustHit {
+                index,
+                area: Rect::new(
+                    content_x,
+                    area.y
+                        .saturating_add(3 + u16::try_from(index).unwrap_or(u16::MAX)),
+                    content_width,
+                    1,
+                ),
+            })
+            .collect();
+        return TrustRenderHits {
+            rows,
+            path: Some(TrustPathHit {
+                area: Rect::new(content_x, area.y.saturating_add(1), content_width, 1),
+                text: shown_path,
+            }),
+        };
+    }
+
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .style(theme.ui(UiRole::Surface))
+        .border_style(theme.ui(UiRole::Border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let content_x = inner.x.saturating_add(2);
+    let content_width = inner.width.saturating_sub(4);
+    frame.render_widget(
+        Paragraph::new("Trust this workspace?").style(theme.ui(UiRole::Prompt)),
+        Rect::new(content_x, inner.y, content_width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("Choose how LocalPilot may use this workspace.")
+            .style(theme.ui(UiRole::Muted)),
+        Rect::new(content_x, inner.y.saturating_add(1), content_width, 1),
+    );
+    let path_area = Rect::new(content_x, inner.y.saturating_add(2), content_width, 3);
+    let path_block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .style(theme.ui(UiRole::Surface))
+        .border_style(theme.ui(UiRole::Border));
+    let path_inner = path_block.inner(path_area);
+    frame.render_widget(path_block, path_area);
+    let shown_path = middle_elide(trust.path, path_inner.width);
+    frame.render_widget(
+        Paragraph::new(trust_path_line(&shown_path, trust, app)),
+        path_inner,
+    );
+
+    let choices_y = path_area.bottom();
+    let footer_y = inner.bottom().saturating_sub(1);
+    let mut hits = Vec::new();
+    for (index, label) in TRUST_OPTIONS.iter().enumerate() {
+        let y = choices_y.saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= footer_y {
+            break;
+        }
+        let selected = trust.selected == index;
+        let shown = format!(
+            "{} {}. {label}",
+            if selected { "❯" } else { " " },
+            index + 1
+        );
+        let hit = Rect::new(content_x, y, content_width, 1);
+        frame.render_widget(
+            Paragraph::new(truncate_end(&shown, content_width)).style(theme.ui(if selected {
+                UiRole::Focus
+            } else {
+                UiRole::Foreground
+            })),
+            hit,
+        );
+        hits.push(TrustHit { index, area: hit });
+    }
+    frame.render_widget(
+        Paragraph::new(truncate_end(
+            "↑/↓ to select · enter to confirm · esc to exit",
+            content_width,
+        ))
+        .style(theme.ui(UiRole::Muted)),
+        Rect::new(content_x, footer_y, content_width, 1),
+    );
+    TrustRenderHits {
+        rows: hits,
+        path: Some(TrustPathHit {
+            area: path_inner,
+            text: shown_path,
+        }),
+    }
+}
+
+fn trust_path_line<'a>(shown_path: &'a str, trust: TrustView<'_>, app: &AppModel) -> Line<'a> {
+    let theme = theme(app);
+    let Some(selection) = trust
+        .path_selection
+        .filter(|selection| selection.source == shown_path && selection.start < selection.end)
+    else {
+        return Line::styled(shown_path, theme.ui(UiRole::Foreground));
+    };
+    let start = previous_grapheme_boundary(shown_path, selection.start.min(shown_path.len()));
+    let end = previous_grapheme_boundary(shown_path, selection.end.min(shown_path.len()));
+    Line::from(vec![
+        Span::styled(&shown_path[..start], theme.ui(UiRole::Foreground)),
+        Span::styled(&shown_path[start..end], theme.ui(UiRole::Selection)),
+        Span::styled(&shown_path[end..], theme.ui(UiRole::Foreground)),
+    ])
+}
+
+fn previous_grapheme_boundary(text: &str, byte: usize) -> usize {
+    if byte >= text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(start, _)| start)
+        .take_while(|start| *start <= byte)
+        .last()
+        .unwrap_or(0)
 }
 
 fn render_screen_reader_dialog(
@@ -1777,16 +2057,7 @@ fn render_screen_reader_dialog(
     );
     let theme = theme(app);
     let lines = match dialog {
-        DialogState::Trust { path } => vec![
-            Line::styled("Trust this workspace?", theme.ui(UiRole::Prompt)),
-            Line::styled(middle_elide(path, area.width), theme.ui(UiRole::Foreground)),
-            Line::styled(
-                "LocalPilot will use the active permission profile.",
-                theme.ui(UiRole::Muted),
-            ),
-            Line::styled("Y trust and continue", theme.ui(UiRole::Foreground)),
-            Line::styled("N or Esc exit", theme.ui(UiRole::Muted)),
-        ],
+        DialogState::Trust(_) => Vec::new(),
         DialogState::Approval {
             tool,
             target,
@@ -2508,19 +2779,62 @@ mod tests {
     }
 
     #[test]
-    fn trust_and_approval_dialogs_use_original_deny_safe_copy() {
+    fn trust_dialog_uses_full_timeline_width_numbered_choices_and_mouse_hits() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = model();
         app.require_workspace_trust("D:\\workspace");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| {
+                hit_map = Some(render(frame, &app));
+            })
+            .expect("draw trust dialog");
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("trust hit map");
+        let timeline = hit_map.frame.expect("frame layout").timeline_content;
+        assert!(rendered.contains("Trust this workspace?"));
+        assert!(rendered.contains("D:\\workspace"));
+        assert!(rendered.contains("❯ 1. Yes"));
+        assert!(rendered.contains("2. Yes, remember this workspace"));
+        assert!(rendered.contains("3. No, exit"));
+        assert!(rendered.contains("↑/↓ to select · enter to confirm · esc to exit"));
+        assert_eq!(hit_map.trust_rows.len(), 3);
+        assert_eq!(hit_map.trust_rows[0].area.x, timeline.x + 3);
+        assert_eq!(hit_map.trust_rows[0].area.width, timeline.width - 6);
+        let path_hit = hit_map.trust_path.as_ref().expect("path hit");
+        assert_eq!(path_hit.text(), "D:\\workspace");
+        assert!(!format!("{path_hit:?}").contains("D:\\workspace"));
+
+        let buffer = terminal.backend().buffer();
+        let border_y = hit_map.trust_rows[0].area.y.saturating_sub(6);
+        assert_eq!(buffer[(timeline.x, border_y)].symbol(), "╭");
+        assert_eq!(
+            buffer[(timeline.right().saturating_sub(1), border_y)].symbol(),
+            "╮"
+        );
+
+        app.start_trust_path_selection(path_hit.text().to_string(), 0);
+        app.extend_trust_path_selection(path_hit.text(), 2);
         terminal
             .draw(|frame| {
                 let _ = render(frame, &app);
             })
-            .expect("draw trust dialog");
-        let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("Trust this workspace?"));
-        assert!(rendered.contains("Y trust and continue · N exit"));
+            .expect("draw selected trust path");
+        let selected = terminal.backend().buffer()[(path_hit.area.x, path_hit.area.y)].style();
+        assert_eq!(
+            selected.bg,
+            ThemeResolver::new(Theme::Default, ColorSupport::Color)
+                .ui(UiRole::Selection)
+                .bg
+        );
+    }
+
+    #[test]
+    fn approval_dialog_uses_original_deny_safe_copy() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = model();
 
         app.request_approval("write_file", "D:\\workspace\\src\\main.rs", "write");
         terminal
@@ -2989,6 +3303,19 @@ mod tests {
         assert!(!rendered.contains("Current selection"));
         assert!(!rendered.contains("╭"));
 
+        app.require_workspace_trust("D:\\workspace");
+        let mut trust_hits = None;
+        terminal
+            .draw(|frame| trust_hits = Some(render(frame, &app)))
+            .expect("draw accessible trust dialog");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Current selection: 1. Yes"));
+        assert!(rendered.contains("1. Yes"));
+        assert!(rendered.contains("2. Yes, remember this workspace"));
+        assert!(rendered.contains("3. No, exit"));
+        assert!(!rendered.contains("╭"));
+        assert_eq!(trust_hits.expect("trust hits").trust_rows.len(), 3);
+
         let mut narrow = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");
         narrow
             .draw(|frame| {
@@ -2997,6 +3324,7 @@ mod tests {
             .expect("draw narrow screen-reader frame");
         let rendered = narrow.backend().to_string();
         assert!(rendered.contains("Home: current tab: Session; tabs:"));
+        assert!(rendered.contains("Current selection: 1. Yes"));
         assert!(!rendered.contains('›'));
     }
 

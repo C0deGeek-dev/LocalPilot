@@ -60,8 +60,12 @@ not need a real console:
   resolved row identity, numbered modal, automatic Other editor, keyboard/mouse
   focus, Escape/closed-host cancellation, screen-reader projection and buffered
   reply cleanup. Tests also preserve the
-  invariant that slash input never enters the provider FIFO or prompt-history
-  store.
+  reply cleanup. Workspace-trust coverage separately pins full-width numbered
+  rendering, keyboard/mouse focus, session-only versus persistent outcomes,
+  deny-safe Escape, screen-reader current-selection text, selection-copy
+  precedence, and double-Ctrl+C exit without touching the real trust store.
+  Tests also preserve the invariant that slash input never enters the provider
+  FIFO or prompt-history store.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.

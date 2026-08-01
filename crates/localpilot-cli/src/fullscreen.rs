@@ -25,7 +25,6 @@ use crossterm::terminal::{
 };
 use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
-use localpilot_terminal_ui::QuestionAction;
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, DiffFile,
     DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, KeyboardSupport, PlanEntry,
@@ -33,6 +32,7 @@ use localpilot_terminal_ui::{
     TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand, UserShellOutput,
     VisualRowPart,
 };
+use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::ElicitationOutcome;
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
@@ -224,6 +224,30 @@ enum RoutedEvent {
     Unhandled,
     Handled,
     Copy(String),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum TrustEventOutcome {
+    Pending,
+    Copy(String),
+    ContinueSession,
+    Remember,
+    Exit,
+}
+
+impl std::fmt::Debug for TrustEventOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => formatter.write_str("Pending"),
+            Self::Copy(text) => formatter
+                .debug_tuple("Copy")
+                .field(&format_args!("<{} bytes redacted>", text.len()))
+                .finish(),
+            Self::ContinueSession => formatter.write_str("ContinueSession"),
+            Self::Remember => formatter.write_str("Remember"),
+            Self::Exit => formatter.write_str("Exit"),
+        }
+    }
 }
 
 pub(crate) async fn run(
@@ -1236,8 +1260,18 @@ async fn run_event_loop(
         let next = event::read().context("read full-screen terminal event")?;
         if app.workspace_trust_pending() {
             mouse_state.reset_gesture();
-            if handle_trust_event(app, next, cwd, ingest) {
-                break;
+            match handle_trust_event(app, next, &hit_map) {
+                TrustEventOutcome::Pending => {}
+                TrustEventOutcome::Copy(text) => copy_to_clipboard(app, text),
+                TrustEventOutcome::ContinueSession => {
+                    accept_workspace_trust(app, cwd, false, crate::trust::remember);
+                    crate::repl::start_session_knowledge_index(cwd, ingest);
+                }
+                TrustEventOutcome::Remember => {
+                    accept_workspace_trust(app, cwd, true, crate::trust::remember);
+                    crate::repl::start_session_knowledge_index(cwd, ingest);
+                }
+                TrustEventOutcome::Exit => break,
             }
             continue;
         }
@@ -1517,43 +1551,85 @@ async fn drive_shell(
     outcome
 }
 
-fn handle_trust_event(
+fn accept_workspace_trust(
     app: &mut AppModel,
-    event: Event,
     cwd: &Path,
-    ingest: &localpilot_config::IngestConfig,
-) -> bool {
-    let Event::Key(key) = event else {
-        if matches!(event, Event::Paste(_)) {
+    remember: bool,
+    persist: impl FnOnce(&Path),
+) {
+    if remember {
+        persist(cwd);
+    }
+    app.clear_dialog();
+}
+
+fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> TrustEventOutcome {
+    match event {
+        Event::Mouse(mouse) => {
             app.disarm_exit();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    let _ = app.handle_trust_input(InputAction::MoveUp);
+                }
+                MouseEventKind::ScrollDown => {
+                    let _ = app.handle_trust_input(InputAction::MoveDown);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(path) = hit_map
+                        .trust_path
+                        .as_ref()
+                        .filter(|path| rect_contains(path.area, mouse.column, mouse.row))
+                    {
+                        app.start_trust_path_selection(
+                            path.text().to_string(),
+                            path.byte_for_column(mouse.column, false),
+                        );
+                    } else if let Some(hit) = hit_map
+                        .trust_rows
+                        .iter()
+                        .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                    {
+                        app.select_trust_option(hit.index);
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                    if app.trust_path_selection_active() =>
+                {
+                    if let Some(path) = &hit_map.trust_path {
+                        app.extend_trust_path_selection(
+                            path.text(),
+                            path.byte_for_column(mouse.column, true),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            TrustEventOutcome::Pending
         }
-        return false;
-    };
-    if !is_key_action(key) {
-        return false;
-    }
-    if !is_cancel(key) {
-        app.disarm_exit();
-    }
-    match key.code {
-        KeyCode::Char('y' | 'Y') => {
-            crate::trust::remember(cwd);
-            crate::repl::start_session_knowledge_index(cwd, ingest);
-            app.clear_dialog();
-            false
+        Event::Paste(_) => {
+            app.disarm_exit();
+            TrustEventOutcome::Pending
         }
-        KeyCode::Enter if !app.capabilities.screen_reader => {
-            crate::trust::remember(cwd);
-            crate::repl::start_session_knowledge_index(cwd, ingest);
-            app.clear_dialog();
-            false
+        Event::Key(key) if is_key_action(key) => {
+            if is_cancel(key) {
+                return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
+                    AppCommand::Copy(text) => TrustEventOutcome::Copy(text),
+                    AppCommand::Exit => TrustEventOutcome::Exit,
+                    _ => TrustEventOutcome::Pending,
+                };
+            }
+            app.disarm_exit();
+            let Some(action) = map_key(key) else {
+                return TrustEventOutcome::Pending;
+            };
+            match app.handle_trust_input(action) {
+                TrustAction::None => TrustEventOutcome::Pending,
+                TrustAction::ContinueSession => TrustEventOutcome::ContinueSession,
+                TrustAction::Remember => TrustEventOutcome::Remember,
+                TrustAction::Deny => TrustEventOutcome::Exit,
+            }
         }
-        KeyCode::Char('n' | 'N') | KeyCode::Esc => true,
-        _ if is_cancel(key) => matches!(
-            app.handle_input(InputAction::CancelOrExit, 1),
-            AppCommand::Exit
-        ),
-        _ => false,
+        _ => TrustEventOutcome::Pending,
     }
 }
 
@@ -4106,20 +4182,166 @@ mod tests {
     fn trust_dialog_preserves_double_ctrl_c_exit_contract() {
         let mut app = app();
         app.require_workspace_trust("fixture");
-        let cwd = Path::new("fixture");
-        let ingest = localpilot_config::IngestConfig::default();
+        let hit_map = draw_hit_map(&app, 80, 24);
         let ctrl_c = || Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
+        assert_eq!(
+            handle_trust_event(&mut app, ctrl_c(), &hit_map),
+            TrustEventOutcome::Pending
+        );
         assert!(app.workspace_trust_pending());
-        assert!(!handle_trust_event(
-            &mut app,
-            Event::Key(press(KeyCode::Char('x'), KeyModifiers::NONE)),
-            cwd,
-            &ingest,
-        ));
-        assert!(!handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
-        assert!(handle_trust_event(&mut app, ctrl_c(), cwd, &ingest));
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Char('x'), KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::Pending
+        );
+        assert_eq!(
+            handle_trust_event(&mut app, ctrl_c(), &hit_map),
+            TrustEventOutcome::Pending
+        );
+        assert_eq!(
+            handle_trust_event(&mut app, ctrl_c(), &hit_map),
+            TrustEventOutcome::Exit
+        );
+    }
+
+    #[test]
+    fn trust_dialog_routes_session_remember_deny_and_mouse_focus_without_io() {
+        let mut app = app();
+        app.require_workspace_trust("fixture");
+        let hit_map = draw_hit_map(&app, 120, 30);
+
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::ContinueSession
+        );
+        assert!(app.workspace_trust_pending());
+
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Down, KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::Pending
+        );
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::Remember
+        );
+
+        let deny = hit_map.trust_rows[2].area;
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    deny.x,
+                    deny.y,
+                )),
+                &hit_map,
+            ),
+            TrustEventOutcome::Pending
+        );
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::Exit
+        );
+
+        app.select_trust_option(0);
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+                &hit_map,
+            ),
+            TrustEventOutcome::Exit
+        );
+    }
+
+    #[test]
+    fn session_trust_does_not_write_but_remember_uses_an_isolated_store() {
+        let temp = tempfile::tempdir().expect("temp trust root");
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir(&cwd).expect("workspace fixture");
+        let store = temp.path().join("trusted-folders.txt");
+        let persist = |path: &Path| crate::trust::remember_in_test_store(path, &store);
+
+        let mut app = app();
+        app.require_workspace_trust(cwd.display().to_string());
+        accept_workspace_trust(&mut app, &cwd, false, persist);
+        assert!(
+            !store.exists(),
+            "session-only trust must not touch the store"
+        );
+        assert!(!app.workspace_trust_pending());
+
+        app.require_workspace_trust(cwd.display().to_string());
+        accept_workspace_trust(&mut app, &cwd, true, persist);
+        let persisted = std::fs::read_to_string(&store).expect("isolated trust store");
+        assert_eq!(
+            persisted.trim(),
+            cwd.canonicalize().expect("canonical cwd").to_string_lossy()
+        );
+        assert!(!app.workspace_trust_pending());
+    }
+
+    #[test]
+    fn selected_text_keeps_ctrl_c_copy_precedence_during_trust() {
+        let mut app = app();
+        app.require_workspace_trust("fixture");
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let path = hit_map.trust_path.as_ref().expect("path hit").area;
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    path.x,
+                    path.y,
+                )),
+                &hit_map,
+            ),
+            TrustEventOutcome::Pending
+        );
+        assert_eq!(
+            handle_trust_event(
+                &mut app,
+                Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    path.x + 4,
+                    path.y,
+                )),
+                &hit_map,
+            ),
+            TrustEventOutcome::Pending
+        );
+        let ctrl_c = || Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            handle_trust_event(&mut app, ctrl_c(), &hit_map),
+            TrustEventOutcome::Copy("fixt".to_string())
+        );
+        assert!(app.workspace_trust_pending());
+        assert_eq!(
+            handle_trust_event(&mut app, ctrl_c(), &hit_map),
+            TrustEventOutcome::Exit
+        );
     }
 
     #[test]
