@@ -379,12 +379,13 @@ pub(crate) fn map_event(event: RuntimeEvent) -> ServerEvent {
     match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },
-        RuntimeEvent::ToolStarted { id, name } => ServerEvent::ToolStarted { id, name },
+        RuntimeEvent::ToolStarted { id, name, .. } => ServerEvent::ToolStarted { id, name },
         RuntimeEvent::ToolFinished {
             id,
             name,
             is_error,
             output,
+            ..
         } => ServerEvent::ToolFinished {
             id,
             name,

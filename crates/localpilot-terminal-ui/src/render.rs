@@ -1387,6 +1387,14 @@ fn role_prefix(
                     },
                     UiRole::Error,
                 ),
+                Some(ActivityState::Cancelled) => (
+                    if first {
+                        "Tool cancelled: "
+                    } else {
+                        "                "
+                    },
+                    UiRole::Muted,
+                ),
                 Some(ActivityState::Running) | None => (
                     if first {
                         "Tool running: "
@@ -1412,6 +1420,14 @@ fn role_prefix(
                         "              "
                     },
                     UiRole::Error,
+                ),
+                Some(ActivityState::Cancelled) => (
+                    if first {
+                        "Shell cancelled: "
+                    } else {
+                        "                 "
+                    },
+                    UiRole::Muted,
                 ),
                 Some(ActivityState::Running) | None => (
                     if first {
@@ -1447,6 +1463,7 @@ fn role_prefix(
                 Some(ActivityState::Running) | None => ("◉ ", UiRole::Code),
                 Some(ActivityState::Success) => ("✓ ", UiRole::Success),
                 Some(ActivityState::Error) => ("× ", UiRole::Error),
+                Some(ActivityState::Cancelled) => ("■ ", UiRole::Muted),
             };
             vec![Span::styled(
                 if first { glyph } else { "  " },
@@ -1457,6 +1474,7 @@ fn role_prefix(
             let (glyph, role) = match activity {
                 Some(ActivityState::Error) => ("✗ ", UiRole::Error),
                 Some(ActivityState::Success) => ("$ ", UiRole::Success),
+                Some(ActivityState::Cancelled) => ("■ ", UiRole::Muted),
                 Some(ActivityState::Running) | None => ("◉ ", UiRole::Code),
             };
             vec![Span::styled(
@@ -2651,12 +2669,15 @@ mod tests {
         app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
             id: "tool-1".into(),
             name: "inspect".into(),
+            detail: String::new(),
         });
         app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
             id: "tool-1".into(),
             name: "inspect".into(),
             is_error: false,
+            cancelled: false,
             output: String::new(),
+            duration_ms: 25,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
@@ -2945,7 +2966,9 @@ mod tests {
             id: "missing".to_string(),
             name: "inspect".to_string(),
             is_error: true,
+            cancelled: false,
             output: String::new(),
+            duration_ms: 25,
         });
         terminal
             .draw(|frame| {

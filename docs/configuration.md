@@ -56,6 +56,12 @@ remain unchanged, while non-TTY output continues to use LocalPilot's separate
 plain path. Terminal chrome is static; there is no animated spinner or motion
 effect to disable.
 
+Tool calls appear as one compact running/completed/failed/cancelled row. Clicking the
+status prefix expands the permission-safe target detail and captured output;
+finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
+with an explicit middle-omission marker, while the provider transcript and
+retained tool-output path keep their existing independent limits.
+
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
 as an atomic placeholder; the encoded image is sent only with that submitted

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use indexmap::IndexMap;
@@ -129,13 +129,19 @@ pub enum RuntimeEvent {
     /// A chunk of reasoning. Metadata, never the final answer.
     Reasoning(String),
     /// A tool call started.
-    ToolStarted { id: String, name: String },
+    ToolStarted {
+        id: String,
+        name: String,
+        detail: String,
+    },
     /// A tool call finished.
     ToolFinished {
         id: String,
         name: String,
         is_error: bool,
+        cancelled: bool,
         output: String,
+        duration_ms: u64,
     },
     /// Token usage.
     Usage(TokenUsage),
@@ -2562,9 +2568,30 @@ impl SessionRuntime {
                     }
                 }
 
+                // Resolve the input shape before projecting the row so its target
+                // describes the arguments that permission and dispatch will see.
+                let tool_decision = self.tool_input_decision(name, input);
+                let repaired_input = tool_decision.as_ref().and_then(|d| {
+                    matches!(d.outcome, localpilot_tools::RepairOutcome::Repaired)
+                        .then(|| d.repaired_input.clone())
+                        .flatten()
+                });
+                let readable_error = tool_decision.as_ref().and_then(|d| {
+                    (matches!(d.outcome, localpilot_tools::RepairOutcome::Invalid)
+                        && self.config.enforce_readable_errors)
+                        .then(|| d.readable_message.clone())
+                        .flatten()
+                });
+                let projected_input = repaired_input.as_ref().unwrap_or(input);
+                let tool_started_at = Instant::now();
+                let detail = self
+                    .tools
+                    .get(name)
+                    .map_or_else(String::new, |tool| tool.approval_detail(projected_input));
                 let _ = events.send(RuntimeEvent::ToolStarted {
                     id: id.clone(),
                     name: name.clone(),
+                    detail,
                 });
                 self.record_event(SessionEventKind::ToolStarted {
                     id: id.clone(),
@@ -2605,18 +2632,6 @@ impl SessionRuntime {
                 // a schema-aware error when readable errors are on. A valid call
                 // dispatches byte-unchanged, exactly as before. Repaired and invalid
                 // are mutually exclusive outcomes of the one validate-or-repair pass.
-                let tool_decision = self.tool_input_decision(name, input);
-                let repaired_input = tool_decision.as_ref().and_then(|d| {
-                    matches!(d.outcome, localpilot_tools::RepairOutcome::Repaired)
-                        .then(|| d.repaired_input.clone())
-                        .flatten()
-                });
-                let readable_error = tool_decision.as_ref().and_then(|d| {
-                    (matches!(d.outcome, localpilot_tools::RepairOutcome::Invalid)
-                        && self.config.enforce_readable_errors)
-                        .then(|| d.readable_message.clone())
-                        .flatten()
-                });
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
                 let mut repaired_dispatched = false;
@@ -2788,6 +2803,15 @@ impl SessionRuntime {
                         ToolUseId::from(id.as_str()),
                         "cancelled by the user; execution aborted",
                     );
+                    let _ = events.send(RuntimeEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
+                        is_error: true,
+                        cancelled: true,
+                        output: "cancelled by the user; execution aborted".to_string(),
+                        duration_ms: u64::try_from(tool_started_at.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    });
                     self.record_event(SessionEventKind::ToolFinished {
                         id: id.clone(),
                         name: name.clone(),
@@ -2943,7 +2967,10 @@ impl SessionRuntime {
                     id: result.id.to_string(),
                     name: name.clone(),
                     is_error: result.is_error,
+                    cancelled: false,
                     output: result.output.clone(),
+                    duration_ms: u64::try_from(tool_started_at.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
                 });
                 self.record_event(SessionEventKind::ToolFinished {
                     id: result.id.to_string(),

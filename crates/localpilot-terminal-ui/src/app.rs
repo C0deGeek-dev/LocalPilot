@@ -9,6 +9,9 @@ use crate::{
     StyledRange, TextStyle, Theme, Timeline,
 };
 
+const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
+const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabId {
     Session,
@@ -315,6 +318,53 @@ fn sanitize_inline(text: &str) -> String {
         .collect()
 }
 
+fn previous_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn bounded_inline_text(text: &str, maximum: usize) -> String {
+    let text = sanitize_inline(text);
+    if text.len() <= maximum {
+        return text;
+    }
+    let suffix = "…";
+    let end = previous_char_boundary(&text, maximum.saturating_sub(suffix.len()));
+    format!("{}{suffix}", &text[..end])
+}
+
+fn bounded_view_text(text: &str, maximum: usize) -> String {
+    let text = sanitize_text(text);
+    if text.len() <= maximum {
+        return text;
+    }
+    let marker = "\n… middle omitted from terminal view …\n";
+    let available = maximum.saturating_sub(marker.len());
+    let head_budget = available.saturating_mul(3) / 4;
+    let head_end = previous_char_boundary(&text, head_budget);
+    let tail_start = next_char_boundary(&text, text.len().saturating_sub(available - head_end));
+    format!("{}{}{}", &text[..head_end], marker, &text[tail_start..])
+}
+
+fn format_tool_duration(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{duration_ms} ms")
+    } else {
+        format!("{:.1} s", duration_ms as f64 / 1_000.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ThemePickerState {
     original: Theme,
@@ -524,12 +574,15 @@ pub enum RuntimeUpdate {
     ToolStarted {
         id: String,
         name: String,
+        detail: String,
     },
     ToolFinished {
         id: String,
         name: String,
         is_error: bool,
+        cancelled: bool,
         output: String,
+        duration_ms: u64,
     },
     Usage {
         input_tokens: u64,
@@ -549,6 +602,25 @@ pub enum RuntimeUpdate {
         count: u32,
     },
     Stopped(StopState),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ActiveTool {
+    item_id: ItemId,
+    detail: String,
+}
+
+impl fmt::Debug for ActiveTool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActiveTool")
+            .field("item_id", &self.item_id)
+            .field(
+                "detail",
+                &format_args!("<{} bytes redacted>", self.detail.len()),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,7 +653,7 @@ pub struct AppModel {
     workspace_files_ready: bool,
     active_assistant: Option<ItemId>,
     active_reasoning: Option<ItemId>,
-    active_tools: BTreeMap<String, ItemId>,
+    active_tools: BTreeMap<String, ActiveTool>,
     active_insert_before: Option<ItemId>,
 }
 
@@ -903,39 +975,76 @@ impl AppModel {
                     self.active_reasoning = self.push_runtime_item(ItemKind::Reasoning, text);
                 }
             }
-            RuntimeUpdate::ToolStarted { id, name } => {
-                if let Some(item) = self.push_runtime_item(ItemKind::Tool, name) {
+            RuntimeUpdate::ToolStarted { id, name, detail } => {
+                let detail = bounded_inline_text(&detail, MAX_TOOL_DETAIL_BYTES);
+                let mut text = sanitize_inline(&name);
+                if !detail.is_empty() {
+                    text.push('\n');
+                    text.push_str(&detail);
+                }
+                if let Some(item) = self.push_runtime_item(ItemKind::Tool, text) {
                     let _ = self
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
-                    self.active_tools.insert(id, item);
+                    self.active_tools.insert(
+                        id,
+                        ActiveTool {
+                            item_id: item,
+                            detail,
+                        },
+                    );
                 }
             }
             RuntimeUpdate::ToolFinished {
                 id,
                 name,
                 is_error,
+                cancelled,
                 output,
+                duration_ms,
             } => {
-                let suffix = if is_error { " failed" } else { " completed" };
-                let text = if output.is_empty() {
-                    suffix.to_string()
+                let state = if cancelled {
+                    "cancelled"
+                } else if is_error {
+                    "failed"
                 } else {
-                    format!("{suffix}\n{output}")
+                    "completed"
                 };
-                if let Some(item) = self.active_tools.remove(&id) {
-                    let _ = self.timeline.append_text(item, &text);
-                    let activity = if is_error {
+                let mut text = format!(
+                    "{} {state} · {}",
+                    sanitize_inline(&name),
+                    format_tool_duration(duration_ms)
+                );
+                let output = bounded_view_text(&output, MAX_TOOL_OUTPUT_BYTES);
+                if let Some(active) = self.active_tools.remove(&id) {
+                    if !active.detail.is_empty() {
+                        text.push('\n');
+                        text.push_str(&active.detail);
+                    }
+                    if !output.is_empty() {
+                        text.push('\n');
+                        text.push_str(&output);
+                    }
+                    let _ = self.timeline.replace_text(active.item_id, text);
+                    let activity = if cancelled {
+                        ActivityState::Cancelled
+                    } else if is_error {
                         ActivityState::Error
                     } else {
                         ActivityState::Success
                     };
-                    let _ = self.timeline.set_activity(item, Some(activity));
-                    self.style_activity(item, activity);
-                } else if let Some(item) =
-                    self.push_runtime_item(ItemKind::Tool, format!("{name}{text}"))
-                {
-                    let activity = if is_error {
+                    let _ = self.timeline.set_activity(active.item_id, Some(activity));
+                    self.style_activity(active.item_id, activity);
+                } else if let Some(item) = self.push_runtime_item(ItemKind::Tool, {
+                    if !output.is_empty() {
+                        text.push('\n');
+                        text.push_str(&output);
+                    }
+                    text
+                }) {
+                    let activity = if cancelled {
+                        ActivityState::Cancelled
+                    } else if is_error {
                         ActivityState::Error
                     } else {
                         ActivityState::Success
@@ -2279,6 +2388,7 @@ impl AppModel {
             ActivityState::Running => SemanticRole::Tool,
             ActivityState::Success => SemanticRole::Success,
             ActivityState::Error => SemanticRole::Error,
+            ActivityState::Cancelled => SemanticRole::Muted,
         };
         let styles = (end_byte > 0)
             .then_some(StyledRange {
@@ -3720,6 +3830,7 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::ToolStarted {
             id: "tool".to_string(),
             name: "inspect".to_string(),
+            detail: String::new(),
         });
 
         let ids = app
@@ -3802,12 +3913,15 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::ToolStarted {
             id: "tool-1".to_string(),
             name: "inspect".to_string(),
+            detail: "src/main.rs".to_string(),
         });
         app.apply_runtime(RuntimeUpdate::ToolFinished {
             id: "tool-1".to_string(),
             name: "inspect".to_string(),
             is_error: false,
+            cancelled: false,
             output: "detail one\ndetail two".to_string(),
+            duration_ms: 1_250,
         });
         app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
 
@@ -3823,6 +3937,51 @@ mod tests {
         let tool = &app.timeline.items()[1];
         assert_eq!(tool.activity, Some(ActivityState::Success));
         assert!(!tool.expanded);
-        assert_eq!(app.timeline.rows(80)[2].text, "inspect completed");
+        assert_eq!(app.timeline.rows(80)[2].text, "inspect completed · 1.2 s");
+        assert!(tool.text.contains("src/main.rs"));
+        assert!(tool.text.contains("detail one\ndetail two"));
+    }
+
+    #[test]
+    fn cancelled_tool_has_a_distinct_terminal_state() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-1".to_string(),
+            name: "run_shell".to_string(),
+            detail: "cargo test".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "tool-1".to_string(),
+            name: "run_shell".to_string(),
+            is_error: true,
+            cancelled: true,
+            output: "cancelled by the user; execution aborted".to_string(),
+            duration_ms: 750,
+        });
+
+        let tool = &app.timeline.items()[0];
+        assert_eq!(tool.activity, Some(ActivityState::Cancelled));
+        assert_eq!(
+            app.timeline.rows(80)[0].text,
+            "run_shell cancelled · 750 ms"
+        );
+    }
+
+    #[test]
+    fn tool_detail_and_output_bounds_preserve_unicode_head_and_tail() {
+        let detail = format!("{}界", "x".repeat(MAX_TOOL_DETAIL_BYTES));
+        let bounded_detail = bounded_inline_text(&detail, MAX_TOOL_DETAIL_BYTES);
+        assert!(bounded_detail.len() <= MAX_TOOL_DETAIL_BYTES);
+        assert!(bounded_detail.ends_with('…'));
+
+        let output = format!(
+            "HEAD界{}TAIL界",
+            "x".repeat(MAX_TOOL_OUTPUT_BYTES.saturating_add(100))
+        );
+        let bounded = bounded_view_text(&output, MAX_TOOL_OUTPUT_BYTES);
+        assert!(bounded.len() <= MAX_TOOL_OUTPUT_BYTES);
+        assert!(bounded.starts_with("HEAD界"));
+        assert!(bounded.ends_with("TAIL界"));
+        assert!(bounded.contains("middle omitted from terminal view"));
     }
 }

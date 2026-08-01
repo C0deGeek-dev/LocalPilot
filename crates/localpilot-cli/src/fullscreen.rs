@@ -2311,17 +2311,23 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
     match event {
         RuntimeEvent::Text(text) => RuntimeUpdate::Text(text),
         RuntimeEvent::Reasoning(text) => RuntimeUpdate::Reasoning(text),
-        RuntimeEvent::ToolStarted { id, name } => RuntimeUpdate::ToolStarted { id, name },
+        RuntimeEvent::ToolStarted { id, name, detail } => {
+            RuntimeUpdate::ToolStarted { id, name, detail }
+        }
         RuntimeEvent::ToolFinished {
             id,
             name,
             is_error,
+            cancelled,
             output,
+            duration_ms,
         } => RuntimeUpdate::ToolFinished {
             id,
             name,
             is_error,
+            cancelled,
             output,
+            duration_ms,
         },
         RuntimeEvent::Usage(usage) => RuntimeUpdate::Usage {
             input_tokens: usage.input_tokens,
@@ -3088,12 +3094,15 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::ToolStarted {
             id: "tool-1".to_string(),
             name: "inspect".to_string(),
+            detail: String::new(),
         });
         app.apply_runtime(RuntimeUpdate::ToolFinished {
             id: "tool-1".to_string(),
             name: "inspect".to_string(),
             is_error: false,
+            cancelled: false,
             output: "detail one\ndetail two".to_string(),
+            duration_ms: 25,
         });
         let tool = app
             .timeline
@@ -3923,12 +3932,15 @@ mod tests {
                 RuntimeEvent::ToolStarted {
                     id: "fixture-tool".to_string(),
                     name: "inspect".to_string(),
+                    detail: String::new(),
                 },
                 RuntimeEvent::ToolFinished {
                     id: "fixture-tool".to_string(),
                     name: "inspect".to_string(),
                     is_error: false,
+                    cancelled: false,
                     output: "detail one\ndetail two".to_string(),
+                    duration_ms: 25,
                 },
                 RuntimeEvent::Stopped(StopReason::Done),
             ]
@@ -3944,7 +3956,7 @@ mod tests {
         assert!(bottom
             .rows
             .iter()
-            .any(|row| row.text == "inspect completed"));
+            .any(|row| row.text == "inspect completed · 25 ms"));
         assert_eq!(following.usage, Some((12, 34)));
         assert_eq!(following.work, WorkState::Idle);
 

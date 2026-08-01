@@ -315,6 +315,7 @@ async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
         .tool_call("c1", "run_shell", input)
         .text("never reached");
     let mut h = build(provider, Profile::Bypass);
+    let mut runtime_events = h.events.subscribe();
 
     let cancel = h.cancel.clone();
     tokio::spawn(async move {
@@ -349,6 +350,24 @@ async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
     assert_eq!(calls, results.len());
     assert!(results[0].is_error);
     assert!(results[0].output.contains("cancelled"));
+
+    let mut saw_cancelled_finish = false;
+    while let Ok(event) = runtime_events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::ToolFinished {
+                cancelled: true,
+                is_error: true,
+                ..
+            }
+        ) {
+            saw_cancelled_finish = true;
+        }
+    }
+    assert!(
+        saw_cancelled_finish,
+        "runtime projection must distinguish cancellation from failure"
+    );
 
     let events = h.store.read_events(h.runtime.session_id()).unwrap();
     assert!(events.iter().any(|event| matches!(

@@ -2457,12 +2457,13 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
             debug_stream_log("reasoning", &text);
             Some(UiEvent::ReasoningDelta(text))
         }
-        RuntimeEvent::ToolStarted { id, name } => Some(UiEvent::ToolStarted { id, name }),
+        RuntimeEvent::ToolStarted { id, name, .. } => Some(UiEvent::ToolStarted { id, name }),
         RuntimeEvent::ToolFinished {
             id,
             name,
             is_error,
             output,
+            ..
         } => Some(UiEvent::ToolFinished {
             id,
             name,

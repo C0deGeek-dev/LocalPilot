@@ -33,6 +33,7 @@ pub enum ActivityState {
     Running,
     Success,
     Error,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -55,7 +55,8 @@ not need a real console:
   values, contained quick/full help, help wheel/thumb navigation, cancelable
   whole-UI theme preview and mouse selection, contained settings and bounded
   two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
-  local refusal during active work, and the
+  bounded compact/expanded tool details with elapsed time, local refusal during
+  active work, and the
   invariant that slash input never enters the provider FIFO or prompt-history
   store.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run

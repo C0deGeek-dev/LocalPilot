@@ -154,10 +154,20 @@ async fn resume_with_events_forwards_runtime_progress() {
         seen.push(event);
     }
     assert!(
-        seen.iter().any(
-            |event| matches!(event, RuntimeEvent::ToolStarted { name, .. } if name == "write_file")
-        ),
+        seen.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ToolStarted { name, detail, .. }
+                if name == "write_file" && detail == "hello.txt"
+        )),
         "tool start event missing: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ToolFinished { name, duration_ms, .. }
+                if name == "write_file" && *duration_ms < u64::MAX
+        )),
+        "timed tool finish event missing: {seen:?}"
     );
     assert!(
         seen.iter()
