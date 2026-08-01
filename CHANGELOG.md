@@ -6,6 +6,26 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Internal/Added: connection-scoped session attach handshake + additive
+  protocol evolution.** The shared RPC envelope (`localpilot-rpc`) gains, purely
+  additively, a `ClientCommand::Attach { target }` command — where `target` is
+  `open_new` / `resume_id { session_id }` / `resume_name { name }` — and a
+  `ServerEvent::Attached { session_id, server_version }` confirmation, plus a
+  `SERVER_VERSION` constant. The server is one connection = one session: a
+  connection names its session once and is bound to it, rather than multiplexing
+  many sessions per connection. `localpilot-server` gains an `attach` dispatch
+  (`attach(target, &registry, &factory, &store)`) that routes each target to the
+  registry and returns the bound `SessionId`; an unknown id or name is a typed
+  `AttachError`, never a panic (resume-by-id is guarded so a never-seen id cannot
+  mint an empty ghost session). New fields follow an additive-evolution
+  discipline — `#[serde(default)]` and skipped-when-empty — so a payload from a
+  peer predating a field still deserializes without a second version handshake;
+  the existing `RPC_PROTOCOL_VERSION` negotiation is unchanged and coexists with
+  it. The existing single-session stdio RPC/ACP/MCP path is byte-for-byte
+  unchanged: a client that never sends `attach` behaves exactly as before. No
+  user-facing change — there is still no `serve`/`connect` command; this is the
+  protocol groundwork. See [docs/embedding.md](docs/embedding.md).
+
 - **Internal/Added: per-session multi-client fanout and lock-free out-of-band
   control.** The `localpilot-server` crate gains a `host` module (`SessionHost`)
   layered over a registry session handle. Several client connections can attach

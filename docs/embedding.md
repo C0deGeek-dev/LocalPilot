@@ -51,6 +51,48 @@ running turn without waiting for it:
 This is a library surface on top of the registry handle; there is still no wire
 protocol or `serve`/`connect` command exposing it.
 
+### Attaching to a session (server crate)
+
+The server transport is **one connection = one session**: a connection names
+its session exactly once, then is bound to it. It does that with an *attach*
+handshake rather than tagging every message with a session id. The shared RPC
+envelope carries one additive command and one additive confirmation:
+
+- **`attach`** (`ClientCommand::Attach { target }`) is the first thing a
+  connection sends. Its `target` is internally tagged by `mode`:
+  - `open_new` — open and bind a brand-new session;
+  - `resume_id` — resume the session with `session_id` (a UUID);
+  - `resume_name` — resume the session carrying `name`.
+- **`attached`** (`ServerEvent::Attached { session_id, server_version }`)
+  confirms the bind and reports the id the connection is now bound to.
+
+```text
+→ {"v":1,"id":"1","command":{"type":"attach","target":{"mode":"open_new"}}}
+← {"v":1,"id":"1","event":{"type":"attached","session_id":"…","server_version":"2.6.0"}}
+
+→ {"v":1,"command":{"type":"attach","target":{"mode":"resume_name","name":"nightly"}}}
+← {"v":1,"event":{"type":"attached","session_id":"…","server_version":"2.6.0"}}
+```
+
+Server-side, `localpilot-server`'s `attach(target, &registry, &factory, &store)`
+routes `open_new` → `open_new`, `resume_id` → `resume_by_id`, and `resume_name`
+→ `resume_by_name`, returning the bound `SessionId` (the caller then builds a
+`SessionHost` from `registry.get(id)`). An unknown id or name is a typed
+`AttachError` (`UnknownId` / `UnknownName`) the transport renders as an
+`error` event — never a panic. Resume-by-id is guarded against a never-seen id
+so it cannot silently mint an empty session under a caller-chosen id.
+
+**Additive evolution.** `server_version` (the server build, `SERVER_VERSION`)
+is `#[serde(default)]` and skipped when empty, so a payload written by an older
+peer that predates the field still deserializes — the field simply fills in
+empty — and a default value never bloats the wire. This is the discipline for
+every field added hereafter: default it and/or skip it when absent, so
+forward/backward compatibility holds without a second version handshake. The
+explicit `RPC_PROTOCOL_VERSION` still gates wire compatibility in `hello`; the
+serde-default discipline *coexists* with it for per-field evolution rather than
+replacing it. There is still no `serve`/`connect` command exposing any of this;
+`attach` is the protocol groundwork the future server command will drive.
+
 ## In-process embedding
 
 The supported library API is the `SessionRuntime` in `localpilot-harness`,

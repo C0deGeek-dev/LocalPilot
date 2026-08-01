@@ -187,6 +187,22 @@ where
                 emit(&mut writer, id, ServerEvent::Closed).await?;
                 break;
             }
+            // The stdio drive is one-session-per-process: its session is fixed
+            // at process start, so the connection-scoped attach handshake does
+            // not apply here. Reject it without disturbing the bound session.
+            ClientCommand::Attach { .. } => {
+                emit(
+                    &mut writer,
+                    id,
+                    ServerEvent::Error {
+                        message: "attach is not supported on the stdio drive; \
+                                  this connection is already bound to its session"
+                            .to_string(),
+                    },
+                )
+                .await?;
+                continue;
+            }
             // Any disposition starts a turn now when the session is idle.
             ClientCommand::Prompt { text, .. } => text,
         };
@@ -305,6 +321,12 @@ where
                             ClientCommand::Shutdown => {
                                 cancel.cancel();
                                 shutdown = true;
+                            }
+                            ClientCommand::Attach { .. } => {
+                                emit(writer, id, ServerEvent::Error {
+                                    message: "attach is not supported on the stdio drive"
+                                        .to_string(),
+                                }).await?;
                             }
                         }
                     }

@@ -6,12 +6,24 @@
 //! runtime — commands in, streamed session events out — and never widens what
 //! the permission engine would allow.
 
+use localpilot_core::SessionId;
 use serde::{Deserialize, Serialize};
 
 /// The current RPC protocol version. Version negotiation happens in `hello`:
 /// a client built for a newer version than this build receives a typed error
 /// rather than silently mismatched records.
 pub const RPC_PROTOCOL_VERSION: u32 = 1;
+
+/// This build's server/protocol crate version, reported in the
+/// [`ServerEvent::Attached`] `server_version` field.
+///
+/// This is deliberately *not* a second negotiated protocol number. Wire
+/// compatibility is gated by [`RPC_PROTOCOL_VERSION`]; additive fields instead
+/// evolve under `#[serde(default)]` / `#[serde(skip_serializing_if)]`, so a
+/// peer that predates a field simply omits it and both sides still parse. This
+/// constant is a human-facing build string a bound connection can log or
+/// display — it coexists with the version handshake rather than replacing it.
+pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One client-to-agent record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +57,27 @@ pub enum ClientCommand {
     Status,
     /// End the connection.
     Shutdown,
+    /// Bind this connection to a session — open a new one, or resume one by id
+    /// or name — as the first thing a connection does on the server transport
+    /// (one connection names its session once, then is bound to it). The server
+    /// confirms with [`ServerEvent::Attached`]. The stdio drive is
+    /// one-session-per-process and never uses this handshake.
+    Attach { target: AttachTarget },
+}
+
+/// Where a [`ClientCommand::Attach`] binds the connection: a brand-new session,
+/// or an existing one resumed by id or by name. Internally tagged by `mode`,
+/// mirroring the `type`-tagged style of the command and event enums.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AttachTarget {
+    /// Open and bind a brand-new session.
+    OpenNew,
+    /// Resume and bind the session with this id.
+    ResumeId { session_id: SessionId },
+    /// Resume and bind the session carrying this name.
+    ResumeName { name: String },
 }
 
 /// When queued input is admitted.
@@ -82,6 +115,16 @@ pub enum ServerEvent {
         protocol_version: u32,
         session_id: String,
         model: String,
+    },
+    /// Confirms a [`ClientCommand::Attach`]: the connection is now bound to
+    /// `session_id`. `server_version` names the server build (see
+    /// [`SERVER_VERSION`]); it is `#[serde(default)]` so a record written by an
+    /// older server predating the field still deserializes (the field fills in
+    /// empty), and skipped when empty so a default value never bloats the wire.
+    Attached {
+        session_id: SessionId,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        server_version: String,
     },
     TextDelta {
         text: String,
@@ -229,5 +272,145 @@ mod tests {
         let line = serde_json::to_string(&record).unwrap();
         let back: ServerRecord = serde_json::from_str(&line).unwrap();
         assert_eq!(record, back);
+    }
+
+    // --- 04.1 attach handshake round-trips ----------------------------------
+
+    #[test]
+    fn attach_commands_roundtrip_for_every_target() {
+        let id = localpilot_core::SessionId::new();
+        let records = vec![
+            ClientRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: Some("a1".to_string()),
+                command: ClientCommand::Attach {
+                    target: AttachTarget::OpenNew,
+                },
+            },
+            ClientRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: None,
+                command: ClientCommand::Attach {
+                    target: AttachTarget::ResumeId { session_id: id },
+                },
+            },
+            ClientRecord {
+                v: RPC_PROTOCOL_VERSION,
+                id: None,
+                command: ClientCommand::Attach {
+                    target: AttachTarget::ResumeName {
+                        name: "nightly".to_string(),
+                    },
+                },
+            },
+        ];
+        for record in records {
+            let line = serde_json::to_string(&record).unwrap();
+            let back: ClientRecord = serde_json::from_str(&line).unwrap();
+            assert_eq!(record, back);
+        }
+    }
+
+    #[test]
+    fn attach_target_uses_the_mode_internal_tag() {
+        let id = localpilot_core::SessionId::new();
+        let json = serde_json::to_value(ClientCommand::Attach {
+            target: AttachTarget::ResumeId { session_id: id },
+        })
+        .unwrap();
+        assert_eq!(json["type"], "attach");
+        assert_eq!(json["target"]["mode"], "resume_id");
+        assert_eq!(json["target"]["session_id"], id.to_string());
+    }
+
+    #[test]
+    fn attached_event_roundtrips_with_server_version() {
+        let record = ServerRecord {
+            v: RPC_PROTOCOL_VERSION,
+            id: Some("a1".to_string()),
+            event: ServerEvent::Attached {
+                session_id: localpilot_core::SessionId::new(),
+                server_version: SERVER_VERSION.to_string(),
+            },
+        };
+        let line = serde_json::to_string(&record).unwrap();
+        assert!(
+            line.contains(SERVER_VERSION),
+            "a populated server_version is written to the wire"
+        );
+        let back: ServerRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(record, back);
+    }
+
+    // --- 04.2 additive evolution: older-shaped payloads still deserialize ----
+
+    #[test]
+    fn attached_payload_without_server_version_still_deserializes() {
+        // An older server that predates `server_version` emits an `attached`
+        // event without it. It must still parse into the current type, with the
+        // field defaulted — forward/backward compatibility without a second
+        // version handshake.
+        let id = localpilot_core::SessionId::new();
+        let older = format!(r#"{{"v":1,"event":{{"type":"attached","session_id":"{id}"}}}}"#);
+        let record: ServerRecord = serde_json::from_str(&older).unwrap();
+        assert_eq!(
+            record.event,
+            ServerEvent::Attached {
+                session_id: id,
+                server_version: String::new(),
+            },
+            "the missing field defaulted to empty instead of failing to parse"
+        );
+    }
+
+    #[test]
+    fn empty_server_version_is_omitted_from_the_wire() {
+        // The skip-serializing half of the discipline: a default-valued field
+        // does not bloat the wire, so it round-trips through the empty default.
+        let event = ServerEvent::Attached {
+            session_id: localpilot_core::SessionId::new(),
+            server_version: String::new(),
+        };
+        let line = serde_json::to_string(&event).unwrap();
+        assert!(
+            !line.contains("server_version"),
+            "an empty server_version must be skipped: {line}"
+        );
+        let back: ServerEvent = serde_json::from_str(&line).unwrap();
+        assert_eq!(event, back);
+    }
+
+    // --- 04.3 compatibility: pre-attach records are unaffected ----------------
+
+    #[test]
+    fn pre_attach_records_are_unaffected_by_the_new_variants() {
+        // A record using none of the new variants still decodes from its
+        // historical shape and re-encodes without any attach-related key: the
+        // additions are purely additive to the existing stdio/ACP vocabulary.
+        let client: ClientRecord =
+            serde_json::from_str(r#"{"v":1,"command":{"type":"prompt","text":"run the tests"}}"#)
+                .unwrap();
+        let encoded = serde_json::to_string(&client).unwrap();
+        assert!(
+            !encoded.contains("attach"),
+            "unexpected attach key: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<ClientRecord>(&encoded).unwrap(),
+            client,
+            "re-decoding a pre-attach client record is stable"
+        );
+
+        // A server `hello` has no defaulted/skipped fields, so it stays
+        // byte-for-byte identical across a decode/encode round-trip.
+        let hello =
+            r#"{"v":1,"event":{"type":"hello","protocol_version":1,"session_id":"s","model":"m"}}"#;
+        let decoded: ServerRecord = serde_json::from_str(hello).unwrap();
+        let re_encoded = serde_json::to_string(&decoded).unwrap();
+        assert_eq!(
+            re_encoded, hello,
+            "pre-attach server record is byte-identical"
+        );
+        assert!(!re_encoded.contains("attached"));
     }
 }

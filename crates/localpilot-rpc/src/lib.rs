@@ -21,7 +21,7 @@ pub use mcp::{
     serve_mcp, DriverInterventionRecord, McpServeOptions, McpServeReport, MCP_PROTOCOL_VERSION,
 };
 pub use protocol::{
-    ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent, ServerRecord,
-    RPC_PROTOCOL_VERSION,
+    AttachTarget, ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent,
+    ServerRecord, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
 pub use serve::{serve, RpcError, ServeContext};

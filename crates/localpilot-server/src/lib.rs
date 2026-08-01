@@ -6,7 +6,7 @@
 //! [`SessionRuntime`](localpilot_harness)s in one process. A tiny echo/ping
 //! serve loop ([`wire::serve_echo`]) proves the transport end to end.
 //!
-//! Three things live here:
+//! The pieces:
 //!
 //! - [`transport`] — a uniform [`Listener`]/[`Conn`]/[`connect`] surface over a
 //!   Unix domain socket (Unix) or a named pipe (Windows), with a deterministic
@@ -21,6 +21,10 @@
 //!   event fanout (a session-lifetime broadcast) and lock-free out-of-band
 //!   cancel/steer that reach an in-flight turn without taking the runtime mutex
 //!   the turn holds.
+//! - [`attach`] — the connection-scoped bind seam: one decoded
+//!   [`AttachTarget`](localpilot_rpc::AttachTarget) (open-new / resume-by-id /
+//!   resume-by-name) routed to the registry, returning the bound session id
+//!   (or a typed [`AttachError`] on an unknown id/name — never a panic).
 //!
 //! Every lifecycle primitive is built from safe `std` + `tokio` only: no
 //! `unsafe`, no `libc`/`nix`, no `flock`/`setsid`/`kill`. Exclusivity uses an
@@ -30,12 +34,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attach;
 pub mod daemon;
 pub mod host;
 pub mod registry;
 pub mod transport;
 pub mod wire;
 
+pub use attach::{attach, AttachError};
 pub use daemon::{
     acquire, build_serve_command, ensure_running, spawn_detached, spawn_detached_argv,
     wait_for_ready, Acquired, DaemonError, Singleton, SERVE_ARGV,
