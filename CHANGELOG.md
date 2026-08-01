@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: an immutable store for self-built versions, and marker-file channel
+  pointers.** Each self-dev build lands in its own directory named by its source
+  label and is never written to again; a rebuild of the same source is a no-op,
+  and a rebuild of different source is a different directory. Which build runs is
+  decided by a *channel pointer* — a small marker file naming a label — swapped
+  atomically by rename. So switching versions never overwrites a file a running
+  process was launched from, and the previous build stays intact and usable
+  behind it. The pointer is a plain file on every platform rather than a symlink,
+  so Windows behaves exactly like Linux and macOS and needs no elevated
+  privilege. Builds are copied into the store rather than hard-linked, on purpose:
+  the source is a live build-output path a later build rewrites, and a shared
+  inode would let that later build reach into a version already in use.
+
 - **Added: a source fingerprint, and a build that knows what it built.** A commit
   hash answers "which commit", not "which bytes" — an uncommitted edit, a staged
   hunk, and a stray new file all produce a different binary from the same `HEAD`.

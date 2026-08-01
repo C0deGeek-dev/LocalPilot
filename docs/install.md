@@ -170,6 +170,29 @@ not check for a newer release; update `localpilot` first, then run it.
 > on Windows it can install 2.6.0 and later; for anything earlier, download by
 > hand or use `--from-source`.
 
+### Self-dev builds (developer feature)
+
+A build LocalPilot makes from its *own* source keeps its state entirely separate
+from the releases above, under a `selfdev/` subtree beside the release cache
+(`%LOCALAPPDATA%\localx\selfdev` on Windows, `~/.local/share/localx/selfdev` on
+Linux/macOS). You can delete that subtree wholesale without touching an installed
+release.
+
+Inside it, the same one-directory-per-version idea holds, keyed by a source label
+rather than a release version:
+
+| Path | Holds |
+| --- | --- |
+| `selfdev/versions/<label>/` | one immutable build; `<label>` is `<short-hash>` for a clean tree, `<short-hash>-dirty-<fingerprint>` for a modified one |
+| `selfdev/versions/<label>/.selfdev.json` | the build's marker (source hash, fingerprint, embedded version); its presence is what makes the build resolvable |
+| `selfdev/channels/<name>.json` | a *channel pointer* — a small file naming the label that `<name>` (e.g. `current`, `stable`, `slow`) currently resolves to |
+
+A version directory is written once and never modified; switching which build
+runs only rewrites a channel pointer, so a running process is never exec'd from a
+path a later build can overwrite. The pointer is a marker file, not a symlink, on
+every platform — identical behaviour on Windows, Linux, and macOS, and no
+elevated privilege required.
+
 ## From source
 
 Use this when you want to build from a working tree, or on a platform with no

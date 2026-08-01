@@ -3,22 +3,30 @@
 //! The crate is a stack of primitives, each useful on its own:
 //!
 //! 1. [`SourceState`] — what the working tree *is*, as one comparable value.
-//! 2. [`builder`] — an isolated, identity-carrying build of that tree.
+//! 2. [`build`] — an isolated, identity-carrying build of that tree.
+//! 3. [`VersionStore`] — every build in its own immutable directory.
+//! 4. [`Channels`] — marker-file pointers naming which stored version runs.
 //!
 //! Nothing here decides *whether* to reload. That is a policy question for the
 //! caller; this crate only makes each step safe to take.
 #![forbid(unsafe_code)]
 
 mod builder;
+mod channel;
 mod error;
 mod git;
+mod marker;
 mod paths;
 mod source;
+mod store;
 
 pub use builder::{
     build, default_target_dir, plan, BuildOptions, BuildPlan, Built, ENV_GIT_HASH,
     ENV_SOURCE_FINGERPRINT, ENV_VERSION, SELFDEV_PACKAGE, SELFDEV_PROFILE, TOOL,
 };
+pub use channel::{Channel, ChannelName, Channels, CURRENT, SLOW, STABLE};
 pub use error::SelfDevError;
+pub use marker::{BuildMarker, BUILD_MARKER_VERSION};
 pub use paths::default_root;
 pub use source::SourceState;
+pub use store::{StoredVersion, VersionStore};
