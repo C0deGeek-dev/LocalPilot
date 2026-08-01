@@ -68,8 +68,16 @@ What the host owns:
   `Approver` implementation; the engine's verdicts cannot be bypassed,
 - **cancellation** via the `CancellationToken`,
 - **steering**: clone `runtime.steer_queue()` before a turn and push text into
-  it while the turn runs; it is admitted at the next safe provider-turn
-  boundary.
+  it while the turn runs; it is admitted at the next safe provider-turn boundary.
+  `push(text)` queues a normal user steer; `push_interrupt(SoftInterrupt { .. })`
+  queues a typed soft interrupt carrying a source (`user` / `system` /
+  `background_task`) and an `urgent` flag. A non-user message is labelled so it
+  does not read as user-typed input; an urgent interrupt is admitted between tool
+  calls (skipping the rest of the batch). A steer arriving as a turn would finish
+  keeps the turn going so the model sees it. Every injection is recorded as a
+  `SoftInterruptInjected` event in the session log. (The system/background-task
+  producer path is a library surface for future work; only user steering produces
+  interrupts today.)
 
 What the runtime guarantees is the reliability contract in
 [`docs/06`](06-harness-spec.md) and [`docs/07`](07-security-and-privacy.md):

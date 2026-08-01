@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Improved: mid-turn steering is now a typed soft-interrupt substrate.** User
+  input steered into a running turn (already admitted at a safe boundary) is now
+  one case of a typed soft interrupt that also carries a source (user / system /
+  background task) and an urgency flag. A non-user message is labelled so it does
+  not read as user-typed input; every injection is recorded as a durable
+  `SoftInterruptInjected` event for replay. A steer that arrives as a turn would
+  otherwise finish now keeps the turn going so the model sees it (Point B), and an
+  urgent interrupt is admitted between tool calls, skipping the rest of the batch
+  while keeping the tool_use/tool_result contract valid (Point C). The
+  system/background-task producer path is available as a library surface for
+  later work; only user steering produces interrupts today.
+
 - **Improved: memory retrieval now fuses keyword and semantic rankings.** When
   the stored-vector rerank is enabled (`[retrieval] rerank` + an embedding
   endpoint), memory injection now blends the keyword (bm25) ranking with the

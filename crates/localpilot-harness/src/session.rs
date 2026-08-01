@@ -320,17 +320,82 @@ pub fn effective_context_limit(window: Option<u64>, configured: usize) -> usize 
     }
 }
 
-/// A thread-safe queue of steering input: user text typed while a turn is
-/// running, admitted at the next safe provider-turn boundary (after the
-/// current iteration's tool calls, before the next provider call).
+/// Who produced a soft interrupt. Drives how the injected message is labelled so
+/// a system or background-task message is not mistaken for user-typed input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoftInterruptSource {
+    /// The user steered the running turn (typed input, the common case).
+    #[default]
+    User,
+    /// The harness itself injected context (a notice, a background result summary).
+    System,
+    /// A background task reported completion or progress into the turn.
+    BackgroundTask,
+}
+
+impl SoftInterruptSource {
+    /// A short label prefixed to a non-user injection so the model (and the
+    /// transcript) can tell it apart from user-typed steering. `User` is
+    /// unlabelled — it *is* the user talking.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            SoftInterruptSource::User => None,
+            SoftInterruptSource::System => Some("system"),
+            SoftInterruptSource::BackgroundTask => Some("background task"),
+        }
+    }
+}
+
+/// One message injected into a running turn at a safe boundary. Text plus who
+/// sent it and whether it is urgent (an urgent interrupt is admitted between
+/// tool calls, skipping the rest of the batch; a normal one waits for the batch
+/// to finish).
+#[derive(Debug, Clone)]
+pub struct SoftInterrupt {
+    pub content: String,
+    pub source: SoftInterruptSource,
+    pub urgent: bool,
+}
+
+impl SoftInterrupt {
+    /// A non-urgent user steering message (the common case).
+    #[must_use]
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            source: SoftInterruptSource::User,
+            urgent: false,
+        }
+    }
+
+    /// The message as it appears in the turn: a user-role message, but a non-user
+    /// source is prefixed with its label so it does not read as user-typed input.
+    fn into_message(self) -> Message {
+        let text = match self.source.label() {
+            Some(label) => format!("[{label}] {}", self.content),
+            None => self.content,
+        };
+        Message::text(Role::User, text)
+    }
+}
+
+/// A thread-safe queue of soft interrupts: messages pushed while a turn is
+/// running, admitted at a safe provider-turn boundary. User steering is the
+/// common case; the harness and background tasks use the same queue so every
+/// mid-turn injection rides one path.
 #[derive(Debug, Clone, Default)]
-pub struct SteerQueue(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+pub struct SteerQueue(Arc<std::sync::Mutex<std::collections::VecDeque<SoftInterrupt>>>);
 
 impl SteerQueue {
-    /// Queue steering text for the running turn.
+    /// Queue user steering text for the running turn (a non-urgent user message).
     pub fn push(&self, text: impl Into<String>) {
+        self.push_interrupt(SoftInterrupt::user(text.into()));
+    }
+
+    /// Queue an arbitrary soft interrupt (user, system, or background task).
+    pub fn push_interrupt(&self, interrupt: SoftInterrupt) {
         if let Ok(mut queue) = self.0.lock() {
-            queue.push_back(text.into());
+            queue.push_back(interrupt);
         }
     }
 
@@ -340,7 +405,16 @@ impl SteerQueue {
         self.0.lock().map(|q| q.is_empty()).unwrap_or(true)
     }
 
-    fn drain(&self) -> Vec<String> {
+    /// Whether an *urgent* interrupt is queued (admitted between tool calls).
+    #[must_use]
+    fn has_urgent(&self) -> bool {
+        self.0
+            .lock()
+            .map(|q| q.iter().any(|i| i.urgent))
+            .unwrap_or(false)
+    }
+
+    fn drain(&self) -> Vec<SoftInterrupt> {
         self.0
             .lock()
             .map(|mut queue| queue.drain(..).collect())
@@ -1493,6 +1567,29 @@ impl SessionRuntime {
         runner.run(check).await
     }
 
+    /// Admit every queued soft interrupt at a safe boundary: inject each as a
+    /// user-role message (a non-user source is labelled so it does not read as
+    /// user-typed input) and record a durable `SoftInterruptInjected` event.
+    /// Returns whether any were admitted, so a would-be-final turn can decide to
+    /// keep going instead of ending (Point B).
+    fn admit_soft_interrupts(&mut self, point: &str) -> bool {
+        let interrupts = self.steer.drain();
+        let admitted = !interrupts.is_empty();
+        for interrupt in interrupts {
+            let source = match interrupt.source {
+                SoftInterruptSource::User => "user",
+                SoftInterruptSource::System => "system",
+                SoftInterruptSource::BackgroundTask => "background_task",
+            };
+            self.append(interrupt.into_message());
+            self.record_event(SessionEventKind::SoftInterruptInjected {
+                point: point.to_string(),
+                source: source.to_string(),
+            });
+        }
+        admitted
+    }
+
     /// The verify-before-done gate, consulted when a turn would finalize with no
     /// tool call. Reuses [`Self::run_check`] — the same runner the quality gate
     /// uses — so it never runs a second compile engine. The outcome tells the
@@ -1943,7 +2040,7 @@ impl SessionRuntime {
         // never loop forever even with the rails off.
         let mut verify_attempts = 0usize;
 
-        loop {
+        'turn: loop {
             if cancel.is_cancelled() {
                 return self.stop(events, StopReason::Cancelled);
             }
@@ -1951,11 +2048,9 @@ impl SessionRuntime {
                 return self.stop(events, StopReason::TimedOut);
             }
 
-            // Admit queued steering input at this safe boundary: after the
-            // previous iteration's tool calls, before the next provider call.
-            for steer_text in self.steer.drain() {
-                self.append(Message::text(Role::User, steer_text));
-            }
+            // Admit queued soft interrupts at this safe boundary (Point D): after
+            // the previous iteration's tool calls, before the next provider call.
+            self.admit_soft_interrupts("after_tools");
 
             let compacted = self.compacted_history(context_reserve, cancel).await;
             let tools = if tools_enabled {
@@ -2361,6 +2456,13 @@ impl SessionRuntime {
                     );
                     continue;
                 }
+                // A soft interrupt queued while this call-free turn was streaming
+                // (Point B): instead of ending, admit it and keep the turn going so
+                // the model sees the steer/notice before it finalizes.
+                if !self.steer.is_empty() {
+                    self.admit_soft_interrupts("turn_continued");
+                    continue;
+                }
                 // Verify-before-done gate (opt-in): before accepting a call-free
                 // turn as the final answer, confirm the workspace still
                 // builds/tests. On a failure within the re-entry cap, feed the
@@ -2398,7 +2500,21 @@ impl SessionRuntime {
             }
 
             // Execute tool calls through the permission-gated registry.
-            for (id, name, input, _) in &calls {
+            for (call_index, (id, name, input, _)) in calls.iter().enumerate() {
+                // Point C: an urgent interrupt arrived mid-batch. Answer this call
+                // and every remaining tool_use with a skipped result (the wire
+                // contract requires one result per tool_use), admit the interrupt,
+                // and re-enter the turn so the model sees it before continuing.
+                if self.steer.has_urgent() {
+                    for (skip_id, _, _, _) in &calls[call_index..] {
+                        self.append(tool_error_message(
+                            skip_id,
+                            "skipped: an urgent interrupt cut the tool batch short",
+                        ));
+                    }
+                    self.admit_soft_interrupts("between_tools");
+                    continue 'turn;
+                }
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
                 // cleanly with a model-visible, recorded reason before the next
                 // call runs. The hard cost ceiling always wins; a no-progress
@@ -3104,6 +3220,60 @@ mod tests {
     use localpilot_llm::{FakeProvider, ProviderDeclaration};
     use localpilot_recovery::RecoveryBudget;
     use localpilot_sandbox::{ScriptedApprover, Workspace};
+
+    #[test]
+    fn a_user_soft_interrupt_injects_verbatim_a_system_one_is_labelled() {
+        // A user steer is the user talking, so it is unlabelled; a system or
+        // background-task message is prefixed so it never reads as user input.
+        let user = SoftInterrupt::user("do the thing").into_message();
+        assert_eq!(message_plain_text(&user), "do the thing");
+
+        let system = SoftInterrupt {
+            content: "a notice".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: false,
+        }
+        .into_message();
+        assert_eq!(message_plain_text(&system), "[system] a notice");
+
+        let bg = SoftInterrupt {
+            content: "done".to_string(),
+            source: SoftInterruptSource::BackgroundTask,
+            urgent: false,
+        }
+        .into_message();
+        assert_eq!(message_plain_text(&bg), "[background task] done");
+    }
+
+    #[test]
+    fn the_queue_reports_urgency_and_drains_in_order() {
+        let q = SteerQueue::default();
+        assert!(q.is_empty() && !q.has_urgent());
+        q.push("first");
+        q.push_interrupt(SoftInterrupt {
+            content: "urgent".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: true,
+        });
+        assert!(!q.is_empty() && q.has_urgent());
+        let drained = q.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].content, "first");
+        assert!(drained[1].urgent);
+        assert!(q.is_empty() && !q.has_urgent());
+    }
+
+    fn message_plain_text(message: &Message) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 
     /// A fake provider that reports `id` as its declaration id.
     fn fake_with_id(id: &str) -> Arc<dyn ModelProvider> {

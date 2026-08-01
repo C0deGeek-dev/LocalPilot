@@ -271,6 +271,16 @@ pub enum SessionEventKind {
         /// The driving client's self-reported name/version.
         client: String,
     },
+    /// A soft interrupt was injected into the running turn at a safe boundary.
+    /// The durable record of a mid-turn injection: which safe point it landed at
+    /// and who produced it, so a replayed turn shows the interruption in place.
+    SoftInterruptInjected {
+        /// The safe point it landed at: `after_tools` (D), `turn_continued` (B),
+        /// or `between_tools` (C, urgent).
+        point: String,
+        /// Who produced it: `user`, `system`, or `background_task`.
+        source: String,
+    },
 }
 
 impl SessionEvent {

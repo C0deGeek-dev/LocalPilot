@@ -83,8 +83,8 @@ pub use localx_eval_core::{
 };
 pub use session::{
     effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
-    SessionRecovery, SessionRuntime, SteerQueue, StopReason, SwitchError, SwitchOutcome,
-    TurnHandoff,
+    SessionRecovery, SessionRuntime, SoftInterrupt, SoftInterruptSource, SteerQueue, StopReason,
+    SwitchError, SwitchOutcome, TurnHandoff,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::agent_system_prompt;

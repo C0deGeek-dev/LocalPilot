@@ -131,6 +131,58 @@ fn tool_result_outputs(messages: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn queued_soft_interrupts_are_admitted_labelled_and_recorded() {
+    use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
+
+    // A user steer and a system notice queued before a call-free turn. Both are
+    // admitted at the safe boundary and injected as user-role messages — the user
+    // steer verbatim, the system notice labelled so it does not read as the user —
+    // and each is recorded as a durable SoftInterruptInjected event.
+    let provider = FakeProvider::new().text("acknowledged");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let steer = h.runtime.steer_queue();
+    steer.push("also check the error path");
+    steer.push_interrupt(SoftInterrupt {
+        content: "background job finished".to_string(),
+        source: SoftInterruptSource::System,
+        urgent: false,
+    });
+
+    let reason = h
+        .runtime
+        .run_turn("review the module", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let text = message_text(&transcript);
+    assert!(text.contains("also check the error path"), "user steer injected: {text}");
+    assert!(
+        text.contains("[system] background job finished"),
+        "system notice injected and labelled: {text}"
+    );
+
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            localpilot_store::SessionEventKind::SoftInterruptInjected { point, source } => {
+                Some((point.clone(), source.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        injected.iter().any(|(_, s)| s == "user"),
+        "the user steer is recorded: {injected:?}"
+    );
+    assert!(
+        injected.iter().any(|(_, s)| s == "system"),
+        "the system notice is recorded: {injected:?}"
+    );
+}
+
+#[tokio::test]
 async fn loop_reads_a_file_then_produces_a_final_answer() {
     let provider = FakeProvider::new()
         .tool_call("c1", "read_file", json!({ "path": "src/lib.rs" }))
