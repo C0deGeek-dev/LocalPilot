@@ -223,6 +223,32 @@ Rules:
   Nothing else from the child crosses over — its tool calls and stream output
   belong to its transcript, not the caller's
 
+### File-touch reporting
+
+Every file-mutating builtin — `write_file`, `append_file`, `edit_file`,
+`multi_edit`, `apply_patch`, `replace_in_file` — and `read_file` report what they
+touched, as typed data on their own output: the path, the operation, and the
+**line range** where one is known.
+
+Reported, not inferred. The three tempting alternatives all fail:
+
+- *Inferring from the tool name and arguments* is fine for `write_file` and
+  useless for `multi_edit`, which is one call, several ranges, some of which may
+  not apply.
+- *Parsing the range out of the tool's prose output* reads like it works and then
+  silently stops when the wording changes.
+- *Watching the filesystem* catches everything and attributes nothing.
+
+The range is computed by comparing the file's content before and after, so it is
+the extent that actually changed rather than what the tool intended. Scattered
+edits in one call collapse into the single enclosing range: for an advisory
+alert, over-reporting costs a message and under-reporting costs the collision.
+
+Tools know nothing about swarms. The registry hands the touches to the caller
+(`dispatch_reporting`), the turn loop publishes them as a `FilesTouched` runtime
+event, and anything that cares subscribes. A session outside a swarm pays a
+`Vec` that stays empty.
+
 ### `swarm`
 
 Agent-to-agent messaging for the sessions collaborating on one repository.

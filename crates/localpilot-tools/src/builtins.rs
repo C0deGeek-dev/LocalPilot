@@ -16,6 +16,7 @@ use crate::contract::{
 };
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
 use localpilot_core::ToolOutcome;
 
 /// Approval detail from a single string field of the input. Tools know their
@@ -91,6 +92,15 @@ const MAX_WRITE_BYTES: usize = 64 * 1024;
 /// never lose data to a per-tool pre-truncation. A large result is retained in
 /// full and paged back with `read_tool_output`; the model still only sees the
 /// bounded view in context.
+/// The touch for an in-place edit: the changed span where there is one, and the
+/// whole file when the change cannot be localised.
+fn edit_touch(path: &std::path::Path, before: &str, after: &str) -> FileTouch {
+    match changed_range(before, after) {
+        Some(lines) => FileTouch::ranged(path, TouchOp::Modified, lines),
+        None => FileTouch::whole(path, TouchOp::Modified),
+    }
+}
+
 pub(crate) fn cap(text: String) -> ToolOutput {
     ToolOutput::ok(text)
 }
@@ -524,6 +534,7 @@ impl Tool for ReadFile {
         }
         let text = String::from_utf8(bytes)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+        let total = text.lines().count();
         let selected = match (input.start_line, input.end_line) {
             (None, None) => text,
             (start, end) => {
@@ -540,7 +551,21 @@ impl Tool for ReadFile {
                     .join("\n")
             }
         };
-        Ok(cap(selected))
+        // The read side is recorded too, with the range that was actually read.
+        // Whether a prior *reader* is told its ground moved is a policy decision
+        // taken where the index lives — not one settled here by staying silent.
+        let touch = match (input.start_line, input.end_line) {
+            (None, None) => FileTouch::whole(&path, TouchOp::Read),
+            (start, end) => FileTouch::ranged(
+                &path,
+                TouchOp::Read,
+                LineRange::new(
+                    u32::try_from(start.unwrap_or(1).max(1)).unwrap_or(u32::MAX),
+                    u32::try_from(end.unwrap_or(total.max(1))).unwrap_or(u32::MAX),
+                ),
+            ),
+        };
+        Ok(cap(selected).touching(touch))
     }
 }
 
@@ -623,11 +648,13 @@ impl Tool for WriteFile {
         let newline = existing.as_deref().map_or("\n", detect_newline);
         let body = apply_newline(&input.content, newline);
         atomic_write(&path, body.as_bytes())?;
-        Ok(ToolOutput::ok(format!(
-            "wrote {} bytes to {}",
-            body.len(),
-            path.display()
-        )))
+        // A whole-file write is reported without a range on purpose: it is in
+        // the way of every other edit to that file, and pretending otherwise
+        // would hide exactly the collision worth catching.
+        Ok(
+            ToolOutput::ok(format!("wrote {} bytes to {}", body.len(), path.display()))
+                .touching(FileTouch::whole(&path, TouchOp::Wrote)),
+        )
     }
 }
 
@@ -700,6 +727,9 @@ impl Tool for AppendFile {
         // chunked write stays consistent across appends and platforms.
         let newline = existing.as_deref().map_or("\n", detect_newline);
         let addition = apply_newline(&input.content, newline);
+        // Kept for the touch range: the append consumes `existing`, and the
+        // changed span is the difference between what was there and what is now.
+        let before = existing.clone().unwrap_or_default();
         let body = match existing {
             Some(mut current) => {
                 current.push_str(&addition);
@@ -708,11 +738,13 @@ impl Tool for AppendFile {
             None => addition.clone(),
         };
         atomic_write(&path, body.as_bytes())?;
+        let touch = edit_touch(&path, &before, &body);
         Ok(ToolOutput::ok(format!(
             "appended {} bytes to {}",
             addition.len(),
             path.display()
-        )))
+        ))
+        .touching(touch))
     }
 }
 
@@ -781,7 +813,8 @@ impl Tool for EditFile {
             Ok(plan) => {
                 let updated = apply_plan(&haystack, &plan);
                 atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
-                Ok(ToolOutput::ok(format!("edited {}", path.display())))
+                Ok(ToolOutput::ok(format!("edited {}", path.display()))
+                    .touching(edit_touch(&path, &haystack, &updated)))
             }
             Err(miss) => Err(edit_miss_error(&location, &haystack, &needle, &miss)),
         }
@@ -868,11 +901,15 @@ impl Tool for MultiEdit {
             }
         }
         atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
+        // Several edits in one call collapse into one enclosing range. This is
+        // the case a per-call inference gets wrong, and the reason the range is
+        // computed from the content rather than from the arguments.
         Ok(ToolOutput::ok(format!(
             "applied {} edits to {}",
             input.edits.len(),
             path.display()
-        )))
+        ))
+        .touching(edit_touch(&path, &original, &updated)))
     }
 }
 
@@ -1316,15 +1353,30 @@ impl Tool for ApplyPatch {
         // Apply. Each file write is atomic (temp-then-rename); validation
         // above makes the whole patch all-or-nothing in practice.
         let mut applied = Vec::new();
+        let mut touches = Vec::new();
         for ((path, content), op) in writes.iter().zip(&input.operations) {
             match content {
-                Some(content) => atomic_write(path, content.as_bytes())?,
-                None => std::fs::remove_file(path)
-                    .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?,
+                Some(content) => {
+                    // Read back what was there so the touch names the lines that
+                    // actually moved. One patch can span several files, so each
+                    // gets its own touch rather than the call getting one.
+                    let before = std::fs::read_to_string(path).unwrap_or_default();
+                    atomic_write(path, content.as_bytes())?;
+                    touches.push(if before.is_empty() {
+                        FileTouch::whole(path, TouchOp::Wrote)
+                    } else {
+                        edit_touch(path, &before, content)
+                    });
+                }
+                None => {
+                    std::fs::remove_file(path)
+                        .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+                    touches.push(FileTouch::whole(path, TouchOp::Deleted));
+                }
             }
             applied.push(op.describe());
         }
-        Ok(ToolOutput::ok(format!("applied: {}", applied.join("; "))))
+        Ok(ToolOutput::ok(format!("applied: {}", applied.join("; "))).touching_all(touches))
     }
 }
 
@@ -1653,7 +1705,8 @@ impl Tool for ReplaceInFile {
             return Ok(cap(format!("no match for find in {}", path.display())));
         }
         atomic_write(&path, updated.as_bytes())?;
-        Ok(cap(format!("updated {}", path.display())))
+        Ok(cap(format!("updated {}", path.display()))
+            .touching(edit_touch(&path, &original, &updated)))
     }
 }
 

@@ -12,11 +12,15 @@
 //! - [`messaging`] routes agent-to-agent messages: scope is the spawn tree, and
 //!   delivery rides the same soft-interrupt substrate the user's own steering
 //!   uses.
+//! - [`touches`] records who touched which file recently and tells the peers a
+//!   change affects. Advisory only: nothing is locked and nothing is rolled
+//!   back.
 
 pub mod messaging;
 pub mod registry;
 pub mod scope;
 pub mod spawn;
+pub mod touches;
 
 pub use messaging::SessionPeers;
 pub use registry::{
@@ -25,3 +29,4 @@ pub use registry::{
 };
 pub use scope::{git_common_dir, swarm_id_for_dir, SwarmId, SWARM_ID_ENV};
 pub use spawn::{SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory, WorkerReport};
+pub use touches::{announce, Collision, TouchIndex};

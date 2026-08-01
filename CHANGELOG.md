@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: advisory file-conflict alerts.** When several agents share one
+  working tree, an agent that changes a file another agent is working in now
+  hears about it mid-turn. Every file-mutating builtin, and `read_file`, report
+  what they touched as typed data — path, operation, and the line range, computed
+  from the content that actually changed rather than from what the tool intended,
+  so `multi_edit` and `apply_patch` are covered as exactly as `write_file`. The
+  server keeps a short-lived index of who touched what and tells the peers a
+  change affects, over the same soft-interrupt path the rest of the swarm uses.
+  Two agents editing different parts of one file are left alone; two editing the
+  same lines are both told, and a prior *reader* is told its knowledge went
+  stale — in different words, because a reader has not lost work. The guarantee
+  is advisory and stated plainly: nothing is locked, nothing is blocked, and
+  nothing is rolled back. Both edits land, and git remains the merge substrate.
+
 - **Added: `swarm` — agent-to-agent messaging.** Sessions collaborating on one
   repository can now message each other: `send` to one peer by name or id,
   `broadcast` to the agents you spawned (the whole swarm only if you are the

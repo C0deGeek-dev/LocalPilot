@@ -192,18 +192,45 @@ impl ToolRegistry {
         approver: &dyn Approver,
         gates: &[&dyn ToolGate],
     ) -> ToolResult {
+        self.dispatch_reporting(call, ctx, engine, approver, gates)
+            .await
+            .0
+    }
+
+    /// [`ToolRegistry::dispatch_gated`], also returning what the tool reported
+    /// touching.
+    ///
+    /// The touches are deliberately *not* on [`ToolResult`]: that type is the
+    /// durable wire shape written into every transcript, and a field only the
+    /// swarm reads has no business there. Callers that care ask for them; the
+    /// rest use `dispatch` and never see them.
+    pub async fn dispatch_reporting(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+        gates: &[&dyn ToolGate],
+    ) -> (ToolResult, Vec<crate::touch::FileTouch>) {
         let Some(tool) = self.get(&call.name) else {
-            return unusable_result(
+            return no_touches(unusable_result(
                 &call.name,
                 &call.id,
                 &format!("unknown tool: {}", call.name),
                 ctx,
-            );
+            ));
         };
 
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
-            Err(err) => return unusable_result(tool.name(), &call.id, &err.to_string(), ctx),
+            Err(err) => {
+                return no_touches(unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &err.to_string(),
+                    ctx,
+                ))
+            }
         };
 
         // Reversibility-aware confirmation: an irreversible tool (or one that
@@ -235,23 +262,23 @@ impl ToolRegistry {
                 Decision::Deny => false,
             };
             if !allowed {
-                return unusable_result(
+                return no_touches(unusable_result(
                     tool.name(),
                     &call.id,
                     &denial_message(tool.name(), &request),
                     ctx,
-                );
+                ));
             }
         }
 
         for gate in gates {
             if let GateVerdict::Block { reason } = gate.check(call, &effects) {
-                return unusable_result(
+                return no_touches(unusable_result(
                     tool.name(),
                     &call.id,
                     &format!("blocked by {}: {reason}", gate.name()),
                     ctx,
-                );
+                ));
             }
         }
 
@@ -260,15 +287,28 @@ impl ToolRegistry {
             Ok(output) => {
                 let redacted = redact(&output.text);
                 let bounded = bound_output(tool.name(), &call.id, &redacted, ctx);
-                ToolResult {
-                    id: call.id.clone(),
-                    output: format_tool_output(tool.name(), &bounded, output.outcome),
-                    outcome: output.outcome,
-                }
+                (
+                    ToolResult {
+                        id: call.id.clone(),
+                        output: format_tool_output(tool.name(), &bounded, output.outcome),
+                        outcome: output.outcome,
+                    },
+                    output.touches,
+                )
             }
-            Err(err) => unusable_result(tool.name(), &call.id, &err.to_string(), ctx),
+            Err(err) => no_touches(unusable_result(
+                tool.name(),
+                &call.id,
+                &err.to_string(),
+                ctx,
+            )),
         }
     }
+}
+
+/// A result from a call that never reached a tool, so touched nothing.
+fn no_touches(result: ToolResult) -> (ToolResult, Vec<crate::touch::FileTouch>) {
+    (result, Vec::new())
 }
 
 /// The single exit for every result the model sees without the tool having

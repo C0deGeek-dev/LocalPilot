@@ -263,6 +263,13 @@ pub struct ToolOutput {
     pub text: String,
     pub outcome: ToolOutcome,
     pub truncated: bool,
+    /// What this call touched, reported by the tool itself.
+    ///
+    /// Empty for the overwhelming majority of tools, which touch no file. A
+    /// file-mutating tool attaches one entry per file it changed, with the line
+    /// range where it knows one. Nothing downstream infers or parses this — the
+    /// tool is the only thing that knows what it did, and it knows exactly.
+    pub touches: Vec<crate::touch::FileTouch>,
 }
 
 impl ToolOutput {
@@ -273,6 +280,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: false,
+            touches: Vec::new(),
         }
     }
 
@@ -283,6 +291,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: true,
+            touches: Vec::new(),
         }
     }
 
@@ -292,6 +301,24 @@ impl ToolOutput {
     #[must_use]
     pub fn with_outcome(mut self, outcome: ToolOutcome) -> Self {
         self.outcome = outcome;
+        self
+    }
+
+    /// Report that this call touched a file.
+    #[must_use]
+    pub fn touching(mut self, touch: crate::touch::FileTouch) -> Self {
+        self.touches.push(touch);
+        self
+    }
+
+    /// Report several touches at once — one call, several files or several
+    /// ranges. The case a per-call inference would get wrong.
+    #[must_use]
+    pub fn touching_all(
+        mut self,
+        touches: impl IntoIterator<Item = crate::touch::FileTouch>,
+    ) -> Self {
+        self.touches.extend(touches);
         self
     }
 

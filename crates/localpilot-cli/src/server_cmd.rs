@@ -628,7 +628,11 @@ where
         tokio::select! {
             // Fanout: every session event, whoever drove the turn, to this writer.
             event = events.recv() => match event {
-                Ok(event) => emit(&mut write, None, map_event(event)).await?,
+                Ok(event) => {
+                    if let Some(mapped) = map_event(event) {
+                        emit(&mut write, None, mapped).await?;
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             },

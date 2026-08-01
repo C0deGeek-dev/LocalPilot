@@ -200,6 +200,9 @@ pub struct SwarmHost {
     /// none.
     hosts: Arc<RwLock<HashMap<SessionId, Arc<SessionHost>>>>,
     factory: Arc<dyn WorkerFactory>,
+    /// Who touched which file recently. Shared across the swarm, because the
+    /// whole point is that one member's edit is visible to another.
+    touches: super::touches::TouchIndex,
 }
 
 impl SwarmHost {
@@ -215,7 +218,14 @@ impl SwarmHost {
             swarms,
             hosts: Arc::new(RwLock::new(HashMap::new())),
             factory,
+            touches: super::touches::TouchIndex::default(),
         }
+    }
+
+    /// The shared record of who touched what recently.
+    #[must_use]
+    pub fn touches(&self) -> &super::touches::TouchIndex {
+        &self.touches
     }
 
     /// The swarm membership registry.
@@ -254,6 +264,7 @@ impl SwarmHost {
         self.swarms.join_as_root(swarm, session, name).await?;
         let host = self.host_for(session, handle).await;
         self.bind_peers(swarm, session).await;
+        self.watch_touches(swarm, session, &host);
         Ok(host)
     }
 
@@ -318,8 +329,9 @@ impl SwarmHost {
                 SwarmMember::worker(session, request.name.clone(), request.parent),
             )
             .await?;
-        self.host_for(session, handle).await;
+        let host = self.host_for(session, handle).await;
         self.bind_peers(&request.swarm, session).await;
+        self.watch_touches(&request.swarm, session, &host);
         Ok(Spawned::Started { session })
     }
 
@@ -470,7 +482,39 @@ impl SwarmHost {
     /// lifecycle decides what a departed member means, not the fact that nobody
     /// is serving it any more.
     pub async fn unhost(&self, session: SessionId) -> Option<Arc<SessionHost>> {
+        // Its touches go with it: a departed agent should not keep generating
+        // alerts about files nobody is holding.
+        self.touches.forget(session).await;
         self.hosts.write().await.remove(&session)
+    }
+
+    /// Watch `session`'s event stream for file touches and turn them into
+    /// advisory alerts to the peers they affect.
+    ///
+    /// A subscriber rather than a hook in the tool path: the tool that changed a
+    /// file has no business knowing a swarm exists, and this way a session
+    /// outside one costs nothing at all.
+    fn watch_touches(&self, swarm: &SwarmId, session: SessionId, host: &Arc<SessionHost>) {
+        let mut events = host.subscribe();
+        let this = self.clone();
+        let swarm = swarm.clone();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(localpilot_harness::RuntimeEvent::FilesTouched(touched)) => {
+                        for touch in &touched {
+                            super::touches::announce(&this, &this.touches, &swarm, session, touch)
+                                .await;
+                        }
+                    }
+                    Ok(_) => {}
+                    // Lagging is survivable — a missed alert, not a broken
+                    // session — so resynchronise rather than give up watching.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
     }
 
     /// Give `session` its view of the swarm, so the messaging tool it already

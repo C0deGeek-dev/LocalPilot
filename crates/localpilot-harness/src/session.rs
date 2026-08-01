@@ -160,6 +160,11 @@ pub enum RuntimeEvent {
     /// A tool has failed repeatedly (≥ 6 times in this turn). The safeguard
     /// stops issuing that tool and notifies the user.
     ToolStuck { name: String, count: u32 },
+    /// A tool reported touching files. Published on the ordinary event stream so
+    /// anything that cares — today, a swarm's advisory conflict alerts —
+    /// subscribes rather than being wired into the tool path. A session nobody
+    /// is watching for this simply has no subscriber.
+    FilesTouched(Vec<localpilot_tools::touch::FileTouch>),
     /// The loop stopped.
     Stopped(StopReason),
 }
@@ -2873,7 +2878,7 @@ impl SessionRuntime {
                             };
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
-                                result = self.tools.dispatch_gated(
+                                result = self.tools.dispatch_reporting(
                                     &active_call,
                                     &ctx,
                                     &engine,
@@ -2889,7 +2894,17 @@ impl SessionRuntime {
                                 h.delegated_calls
                                     .swap(0, std::sync::atomic::Ordering::Relaxed)
                             });
-                            dispatched
+                            // Publish what the tool reported touching on the
+                            // ordinary event stream, then hand on the result
+                            // alone. Anything that cares — today, a swarm's
+                            // advisory conflict alerts — subscribes, so the
+                            // tool path stays unaware of the swarm entirely.
+                            dispatched.map(|(result, touched)| {
+                                if !touched.is_empty() {
+                                    let _ = events.send(RuntimeEvent::FilesTouched(touched));
+                                }
+                                result
+                            })
                         }
                     }
                 };

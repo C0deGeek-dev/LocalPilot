@@ -20,6 +20,7 @@ mod registry;
 mod repair;
 mod schema_intent;
 mod tool;
+pub mod touch;
 mod validate;
 
 pub use broker::{

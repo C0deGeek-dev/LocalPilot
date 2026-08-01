@@ -262,7 +262,9 @@ where
                 _ = &mut turn => break,
                 event = rx.recv() => {
                     if let Ok(event) = event {
-                        emit(writer, None, map_event(event)).await?;
+                        if let Some(mapped) = map_event(event) {
+                            emit(writer, None, mapped).await?;
+                        }
                     }
                 }
                 Some(ask) = ask_rx.recv() => emit_ask(writer, &ask).await?,
@@ -336,7 +338,9 @@ where
     }
     // Flush events still buffered when the turn future completed.
     while let Ok(event) = rx.try_recv() {
-        emit(writer, None, map_event(event)).await?;
+        if let Some(mapped) = map_event(event) {
+            emit(writer, None, mapped).await?;
+        }
     }
     if shutdown {
         emit(writer, None, ServerEvent::Closed).await?;
@@ -402,8 +406,18 @@ pub(crate) fn next_incomplete_step(root: &Path) -> Option<String> {
 /// This is the single source of truth for the `RuntimeEvent` → [`ServerEvent`]
 /// projection, shared by the stdio serve loop here and the opt-in local-IPC
 /// server (`localpilot-server` via the CLI) so the two never drift.
-pub fn map_event(event: RuntimeEvent) -> ServerEvent {
-    match event {
+///
+/// `None` means the event has no client-facing form. That is a real category,
+/// not a gap: an internal signal projected as an empty warning would put noise
+/// into every attached UI rather than admitting it has nothing to say.
+pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
+    // File touches are an internal signal, feeding the swarm's advisory conflict
+    // alerts. They reach the agents they affect through the soft-interrupt path,
+    // not the client event stream.
+    if matches!(event, RuntimeEvent::FilesTouched(_)) {
+        return None;
+    }
+    Some(match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },
         RuntimeEvent::ToolStarted { id, name } => ServerEvent::ToolStarted { id, name },
@@ -441,7 +455,9 @@ pub fn map_event(event: RuntimeEvent) -> ServerEvent {
             reason: stop_reason_label(reason).to_string(),
         },
         RuntimeEvent::ToolStuck { name, count } => ServerEvent::ToolStuck { name, count },
-    }
+        // Handled above; the early return keeps every other arm a plain value.
+        RuntimeEvent::FilesTouched(_) => return None,
+    })
 }
 
 fn stop_reason_label(reason: StopReason) -> &'static str {
