@@ -12,6 +12,7 @@ mod claim;
 mod compaction;
 mod decisions;
 mod dispatch_gate;
+mod elision;
 mod error;
 mod evidence;
 mod guidance;

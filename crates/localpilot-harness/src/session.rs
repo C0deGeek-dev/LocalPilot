@@ -266,6 +266,12 @@ pub struct SessionConfig {
     /// split on whitespace — no shell). `None` resolves the command from the
     /// workspace stack. Maps `[harness] verify_command`.
     pub verify_command: Option<String>,
+    /// Elide a `read_file` result for a file+range already read this session and
+    /// unchanged since (same mtime and length): return a compact stub instead of
+    /// the full body to save context. Off by default; maps `[tools]
+    /// elide_seen_reads`. Conservative — a changed file (or any doubt) always
+    /// returns full content.
+    pub elide_seen_reads: bool,
 }
 
 impl Default for SessionConfig {
@@ -291,6 +297,7 @@ impl Default for SessionConfig {
             repair_mode: localpilot_config::RepairMode::Off,
             verify_before_done: false,
             verify_command: None,
+            elide_seen_reads: false,
         }
     }
 }
@@ -455,6 +462,44 @@ fn file_write_path(input: &serde_json::Value) -> Option<String> {
         .get("path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+}
+
+/// The normalized string path of a tool call's `path` argument, for a stable
+/// read-history key. `None` when the call has no string path or it cannot be
+/// resolved in the workspace.
+fn normalized_tool_path(
+    workspace: &localpilot_sandbox::Workspace,
+    input: &serde_json::Value,
+) -> Option<String> {
+    let raw = input.get("path").and_then(serde_json::Value::as_str)?;
+    workspace
+        .normalize(std::path::Path::new(raw))
+        .ok()
+        .map(|p| p.display().to_string())
+}
+
+/// The requested line range of a `read_file` call (`None` = the whole file).
+fn read_file_range(input: &serde_json::Value) -> (Option<usize>, Option<usize>) {
+    let line = |key: &str| {
+        input
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| usize::try_from(v).unwrap_or(usize::MAX))
+    };
+    (line("start_line"), line("end_line"))
+}
+
+/// Current mtime (unix seconds) and byte length of a workspace file, for the
+/// "unchanged since read" freshness check. Any error means "cannot confirm
+/// freshness" and the caller must serve full content.
+fn file_mtime_len(norm_path: &str) -> std::io::Result<(u64, u64)> {
+    let meta = std::fs::metadata(norm_path)?;
+    let mtime = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok((mtime, meta.len()))
 }
 
 /// Default threshold at which a tool is considered stuck and the safeguard
@@ -725,6 +770,10 @@ pub struct SessionRuntime {
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
     last_handoff: Option<TurnHandoff>,
+    /// Per-session record of served `read_file` results and their freshness, so an
+    /// already-seen, unchanged re-read can be elided to a stub (opt-in via
+    /// `elide_seen_reads`). In-memory and session-scoped.
+    read_history: crate::elision::ReadHistory,
 }
 
 impl SessionRuntime {
@@ -784,6 +833,7 @@ impl SessionRuntime {
             turn_memory_written: false,
             turn_memories_used: Vec::new(),
             last_handoff: None,
+            read_history: crate::elision::ReadHistory::default(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -2879,6 +2929,35 @@ impl SessionRuntime {
                     if let Some(path) = file_write_path(input) {
                         if !self.turn_files_changed.contains(&path) {
                             self.turn_files_changed.push(path);
+                        }
+                    }
+                    // A write invalidates any elision baseline for the file, so a
+                    // later read serves full content (belt-and-suspenders — the
+                    // mtime/length check already catches an ordinary write).
+                    if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                        self.read_history.forget_path(&norm);
+                    }
+                }
+
+                // Already-seen read elision (opt-in): when this `read_file` returned
+                // a file+range already served this session and the file is unchanged
+                // since (same mtime *and* length), replace the body with a compact
+                // stub instead of re-spending the context. Conservative — any doubt
+                // (an unreadable stat, a changed file) serves full content, so the
+                // model is never handed stale bytes. The elided read still records as
+                // a successful `read_file`, so `RequiresPriorRead` and the scorecards
+                // see the same events.
+                if self.config.elide_seen_reads && !result.is_error && name == "read_file" {
+                    if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                        let (start, end) = read_file_range(input);
+                        if let Ok((mtime, len)) = file_mtime_len(&norm) {
+                            if let Some(prior_id) =
+                                self.read_history.elidable(&norm, start, end, mtime, len)
+                            {
+                                let elided = result.output.len();
+                                result.output = crate::elision::elision_stub(&norm, &prior_id, elided);
+                            }
+                            self.read_history.record(&norm, start, end, mtime, len, id);
                         }
                     }
                 }

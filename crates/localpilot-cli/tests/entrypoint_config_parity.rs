@@ -21,6 +21,7 @@ const PARITY_KEYS: &[&str] = &[
     "tool_marker_enabled: config.tools.marker",
     "enforce_readable_errors: config.tools.readable_errors",
     "repair_mode: config.tools.repair",
+    "elide_seen_reads: config.tools.elide_seen_reads",
 ];
 
 #[test]

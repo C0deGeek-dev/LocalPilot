@@ -996,6 +996,7 @@ fn build_runtime(
             tool_marker_enabled: tools.marker,
             enforce_readable_errors: tools.readable_errors,
             repair_mode: tools.repair,
+            elide_seen_reads: tools.elide_seen_reads,
             ..SessionConfig::default()
         },
         Vec::new(),

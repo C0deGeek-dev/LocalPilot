@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: already-seen read elision (opt-in).** With `[tools] elide_seen_reads`
+  on, a `read_file` that returns a file+range already read this session and
+  unchanged since (same mtime and length) is replaced with a compact stub
+  pointing at the earlier read, instead of re-spending the context on an
+  identical body — a real saving on read-heavy loops. Conservative and off by
+  default: a changed file (or any doubt) always returns full content, never a
+  stale stub, and the elided read still records as a successful `read_file`, so
+  require-prior-read and the scorecards are unaffected.
+
 - **Improved: mid-turn steering is now a typed soft-interrupt substrate.** User
   input steered into a running turn (already admitted at a safe boundary) is now
   one case of a typed soft interrupt that also carries a source (user / system /

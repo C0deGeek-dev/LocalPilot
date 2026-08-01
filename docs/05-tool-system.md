@@ -367,6 +367,15 @@ where `read_tool_output` can fetch it. Tools return their complete output to
 that seam; there is no per-tool pre-cap that would drop data before it is
 retained, so a large result is always recoverable in full.
 
+With `[tools] elide_seen_reads` on (off by default), a `read_file` that returns
+a file+range already read this session — and unchanged since (same mtime and
+length) — is replaced with a compact stub pointing at the earlier read, cutting
+context waste on read-heavy loops. It is conservative: a changed file (or any
+doubt) always returns full content, never a stale stub, and the model can
+re-page any range with `read_file` start_line/end_line. The elided read still
+records as a successful `read_file`, so anything that checks "was this read"
+(e.g. the require-prior-read precondition) is unaffected.
+
 ## Input Validation, Readable Errors, and Repair
 
 Before dispatch, a tool call's arguments are validated against the tool's

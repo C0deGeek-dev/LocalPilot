@@ -131,6 +131,75 @@ fn tool_result_outputs(messages: &[Message]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn an_unchanged_reread_is_elided_but_still_counts_as_a_read() {
+    // Two identical read_file calls on an unchanged file: the second returns a
+    // compact "elided" stub instead of the full body, but it still records as a
+    // successful read_file — so a later overwrite still passes RequiresPriorRead
+    // and the file content is never actually hidden (the stub says how to re-read).
+    let big = "fn main() {}\n".repeat(400); // well over the stub size
+    let provider = FakeProvider::new()
+        .tool_call("r1", "read_file", json!({ "path": "src/lib.rs" }))
+        .tool_call("r2", "read_file", json!({ "path": "src/lib.rs" }))
+        .text("done");
+    let mut h = build(
+        provider,
+        &[("src/lib.rs", big.as_str())],
+        SessionConfig {
+            elide_seen_reads: true,
+            ..SessionConfig::default()
+        },
+    );
+
+    let reason = h
+        .runtime
+        .run_turn("read the file twice", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let outputs = tool_result_outputs(&transcript);
+    assert_eq!(outputs.len(), 2, "both reads produced a result");
+    assert!(
+        outputs[0].contains("fn main"),
+        "the first read returns the full body"
+    );
+    assert!(
+        outputs[1].contains("elided") && outputs[1].len() < outputs[0].len(),
+        "the second, unchanged re-read is elided to a smaller stub: {}",
+        outputs[1]
+    );
+    // Neither read is an error (so RequiresPriorRead and the scorecards still see
+    // two successful read_file calls).
+    assert!(
+        !transcript
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ToolResult(r) if r.is_error)),
+        "an elided read is not an error"
+    );
+}
+
+#[tokio::test]
+async fn elision_off_by_default_returns_full_content_on_a_reread() {
+    let big = "data\n".repeat(400);
+    let provider = FakeProvider::new()
+        .tool_call("r1", "read_file", json!({ "path": "src/lib.rs" }))
+        .tool_call("r2", "read_file", json!({ "path": "src/lib.rs" }))
+        .text("done");
+    // Default config: elide_seen_reads is false.
+    let mut h = build(provider, &[("src/lib.rs", big.as_str())], SessionConfig::default());
+    let _ = h
+        .runtime
+        .run_turn("read twice", &h.events, &h.cancel)
+        .await;
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let outputs = tool_result_outputs(&transcript);
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0], outputs[1], "with elision off both reads return full content");
+    assert!(!outputs[1].contains("elided"));
+}
+
+#[tokio::test]
 async fn queued_soft_interrupts_are_admitted_labelled_and_recorded() {
     use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
 

@@ -191,6 +191,7 @@ pub async fn run_agent(
         tool_marker_enabled: ctx.config.tool_marker_enabled,
         enforce_readable_errors: ctx.config.enforce_readable_errors,
         repair_mode: ctx.config.repair_mode,
+        elide_seen_reads: ctx.config.elide_seen_reads,
         turn_timeout: ctx.config.turn_timeout,
         ..SessionConfig::default()
     };

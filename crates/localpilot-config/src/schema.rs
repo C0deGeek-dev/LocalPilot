@@ -462,6 +462,13 @@ pub struct ToolsConfig {
     /// inputs/paths/content, writes no accepted memory, and adds no new store — a
     /// human promotes a candidate or it expires in review.
     pub repair_learning: bool,
+    /// Elide a `read_file` result whose file+range was already read this session
+    /// and is unchanged since (same mtime and length), returning a compact stub
+    /// that points at the earlier read instead of the full body — cutting context
+    /// waste on read-heavy loops. Default `false` (conservative): a changed file
+    /// (or any doubt) always returns full content, never a stale stub. The model
+    /// can still re-page any range with `read_file` start_line/end_line.
+    pub elide_seen_reads: bool,
 }
 
 impl Default for ToolsConfig {
@@ -477,6 +484,7 @@ impl Default for ToolsConfig {
             readable_errors: true,
             repair: RepairMode::Off,
             repair_learning: false,
+            elide_seen_reads: false,
         }
     }
 }
