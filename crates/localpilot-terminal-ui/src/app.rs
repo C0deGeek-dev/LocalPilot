@@ -126,6 +126,24 @@ enum InputOverlay {
     TimelineSearch(TimelineSearchState),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeoverKind {
+    Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TakeoverState {
+    kind: TakeoverKind,
+    scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TakeoverView<'a> {
+    pub kind: TakeoverKind,
+    pub scroll: usize,
+    pub commands: &'a [CompletionCommand],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompletionState {
     kind: CompletionKind,
@@ -196,6 +214,14 @@ pub enum TimelineNavigation {
     PageDown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeoverNavigation {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
     None,
@@ -203,6 +229,7 @@ pub enum AppCommand {
     Copy(String),
     Exit,
     NavigateTimeline(TimelineNavigation),
+    NavigateTakeover(TakeoverNavigation),
     OpenExternalEditor,
     RunShell(UserShellCommand),
     RunSlash(SubmittedInput),
@@ -359,6 +386,8 @@ pub struct AppModel {
     pub context_usage: Option<(usize, usize)>,
     pub stream_bytes: usize,
     pub dialog: Option<DialogState>,
+    takeover: Option<TakeoverState>,
+    quick_help: bool,
     input_overlay: Option<InputOverlay>,
     external_edit_snapshot: Option<EditorSnapshot>,
     command_catalog: Vec<CompletionCommand>,
@@ -403,6 +432,8 @@ impl AppModel {
             context_usage: None,
             stream_bytes: 0,
             dialog: None,
+            takeover: None,
+            quick_help: false,
             input_overlay: None,
             external_edit_snapshot: None,
             command_catalog: Vec::new(),
@@ -435,6 +466,19 @@ impl AppModel {
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
+        if matches!(action, InputAction::CancelOrExit)
+            && self.quick_help
+            && self.timeline.selected_text().is_none()
+        {
+            self.exit_armed = false;
+            self.quick_help = false;
+            return AppCommand::None;
+        }
+        if matches!(action, InputAction::CancelOrExit) && self.takeover.is_some() {
+            self.exit_armed = false;
+            self.takeover = None;
+            return AppCommand::None;
+        }
         if matches!(action, InputAction::CancelOrExit) && self.input_overlay.is_some() {
             self.exit_armed = false;
             self.cancel_input_overlay();
@@ -449,8 +493,25 @@ impl AppModel {
         if self.dialog.is_some() {
             return AppCommand::None;
         }
+        if self.takeover.is_some() {
+            return self.handle_takeover_input(action);
+        }
         if self.input_overlay.is_some() {
             return self.handle_overlay_input(action);
+        }
+        if self.quick_help {
+            match &action {
+                InputAction::Escape => {
+                    self.quick_help = false;
+                    return AppCommand::None;
+                }
+                InputAction::Insert(text) if text == "?" && self.editor.text().is_empty() => {
+                    self.quick_help = false;
+                    return AppCommand::None;
+                }
+                InputAction::NavigateTimeline(_) => {}
+                _ => self.quick_help = false,
+            }
         }
         if matches!(action, InputAction::Escape) && self.editor.is_shell_mode() {
             self.editor.exit_shell_mode();
@@ -467,6 +528,14 @@ impl AppModel {
             }
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
+                if text == "?"
+                    && self.editor.text().is_empty()
+                    && !self.editor.is_shell_mode()
+                    && self.work == WorkState::Idle
+                {
+                    self.quick_help = true;
+                    return AppCommand::None;
+                }
                 let text = if self.editor.text().is_empty()
                     && !self.editor.is_shell_mode()
                     && text.starts_with('!')
@@ -584,7 +653,7 @@ impl AppModel {
                                 AppCommand::RunShell(UserShellCommand { command })
                             })
                     }
-                } else if self.open_command_values_for_draft() {
+                } else if self.open_help_for_draft() || self.open_command_values_for_draft() {
                     AppCommand::None
                 } else if let Some(query) = timeline_search_command(self.editor.text()) {
                     // The slash command is an invocation, not a draft to restore
@@ -771,6 +840,54 @@ impl AppModel {
     }
 
     #[must_use]
+    pub const fn has_takeover(&self) -> bool {
+        self.takeover.is_some()
+    }
+
+    #[must_use]
+    pub(crate) const fn quick_help(&self) -> bool {
+        self.quick_help
+    }
+
+    pub fn dismiss_quick_help(&mut self) -> bool {
+        std::mem::take(&mut self.quick_help)
+    }
+
+    #[must_use]
+    pub(crate) fn takeover(&self) -> Option<TakeoverView<'_>> {
+        self.takeover.as_ref().map(|state| TakeoverView {
+            kind: state.kind,
+            scroll: state.scroll,
+            commands: &self.command_catalog,
+        })
+    }
+
+    pub fn open_help(&mut self) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.input_overlay = None;
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::Help,
+            scroll: 0,
+        });
+    }
+
+    pub fn scroll_takeover_by(&mut self, delta: isize, total_rows: usize, viewport_rows: usize) {
+        let Some(state) = self.takeover.as_mut() else {
+            return;
+        };
+        let maximum = total_rows.saturating_sub(viewport_rows);
+        state.scroll = state.scroll.saturating_add_signed(delta).min(maximum);
+    }
+
+    pub fn scroll_takeover_to(&mut self, start: usize, total_rows: usize, viewport_rows: usize) {
+        let Some(state) = self.takeover.as_mut() else {
+            return;
+        };
+        state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
+    }
+
+    #[must_use]
     pub fn shell_mode(&self) -> bool {
         self.editor.is_shell_mode()
     }
@@ -811,6 +928,8 @@ impl AppModel {
         self.usage = None;
         self.context_usage = None;
         self.plan.clear();
+        self.takeover = None;
+        self.quick_help = false;
         self.input_overlay = None;
         self.external_edit_snapshot = None;
         self.active_assistant = None;
@@ -875,12 +994,14 @@ impl AppModel {
     ) -> Option<String> {
         if self.focus != Focus::Composer
             || self.dialog.is_some()
+            || self.takeover.is_some()
             || self.input_overlay.is_some()
             || self.shell_mode()
         {
             return None;
         }
         self.exit_armed = false;
+        self.quick_help = false;
         Some(self.editor.insert_image(media_type, data, byte_len))
     }
 
@@ -1029,6 +1150,7 @@ impl AppModel {
     }
 
     fn open_reverse_history(&mut self) {
+        self.quick_help = false;
         self.input_overlay = Some(InputOverlay::ReverseHistory(ReverseHistoryState {
             query: String::new(),
             match_index: None,
@@ -1038,6 +1160,7 @@ impl AppModel {
     }
 
     fn open_timeline_search(&mut self, query: String) {
+        self.quick_help = false;
         let original_draft = self.editor.snapshot();
         self.editor.replace_draft(String::new());
         self.input_overlay = Some(InputOverlay::TimelineSearch(TimelineSearchState {
@@ -1105,6 +1228,46 @@ impl AppModel {
             | InputAction::AcceptCompletion => {}
         }
         AppCommand::None
+    }
+
+    fn handle_takeover_input(&mut self, action: InputAction) -> AppCommand {
+        match action {
+            InputAction::Escape => {
+                self.takeover = None;
+                AppCommand::None
+            }
+            InputAction::MoveUp => AppCommand::NavigateTakeover(TakeoverNavigation::LineUp),
+            InputAction::MoveDown => AppCommand::NavigateTakeover(TakeoverNavigation::LineDown),
+            InputAction::NavigateTimeline(TimelineNavigation::PageUp) => {
+                AppCommand::NavigateTakeover(TakeoverNavigation::PageUp)
+            }
+            InputAction::NavigateTimeline(TimelineNavigation::PageDown) => {
+                AppCommand::NavigateTakeover(TakeoverNavigation::PageDown)
+            }
+            InputAction::CancelOrExit
+            | InputAction::OpenReverseHistory
+            | InputAction::Insert(_)
+            | InputAction::Paste(_)
+            | InputAction::Backspace
+            | InputAction::Delete
+            | InputAction::MoveLeft
+            | InputAction::MoveRight
+            | InputAction::ForwardCharOrSearch
+            | InputAction::MoveWordLeft
+            | InputAction::MoveWordRight
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor
+            | InputAction::AcceptCompletion
+            | InputAction::Submit => AppCommand::None,
+        }
     }
 
     fn handle_completion_input(&mut self, action: InputAction) -> AppCommand {
@@ -1383,6 +1546,22 @@ impl AppModel {
             return false;
         };
         self.open_command_values_with_query(&command, &query)
+    }
+
+    fn open_help_for_draft(&mut self) -> bool {
+        if self.editor.text().trim() != "/help" {
+            return false;
+        }
+        if self.editor.has_images() {
+            let _ = self.push_runtime_item(
+                ItemKind::Notice,
+                "remove image attachments before opening help",
+            );
+            return true;
+        }
+        let _ = self.editor.submit_command();
+        self.open_help();
+        true
     }
 
     fn submit_editor(&mut self) -> AppCommand {
@@ -2189,6 +2368,121 @@ mod tests {
         assert!(image.timeline.items().iter().any(|item| {
             item.kind == ItemKind::Notice && item.text.contains("remove image attachments")
         }));
+    }
+
+    #[test]
+    fn help_is_a_contained_history_free_takeover_during_idle_or_work() {
+        let mut app = model();
+        app.set_command_catalog([
+            command("help", "Open help"),
+            command("clear", "Clear conversation"),
+        ]);
+        app.seed_history(vec!["ordinary prompt".to_string()]);
+        let existing = app
+            .timeline
+            .push(ItemKind::Assistant, "conversation remains underneath")
+            .expect("timeline item");
+        app.begin_work();
+        app.editor.replace_draft("/help");
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.has_takeover());
+        assert!(app.editor.text().is_empty());
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert!(app.timeline.item(existing).is_some());
+        assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_none());
+        assert_eq!(
+            app.handle_input(InputAction::MoveDown, 80),
+            AppCommand::NavigateTakeover(TakeoverNavigation::LineDown)
+        );
+
+        app.apply_runtime(RuntimeUpdate::Text("streamed behind help".to_string()));
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_takeover());
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert!(app
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text.contains("streamed behind help")));
+
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "ordinary prompt");
+    }
+
+    #[test]
+    fn ctrl_c_closes_help_without_arming_or_exiting() {
+        let mut app = model();
+        app.open_help();
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(!app.has_takeover());
+        assert!(!app.exit_armed);
+        assert!(!app.exit_requested);
+    }
+
+    #[test]
+    fn empty_question_mark_toggles_transient_quick_help_without_editing() {
+        let mut app = model();
+        assert_eq!(
+            app.handle_input(InputAction::Insert("?".to_string()), 80),
+            AppCommand::None
+        );
+        assert!(app.quick_help());
+        assert!(app.editor.text().is_empty());
+
+        let _ = app.handle_input(InputAction::Insert("?".to_string()), 80);
+        assert!(!app.quick_help());
+        assert!(app.editor.text().is_empty());
+
+        let _ = app.handle_input(InputAction::Insert("?".to_string()), 80);
+        let _ = app.handle_input(InputAction::Insert("x".to_string()), 80);
+        assert!(!app.quick_help());
+        assert_eq!(app.editor.text(), "x");
+
+        app.editor.replace_draft("");
+        app.begin_work();
+        let _ = app.handle_input(InputAction::Insert("?".to_string()), 80);
+        assert!(!app.quick_help());
+        assert_eq!(app.editor.text(), "?");
+    }
+
+    #[test]
+    fn quick_help_does_not_preempt_selection_copy() {
+        let mut app = model();
+        let item = app
+            .timeline
+            .push(ItemKind::Assistant, "copy me")
+            .expect("timeline item");
+        app.timeline.start_selection(ContentPoint {
+            item_id: item,
+            byte: 0,
+        });
+        app.timeline.extend_selection(ContentPoint {
+            item_id: item,
+            byte: "copy".len(),
+        });
+        let _ = app.handle_input(InputAction::Insert("?".to_string()), 80);
+
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::Copy("copy".to_string())
+        );
+        assert!(app.quick_help());
+        assert!(app.exit_armed);
     }
 
     #[test]

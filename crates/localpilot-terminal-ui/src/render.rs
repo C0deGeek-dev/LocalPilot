@@ -5,11 +5,11 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::CompletionKind;
+use crate::app::{CompletionKind, TakeoverView};
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
-    TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT,
-    MINIMUM_WIDTH,
+    TakeoverKind, TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
+    MINIMUM_HEIGHT, MINIMUM_WIDTH,
 };
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
@@ -117,6 +117,7 @@ impl TimelineRowHit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitMap {
+    pub takeover: bool,
     pub frame: Option<FrameLayout>,
     pub tabs: Vec<TabHit>,
     pub timeline: Rect,
@@ -135,6 +136,9 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         Block::default().style(theme(app).ui(UiRole::Background)),
         area,
     );
+    if let Some(takeover) = app.takeover() {
+        return render_takeover(frame, area, app, takeover);
+    }
     // FrameLayout insets the composer twice: once for the outer surface and
     // once for its content. Use that exact width for the height request so the
     // renderer never wraps with one width and allocates rows with another.
@@ -160,6 +164,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             area,
         );
         return HitMap {
+            takeover: false,
             frame: None,
             tabs: Vec::new(),
             timeline: Rect::default(),
@@ -174,15 +179,17 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
 
     let tabs = render_tabs(frame, layout.tabs, app);
     let (scrollbar, mut timeline_rows) = render_timeline(frame, layout, app);
+    let quick_help_area = render_quick_help(frame, layout.timeline_content, app);
     let (completion_area, completion_rows) = render_completion(frame, layout.timeline_content, app);
-    if let Some(completion_area) = completion_area {
-        timeline_rows.retain(|hit| hit.y < completion_area.y);
+    if let Some(overlay_area) = completion_area.or(quick_help_area) {
+        timeline_rows.retain(|hit| hit.y < overlay_area.y);
     }
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
     render_dialog(frame, area, app);
     HitMap {
+        takeover: false,
         frame: Some(layout),
         tabs,
         timeline: layout.timeline_content,
@@ -192,6 +199,278 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         composer: layout.composer_content,
         editor_width,
         composer_scroll,
+    }
+}
+
+fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Option<Rect> {
+    if !app.quick_help() || area.height == 0 {
+        return None;
+    }
+    let left = [
+        "Enter       send prompt",
+        "Shift+Enter add a line",
+        "↑ / ↓       edit, then history",
+        "Ctrl+R      search history",
+        "Ctrl+G      external editor",
+    ];
+    let right = [
+        "Page Up/Down scroll timeline",
+        "Wheel        scroll timeline",
+        "Drag         select text",
+        "Ctrl+F       search messages",
+        "Esc          stop and steer",
+    ];
+    let wide = area.width >= 70;
+    let requested = if wide { 6 } else { 11 };
+    let height = requested.min(area.height);
+    let help = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(height),
+        area.width,
+        height,
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, help);
+    frame.render_widget(Block::default().style(theme.ui(UiRole::Surface)), help);
+    frame.render_widget(
+        Paragraph::new("Quick help").style(theme.ui(UiRole::Accent)),
+        Rect::new(
+            help.x.saturating_add(2),
+            help.y,
+            help.width.saturating_sub(4),
+            1,
+        ),
+    );
+    if wide {
+        let column_width = help.width.saturating_sub(5) / 2;
+        for (index, (left, right)) in left.iter().zip(right.iter()).enumerate() {
+            let row = u16::try_from(index).unwrap_or(u16::MAX);
+            let y = help.y.saturating_add(1).saturating_add(row);
+            frame.render_widget(
+                Paragraph::new(*left).style(theme.ui(UiRole::Foreground)),
+                Rect::new(help.x.saturating_add(2), y, column_width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(*right).style(theme.ui(UiRole::Foreground)),
+                Rect::new(
+                    help.x.saturating_add(3).saturating_add(column_width),
+                    y,
+                    column_width,
+                    1,
+                ),
+            );
+        }
+    } else {
+        for (index, text) in left.iter().chain(right.iter()).enumerate() {
+            let row = u16::try_from(index).unwrap_or(u16::MAX);
+            let y = help.y.saturating_add(1).saturating_add(row);
+            if y >= help.bottom() {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(*text).style(theme.ui(UiRole::Foreground)),
+                Rect::new(help.x.saturating_add(2), y, help.width.saturating_sub(4), 1),
+            );
+        }
+    }
+    Some(help)
+}
+
+fn render_takeover(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    takeover: TakeoverView<'_>,
+) -> HitMap {
+    if area.width < 20 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new(format!("{APP_NAME}\nresize to view help")).wrap(Wrap { trim: false }),
+            area,
+        );
+        render_dialog(frame, area, app);
+        return HitMap {
+            takeover: true,
+            frame: None,
+            tabs: Vec::new(),
+            timeline: Rect::default(),
+            timeline_rows: Vec::new(),
+            completion_rows: Vec::new(),
+            scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
+            composer: Rect::default(),
+            editor_width: 1,
+            composer_scroll: 0,
+        };
+    }
+
+    let theme = theme(app);
+    let title = match takeover.kind {
+        TakeoverKind::Help => " Help ",
+    };
+    frame.render_widget(
+        Paragraph::new(title).style(theme.ui(UiRole::TabActive)),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            u16::try_from(title.width()).unwrap_or(area.width),
+            1,
+        ),
+    );
+
+    let footer_height = 1;
+    let content = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(2),
+        area.width.saturating_sub(5),
+        area.height.saturating_sub(2 + footer_height),
+    );
+    let lines = help_lines(takeover, content.width, theme);
+    let viewport_rows = usize::from(content.height);
+    let maximum = lines.len().saturating_sub(viewport_rows);
+    let start = takeover.scroll.min(maximum);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(viewport_rows)
+                .collect::<Vec<_>>(),
+        ),
+        content,
+    );
+
+    let scrollbar = ScrollbarGeometry::calculate(
+        Rect::new(
+            area.right().saturating_sub(2),
+            area.y.saturating_add(1),
+            1,
+            area.height.saturating_sub(3),
+        ),
+        start,
+        maximum.saturating_add(viewport_rows),
+        viewport_rows,
+    );
+    draw_scrollbar(frame, scrollbar, app);
+    frame.render_widget(
+        Paragraph::new("↑/↓ scroll · Page Up/Page Down · Esc close").style(theme.ui(UiRole::Muted)),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.bottom().saturating_sub(1),
+            area.width.saturating_sub(3),
+            1,
+        ),
+    );
+    render_dialog(frame, area, app);
+
+    HitMap {
+        takeover: true,
+        frame: None,
+        tabs: Vec::new(),
+        timeline: content,
+        timeline_rows: Vec::new(),
+        completion_rows: Vec::new(),
+        scrollbar,
+        composer: Rect::default(),
+        editor_width: 1,
+        composer_scroll: 0,
+    }
+}
+
+fn help_lines(takeover: TakeoverView<'_>, width: u16, theme: ThemeResolver) -> Vec<Line<'static>> {
+    let mut source = vec![
+        ("Conversation commands".to_string(), UiRole::Accent),
+        (String::new(), UiRole::Foreground),
+    ];
+    source.extend(takeover.commands.iter().map(|command| {
+        (
+            format!("  /{:<10} {}", command.name, command.description),
+            UiRole::Foreground,
+        )
+    }));
+    source.extend([
+        (String::new(), UiRole::Foreground),
+        ("Editing".to_string(), UiRole::Accent),
+        (
+            "  Enter       Send the current prompt".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Shift+Enter Add a line without sending".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  ↑ / ↓       Move through a multiline draft, then prompt history".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+R      Search prompt history".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+F      Search this conversation from an empty composer".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+G      Edit the draft in your configured editor".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  !           Enter direct shell-command mode".to_string(),
+            UiRole::Foreground,
+        ),
+        (String::new(), UiRole::Foreground),
+        ("Timeline and work".to_string(), UiRole::Accent),
+        (
+            "  Wheel/Page  Scroll while keeping the composer active".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Drag        Select timeline text or move the scrollbar".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Esc         Close the focused view; during work, stop and steer".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+C      Copy a selection; press twice consecutively to exit".to_string(),
+            UiRole::Foreground,
+        ),
+        (String::new(), UiRole::Foreground),
+        (
+            "LocalPilot keeps provider, permission, and tool behavior unchanged in this view."
+                .to_string(),
+            UiRole::Muted,
+        ),
+    ]);
+
+    let mut lines = Vec::new();
+    for (text, role) in source {
+        for range in crate::text::wrap_ranges(&text, width) {
+            lines.push(Line::styled(
+                text[range.start_byte..range.end_byte].to_string(),
+                theme.ui(role),
+            ));
+        }
+    }
+    lines
+}
+
+fn draw_scrollbar(frame: &mut Frame<'_>, scrollbar: ScrollbarGeometry, app: &AppModel) {
+    let Some(thumb) = scrollbar.thumb else {
+        return;
+    };
+    let theme = theme(app);
+    for y in scrollbar.track.y..scrollbar.track.bottom() {
+        frame.render_widget(
+            Paragraph::new("│").style(theme.ui(UiRole::Border)),
+            Rect::new(scrollbar.track.x, y, 1, 1),
+        );
+    }
+    for y in thumb.y..thumb.bottom() {
+        frame.render_widget(
+            Paragraph::new("█").style(theme.ui(UiRole::Focus)),
+            Rect::new(thumb.x, y, 1, 1),
+        );
     }
 }
 
@@ -380,21 +659,7 @@ fn render_timeline(
         view.total_rows,
         scrollbar_viewport_rows,
     );
-    if let Some(thumb) = scrollbar.thumb {
-        let theme = theme(app);
-        for y in scrollbar.track.y..scrollbar.track.bottom() {
-            frame.render_widget(
-                Paragraph::new("│").style(theme.ui(UiRole::Border)),
-                Rect::new(scrollbar.track.x, y, 1, 1),
-            );
-        }
-        for y in thumb.y..thumb.bottom() {
-            frame.render_widget(
-                Paragraph::new("█").style(theme.ui(UiRole::Focus)),
-                Rect::new(thumb.x, y, 1, 1),
-            );
-        }
-    }
+    draw_scrollbar(frame, scrollbar, app);
     (scrollbar, row_hits)
 }
 
@@ -958,6 +1223,9 @@ fn footer_state(app: &AppModel) -> String {
     if app.timeline_search().is_some() {
         return "search · ↑↓ navigate · esc close".to_string();
     }
+    if app.quick_help() {
+        return "quick help · ? or Esc close".to_string();
+    }
     if let Some(completion) = app.completion() {
         let fallback = match (completion.kind, completion.loading) {
             (CompletionKind::File, true) => "indexing workspace files",
@@ -1174,6 +1442,92 @@ mod tests {
             hit_map.scrollbar.track.x,
             "timeline wrapping width must always exclude the scrollbar gutter"
         );
+    }
+
+    #[test]
+    fn help_takeover_replaces_chat_chrome_and_owns_its_scrollbar() {
+        let mut app = model();
+        let _ = app
+            .timeline
+            .push(ItemKind::Assistant, "HIDDEN_TIMELINE_MARKER");
+        app.set_command_catalog([
+            crate::CompletionCommand {
+                name: "model".into(),
+                description: "Switch model".into(),
+            },
+            crate::CompletionCommand {
+                name: "new".into(),
+                description: "Start a session".into(),
+            },
+            crate::CompletionCommand {
+                name: "fork".into(),
+                description: "Fork a session".into(),
+            },
+            crate::CompletionCommand {
+                name: "clone".into(),
+                description: "Clone a session".into(),
+            },
+            crate::CompletionCommand {
+                name: "clear".into(),
+                description: "Clear the view".into(),
+            },
+            crate::CompletionCommand {
+                name: "quit".into(),
+                description: "Exit".into(),
+            },
+            crate::CompletionCommand {
+                name: "search".into(),
+                description: "Search messages".into(),
+            },
+            crate::CompletionCommand {
+                name: "help".into(),
+                description: "Open help".into(),
+            },
+        ]);
+        app.open_help();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw help");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("help hit map");
+        assert!(hit_map.takeover);
+        assert!(hit_map.frame.is_none());
+        assert!(hit_map.tabs.is_empty());
+        assert_eq!(hit_map.composer, Rect::default());
+        assert!(hit_map.scrollbar.thumb.is_some());
+        assert!(rendered.contains("Conversation commands"));
+        assert!(rendered.contains("/model"));
+        assert!(rendered.contains("Esc close"));
+        assert!(!rendered.contains("HIDDEN_TIMELINE_MARKER"));
+    }
+
+    #[test]
+    fn quick_help_is_a_two_column_timeline_overlay() {
+        let mut app = model();
+        for number in 0..20 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("timeline row {number}"));
+        }
+        let _ = app.handle_input(crate::InputAction::Insert("?".to_string()), 76);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw quick help");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("hit map");
+        assert!(!hit_map.takeover);
+        assert!(hit_map.frame.is_some());
+        assert!(rendered.contains("Quick help"));
+        assert!(rendered.contains("Enter       send prompt"));
+        assert!(rendered.contains("Page Up/Down scroll timeline"));
+        assert!(footer_state(&app).contains("? or Esc close"));
+        assert!(hit_map.timeline_rows.len() < usize::from(hit_map.timeline.height));
     }
 
     #[test]

@@ -28,8 +28,8 @@ use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
     InputAction, ItemId, KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState,
-    SubmittedInput, TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand,
-    UserShellOutput,
+    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
+    UserShellCommand, UserShellOutput,
 };
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
@@ -280,6 +280,10 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         name: "search".to_string(),
         description: "Search messages in this session".to_string(),
     });
+    command_catalog.push(CompletionCommand {
+        name: "help".to_string(),
+        description: "Open keyboard and command help".to_string(),
+    });
     command_catalog
 }
 
@@ -334,7 +338,7 @@ async fn attach_clipboard_image_idle(
     config: &localpilot_config::Config,
     quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() {
+    if app.has_input_overlay() || app.has_takeover() {
         return;
     }
     if app.shell_mode() {
@@ -360,7 +364,7 @@ fn attach_clipboard_image_with_capability(
     capability: &ImageCapabilitySnapshot,
     quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() {
+    if app.has_input_overlay() || app.has_takeover() {
         return;
     }
     if app.shell_mode() {
@@ -866,8 +870,13 @@ async fn run_event_loop(
                             break;
                         }
                     }
-                    AppCommand::None | AppCommand::CancelWork | AppCommand::NavigateTimeline(_) => {
+                    AppCommand::NavigateTakeover(navigation) => {
+                        apply_takeover_navigation(app, navigation, &hit_map);
                     }
+                    AppCommand::NavigateTimeline(navigation) => {
+                        apply_timeline_navigation(app, navigation, &hit_map);
+                    }
+                    AppCommand::None | AppCommand::CancelWork => {}
                 }
             }
             Event::Paste(text) => {
@@ -1002,7 +1011,7 @@ async fn drive_shell(
                                 app,
                                 next,
                                 &cancel,
-                                hit_map.editor_width,
+                                &hit_map,
                                 queue,
                                 history,
                                 cwd,
@@ -1149,7 +1158,7 @@ async fn drive_turn(
                                 app,
                                 next,
                                 &cancel,
-                                hit_map.editor_width,
+                                &hit_map,
                                 queue,
                                 history,
                                 cwd,
@@ -1204,7 +1213,7 @@ fn handle_turn_event(
     app: &mut AppModel,
     event: Event,
     cancel: &CancellationToken,
-    editor_width: u16,
+    hit_map: &HitMap,
     queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
@@ -1219,7 +1228,7 @@ fn handle_turn_event(
             let Some(action) = map_key(key) else {
                 return false;
             };
-            match app.handle_input(action, editor_width) {
+            match app.handle_input(action, hit_map.editor_width) {
                 AppCommand::Exit => {
                     cancel.cancel();
                     true
@@ -1257,16 +1266,22 @@ fn handle_turn_event(
                     }
                     false
                 }
-                AppCommand::None
-                | AppCommand::OpenExternalEditor
-                | AppCommand::NavigateTimeline(_) => false,
+                AppCommand::NavigateTakeover(navigation) => {
+                    apply_takeover_navigation(app, navigation, hit_map);
+                    false
+                }
+                AppCommand::NavigateTimeline(navigation) => {
+                    apply_timeline_navigation(app, navigation, hit_map);
+                    false
+                }
+                AppCommand::None | AppCommand::OpenExternalEditor => false,
             }
         }
         Event::Paste(text) => {
             if text.trim().is_empty() {
                 attach_clipboard_image_with_capability(app, image_capability, true);
             } else {
-                let _ = app.handle_input(InputAction::Paste(text), editor_width);
+                let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
             }
             false
         }
@@ -1294,10 +1309,15 @@ fn route_pointer_or_navigation(
                 InputAction::NavigateTimeline(navigation),
                 hit_map.editor_width,
             );
-            let AppCommand::NavigateTimeline(navigation) = command else {
-                return RoutedEvent::Handled;
-            };
-            apply_timeline_navigation(app, navigation, hit_map);
+            match command {
+                AppCommand::NavigateTimeline(navigation) => {
+                    apply_timeline_navigation(app, navigation, hit_map)
+                }
+                AppCommand::NavigateTakeover(navigation) => {
+                    apply_takeover_navigation(app, navigation, hit_map)
+                }
+                _ => {}
+            }
             RoutedEvent::Handled
         }
         Event::FocusGained
@@ -1314,23 +1334,44 @@ fn handle_mouse_event(
     hit_map: &HitMap,
     mouse_state: &mut MouseState,
 ) -> RoutedEvent {
+    if !matches!(mouse.kind, MouseEventKind::Moved) && app.dismiss_quick_help() {
+        app.disarm_exit();
+        mouse_state.reset_gesture();
+        return RoutedEvent::Handled;
+    }
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             app.disarm_exit();
-            app.timeline.scroll_by(
-                -WHEEL_SCROLL_ROWS,
-                hit_map.timeline.width,
-                hit_map.timeline.height,
-            );
+            if hit_map.takeover {
+                app.scroll_takeover_by(
+                    -WHEEL_SCROLL_ROWS,
+                    hit_map.scrollbar.total_rows,
+                    hit_map.scrollbar.viewport_rows,
+                );
+            } else {
+                app.timeline.scroll_by(
+                    -WHEEL_SCROLL_ROWS,
+                    hit_map.timeline.width,
+                    hit_map.timeline.height,
+                );
+            }
             RoutedEvent::Handled
         }
         MouseEventKind::ScrollDown => {
             app.disarm_exit();
-            app.timeline.scroll_by(
-                WHEEL_SCROLL_ROWS,
-                hit_map.timeline.width,
-                hit_map.timeline.height,
-            );
+            if hit_map.takeover {
+                app.scroll_takeover_by(
+                    WHEEL_SCROLL_ROWS,
+                    hit_map.scrollbar.total_rows,
+                    hit_map.scrollbar.viewport_rows,
+                );
+            } else {
+                app.timeline.scroll_by(
+                    WHEEL_SCROLL_ROWS,
+                    hit_map.timeline.width,
+                    hit_map.timeline.height,
+                );
+            }
             RoutedEvent::Handled
         }
         MouseEventKind::Down(MouseButton::Left) => {
@@ -1344,13 +1385,26 @@ fn handle_mouse_event(
                     } else {
                         let delta =
                             isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
-                        app.timeline.scroll_by(
-                            if mouse.row < thumb.y { -delta } else { delta },
-                            hit_map.timeline.width,
-                            hit_map.timeline.height,
-                        );
+                        let delta = if mouse.row < thumb.y { -delta } else { delta };
+                        if hit_map.takeover {
+                            app.scroll_takeover_by(
+                                delta,
+                                hit_map.scrollbar.total_rows,
+                                hit_map.scrollbar.viewport_rows,
+                            );
+                        } else {
+                            app.timeline.scroll_by(
+                                delta,
+                                hit_map.timeline.width,
+                                hit_map.timeline.height,
+                            );
+                        }
                     }
                 }
+                return RoutedEvent::Handled;
+            }
+
+            if hit_map.takeover {
                 return RoutedEvent::Handled;
             }
 
@@ -1398,12 +1452,23 @@ fn handle_mouse_event(
             if let Some(grab) = mouse_state.scrollbar_grab {
                 let thumb_top = mouse.row.saturating_sub(grab);
                 if let Some(start) = hit_map.scrollbar.content_start_for_thumb_top(thumb_top) {
-                    app.timeline.scroll_to_row(
-                        start,
-                        hit_map.timeline.width,
-                        hit_map.timeline.height,
-                    );
+                    if hit_map.takeover {
+                        app.scroll_takeover_to(
+                            start,
+                            hit_map.scrollbar.total_rows,
+                            hit_map.scrollbar.viewport_rows,
+                        );
+                    } else {
+                        app.timeline.scroll_to_row(
+                            start,
+                            hit_map.timeline.width,
+                            hit_map.timeline.height,
+                        );
+                    }
                 }
+                return RoutedEvent::Handled;
+            }
+            if hit_map.takeover {
                 return RoutedEvent::Handled;
             }
             if mouse_state.selection.is_some() {
@@ -1443,6 +1508,9 @@ fn handle_mouse_event(
         }
         MouseEventKind::Down(MouseButton::Right) => {
             app.disarm_exit();
+            if hit_map.takeover {
+                return RoutedEvent::Handled;
+            }
             app.timeline
                 .selected_text()
                 .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
@@ -1452,7 +1520,13 @@ fn handle_mouse_event(
         | MouseEventKind::Drag(_)
         | MouseEventKind::Moved
         | MouseEventKind::ScrollLeft
-        | MouseEventKind::ScrollRight => RoutedEvent::Unhandled,
+        | MouseEventKind::ScrollRight => {
+            if hit_map.takeover {
+                RoutedEvent::Handled
+            } else {
+                RoutedEvent::Unhandled
+            }
+        }
     }
 }
 
@@ -1508,6 +1582,14 @@ fn selection_points_nearest(
 }
 
 fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation, hit_map: &HitMap) {
+    if hit_map.takeover {
+        let navigation = match navigation {
+            TimelineNavigation::PageUp => TakeoverNavigation::PageUp,
+            TimelineNavigation::PageDown => TakeoverNavigation::PageDown,
+        };
+        apply_takeover_navigation(app, navigation, hit_map);
+        return;
+    }
     let page = isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
     match navigation {
         TimelineNavigation::PageUp => {
@@ -1519,6 +1601,21 @@ fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation,
                 .scroll_by(page, hit_map.timeline.width, hit_map.timeline.height)
         }
     }
+}
+
+fn apply_takeover_navigation(app: &mut AppModel, navigation: TakeoverNavigation, hit_map: &HitMap) {
+    let page = isize::try_from(hit_map.scrollbar.viewport_rows.max(1)).unwrap_or(isize::MAX);
+    let delta = match navigation {
+        TakeoverNavigation::LineUp => -1,
+        TakeoverNavigation::LineDown => 1,
+        TakeoverNavigation::PageUp => -page,
+        TakeoverNavigation::PageDown => page,
+    };
+    app.scroll_takeover_by(
+        delta,
+        hit_map.scrollbar.total_rows,
+        hit_map.scrollbar.viewport_rows,
+    );
 }
 
 fn rect_contains(rect: ratatui::layout::Rect, column: u16, row: u16) -> bool {
@@ -1916,6 +2013,10 @@ mod tests {
         hit_map.expect("hit map")
     }
 
+    fn event_hit_map() -> HitMap {
+        draw_hit_map(&app(), 80, 24)
+    }
+
     fn app() -> AppModel {
         AppModel::new(
             Header {
@@ -2170,7 +2271,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
-        for supported in ["model", "new", "fork", "clone", "clear", "quit"] {
+        for supported in ["model", "new", "fork", "clone", "clear", "quit", "help"] {
             assert!(catalog.iter().any(|command| command.name == supported));
         }
         for deferred in ["compact", "research", "skills", "sessions"] {
@@ -2445,6 +2546,75 @@ mod tests {
     }
 
     #[test]
+    fn help_takeover_contains_mouse_input_and_scrolls_its_own_view() {
+        let mut app = app();
+        app.set_command_catalog(fullscreen_command_catalog());
+        app.open_help();
+        let mut hit_map = draw_hit_map(&app, 80, 20);
+        assert!(hit_map.takeover);
+        assert_eq!(hit_map.scrollbar.start, 0);
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::ScrollDown, 20, 8)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        hit_map = draw_hit_map(&app, 80, 20);
+        assert!(hit_map.scrollbar.start > 0);
+
+        let thumb = hit_map.scrollbar.thumb.expect("help scrollbar thumb");
+        let track_bottom = hit_map.scrollbar.track.bottom().saturating_sub(1);
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    thumb.x,
+                    thumb.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    thumb.x,
+                    track_bottom,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        hit_map = draw_hit_map(&app, 80, 20);
+        assert_eq!(
+            hit_map.scrollbar.start,
+            hit_map
+                .scrollbar
+                .total_rows
+                .saturating_sub(hit_map.scrollbar.viewport_rows)
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Right), 20, 8)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+    }
+
+    #[test]
     fn active_turn_queues_typeahead_and_escape_cancels_real_token() {
         let mut app = app();
         app.begin_work();
@@ -2458,7 +2628,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             cwd,
@@ -2480,7 +2650,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             cwd,
@@ -2498,7 +2668,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             cwd,
@@ -2532,7 +2702,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             temp.path(),
@@ -2543,7 +2713,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             temp.path(),
@@ -2596,7 +2766,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             temp.path(),
@@ -2706,7 +2876,7 @@ mod tests {
             &mut app,
             Event::Paste(payload.clone()),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             temp.path(),
@@ -2719,7 +2889,7 @@ mod tests {
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
-            80,
+            &event_hit_map(),
             &mut queue,
             &history,
             temp.path(),
@@ -2753,7 +2923,7 @@ mod tests {
                 &mut app,
                 Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
                 &cancel,
-                80,
+                &event_hit_map(),
                 &mut queue,
                 &history,
                 temp.path(),
