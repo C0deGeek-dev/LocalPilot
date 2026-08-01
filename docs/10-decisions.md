@@ -2,6 +2,183 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0127: A Failing Task Fails Loudly, And A Plan Survives A Restart
+
+Status: accepted. The failure half of ADR-0125.
+
+A worker will die holding an assignment. Four things follow, and each replaces
+something more obvious that does not work.
+
+1. **Staleness is measured from the last heartbeat, and never-observed is not
+   dead.** Measuring from admission reaps every worker the instant it starts.
+   The distinction has its own test because it only appears under load.
+
+2. **Salvage is bounded.** A departed worker's unfinished tasks return to the
+   plan, but each task carries a reclaim counter, and past the budget it is
+   **failed** rather than requeued. A task that keeps outliving its workers is
+   failing, not unlucky; requeuing it forever turns one bad task into a plan
+   that never finishes and never says why. Salvage is idempotent, so two sweeps
+   racing cannot reclaim the same work twice.
+
+3. **Re-election is deterministic — the lowest surviving member id.** Not the
+   oldest, not the nearest: every observer of the same state has to reach the
+   same answer without coordinating, or there is a window in which two of them
+   believe different things and both act. Children are reparented onto the
+   nearest surviving ancestor (grandparent → coordinator → root), because a
+   report-back edge pointing at a member that no longer exists is a completion
+   report delivered nowhere.
+
+4. **Somebody is told.** A salvage report naming each task and its fate reaches
+   whoever now owns the work. A plan that silently re-runs a task is
+   indistinguishable from one that is stuck.
+
+**Snapshots are their own stream.** A swarm's plan and membership persist
+separately from session event logs, so recovering a plan never requires replaying
+anybody's transcript. Writes are serialised, atomic (temp then rename), keep the
+previous good file as a backup, and **refuse to go backwards**: a write whose
+revision is not newer than what is on disk is dropped, because a slow writer
+restoring an older plan over a newer one is worse than not persisting at all. A
+torn primary falls back to the backup, costing the newest revision rather than
+the plan.
+
+**The driver treats silence as death, not success.** A worker that returns
+nothing, times out, or produces a report the graph refuses is salvaged rather
+than completed. Marking a task done because a worker said nothing is the failure
+that makes a plan finish and be wrong.
+
+## ADR-0126: File-Conflict Alerts Are Advisory, Reported By Tools, And Reach Readers Too
+
+Status: accepted. Applies to sessions sharing one working tree under ADR-0125.
+
+**The guarantee is advisory and is stated as such.** No lock is taken, no write
+is blocked, nothing is rolled back. Two agents that edit the same lines both
+succeed and both are told. Git stays the merge substrate and the task graph stays
+the ordering mechanism; this exists so agents find out *now* rather than at merge
+time. Saying that plainly matters: the honest version is less impressive than
+"conflict detection" sounds and far more useful than a lock agents route around.
+
+**Tools report what they touched; nothing infers it.** Every file-mutating
+builtin, and `read_file`, attach a typed `FileTouch` to their own output. The
+three alternatives all fail: inferring from the tool name and arguments works for
+`write_file` and not for `multi_edit` (one call, several ranges, some of which may
+not apply); parsing the range out of prose output reads like it works and stops
+silently when the wording changes; watching the filesystem catches everything and
+attributes nothing.
+
+**The line range is diffed from content, not taken from arguments.** Comparing
+the file before and after gives the extent that actually changed, uniformly,
+without per-tool plumbing. Scattered edits in one call collapse into the
+enclosing range — over-reporting costs a message, under-reporting costs the
+collision.
+
+**Prior readers are alerted, not only prior writers.** An agent that read a
+function and is now reasoning about it is exactly the agent whose conclusions
+just went stale. The wording differs: a reader has not lost work, it has lost
+currency, and telling it its edit may have been overwritten would send it looking
+for an edit it never made.
+
+**Paths are compared after normalisation.** `src/lib.rs` and `./src/lib.rs` must
+land in one bucket; getting this wrong fails *open* — two agents editing one file,
+each told nothing. Touches expire on a short, configurable window, and recording
+and querying happen under one lock, because a gap between them is a race in which
+two simultaneous edits each record before either queries and neither is told.
+
+Known gap: a file changed by `run_shell` reports nothing. The shell tool cannot
+know what the command it ran touched without watching the filesystem, which is the
+option that attributes nothing. Documented rather than left to be discovered.
+
+## ADR-0125: A Swarm Is Scoped By Repository, Bounded By Reservation, And Shaped By One Edge
+
+Status: accepted. Builds on ADR-0123 (the hosting server) and reuses ADR-0111
+(the soft-interrupt substrate). Strictly opt-in: nothing on the single-agent path
+changed.
+
+**Scope is the repository, not the path.** A git worktree has its own directory
+and is the same repo, so a path-keyed swarm would let a worker spawned into a
+worktree found an invisible second swarm that the coordinator then waits on
+forever. Resolution reads git's own on-disk contract — `.git` as a directory, or
+as a `gitdir:` pointer whose target names its `commondir` — with no `git`
+subprocess, because a swarm id is needed on every spawn. Outside a repository the
+canonical path is used, so non-git workspaces work rather than erroring.
+
+**The spawn tree is one stored edge.** A member records only who it reports back
+to; children, ancestry, and subtrees are derived by walking it. A stored child
+list is a second copy of the same fact, and the two disagree the first time a
+member departs.
+
+**Admission is a reservation, and there are two caps.** Building a worker session
+is slow, so the caps are enforced *before* that work starts, under the lock that
+counts them: reserve → build → confirm-or-release. Checking a cap and inserting
+afterwards lets a burst of concurrent spawns all read the same count and all
+proceed. The caps are a **lifetime** member cap and a **live** concurrency
+budget, because they stop different failures — only a cap counting departed
+members ends a coordinator that keeps replacing work that keeps failing.
+Idempotency keys are answered from the reservation table as well as the member
+table, so a retry whose first attempt is still building is told so rather than
+starting a second worker on the same task.
+
+**A worker is an ordinary hosted session with a swarm edge** — not a second
+process, not a second loop, and not a special case on the session path, so
+cancel, steer, fanout, and reaping all work on it unchanged. Building it stays
+behind a host-supplied factory: narrowing tools, attributing the approver, and
+resolving a provider need wiring the server crate does not have. A spawn naming a
+model is **refused** if the built session is on a different one; running anyway
+produces work that reads normally and never says the wrong model produced it.
+
+**Messaging scope is the spawn tree.** A member may address what it spawned; only
+the coordinator may address the whole swarm. Without that, one worker deciding to
+keep everyone informed costs every other worker a turn, and the cost scales with
+the square of the swarm. An ambiguous recipient is refused rather than resolved
+arbitrarily. Delivery rides the one soft-interrupt substrate the user's own
+steering uses, so there is one set of ordering rules rather than two.
+
+## ADR-0124: The Task Graph Is A Pure Crate, Simulated Before It Is Wired
+
+Status: accepted. Establishes `localpilot-taskgraph`; see
+[`docs/02-architecture.md`](02-architecture.md).
+
+The hard part of running several agents on one plan is not spawning them. It is
+that the graph is shared mutable state under concurrent, unreliable, occasionally
+creative writers. So every rule that keeps it coherent lives in **one pure crate**
+— no I/O, no sessions, no models, no tools, and no LocalPilot dependencies — where
+it can be tested exhaustively in microseconds and run end to end by a
+deterministic simulator with no live agents attached.
+
+That ordering is the decision, not a nicety. A stuck plan and a slow one look
+identical from outside; a mis-scheduled dispatch and an unhelpful model look
+identical too. Building the engine first and simulating it separates them: a plan
+that misbehaves in the simulator is the engine's fault, and one that misbehaves
+only live is not. It paid immediately — the two defects that survived a full unit
+suite were both composition bugs that only whole-plan scenarios found.
+
+Four invariants hold across every mutation:
+
+1. **Ownership** — only a task's owner or its current assignee may change it, so
+   one worker cannot rewrite another's subtree unnoticed.
+2. **Acyclicity** — checked before an edge is written, and for a *batch* of new
+   tasks before any of them is created. A batch is the one place a caller names
+   edges among nodes that do not exist yet, so the graph's own check has nothing
+   to look at.
+3. **Terminality** — a finished task never changes; rework enters as new tasks,
+   which keeps the record of what went wrong.
+4. **Honest completion** — a completion carries a typed handoff. In deep mode it
+   must also state what was *not* checked, and a review gate must say how it
+   reviewed and cite something. A gate that waves work through is worse than no
+   gate, because the plan then claims a review happened.
+
+Two structural choices follow from wanting the graph to stay coherent rather than
+merely correct. **Expansion makes a task a join over its children** instead of
+replacing it, so nothing downstream is rewired and an expanding worker cannot
+corrupt the part of the graph it cannot see. **Readiness is derived, never
+stored** — a stored flag is a second source of truth that can disagree with the
+edges — and a third state, `Blocked`, names a task whose upstream ended badly,
+because without it a driver waits forever on a plan that is already over.
+
+Determinism is load-bearing: ordered maps throughout, no clock and no randomness
+in the engine or the simulator, so the same plan produces the same frontier and
+the same dispatch order on every machine. Without that the simulator is a flaky
+test rather than a safety net.
+
 ## ADR-0123: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
 
 Status: accepted. Builds on ADR-0122 (the opt-in server) and reuses ADR-0111 (the
