@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Improved: `harness wait-resume` now actually waits and escalates.** On a
+  provider quota/rate limit the paused-run marker now records the real provider
+  id and a pause-attempt count that grows the backoff window across repeated
+  pauses (instead of a fixed window). `wait-resume` now waits out the pause
+  window — re-checking the safety gates and cancellation on a bounded poll,
+  honouring `quota.max_wait_minutes` — and then resumes, instead of printing an
+  ETA and exiting. Cancellation (Ctrl-C) ends the wait; an explicit `--provider`
+  that differs from the paused run is treated as a provider change.
+
 - **Added: `localpilot import claude-code`.** Import a Claude Code session
   (`~/.claude/projects/.../<id>.jsonl`) as a resumable LocalPilot session. The
   history is text-flattened — tool calls and results become plain-text markers

@@ -164,8 +164,21 @@ pub async fn resume_one_step_with_events(
                 retryable: true,
                 ..QuotaInfo::default()
             });
-            let window = estimate_window(&quota, 1);
-            let paused = PausedRun::new(step.number, "provider", &window);
+            // Escalate the backoff across repeated pauses: read the prior marker's
+            // attempt (if this step already paused) and grow it, so a provider that
+            // keeps limiting is retried with an ever-wider window rather than the
+            // same one. A provider-stated window (retry_after/reset_at) ignores the
+            // attempt; only the fallback backoff widens.
+            let attempt = runtime
+                .store()
+                .get_cache(QUOTA_PAUSE_KEY)
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<PausedRun>(&bytes).ok())
+                .map_or(1, |prev| prev.attempt.saturating_add(1));
+            let window = estimate_window(&quota, attempt);
+            let paused = PausedRun::new(step.number, runtime.active_provider_id(), &window)
+                .with_attempt(attempt);
             // A failed marker write must be visible: without the marker a later
             // `resume` can't see the pause window and retries into the same
             // limit. The pause itself still proceeds (the outcome carries the
