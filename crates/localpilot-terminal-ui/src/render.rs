@@ -1097,10 +1097,10 @@ fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) 
             ]
         } else {
             [
-                ("1 - fn previous()", UiRole::DiffDeletion),
-                ("1 + fn improved()", UiRole::DiffAddition),
-                ("2   return result", UiRole::Code),
-                ("3   // selected", UiRole::Focus),
+                ("1 - let total = items.len();", UiRole::DiffDeletion),
+                ("1 + let item_count = items.len();", UiRole::DiffAddition),
+                ("2   show(item_count);", UiRole::Code),
+                ("3   // selected line", UiRole::Focus),
             ]
         };
         for (offset, (text, role)) in sample.into_iter().enumerate() {
@@ -3229,7 +3229,7 @@ mod tests {
         assert!(rendered.contains("1. Terminal"));
         assert!(rendered.contains("2. Default ✓"));
         assert!(rendered.contains("❯3. Dim"));
-        assert!(rendered.contains("1 - fn previous()"));
+        assert!(rendered.contains("1 - let total = items.len();"));
         assert!(rendered.contains("Enter select · Esc cancel"));
         assert_eq!(app.theme, Theme::Dim);
     }
@@ -3795,7 +3795,7 @@ mod tests {
         assert!(rendered.contains("Home: current tab: Session; tabs: Plan, Activity, Settings"));
         assert!(rendered.contains("User message"));
         assert!(rendered.contains("Reasoning: Checking context"));
-        assert!(rendered.contains("Tool completed: inspect completed"));
+        assert!(rendered.contains("Tool completed: inspect completed · 0 lines · 25 ms"));
         assert!(rendered.contains("Shell completed: "));
         assert!(!rendered.contains("● Ready"));
         assert!(!rendered.contains(">_"));

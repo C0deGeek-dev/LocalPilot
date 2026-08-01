@@ -23,7 +23,10 @@ is SemVer-stable; the configuration schema stability policy is in
   submits through the existing `SessionRuntime`, streams stable timeline items,
   shows a live response-byte counter, denies tool approvals safely, and keeps an
   ordered visible pending-prompt queue. Escape cancels the current turn and then
-  drains that queue in submission order. The full-screen host also supports
+  drains that queue in submission order. Collapsed tool rows now include a
+  truthful output-line count before their expandable detail, and the theme
+  picker uses a readable refactor sample for its semantic color preview. The
+  full-screen host also supports
   application-owned drag selection/copy, wheel and page navigation, draggable
   scrollbar navigation, precise composer clicks, boundary-aware history,
   reverse and timeline search, fuzzy slash/file completion, atomic compact

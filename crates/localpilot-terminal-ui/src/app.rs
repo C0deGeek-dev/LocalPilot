@@ -504,6 +504,15 @@ fn tool_output_body(output: &str) -> &str {
         .trim()
 }
 
+fn tool_output_line_count(output: &str) -> usize {
+    let body = tool_output_body(output);
+    if body.is_empty() {
+        0
+    } else {
+        body.lines().count()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThemePickerState {
     original: Theme,
@@ -1394,8 +1403,14 @@ impl AppModel {
                 } else {
                     "completed"
                 };
+                let output_line_count = tool_output_line_count(&output);
+                let output_line_unit = if output_line_count == 1 {
+                    "line"
+                } else {
+                    "lines"
+                };
                 let mut text = format!(
-                    "{} {state} · {}",
+                    "{} {state} · {output_line_count} {output_line_unit} · {}",
                     sanitize_inline(&name),
                     format_tool_duration(duration_ms)
                 );
@@ -5293,7 +5308,10 @@ mod tests {
         let tool = &app.timeline.items()[1];
         assert_eq!(tool.activity, Some(ActivityState::Success));
         assert!(!tool.expanded);
-        assert_eq!(app.timeline.rows(80)[2].text, "inspect completed · 1.2 s");
+        assert_eq!(
+            app.timeline.rows(80)[2].text,
+            "inspect completed · 2 lines · 1.2 s"
+        );
         assert!(tool.text.contains("src/main.rs"));
         assert!(tool.text.contains("detail one\ndetail two"));
     }
@@ -5319,8 +5337,46 @@ mod tests {
         assert_eq!(tool.activity, Some(ActivityState::Cancelled));
         assert_eq!(
             app.timeline.rows(80)[0].text,
-            "run_shell cancelled · 750 ms"
+            "run_shell cancelled · 1 line · 750 ms"
         );
+    }
+
+    #[test]
+    fn completed_tool_summary_counts_only_the_output_body() {
+        let mut app = model();
+        for (id, output, is_error, expected) in [
+            (
+                "empty",
+                "tool: inspect\nstatus: success\noutput:\n",
+                false,
+                "inspect completed · 0 lines · 10 ms",
+            ),
+            (
+                "one",
+                "tool: inspect\nstatus: error\noutput:\nproblem",
+                true,
+                "inspect failed · 1 line · 10 ms",
+            ),
+            (
+                "many",
+                "tool: inspect\nstatus: success\noutput:\nfirst\nsecond\nthird",
+                false,
+                "inspect completed · 3 lines · 10 ms",
+            ),
+        ] {
+            app.apply_runtime(RuntimeUpdate::ToolFinished {
+                id: id.to_string(),
+                name: "inspect".to_string(),
+                is_error,
+                cancelled: false,
+                output: output.to_string(),
+                duration_ms: 10,
+            });
+            assert_eq!(
+                app.timeline.rows(80).last().map(|row| row.text.as_str()),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

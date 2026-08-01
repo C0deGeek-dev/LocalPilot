@@ -5726,7 +5726,7 @@ mod tests {
         assert!(bottom
             .rows
             .iter()
-            .any(|row| row.text == "inspect completed · 25 ms"));
+            .any(|row| row.text == "inspect completed · 2 lines · 25 ms"));
         assert_eq!(following.usage, Some((12, 34)));
         assert_eq!(following.work, WorkState::Idle);
 
