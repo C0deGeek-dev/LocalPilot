@@ -303,8 +303,14 @@ mod tests {
         let w1 = estimate_window(&bare, 1).wait;
         let w2 = estimate_window(&bare, 2).wait;
         let w3 = estimate_window(&bare, 3).wait;
-        assert!(w2 >= w1, "attempt 2 must not be shorter than 1: {w1:?} vs {w2:?}");
-        assert!(w3 >= w2, "attempt 3 must not be shorter than 2: {w2:?} vs {w3:?}");
+        assert!(
+            w2 >= w1,
+            "attempt 2 must not be shorter than 1: {w1:?} vs {w2:?}"
+        );
+        assert!(
+            w3 >= w2,
+            "attempt 3 must not be shorter than 2: {w2:?} vs {w3:?}"
+        );
     }
 
     #[test]

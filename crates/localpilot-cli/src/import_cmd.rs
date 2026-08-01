@@ -116,9 +116,10 @@ fn map_cc_line(line: &CcLine) -> Option<Message> {
                     .iter()
                     .filter_map(|b| match b {
                         CcBlock::Text { text } => Some(text.clone()),
-                        CcBlock::ToolResult { content } => {
-                            Some(format!("[tool result] {}", bounded(&flatten_result(content))))
-                        }
+                        CcBlock::ToolResult { content } => Some(format!(
+                            "[tool result] {}",
+                            bounded(&flatten_result(content))
+                        )),
                         _ => None,
                     })
                     .collect();
@@ -153,7 +154,13 @@ fn map_cc_line(line: &CcLine) -> Option<Message> {
 fn encode_cwd(cwd: &Path) -> String {
     cwd.to_string_lossy()
         .chars()
-        .map(|c| if matches!(c, ':' | '\\' | '/') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, ':' | '\\' | '/') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -232,9 +239,13 @@ pub fn import_session(
     }
 
     let session = SessionId::new();
-    let mut parent = store.append_event(session, None, SessionEventKind::SessionOpened {
-        reason: OpenReason::New,
-    })?;
+    let mut parent = store.append_event(
+        session,
+        None,
+        SessionEventKind::SessionOpened {
+            reason: OpenReason::New,
+        },
+    )?;
     for message in &messages {
         // Write both: the transcript (drives the session-list message count) and
         // the event log (what resume reads back). Redaction is applied on write.
@@ -317,7 +328,10 @@ mod tests {
         // No structured tool/reasoning blocks survive — everything is text.
         for m in &messages {
             for b in &m.content {
-                assert!(matches!(b, ContentBlock::Text { .. }), "not flattened: {b:?}");
+                assert!(
+                    matches!(b, ContentBlock::Text { .. }),
+                    "not flattened: {b:?}"
+                );
             }
         }
         let text = |m: &Message| {
@@ -331,8 +345,16 @@ mod tests {
         };
         assert_eq!(text(&messages[0]), "read the file");
         assert_eq!(text(&messages[1]), "reading now");
-        assert!(text(&messages[2]).starts_with("[tool: Read("), "{}", text(&messages[2]));
-        assert!(text(&messages[3]).starts_with("[tool result] "), "{}", text(&messages[3]));
+        assert!(
+            text(&messages[2]).starts_with("[tool: Read("),
+            "{}",
+            text(&messages[2])
+        );
+        assert!(
+            text(&messages[3]).starts_with("[tool result] "),
+            "{}",
+            text(&messages[3])
+        );
         assert!(!text(&messages[2]).contains("secret reasoning"));
     }
 

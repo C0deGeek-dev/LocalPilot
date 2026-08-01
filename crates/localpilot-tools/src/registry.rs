@@ -380,7 +380,10 @@ mod retention_tests {
 
     impl crate::tool::OutputRetention for MemoryRetention {
         fn retain(&self, id: &str, output: &str) -> Result<(), String> {
-            self.0.lock().unwrap().insert(id.to_string(), output.to_string());
+            self.0
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), output.to_string());
             Ok(())
         }
         fn fetch(&self, id: &str) -> Result<Option<String>, String> {

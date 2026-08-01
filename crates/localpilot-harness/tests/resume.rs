@@ -520,7 +520,11 @@ async fn a_phase_cadence_check_is_skipped_until_the_plan_completes() {
     // step). This pins that phase checks fire at the boundary, not every step.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("brief.md"), "# Brief: two\n\n## Summary\n\nTwo.\n").unwrap();
+    std::fs::write(
+        root.join("brief.md"),
+        "# Brief: two\n\n## Summary\n\nTwo.\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("PROGRESS.md"),
         "# Progress: two\nBranch: feature/two\n\n## Steps\n\n- [ ] 1. First\n- [ ] 2. Second\n",
@@ -548,7 +552,11 @@ async fn a_phase_cadence_check_is_skipped_until_the_plan_completes() {
 
     // Step 1 committed and the phase audit did NOT run (a second step remains).
     assert!(outcome.committed, "{:?}", outcome.blocked_reason);
-    assert!(outcome.blocked_reason.is_none(), "{:?}", outcome.blocked_reason);
+    assert!(
+        outcome.blocked_reason.is_none(),
+        "{:?}",
+        outcome.blocked_reason
+    );
     assert!(
         !outcome.gate.iter().any(|o| o.name == "audit"),
         "the phase-cadence check must not run before the plan boundary"

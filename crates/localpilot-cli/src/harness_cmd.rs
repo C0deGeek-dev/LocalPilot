@@ -926,7 +926,8 @@ where
             ResumeDecision::Resume => {
                 writeln!(out, "resuming paused run at step {}", paused.step_number)?;
                 store.delete_cache(QUOTA_PAUSE_KEY)?;
-                return resume_with_events(root, model, provider_id, run, events, cancel, out).await;
+                return resume_with_events(root, model, provider_id, run, events, cancel, out)
+                    .await;
             }
             ResumeDecision::AskUser => {
                 writeln!(
@@ -1117,15 +1118,24 @@ mod tests {
     fn wait_nap_clamps_to_poll_cap_and_max_wait_and_stops_when_elapsed() {
         // Eligible in 100s, poll cap 30 → nap 30 (re-check cadence).
         let p = paused_at(0, Some(100));
-        assert_eq!(wait_nap(&p, &wait_policy(3600), 0, 30), Some(Duration::from_secs(30)));
+        assert_eq!(
+            wait_nap(&p, &wait_policy(3600), 0, 30),
+            Some(Duration::from_secs(30))
+        );
         // Window elapsed → act now.
         assert_eq!(wait_nap(&p, &wait_policy(3600), 100, 30), None);
         // Clamped to the time left before max_wait: waited 50 of max 60 → nap 10.
-        assert_eq!(wait_nap(&p, &wait_policy(60), 50, 30), Some(Duration::from_secs(10)));
+        assert_eq!(
+            wait_nap(&p, &wait_policy(60), 50, 30),
+            Some(Duration::from_secs(10))
+        );
         // Past max_wait → no nap; decide_resume returns BlockedBy and the loop ends.
         assert_eq!(wait_nap(&p, &wait_policy(60), 60, 30), None);
         // No eligible time recorded → act now.
-        assert_eq!(wait_nap(&paused_at(0, None), &wait_policy(3600), 0, 30), None);
+        assert_eq!(
+            wait_nap(&paused_at(0, None), &wait_policy(3600), 0, 30),
+            None
+        );
     }
 
     const VALID_BRIEF: &str = "# Brief: widget\n\n## Summary\n\nBuild the widget.\n\n\

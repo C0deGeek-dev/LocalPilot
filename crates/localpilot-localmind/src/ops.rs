@@ -366,8 +366,10 @@ pub fn context_hits(
     let hits = match (&cosines, active_rerank_window(project_root)) {
         (Some((by_id, dense_ids)), Some(_)) => {
             let bm25_ids: Vec<String> = hits.iter().map(|h| h.memory_id.to_string()).collect();
-            let fused =
-                crate::fuse::reciprocal_rank_fusion(&[bm25_ids, dense_ids.clone()], crate::fuse::RRF_K);
+            let fused = crate::fuse::reciprocal_rank_fusion(
+                &[bm25_ids, dense_ids.clone()],
+                crate::fuse::RRF_K,
+            );
             let score: std::collections::HashMap<&str, f64> =
                 fused.iter().map(|(id, s)| (id.as_str(), *s)).collect();
             let mut reordered = hits;
@@ -1299,8 +1301,9 @@ mod tests {
             seed_body(root, "cypress build tips"); // relevant, keyword-weak
         };
         let query = "redwood build";
-        let precision_at_1 =
-            |hits: &[SearchHit]| usize::from(hits.first().is_some_and(|h| h.snippet.contains(relevant)));
+        let precision_at_1 = |hits: &[SearchHit]| {
+            usize::from(hits.first().is_some_and(|h| h.snippet.contains(relevant)))
+        };
 
         // Baseline: lexical only (rerank off). The keyword-strong decoy wins.
         let dir = tempfile::tempdir().unwrap();

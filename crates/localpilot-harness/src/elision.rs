@@ -49,8 +49,7 @@ impl ReadHistory {
         current_len: u64,
     ) -> Option<String> {
         let seen = self.seen.get(&(path.to_string(), start, end))?;
-        (seen.mtime_unix == current_mtime && seen.len == current_len)
-            .then(|| seen.call_id.clone())
+        (seen.mtime_unix == current_mtime && seen.len == current_len).then(|| seen.call_id.clone())
     }
 
     /// Record that `(path, range)` was served for `call_id` with the given
@@ -65,7 +64,9 @@ impl ReadHistory {
         len: u64,
         call_id: &str,
     ) {
-        if self.seen.len() >= MAX_TRACKED_READS && !self.seen.contains_key(&(path.to_string(), start, end)) {
+        if self.seen.len() >= MAX_TRACKED_READS
+            && !self.seen.contains_key(&(path.to_string(), start, end))
+        {
             self.seen.clear();
         }
         self.seen.insert(
@@ -110,7 +111,10 @@ mod tests {
 
         h.record("a.rs", None, None, 100, 50, "c1");
         // Same read, unchanged file: elidable, citing the earlier call.
-        assert_eq!(h.elidable("a.rs", None, None, 100, 50).as_deref(), Some("c1"));
+        assert_eq!(
+            h.elidable("a.rs", None, None, 100, 50).as_deref(),
+            Some("c1")
+        );
         // Changed mtime: never elided (would be stale).
         assert!(h.elidable("a.rs", None, None, 101, 50).is_none());
         // Same mtime, different length (a coarse-mtime overwrite): never elided.

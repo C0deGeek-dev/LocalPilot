@@ -2955,7 +2955,8 @@ impl SessionRuntime {
                                 self.read_history.elidable(&norm, start, end, mtime, len)
                             {
                                 let elided = result.output.len();
-                                result.output = crate::elision::elision_stub(&norm, &prior_id, elided);
+                                result.output =
+                                    crate::elision::elision_stub(&norm, &prior_id, elided);
                             }
                             self.read_history.record(&norm, start, end, mtime, len, id);
                         }

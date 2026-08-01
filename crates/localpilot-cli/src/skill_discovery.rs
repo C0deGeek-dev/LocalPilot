@@ -1062,11 +1062,20 @@ mod tests {
         // Toggle on: only an installed, discoverable skill is load-eligible.
         assert!(is_autoload_eligible(&mk(MatchState::Installed, true), true));
         // A user-only installed skill stays report-only.
-        assert!(!is_autoload_eligible(&mk(MatchState::Installed, false), true));
+        assert!(!is_autoload_eligible(
+            &mk(MatchState::Installed, false),
+            true
+        ));
         // An available match is never eligible (it is not installed).
-        assert!(!is_autoload_eligible(&mk(MatchState::Available, true), true));
+        assert!(!is_autoload_eligible(
+            &mk(MatchState::Available, true),
+            true
+        ));
         // Toggle off: nothing is eligible, even an installed discoverable skill.
-        assert!(!is_autoload_eligible(&mk(MatchState::Installed, true), false));
+        assert!(!is_autoload_eligible(
+            &mk(MatchState::Installed, true),
+            false
+        ));
     }
 
     #[tokio::test]

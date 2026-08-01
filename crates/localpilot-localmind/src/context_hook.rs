@@ -598,7 +598,8 @@ mod tests {
         let dir = project_with_one_memory("injection_dedup_ttl_turns = 2");
         let hook = LocalMindContext::new(dir.path());
         let query = "how should I structure the read path";
-        let injected = |h: &LocalMindContext| h.memories_used(query).iter().any(|m| m.id == "mem-cache");
+        let injected =
+            |h: &LocalMindContext| h.memories_used(query).iter().any(|m| m.id == "mem-cache");
 
         assert!(injected(&hook), "turn 1: the memory is injected");
         assert!(!injected(&hook), "turn 2: within TTL, suppressed");
@@ -614,7 +615,9 @@ mod tests {
         let query = "how should I structure the read path";
         for turn in 1..=3 {
             assert!(
-                hook.memories_used(query).iter().any(|m| m.id == "mem-cache"),
+                hook.memories_used(query)
+                    .iter()
+                    .any(|m| m.id == "mem-cache"),
                 "turn {turn}: dedup off, always injected"
             );
         }

@@ -187,15 +187,19 @@ async fn elision_off_by_default_returns_full_content_on_a_reread() {
         .tool_call("r2", "read_file", json!({ "path": "src/lib.rs" }))
         .text("done");
     // Default config: elide_seen_reads is false.
-    let mut h = build(provider, &[("src/lib.rs", big.as_str())], SessionConfig::default());
-    let _ = h
-        .runtime
-        .run_turn("read twice", &h.events, &h.cancel)
-        .await;
+    let mut h = build(
+        provider,
+        &[("src/lib.rs", big.as_str())],
+        SessionConfig::default(),
+    );
+    let _ = h.runtime.run_turn("read twice", &h.events, &h.cancel).await;
     let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
     let outputs = tool_result_outputs(&transcript);
     assert_eq!(outputs.len(), 2);
-    assert_eq!(outputs[0], outputs[1], "with elision off both reads return full content");
+    assert_eq!(
+        outputs[0], outputs[1],
+        "with elision off both reads return full content"
+    );
     assert!(!outputs[1].contains("elided"));
 }
 
@@ -225,7 +229,10 @@ async fn queued_soft_interrupts_are_admitted_labelled_and_recorded() {
 
     let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
     let text = message_text(&transcript);
-    assert!(text.contains("also check the error path"), "user steer injected: {text}");
+    assert!(
+        text.contains("also check the error path"),
+        "user steer injected: {text}"
+    );
     assert!(
         text.contains("[system] background job finished"),
         "system notice injected and labelled: {text}"
