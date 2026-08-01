@@ -14,6 +14,8 @@ mod chunk_store;
 mod codegraph;
 mod context_hook;
 mod context_prefix;
+#[cfg(test)]
+mod dead_endpoint;
 mod defs;
 mod defs_tool;
 mod error;
@@ -815,17 +817,18 @@ mod tests {
     /// extractor, which still surfaces the explicit lesson.
     #[test]
     fn closeout_falls_back_to_deterministic_when_endpoint_unavailable() {
-        // A bound-then-dropped port is guaranteed closed → connection refused.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_addr = dead.local_addr().unwrap();
-        drop(dead);
+        // Held for the whole test rather than bound-and-dropped: a released
+        // ephemeral port can be handed straight to another test, which brings
+        // the "dead" endpoint back to life.
+        let dead = crate::dead_endpoint::DeadEndpoint::new();
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
             root.join(CONFIG_FILE),
             format!(
-                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://{dead_addr}\"\nchat_model = \"m\"\ntimeout_secs = 2\n"
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"{}\"\nchat_model = \"m\"\ntimeout_secs = 2\n",
+                dead.url()
             ),
         )
         .unwrap();
