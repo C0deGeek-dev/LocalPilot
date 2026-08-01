@@ -66,19 +66,27 @@ is capped at 8 MiB.
 
 The full-screen slash picker lists only commands that have a real replacement-
 host path: `/model`, `/new`, `/fork`, `/clone`, `/clear`, `/quit`, `/help`,
-`/theme`, and the local `/search` overlay. `/model` opens a second-level picker
-built from configured providers; an exact `/model <provider>` also executes
-directly.
+`/theme`, `/settings`, `/diff`, and the local `/search` overlay. `/model` opens
+a second-level picker built from configured providers; an exact
+`/model <provider>` also executes directly.
 `/help` opens a scrollable full-screen keyboard and command reference; Escape
 returns to the untouched conversation, including while work continues behind
 the help view. Press `?` on an empty idle composer for transient two-column quick
 help. `/theme` opens a centered semantic-color preview: arrows or mouse selection
 preview the entire UI, Escape restores the prior theme, and Enter accepts the
 choice for the current process. Set `LOCALPILOT_CHAT_THEME` to make the launch
-choice explicit. Slash invocations never enter prompt history or the provider
-prompt queue. A manually typed unsupported command produces an in-app notice
+choice explicit. `/settings` opens a contained read-only view of the effective
+terminal, appearance, provider, and session values; launch-time controls remain
+environment settings. Slash invocations never enter prompt history or the
+provider prompt queue. A manually typed unsupported command produces an in-app notice
 instead of being sent to a model, and state-changing commands entered during
 active work are refused with an idle-retry notice.
+
+`/diff` opens a contained two-pane review of tracked Git changes against `HEAD`
+(or the current index/worktree when no `HEAD` exists). Arrow keys navigate the
+active file or content pane, Left/Right switches panes, `t` hides or restores
+the file tree, and Escape returns to the untouched conversation. Diff capture
+does not run external diff drivers and is bounded to 8 MiB.
 
 ## Project context files
 

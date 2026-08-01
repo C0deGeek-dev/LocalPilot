@@ -5,7 +5,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{CompletionKind, TakeoverView};
+use crate::app::{CompletionKind, DiffPane, TakeoverView};
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
     TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
@@ -29,6 +29,12 @@ pub struct CompletionHit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeHit {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TakeoverHit {
     pub index: usize,
     pub area: Rect,
 }
@@ -130,6 +136,8 @@ pub struct HitMap {
     pub timeline_rows: Vec<TimelineRowHit>,
     pub completion_rows: Vec<CompletionHit>,
     pub theme_rows: Vec<ThemeHit>,
+    pub takeover_rows: Vec<TakeoverHit>,
+    pub takeover_file_rows: Vec<TakeoverHit>,
     pub scrollbar: ScrollbarGeometry,
     pub composer: Rect,
     pub editor_width: u16,
@@ -178,6 +186,8 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
+            takeover_rows: Vec::new(),
+            takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -205,6 +215,8 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         timeline_rows,
         completion_rows,
         theme_rows,
+        takeover_rows: Vec::new(),
+        takeover_file_rows: Vec::new(),
         scrollbar,
         composer: layout.composer_content,
         editor_width,
@@ -316,6 +328,8 @@ fn render_takeover(
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
+            takeover_rows: Vec::new(),
+            takeover_file_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -326,6 +340,8 @@ fn render_takeover(
     let theme = theme(app);
     let title = match takeover.kind {
         TakeoverKind::Help => " Help ",
+        TakeoverKind::Settings => " Settings ",
+        TakeoverKind::Diff => " Diff ",
     };
     frame.render_widget(
         Paragraph::new(title).style(theme.ui(UiRole::TabActive)),
@@ -337,32 +353,100 @@ fn render_takeover(
         ),
     );
 
-    let footer_height = 1;
+    let footer_height = if takeover.kind == TakeoverKind::Settings {
+        2
+    } else {
+        1
+    };
     let content = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(2),
         area.width.saturating_sub(5),
         area.height.saturating_sub(2 + footer_height),
     );
-    let lines = help_lines(
-        takeover,
-        content.width,
-        theme,
-        app.capabilities.mouse_capture,
-    );
     let viewport_rows = usize::from(content.height);
-    let maximum = lines.len().saturating_sub(viewport_rows);
-    let start = takeover.scroll.min(maximum);
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
+    let (start, total_rows, scrollbar_rows, takeover_rows, takeover_file_rows) = match takeover.kind
+    {
+        TakeoverKind::Help => {
+            let lines = help_lines(
+                takeover,
+                content.width,
+                theme,
+                app.capabilities.mouse_capture,
+            );
+            let maximum = lines.len().saturating_sub(viewport_rows);
+            let start = takeover.scroll.min(maximum);
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .iter()
+                        .skip(start)
+                        .take(viewport_rows)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                content,
+            );
+            (start, lines.len(), viewport_rows, Vec::new(), Vec::new())
+        }
+        TakeoverKind::Settings => {
+            let maximum = takeover.settings.len().saturating_sub(viewport_rows);
+            let start = takeover.scroll.min(maximum);
+            let mut hits = Vec::new();
+            for (offset, (index, setting)) in takeover
+                .settings
+                .iter()
+                .enumerate()
                 .skip(start)
                 .take(viewport_rows)
-                .collect::<Vec<_>>(),
-        ),
-        content,
-    );
+                .enumerate()
+            {
+                let y = content
+                    .y
+                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+                let selected = index == takeover.selected;
+                let prefix = if selected { "❯ " } else { "  " };
+                let left = format!("{prefix}{} · {}", setting.section, setting.name);
+                frame.render_widget(
+                    Paragraph::new(two_sided(&left, &setting.value, content.width)).style(
+                        theme.ui(if selected {
+                            UiRole::TabActive
+                        } else {
+                            UiRole::Foreground
+                        }),
+                    ),
+                    Rect::new(content.x, y, content.width, 1),
+                );
+                hits.push(TakeoverHit {
+                    index,
+                    area: Rect::new(content.x, y, content.width, 1),
+                });
+            }
+            if let Some(selected) = takeover.settings.get(takeover.selected) {
+                frame.render_widget(
+                    Paragraph::new(truncate_end(
+                        &selected.description,
+                        area.width.saturating_sub(3),
+                    ))
+                    .style(theme.ui(UiRole::Muted)),
+                    Rect::new(
+                        area.x.saturating_add(1),
+                        area.bottom().saturating_sub(2),
+                        area.width.saturating_sub(3),
+                        1,
+                    ),
+                );
+            }
+            (
+                start,
+                takeover.settings.len(),
+                viewport_rows,
+                hits,
+                Vec::new(),
+            )
+        }
+        TakeoverKind::Diff => render_diff_takeover(frame, content, app, takeover),
+    };
 
     let scrollbar = ScrollbarGeometry::calculate(
         Rect::new(
@@ -372,12 +456,17 @@ fn render_takeover(
             area.height.saturating_sub(3),
         ),
         start,
-        maximum.saturating_add(viewport_rows),
-        viewport_rows,
+        total_rows,
+        scrollbar_rows,
     );
     draw_scrollbar(frame, scrollbar, app);
     frame.render_widget(
-        Paragraph::new("↑/↓ scroll · Page Up/Page Down · Esc close").style(theme.ui(UiRole::Muted)),
+        Paragraph::new(match takeover.kind {
+            TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close",
+            TakeoverKind::Settings => "↑/↓ select · Page Up/Page Down · Esc close",
+            TakeoverKind::Diff => "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close",
+        })
+        .style(theme.ui(UiRole::Muted)),
         Rect::new(
             area.x.saturating_add(1),
             area.bottom().saturating_sub(1),
@@ -395,10 +484,173 @@ fn render_takeover(
         timeline_rows: Vec::new(),
         completion_rows: Vec::new(),
         theme_rows: Vec::new(),
+        takeover_rows,
+        takeover_file_rows,
         scrollbar,
         composer: Rect::default(),
         editor_width: 1,
         composer_scroll: 0,
+    }
+}
+
+fn render_diff_takeover(
+    frame: &mut Frame<'_>,
+    content: Rect,
+    app: &AppModel,
+    takeover: TakeoverView<'_>,
+) -> (usize, usize, usize, Vec<TakeoverHit>, Vec<TakeoverHit>) {
+    let theme = theme(app);
+    let show_tree = takeover.tree_visible && content.width >= 60;
+    let tree_width = if show_tree {
+        (content.width / 3).clamp(20, 34)
+    } else {
+        0
+    };
+    let tree = Rect::new(content.x, content.y, tree_width, content.height);
+    let diff = if show_tree {
+        Rect::new(
+            content.x.saturating_add(tree_width).saturating_add(1),
+            content.y,
+            content.width.saturating_sub(tree_width).saturating_sub(1),
+            content.height,
+        )
+    } else {
+        content
+    };
+    let mut file_hits = Vec::new();
+    let file_viewport_rows = usize::from(tree.height.saturating_sub(1));
+    let file_start = takeover
+        .file_scroll
+        .min(takeover.diff_files.len().saturating_sub(file_viewport_rows));
+    if show_tree {
+        frame.render_widget(
+            Paragraph::new(format!("Files ({})", takeover.diff_files.len()))
+                .style(theme.ui(UiRole::Accent)),
+            Rect::new(tree.x, tree.y, tree.width, 1),
+        );
+        for (offset, (index, file)) in takeover
+            .diff_files
+            .iter()
+            .enumerate()
+            .skip(file_start)
+            .take(usize::from(tree.height.saturating_sub(1)))
+            .enumerate()
+        {
+            let y = tree
+                .y
+                .saturating_add(1)
+                .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+            let selected = index == takeover.selected_file;
+            let prefix = if selected { "❯ " } else { "  " };
+            let left = format!("{prefix}{} {}", file.status, file.path);
+            let counts = format!("+{} -{}", file.additions, file.deletions);
+            frame.render_widget(
+                Paragraph::new(two_sided(&left, &counts, tree.width)).style(theme.ui(
+                    if selected && takeover.diff_pane == DiffPane::Files {
+                        UiRole::TabActive
+                    } else {
+                        UiRole::Foreground
+                    },
+                )),
+                Rect::new(tree.x, y, tree.width, 1),
+            );
+            file_hits.push(TakeoverHit {
+                index,
+                area: Rect::new(tree.x, y, tree.width, 1),
+            });
+        }
+        for y in tree.y..tree.bottom() {
+            frame.render_widget(
+                Paragraph::new("│").style(theme.ui(UiRole::SurfaceEdge)),
+                Rect::new(tree.right(), y, 1, 1),
+            );
+        }
+    }
+
+    let Some(file) = takeover.diff_files.get(takeover.selected_file) else {
+        frame.render_widget(
+            Paragraph::new("No tracked changes").style(theme.ui(UiRole::Muted)),
+            diff,
+        );
+        return (0, 0, usize::from(diff.height), Vec::new(), file_hits);
+    };
+    frame.render_widget(
+        Paragraph::new(two_sided(
+            &file.path,
+            &format!("+{} -{}", file.additions, file.deletions),
+            diff.width,
+        ))
+        .style(theme.ui(UiRole::Accent)),
+        Rect::new(diff.x, diff.y, diff.width, 1),
+    );
+    let rows = Rect::new(
+        diff.x,
+        diff.y.saturating_add(1),
+        diff.width,
+        diff.height.saturating_sub(1),
+    );
+    let viewport_rows = usize::from(rows.height);
+    let maximum = file.lines.len().saturating_sub(viewport_rows);
+    let start = takeover.scroll.min(maximum);
+    let mut line_hits = Vec::new();
+    for (offset, (index, line)) in file
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(viewport_rows)
+        .enumerate()
+    {
+        let y = rows
+            .y
+            .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+        let selected = index == takeover.selected;
+        let marker = if selected { "❯" } else { " " };
+        let old = line
+            .old_line
+            .map_or_else(|| "    ".to_string(), |number| format!("{number:>4}"));
+        let new = line
+            .new_line
+            .map_or_else(|| "    ".to_string(), |number| format!("{number:>4}"));
+        let sign = match line.kind {
+            crate::DiffLineKind::Addition => "+",
+            crate::DiffLineKind::Deletion => "-",
+            crate::DiffLineKind::Hunk => "@",
+            crate::DiffLineKind::Context | crate::DiffLineKind::Metadata => " ",
+        };
+        let text = truncate_end(
+            &format!("{marker}{old} {new} {sign} {}", line.text),
+            rows.width,
+        );
+        let role = if selected && takeover.diff_pane == DiffPane::Content {
+            UiRole::Selection
+        } else {
+            match line.kind {
+                crate::DiffLineKind::Addition => UiRole::Success,
+                crate::DiffLineKind::Deletion => UiRole::Error,
+                crate::DiffLineKind::Hunk => UiRole::Accent,
+                crate::DiffLineKind::Context | crate::DiffLineKind::Metadata => UiRole::Foreground,
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(text).style(theme.ui(role)),
+            Rect::new(rows.x, y, rows.width, 1),
+        );
+        line_hits.push(TakeoverHit {
+            index,
+            area: Rect::new(rows.x, y, rows.width, 1),
+        });
+    }
+    if show_tree && takeover.diff_pane == DiffPane::Files {
+        (
+            file_start,
+            takeover.diff_files.len(),
+            file_viewport_rows,
+            line_hits,
+            file_hits,
+        )
+    } else {
+        (start, file.lines.len(), viewport_rows, line_hits, file_hits)
     }
 }
 
@@ -1653,6 +1905,119 @@ mod tests {
         assert!(rendered.contains("/model"));
         assert!(rendered.contains("Esc close"));
         assert!(!rendered.contains("HIDDEN_TIMELINE_MARKER"));
+    }
+
+    #[test]
+    fn settings_takeover_renders_focused_values_descriptions_and_mouse_hits() {
+        let mut app = model();
+        app.open_settings([
+            crate::SettingEntry {
+                section: "Input".into(),
+                name: "Mouse reporting".into(),
+                value: "On".into(),
+                description: "Capture pointer events".into(),
+            },
+            crate::SettingEntry {
+                section: "Appearance".into(),
+                name: "Color mode".into(),
+                value: "Default".into(),
+                description: "Semantic terminal colors".into(),
+            },
+        ]);
+        app.scroll_takeover_by(1, 2, 10);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw settings");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("settings hit map");
+        assert!(rendered.contains("Settings"));
+        assert!(rendered.contains("Appearance · Color mode"));
+        assert!(rendered.contains("Semantic terminal colors"));
+        assert_eq!(hit_map.takeover_rows.len(), 2);
+        assert_eq!(hit_map.takeover_rows[1].index, 1);
+    }
+
+    #[test]
+    fn diff_takeover_renders_two_panes_semantic_lines_and_hits() {
+        let mut app = model();
+        app.open_diff([crate::DiffFile {
+            status: "M".into(),
+            path: "src/main.rs".into(),
+            additions: 1,
+            deletions: 1,
+            lines: vec![
+                crate::DiffLine {
+                    old_line: None,
+                    new_line: None,
+                    kind: crate::DiffLineKind::Hunk,
+                    text: "@@ -1 +1 @@".into(),
+                },
+                crate::DiffLine {
+                    old_line: Some(1),
+                    new_line: None,
+                    kind: crate::DiffLineKind::Deletion,
+                    text: "old".into(),
+                },
+                crate::DiffLine {
+                    old_line: None,
+                    new_line: Some(1),
+                    kind: crate::DiffLineKind::Addition,
+                    text: "new".into(),
+                },
+            ],
+        }]);
+        app.scroll_takeover_by(1, 3, 10);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw diff");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("diff hit map");
+        assert!(rendered.contains("Files (1)"));
+        assert!(rendered.matches("src/main.rs").count() >= 2);
+        assert!(rendered.contains("@@ -1 +1 @@"));
+        assert!(rendered.contains("old"));
+        assert!(rendered.contains("new"));
+        assert_eq!(hit_map.takeover_file_rows.len(), 1);
+        assert_eq!(hit_map.takeover_rows.len(), 3);
+    }
+
+    #[test]
+    fn diff_file_pane_keeps_large_trees_visible_and_owns_the_scrollbar() {
+        let mut app = model();
+        app.open_diff((0..20).map(|index| crate::DiffFile {
+            status: "M".into(),
+            path: format!("src/file-{index:02}.rs"),
+            additions: 1,
+            deletions: 0,
+            lines: vec![crate::DiffLine {
+                old_line: None,
+                new_line: Some(1),
+                kind: crate::DiffLineKind::Addition,
+                text: "new".into(),
+            }],
+        }));
+        let _ = app.handle_input(crate::InputAction::MoveLeft, 76);
+        app.scroll_takeover_to(10, 20, 8);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw diff tree");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("diff tree hit map");
+        assert!(rendered.contains("src/file-10.rs"));
+        assert!(!rendered.contains("src/file-00.rs"));
+        assert_eq!(hit_map.takeover_file_rows[0].index, 10);
+        assert_eq!(hit_map.scrollbar.total_rows, 20);
+        assert!(hit_map.scrollbar.thumb.is_some());
     }
 
     #[test]

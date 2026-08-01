@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::future::Future;
-use std::io::{self, Stdout, Write};
+use std::io::{self, Read, Stdout, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -26,10 +26,11 @@ use crossterm::terminal::{
 use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
-    render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
-    InputAction, ItemId, KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState,
-    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
-    UserShellCommand, UserShellOutput, VisualRowPart,
+    render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, DiffFile,
+    DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, KeyboardSupport, PlanEntry,
+    RecoveryState, RuntimeUpdate, SettingEntry, StopState, SubmittedInput, TakeoverNavigation,
+    TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand, UserShellOutput,
+    VisualRowPart,
 };
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
@@ -47,6 +48,7 @@ const CHAT_COPY_ON_SELECT_ENV: &str = "LOCALPILOT_CHAT_COPY_ON_SELECT";
 const CHAT_MOUSE_ENV: &str = "LOCALPILOT_CHAT_MOUSE";
 const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
 const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
@@ -298,7 +300,349 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         name: "theme".to_string(),
         description: "Preview terminal color modes".to_string(),
     });
+    command_catalog.push(CompletionCommand {
+        name: "settings".to_string(),
+        description: "Inspect terminal chat settings".to_string(),
+    });
+    command_catalog.push(CompletionCommand {
+        name: "diff".to_string(),
+        description: "Review tracked workspace changes".to_string(),
+    });
     command_catalog
+}
+
+fn load_workspace_diff(cwd: &Path) -> Result<Vec<DiffFile>> {
+    let primary = read_git_diff(cwd, true)?;
+    let bytes = if primary.0.success() {
+        primary.1
+    } else {
+        let fallback = read_git_diff(cwd, false)?;
+        if !fallback.0.success() {
+            return Ok(Vec::new());
+        }
+        fallback.1
+    };
+    Ok(parse_unified_diff(&String::from_utf8_lossy(&bytes)))
+}
+
+fn read_git_diff(cwd: &Path, against_head: bool) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(cwd).args([
+        "-c",
+        "core.quotepath=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--unified=3",
+    ]);
+    if against_head {
+        command.arg("HEAD");
+    }
+    let mut child = command
+        .arg("--")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start git diff")?;
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .context("capture git diff output")?
+        .take(MAX_DIFF_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("read git diff output")?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DIFF_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("workspace diff exceeds 8 MiB");
+    }
+    let status = child.wait().context("wait for git diff")?;
+    Ok((status, bytes))
+}
+
+fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    let mut current: Option<DiffFile> = None;
+    let mut old_line = 0u32;
+    let mut new_line = 0u32;
+    for raw in input.lines() {
+        if let Some(header) = raw.strip_prefix("diff --git ") {
+            if let Some(file) = current.take() {
+                files.push(file);
+            }
+            let path = split_git_path_fields(header)
+                .last()
+                .map_or_else(|| header.to_string(), |path| strip_git_prefix(path, "b/"));
+            current = Some(DiffFile {
+                status: "M".to_string(),
+                path,
+                additions: 0,
+                deletions: 0,
+                lines: Vec::new(),
+            });
+            old_line = 0;
+            new_line = 0;
+            continue;
+        }
+        let Some(file) = current.as_mut() else {
+            continue;
+        };
+        if raw.starts_with("new file mode ") {
+            file.status = "A".to_string();
+            continue;
+        }
+        if raw.starts_with("deleted file mode ") {
+            file.status = "D".to_string();
+            continue;
+        }
+        if let Some(path) = raw.strip_prefix("rename to ") {
+            file.status = "R".to_string();
+            file.path = decode_git_path(path);
+            continue;
+        }
+        if let Some(path) = raw.strip_prefix("copy to ") {
+            file.status = "C".to_string();
+            file.path = decode_git_path(path);
+            continue;
+        }
+        if let Some(path) = raw.strip_prefix("+++ ") {
+            if path != "/dev/null" {
+                file.path = strip_git_prefix(&decode_git_path(path), "b/");
+            }
+            continue;
+        }
+        if raw.starts_with("--- ") || raw.starts_with("index ") {
+            continue;
+        }
+        if raw.starts_with("@@") {
+            if let Some((old, new)) = parse_hunk_starts(raw) {
+                old_line = old;
+                new_line = new;
+            }
+            file.lines.push(DiffLine {
+                old_line: None,
+                new_line: None,
+                kind: DiffLineKind::Hunk,
+                text: raw.to_string(),
+            });
+            continue;
+        }
+        let (kind, old, new, text) = if let Some(text) = raw.strip_prefix('+') {
+            let line = new_line;
+            new_line = new_line.saturating_add(1);
+            file.additions = file.additions.saturating_add(1);
+            (DiffLineKind::Addition, None, Some(line), text)
+        } else if let Some(text) = raw.strip_prefix('-') {
+            let line = old_line;
+            old_line = old_line.saturating_add(1);
+            file.deletions = file.deletions.saturating_add(1);
+            (DiffLineKind::Deletion, Some(line), None, text)
+        } else if let Some(text) = raw.strip_prefix(' ') {
+            let old = old_line;
+            let new = new_line;
+            old_line = old_line.saturating_add(1);
+            new_line = new_line.saturating_add(1);
+            (DiffLineKind::Context, Some(old), Some(new), text)
+        } else {
+            (DiffLineKind::Metadata, None, None, raw)
+        };
+        file.lines.push(DiffLine {
+            old_line: old,
+            new_line: new,
+            kind,
+            text: text.to_string(),
+        });
+    }
+    if let Some(file) = current {
+        files.push(file);
+    }
+    files
+}
+
+fn split_git_path_fields(input: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in input.chars() {
+        if quoted {
+            if escaped {
+                current.push('\\');
+                current.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            } else {
+                current.push(character);
+            }
+        } else if character == '"' && current.is_empty() {
+            quoted = true;
+        } else if character.is_whitespace() {
+            if !current.is_empty() {
+                fields.push(decode_git_quoted(&current));
+                current.clear();
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        fields.push(decode_git_quoted(&current));
+    }
+    fields
+}
+
+fn decode_git_path(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(body) = trimmed
+        .strip_prefix('"')
+        .and_then(|body| body.strip_suffix('"'))
+    {
+        decode_git_quoted(body)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn decode_git_quoted(input: &str) -> String {
+    let input = input.as_bytes();
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'\\' || index + 1 >= input.len() {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        match input[index] {
+            b'a' => output.push(0x07),
+            b'b' => output.push(0x08),
+            b't' => output.push(b'\t'),
+            b'n' => output.push(b'\n'),
+            b'v' => output.push(0x0b),
+            b'f' => output.push(0x0c),
+            b'r' => output.push(b'\r'),
+            digit @ b'0'..=b'7' => {
+                let mut value = digit - b'0';
+                let mut digits = 1;
+                while digits < 3
+                    && index + 1 < input.len()
+                    && matches!(input[index + 1], b'0'..=b'7')
+                {
+                    index += 1;
+                    value = value.saturating_mul(8).saturating_add(input[index] - b'0');
+                    digits += 1;
+                }
+                output.push(value);
+            }
+            escaped => output.push(escaped),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn strip_git_prefix(path: &str, prefix: &str) -> String {
+    path.strip_prefix(prefix).unwrap_or(path).to_string()
+}
+
+fn parse_hunk_starts(header: &str) -> Option<(u32, u32)> {
+    let mut fields = header.split_whitespace();
+    (fields.next()? == "@@").then_some(())?;
+    let old = fields
+        .next()?
+        .strip_prefix('-')?
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    let new = fields
+        .next()?
+        .strip_prefix('+')?
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    Some((old, new))
+}
+
+fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
+    let enabled = |value| if value { "On" } else { "Off" }.to_string();
+    vec![
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Mouse reporting".to_string(),
+            value: enabled(app.capabilities.mouse_capture),
+            description: format!(
+                "Set {CHAT_MOUSE_ENV}=false before launch for keyboard-only input."
+            ),
+        },
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Copy on selection".to_string(),
+            value: enabled(app.copy_on_select()),
+            description: format!(
+                "Set {CHAT_COPY_ON_SELECT_ENV}=true to copy immediately after a drag selection."
+            ),
+        },
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Clipboard".to_string(),
+            value: if app.capabilities.clipboard_write {
+                "Available"
+            } else {
+                "Unavailable"
+            }
+            .to_string(),
+            description: "Ctrl+C and right-click copy use the platform clipboard when available."
+                .to_string(),
+        },
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Keyboard protocol".to_string(),
+            value: match app.capabilities.keyboard {
+                KeyboardSupport::Basic => "Basic",
+                KeyboardSupport::Enhanced => "Enhanced",
+            }
+            .to_string(),
+            description: "Enhanced reporting distinguishes more modified key combinations."
+                .to_string(),
+        },
+        SettingEntry {
+            section: "Appearance".to_string(),
+            name: "Color mode".to_string(),
+            value: app.theme.display_name().to_string(),
+            description: format!(
+                "Use /theme to preview modes or set {CHAT_THEME_ENV} before launch."
+            ),
+        },
+        SettingEntry {
+            section: "Session".to_string(),
+            name: "Provider".to_string(),
+            value: app.header.provider.clone(),
+            description: "The provider currently serving this conversation.".to_string(),
+        },
+        SettingEntry {
+            section: "Session".to_string(),
+            name: "Model".to_string(),
+            value: app.header.model.clone(),
+            description: "Use /model to choose from configured LocalPilot providers.".to_string(),
+        },
+        SettingEntry {
+            section: "Session".to_string(),
+            name: "Mode and profile".to_string(),
+            value: format!("{} · {}", app.header.mode, app.header.profile),
+            description: "The active LocalPilot execution mode and permission profile.".to_string(),
+        },
+    ]
 }
 
 fn fullscreen_model_values(
@@ -717,12 +1061,38 @@ async fn execute_fullscreen_slash(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     config: &localpilot_config::Config,
+    cwd: &Path,
     submitted: SubmittedInput,
 ) -> bool {
     if !submitted.images.is_empty() {
         app.apply_runtime(RuntimeUpdate::Notice(
             "image attachments were ignored for the slash command".to_string(),
         ));
+    }
+    if submitted.prompt.trim() == "/settings" {
+        let settings = fullscreen_settings(app);
+        app.open_settings(settings);
+        return false;
+    }
+    if submitted.prompt.trim() == "/diff" {
+        match load_workspace_diff(cwd) {
+            Ok(files) => app.open_diff(files),
+            Err(error) => {
+                app.open_diff([DiffFile {
+                    status: "!".to_string(),
+                    path: "Diff unavailable".to_string(),
+                    additions: 0,
+                    deletions: 0,
+                    lines: vec![DiffLine {
+                        old_line: None,
+                        new_line: None,
+                        kind: DiffLineKind::Metadata,
+                        text: error.to_string(),
+                    }],
+                }]);
+            }
+        }
+        return false;
     }
     let Some(action) = parse_slash(&submitted.prompt) else {
         app.apply_runtime(RuntimeUpdate::Warning(
@@ -869,7 +1239,7 @@ async fn run_event_loop(
                         edit_composer_externally(terminal, modes, app).await?;
                     }
                     AppCommand::RunSlash(submitted) => {
-                        if execute_fullscreen_slash(app, runtime, config, submitted).await {
+                        if execute_fullscreen_slash(app, runtime, config, cwd, submitted).await {
                             break;
                         }
                     }
@@ -1481,6 +1851,19 @@ fn handle_mouse_event(
             }
 
             if hit_map.takeover {
+                if let Some(hit) = hit_map
+                    .takeover_file_rows
+                    .iter()
+                    .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                {
+                    app.select_diff_file(hit.index);
+                } else if let Some(hit) = hit_map
+                    .takeover_rows
+                    .iter()
+                    .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                {
+                    app.select_takeover_row(hit.index);
+                }
                 return RoutedEvent::Handled;
             }
 
@@ -2375,7 +2758,7 @@ mod tests {
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
         for supported in [
-            "model", "new", "fork", "clone", "clear", "quit", "help", "theme",
+            "model", "new", "fork", "clone", "clear", "quit", "help", "theme", "settings", "diff",
         ] {
             assert!(catalog.iter().any(|command| command.name == supported));
         }
@@ -3432,6 +3815,63 @@ mod tests {
         for value in ["", "yes", "2"] {
             assert_eq!(parse_bool_setting(value), None);
         }
+    }
+
+    #[test]
+    fn unified_diff_parser_preserves_files_counts_kinds_and_line_numbers() {
+        let files = parse_unified_diff(
+            "diff --git a/src/one.rs b/src/one.rs\n\
+             index 111..222 100644\n\
+             --- a/src/one.rs\n\
+             +++ b/src/one.rs\n\
+             @@ -2,2 +2,2 @@\n\
+             \x20keep\n\
+             -old\n\
+             +new\n\
+             diff --git a/new.txt b/new.txt\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/new.txt\n\
+             @@ -0,0 +1 @@\n\
+             +hello\n",
+        );
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "src/one.rs");
+        assert_eq!((files[0].additions, files[0].deletions), (1, 1));
+        assert_eq!(files[0].lines[1].old_line, Some(2));
+        assert_eq!(files[0].lines[1].new_line, Some(2));
+        assert_eq!(files[0].lines[2].kind, DiffLineKind::Deletion);
+        assert_eq!(files[0].lines[2].old_line, Some(3));
+        assert_eq!(files[0].lines[3].kind, DiffLineKind::Addition);
+        assert_eq!(files[0].lines[3].new_line, Some(3));
+        assert_eq!(files[1].status, "A");
+        assert_eq!(files[1].path, "new.txt");
+        assert_eq!(files[1].additions, 1);
+    }
+
+    #[test]
+    fn unified_diff_parser_decodes_quoted_paths_without_running_diff_drivers() {
+        let files = parse_unified_diff(
+            "diff --git \"a/src/file name.rs\" \"b/src/file name.rs\"\n\
+             --- \"a/src/file name.rs\"\n\
+             +++ \"b/src/file name.rs\"\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n\
+             diff --git a/old.rs b/new.rs\n\
+             similarity index 100%\n\
+             rename from old.rs\n\
+             rename to \"folder/new\\tname.rs\"\n",
+        );
+
+        assert_eq!(files[0].path, "src/file name.rs");
+        assert_eq!(files[1].status, "R");
+        assert_eq!(files[1].path, "folder/new\tname.rs");
+        assert_eq!(
+            split_git_path_fields("\"a/src/file name.rs\" \"b/src/file name.rs\""),
+            ["a/src/file name.rs", "b/src/file name.rs"]
+        );
     }
 
     #[test]

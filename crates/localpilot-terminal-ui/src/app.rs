@@ -128,20 +128,189 @@ enum InputOverlay {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TakeoverKind {
+    Diff,
     Help,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffPane {
+    Files,
+    Content,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+    Hunk,
+    Metadata,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct DiffLine {
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub kind: DiffLineKind,
+    pub text: String,
+}
+
+impl fmt::Debug for DiffLine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiffLine")
+            .field("old_line", &self.old_line)
+            .field("new_line", &self.new_line)
+            .field("kind", &self.kind)
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub status: String,
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub lines: Vec<DiffLine>,
+}
+
+impl fmt::Debug for DiffFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiffFile")
+            .field("status", &self.status)
+            .field(
+                "path",
+                &format_args!("<{} bytes redacted>", self.path.len()),
+            )
+            .field("additions", &self.additions)
+            .field("deletions", &self.deletions)
+            .field("line_count", &self.lines.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TakeoverState {
     kind: TakeoverKind,
     scroll: usize,
+    file_scroll: usize,
+    selected: usize,
+    settings: Vec<SettingEntry>,
+    diff_files: Vec<DiffFile>,
+    diff_pane: DiffPane,
+    selected_file: usize,
+    tree_visible: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TakeoverView<'a> {
     pub kind: TakeoverKind,
     pub scroll: usize,
+    pub file_scroll: usize,
+    pub selected: usize,
     pub commands: &'a [CompletionCommand],
+    pub settings: &'a [SettingEntry],
+    pub diff_files: &'a [DiffFile],
+    pub diff_pane: DiffPane,
+    pub selected_file: usize,
+    pub tree_visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingEntry {
+    pub section: String,
+    pub name: String,
+    pub value: String,
+    pub description: String,
+}
+
+fn diff_line_is_navigable(line: &DiffLine) -> bool {
+    matches!(
+        line.kind,
+        DiffLineKind::Context | DiffLineKind::Addition | DiffLineKind::Deletion
+    )
+}
+
+fn first_diff_line(file: Option<&DiffFile>) -> usize {
+    file.and_then(|file| file.lines.iter().position(diff_line_is_navigable))
+        .unwrap_or(0)
+}
+
+fn move_diff_line(file: Option<&DiffFile>, current: usize, delta: isize) -> usize {
+    let Some(file) = file else {
+        return 0;
+    };
+    let first = first_diff_line(Some(file));
+    let Some(last) = file.lines.iter().rposition(diff_line_is_navigable) else {
+        return 0;
+    };
+    if delta > 0 {
+        file.lines
+            .iter()
+            .enumerate()
+            .skip(current.saturating_add(1))
+            .filter_map(|(index, line)| diff_line_is_navigable(line).then_some(index))
+            .nth(delta.unsigned_abs().saturating_sub(1))
+            .unwrap_or(last)
+    } else if delta < 0 {
+        file.lines
+            .iter()
+            .enumerate()
+            .take(current)
+            .rev()
+            .filter_map(|(index, line)| diff_line_is_navigable(line).then_some(index))
+            .nth(delta.unsigned_abs().saturating_sub(1))
+            .unwrap_or(first)
+    } else if file.lines.get(current).is_some_and(diff_line_is_navigable) {
+        current
+    } else {
+        first
+    }
+}
+
+fn diff_line_at_or_after(file: Option<&DiffFile>, start: usize) -> usize {
+    let Some(file) = file else {
+        return 0;
+    };
+    file.lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| (index >= start && diff_line_is_navigable(line)).then_some(index))
+        .or_else(|| {
+            file.lines
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, line)| diff_line_is_navigable(line).then_some(index))
+        })
+        .unwrap_or(0)
+}
+
+fn keep_selection_visible(scroll: &mut usize, selected: usize, total: usize, viewport: usize) {
+    let viewport = viewport.max(1);
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= scroll.saturating_add(viewport) {
+        *scroll = selected.saturating_add(1).saturating_sub(viewport);
+    }
+    *scroll = (*scroll).min(total.saturating_sub(viewport));
+}
+
+fn sanitize_inline(text: &str) -> String {
+    sanitize_text(text)
+        .chars()
+        .map(|character| match character {
+            '\n' | '\t' => ' ',
+            character => character,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,7 +1059,14 @@ impl AppModel {
         self.takeover.as_ref().map(|state| TakeoverView {
             kind: state.kind,
             scroll: state.scroll,
+            file_scroll: state.file_scroll,
+            selected: state.selected,
             commands: &self.command_catalog,
+            settings: &state.settings,
+            diff_files: &state.diff_files,
+            diff_pane: state.diff_pane,
+            selected_file: state.selected_file,
+            tree_visible: state.tree_visible,
         })
     }
 
@@ -939,13 +1115,162 @@ impl AppModel {
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Help,
             scroll: 0,
+            file_scroll: 0,
+            selected: 0,
+            settings: Vec::new(),
+            diff_files: Vec::new(),
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
         });
+    }
+
+    pub fn open_settings(&mut self, settings: impl IntoIterator<Item = SettingEntry>) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.close_theme_picker(true);
+        self.input_overlay = None;
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::Settings,
+            scroll: 0,
+            file_scroll: 0,
+            selected: 0,
+            settings: settings
+                .into_iter()
+                .map(|entry| SettingEntry {
+                    section: sanitize_inline(&entry.section),
+                    name: sanitize_inline(&entry.name),
+                    value: sanitize_inline(&entry.value),
+                    description: sanitize_inline(&entry.description),
+                })
+                .collect(),
+            diff_files: Vec::new(),
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
+        });
+    }
+
+    pub fn open_diff(&mut self, files: impl IntoIterator<Item = DiffFile>) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.close_theme_picker(true);
+        self.input_overlay = None;
+        let diff_files = files
+            .into_iter()
+            .map(|file| DiffFile {
+                status: sanitize_inline(&file.status),
+                path: sanitize_inline(&file.path),
+                additions: file.additions,
+                deletions: file.deletions,
+                lines: file
+                    .lines
+                    .into_iter()
+                    .map(|line| DiffLine {
+                        old_line: line.old_line,
+                        new_line: line.new_line,
+                        kind: line.kind,
+                        text: sanitize_text(&line.text),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let selected = first_diff_line(diff_files.first());
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::Diff,
+            scroll: 0,
+            file_scroll: 0,
+            selected,
+            settings: Vec::new(),
+            diff_files,
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
+        });
+    }
+
+    pub fn select_takeover_row(&mut self, selected: usize) {
+        let Some(state) = self.takeover.as_mut() else {
+            return;
+        };
+        match state.kind {
+            TakeoverKind::Settings if selected < state.settings.len() => state.selected = selected,
+            TakeoverKind::Diff
+                if state
+                    .diff_files
+                    .get(state.selected_file)
+                    .and_then(|file| file.lines.get(selected))
+                    .is_some_and(diff_line_is_navigable) =>
+            {
+                state.selected = selected;
+                state.diff_pane = DiffPane::Content;
+            }
+            TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Settings => {}
+        }
+    }
+
+    pub fn select_diff_file(&mut self, selected: usize) {
+        let Some(state) = self.takeover.as_mut() else {
+            return;
+        };
+        if state.kind == TakeoverKind::Diff && selected < state.diff_files.len() {
+            state.selected_file = selected;
+            state.selected = first_diff_line(state.diff_files.get(selected));
+            state.scroll = 0;
+            state.diff_pane = DiffPane::Files;
+        }
     }
 
     pub fn scroll_takeover_by(&mut self, delta: isize, total_rows: usize, viewport_rows: usize) {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
+        if state.kind == TakeoverKind::Settings {
+            state.selected = state
+                .selected
+                .saturating_add_signed(delta)
+                .min(state.settings.len().saturating_sub(1));
+            keep_selection_visible(
+                &mut state.scroll,
+                state.selected,
+                state.settings.len(),
+                viewport_rows,
+            );
+            return;
+        }
+        if state.kind == TakeoverKind::Diff {
+            if state.diff_pane == DiffPane::Files {
+                state.selected_file = state
+                    .selected_file
+                    .saturating_add_signed(delta)
+                    .min(state.diff_files.len().saturating_sub(1));
+                state.selected = first_diff_line(state.diff_files.get(state.selected_file));
+                state.scroll = 0;
+                keep_selection_visible(
+                    &mut state.file_scroll,
+                    state.selected_file,
+                    state.diff_files.len(),
+                    viewport_rows,
+                );
+            } else {
+                state.selected = move_diff_line(
+                    state.diff_files.get(state.selected_file),
+                    state.selected,
+                    delta,
+                );
+                let line_count = state
+                    .diff_files
+                    .get(state.selected_file)
+                    .map_or(0, |file| file.lines.len());
+                keep_selection_visible(
+                    &mut state.scroll,
+                    state.selected,
+                    line_count,
+                    viewport_rows,
+                );
+            }
+            return;
+        }
         let maximum = total_rows.saturating_sub(viewport_rows);
         state.scroll = state.scroll.saturating_add_signed(delta).min(maximum);
     }
@@ -954,6 +1279,24 @@ impl AppModel {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
+        if state.kind == TakeoverKind::Settings {
+            state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
+            state.selected = start.min(state.settings.len().saturating_sub(1));
+            return;
+        }
+        if state.kind == TakeoverKind::Diff {
+            if state.diff_pane == DiffPane::Files {
+                state.file_scroll = start.min(total_rows.saturating_sub(viewport_rows));
+                state.selected_file = start.min(state.diff_files.len().saturating_sub(1));
+                state.selected = first_diff_line(state.diff_files.get(state.selected_file));
+                state.scroll = 0;
+            } else {
+                state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
+                state.selected =
+                    diff_line_at_or_after(state.diff_files.get(state.selected_file), start);
+            }
+            return;
+        }
         state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
     }
 
@@ -1325,14 +1668,39 @@ impl AppModel {
             InputAction::NavigateTimeline(TimelineNavigation::PageDown) => {
                 AppCommand::NavigateTakeover(TakeoverNavigation::PageDown)
             }
+            InputAction::MoveLeft => {
+                if let Some(state) = self.takeover.as_mut() {
+                    if state.kind == TakeoverKind::Diff && state.tree_visible {
+                        state.diff_pane = DiffPane::Files;
+                    }
+                }
+                AppCommand::None
+            }
+            InputAction::MoveRight => {
+                if let Some(state) = self.takeover.as_mut() {
+                    if state.kind == TakeoverKind::Diff {
+                        state.diff_pane = DiffPane::Content;
+                    }
+                }
+                AppCommand::None
+            }
+            InputAction::Insert(text) if text.eq_ignore_ascii_case("t") => {
+                if let Some(state) = self.takeover.as_mut() {
+                    if state.kind == TakeoverKind::Diff {
+                        state.tree_visible = !state.tree_visible;
+                        if !state.tree_visible {
+                            state.diff_pane = DiffPane::Content;
+                        }
+                    }
+                }
+                AppCommand::None
+            }
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::Backspace
             | InputAction::Delete
-            | InputAction::MoveLeft
-            | InputAction::MoveRight
             | InputAction::ForwardCharOrSearch
             | InputAction::MoveWordLeft
             | InputAction::MoveWordRight
@@ -2583,6 +2951,95 @@ mod tests {
         assert!(!app.has_takeover());
         assert!(!app.exit_armed);
         assert!(!app.exit_requested);
+    }
+
+    #[test]
+    fn settings_takeover_owns_navigation_and_sanitizes_host_values() {
+        let mut app = model();
+        app.open_settings([
+            SettingEntry {
+                section: "Input".to_string(),
+                name: "Mouse".to_string(),
+                value: "On".to_string(),
+                description: "Captured input".to_string(),
+            },
+            SettingEntry {
+                section: "Session".to_string(),
+                name: "Model".to_string(),
+                value: "unsafe\u{1b}[2Jmodel\nnext\tvalue".to_string(),
+                description: "Current model".to_string(),
+            },
+        ]);
+
+        assert_eq!(app.takeover().expect("settings").selected, 0);
+        assert_eq!(
+            app.handle_input(InputAction::MoveDown, 80),
+            AppCommand::NavigateTakeover(TakeoverNavigation::LineDown)
+        );
+        app.scroll_takeover_by(1, 2, 1);
+        let view = app.takeover().expect("settings");
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.scroll, 1);
+        assert_eq!(view.settings[1].value, "unsafemodel next value");
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_takeover());
+    }
+
+    #[test]
+    fn diff_takeover_routes_content_file_and_tree_focus_without_touching_chat() {
+        let mut app = model();
+        let existing = app
+            .timeline
+            .push(ItemKind::Assistant, "conversation")
+            .expect("timeline item");
+        let file = |path: &str| DiffFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            lines: vec![
+                DiffLine {
+                    old_line: None,
+                    new_line: None,
+                    kind: DiffLineKind::Hunk,
+                    text: "@@ -1 +1 @@".to_string(),
+                },
+                DiffLine {
+                    old_line: None,
+                    new_line: Some(1),
+                    kind: DiffLineKind::Addition,
+                    text: "DIFF_SECRET_CONTENT".to_string(),
+                },
+            ],
+        };
+        app.open_diff([file("one.rs"), file("two.rs")]);
+        let debug = format!("{app:?}");
+        assert!(!debug.contains("one.rs"));
+        assert!(!debug.contains("DIFF_SECRET_CONTENT"));
+
+        assert_eq!(
+            app.handle_input(InputAction::MoveDown, 80),
+            AppCommand::NavigateTakeover(TakeoverNavigation::LineDown)
+        );
+        app.scroll_takeover_by(1, 2, 1);
+        assert_eq!(app.takeover().expect("diff").selected, 1);
+        let _ = app.handle_input(InputAction::MoveLeft, 80);
+        assert_eq!(
+            app.handle_input(InputAction::MoveDown, 80),
+            AppCommand::NavigateTakeover(TakeoverNavigation::LineDown)
+        );
+        app.scroll_takeover_by(1, 2, 1);
+        let view = app.takeover().expect("diff");
+        assert_eq!(view.selected_file, 1);
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.file_scroll, 1);
+        let _ = app.handle_input(InputAction::Insert("t".to_string()), 80);
+        let view = app.takeover().expect("diff");
+        assert!(!view.tree_visible);
+        assert_eq!(view.diff_pane, DiffPane::Content);
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert!(app.timeline.item(existing).is_some());
+        assert!(!app.has_takeover());
     }
 
     #[test]
