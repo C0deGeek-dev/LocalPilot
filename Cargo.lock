@@ -1952,6 +1952,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-server"
+version = "2.6.0"
+dependencies = [
+ "localpilot-rpc",
+ "serde_json",
+ "thiserror 2.0.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "localpilot-skills"
 version = "2.6.0"
 dependencies = [

@@ -11,6 +11,15 @@ There is deliberately no HTTP server and no packaged product SDK: the library
 surface below is the embedding contract, and the RPC protocol is its
 process-boundary mirror.
 
+There is also groundwork for a third, **opt-in local-IPC server transport** (the
+`localpilot-server` crate): a framed transport over a Unix domain socket or a
+Windows named pipe, plus daemon lifecycle (detached spawn, a retry-connect ready
+handshake, single-owner exclusivity). It is still local-only — not an HTTP
+server and not a product SDK — and reuses the same LF-delimited JSON framing as
+the stdio path. Only the transport and lifecycle exist today; there is no
+`serve`/`connect` command and no session hosting over it yet, and the stdio
+drive below is unchanged and remains the supported process-boundary surface.
+
 ## In-process embedding
 
 The supported library API is the `SessionRuntime` in `localpilot-harness`,

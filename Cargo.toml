@@ -18,6 +18,7 @@ members = [
     "crates/localpilot-dist",
     "crates/localpilot-recovery",
     "crates/localpilot-rpc",
+    "crates/localpilot-server",
     "crates/localpilot-quota",
     "crates/localpilot-localmind",
     "crates/localpilot-research",

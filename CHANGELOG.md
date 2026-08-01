@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Internal/Added: opt-in local-IPC server transport groundwork.** A new
+  `localpilot-server` crate provides a cross-platform framed local transport
+  (Unix domain socket / Windows named pipe, reusing the existing LF-delimited
+  JSON framing) and daemon lifecycle (detached spawn, a retry-connect ready
+  handshake, and single-owner exclusivity with stale-endpoint reaping). Built
+  from safe `std` + `tokio` only — no `unsafe`, no `libc`/`nix`. No user-facing
+  change: there is no `serve`/`connect` command yet and no session hosting over
+  it; this is transport/lifecycle groundwork alongside the unchanged stdio
+  drive. (`localpilot-rpc` widened `JsonRecordReader` to `pub` so the new crate
+  reuses its framing instead of duplicating it.)
+
 - **Internal: the provider layer is split into isolated crates.**
   `localpilot-llm` is now a thin umbrella over `localpilot-llm-core` (the shared
   provider trait, stream events, errors, auth, headers, request shapes) and one

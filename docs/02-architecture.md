@@ -370,6 +370,38 @@ Must not own: any HTTP server, permission decisions, or a product SDK — the
 supported embedding surface stays the in-process session runtime
 ([`docs/embedding.md`](embedding.md)).
 
+### `localpilot-server`
+
+Groundwork for an opt-in, single-machine local server: a cross-platform framed
+local-IPC transport and the daemon lifecycle around it. This is **transport and
+lifecycle only** — it does not host a `SessionRuntime` yet (that is a later
+subject), and there is no `serve`/`connect` CLI command. A tiny echo/ping serve
+loop proves the transport end to end.
+
+Owns:
+
+- a deterministic per-workspace endpoint scheme: a Unix domain socket under the
+  runtime dir (`$XDG_RUNTIME_DIR`/`$TMPDIR`/`/tmp`, `sun_path`-length checked)
+  or a Windows named pipe, keyed by a short stable hash of the canonical
+  workspace root, overridable by `LOCALPILOT_SERVER_SOCKET`
+- a uniform `Listener`/`Conn`/`connect` transport surface, identical across
+  platforms (`UnixListener`/`UnixStream` on Unix; `named_pipe` server/client on
+  Windows, with the create-next-instance-before-accept pattern), framed with
+  `localpilot-rpc`'s LF-delimited NDJSON codec reused as-is
+- daemon lifecycle: detached spawn of the current executable (new process group
+  on Unix; `DETACHED_PROCESS | CREATE_NO_WINDOW` on Windows; null stdio), a
+  bounded retry-connect ready handshake, and single-owner exclusivity
+- one-owner exclusivity with stale-endpoint reaping: an atomic exclusive-create
+  lock file next to the socket on Unix, the first-pipe-instance flag on Windows;
+  a failed acquire probes for a live daemon and either reuses it or reaps a
+  stale socket/lock and retries
+
+Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
+`libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`
+(`process_group`, `creation_flags`, `create_new`, `PermissionsExt`). The model
+is one connection per session (session hosting arrives later). The transport is
+opt-in and sits alongside — never replacing — the stdio embedding surface.
+
 ### `localpilot-sandbox`
 
 Owns:

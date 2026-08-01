@@ -1,0 +1,25 @@
+[package]
+name = "localpilot-server"
+version = "2.6.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+localpilot-rpc = { path = "../localpilot-rpc" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# `net` (additive over the workspace features) is required for the local IPC
+# transport: `tokio::net::UnixListener` on Unix and
+# `tokio::net::windows::named_pipe` on Windows. The rest of the tokio features
+# this crate uses (io-util for AsyncRead/AsyncWrite, time for retry backoff,
+# sync for the accept-side mutex, macros/rt for tests) are already enabled by
+# the workspace default and unify in.
+tokio = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread", "time"] }
