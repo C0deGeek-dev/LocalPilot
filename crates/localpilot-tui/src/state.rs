@@ -792,6 +792,7 @@ impl AppState {
             "Manage skills: repos, install, list (/skills <subcommand>)",
         ),
         ("bg", "List background processes (/bg stop <id>|all)"),
+        ("exit", "Exit LocalPilot (/exit [print])"),
         ("quit", "Exit LocalPilot"),
     ];
 

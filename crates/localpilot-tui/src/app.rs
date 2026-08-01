@@ -93,7 +93,11 @@ pub enum SlashAction {
     Skills(String),
     /// Manage background processes started this session.
     Background(BackgroundCommand),
-    Quit,
+    /// Leave interactive chat. Full-screen hosts may print the visible
+    /// conversation after terminal restoration when explicitly requested.
+    Exit {
+        print_transcript: bool,
+    },
     Invalid {
         command: String,
         reason: String,
@@ -219,7 +223,11 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
         _ if name == "agents" => SlashAction::Agents(args.to_string()),
         _ if name == "skills" => SlashAction::Skills(args.to_string()),
         _ if name == "bg" => parse_bg(args),
-        _ if matches!(name, "quit" | "q") && args.is_empty() => SlashAction::Quit,
+        _ if matches!(name, "exit" | "quit" | "q") && matches!(args, "" | "print") => {
+            SlashAction::Exit {
+                print_transcript: args == "print",
+            }
+        }
         _ if matches!(
             name,
             "agent"
@@ -236,6 +244,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
                 | "harness-resume"
                 | "wait-resume"
                 | "wait_resume"
+                | "exit"
                 | "quit"
                 | "q"
         ) =>
@@ -522,7 +531,7 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::Model { .. } => state.apply(UiEvent::Notice(
             "/model is handled by the interactive host".to_string(),
         )),
-        SlashAction::Quit => state.should_quit = true,
+        SlashAction::Exit { .. } => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
         }
@@ -798,6 +807,30 @@ mod tests {
         assert!(matches!(
             parse_slash("/name"),
             Some(SlashAction::Invalid { command, .. }) if command == "name"
+        ));
+    }
+
+    #[test]
+    fn exit_commands_parse_print_intent_and_reject_other_arguments() {
+        for command in ["/exit", "/quit", "/q"] {
+            assert_eq!(
+                parse_slash(command),
+                Some(SlashAction::Exit {
+                    print_transcript: false
+                })
+            );
+        }
+        for command in ["/exit print", "/quit print", "/q print"] {
+            assert_eq!(
+                parse_slash(command),
+                Some(SlashAction::Exit {
+                    print_transcript: true
+                })
+            );
+        }
+        assert!(matches!(
+            parse_slash("/exit later"),
+            Some(SlashAction::Invalid { command, .. }) if command == "exit"
         ));
     }
 

@@ -71,13 +71,27 @@ enum ChatUi {
     Fullscreen,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkspaceGitStatus {
-    branch: String,
-    dirty: Option<bool>,
+pub(crate) struct ChatOutcome {
+    pub(crate) succeeded: bool,
+    pub(crate) presentation: Option<String>,
 }
 
-fn workspace_git_status(root: &std::path::Path) -> Option<WorkspaceGitStatus> {
+impl ChatOutcome {
+    const fn success() -> Self {
+        Self {
+            succeeded: true,
+            presentation: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitStatus {
+    pub(crate) branch: String,
+    pub(crate) dirty: Option<bool>,
+}
+
+pub(crate) fn workspace_git_status(root: &std::path::Path) -> Option<WorkspaceGitStatus> {
     let branch =
         crate::harness_cmd::git_line(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .or_else(|| {
@@ -260,7 +274,7 @@ pub async fn run_chat(
     provider_id: Option<&str>,
     profile: Profile,
     resume: Option<localpilot_core::SessionId>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ChatOutcome> {
     let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
     let chat_ui = selected_chat_ui(std::env::var_os(CHAT_UI_ENV).as_deref())?;
@@ -396,6 +410,23 @@ pub async fn run_chat(
     localpilot_localmind::register_context_hook(&cwd, &mut runtime);
     timer.mark("context hooks");
 
+    let fullscreen_startup = if chat_ui == ChatUi::Fullscreen {
+        resume
+            .map(|session| prepare_fullscreen_resume(&mut runtime, session))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let resumed_session_name = runtime
+        .store()
+        .list_sessions()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .into_iter()
+                .find(|entry| entry.id == runtime.session_id())
+        })
+        .and_then(|entry| entry.name);
     let header = Header {
         version: env!("LOCALPILOT_VERSION").to_string(),
         provider: provider_id.unwrap_or(&config.provider.default).to_string(),
@@ -405,7 +436,7 @@ pub async fn run_chat(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string()),
         session_id: runtime.session_id().to_string(),
-        session_name: None,
+        session_name: resumed_session_name,
         // Remote-sourced (a release tag via the GitHub API) and rendered into
         // the banner without passing the state scrub — strip control bytes so
         // a garbled or hostile tag can never reach the terminal raw.
@@ -443,7 +474,7 @@ pub async fn run_chat(
                 session_id: header.session_id.clone(),
                 session_name: header.session_name.clone(),
             },
-            std::iter::empty(),
+            fullscreen_startup,
             crate::fullscreen::HostContext {
                 runtime: &mut runtime,
                 approval_rx: &mut approval_rx,
@@ -457,7 +488,10 @@ pub async fn run_chat(
         )
         .await;
         crate::context_inject::close_out(&cwd, runtime.session_id());
-        return result;
+        return result.map(|exit| ChatOutcome {
+            succeeded: !exit.trust_denied,
+            presentation: exit.presentation,
+        });
     }
 
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
@@ -544,7 +578,75 @@ pub async fn run_chat(
     // the abandoned (often empty) session for lessons instead of the one the
     // user actually worked in.
     crate::context_inject::close_out(&cwd, runtime.session_id());
-    result
+    result?;
+    Ok(ChatOutcome::success())
+}
+
+fn prepare_fullscreen_resume(
+    runtime: &mut SessionRuntime,
+    session: localpilot_core::SessionId,
+) -> Vec<crate::fullscreen::StartupItem> {
+    use crate::fullscreen::StartupItem;
+    use localpilot_core::Role;
+
+    let mut startup = Vec::new();
+    match runtime.load_session(session) {
+        Ok(report) => {
+            if report.skipped_lines > 0 {
+                startup.push(StartupItem::Notice(format!(
+                    "recovered session log: skipped {} damaged event line(s); the remaining events are intact",
+                    report.skipped_lines
+                )));
+            }
+            if let Ok(messages) = runtime.store().read_transcript(session) {
+                let (skipped, shown) = replay_selection(messages, RESUME_REPLAY_MESSAGES);
+                if skipped > 0 {
+                    startup.push(StartupItem::Notice(format!(
+                        "… {skipped} earlier message(s) not shown (context fully restored)"
+                    )));
+                }
+                startup.extend(shown.into_iter().map(|(role, text)| match role {
+                    Role::User => StartupItem::User(text),
+                    _ => StartupItem::Assistant(text),
+                }));
+            }
+            if let Some((input_tokens, output_tokens)) =
+                stored_session_usage(runtime.store(), session)
+            {
+                startup.push(StartupItem::Usage {
+                    input_tokens,
+                    output_tokens,
+                });
+            }
+            let (used, limit) = runtime.context_usage();
+            startup.push(StartupItem::ContextUsage { used, limit });
+            startup.push(StartupItem::Notice(format!(
+                "resumed session {session}; current profile and trust apply"
+            )));
+        }
+        Err(error) => startup.push(StartupItem::Notice(format!("resume failed: {error}"))),
+    }
+    startup
+}
+
+pub(crate) fn stored_session_usage(
+    store: &Store,
+    session: localpilot_core::SessionId,
+) -> Option<(u64, u64)> {
+    let events = store.read_events(session).ok()?;
+    let mut usage = None::<(u64, u64)>;
+    for event in events {
+        if let localpilot_store::SessionEventKind::UsageReported {
+            input_tokens,
+            output_tokens,
+        } = event.kind
+        {
+            let (input, output) = usage.get_or_insert((0, 0));
+            *input = input.saturating_add(input_tokens);
+            *output = output.saturating_add(output_tokens);
+        }
+    }
+    usage
 }
 
 async fn event_loop(
@@ -1015,7 +1117,7 @@ async fn run_slash(
         SlashAction::Background(command) => {
             apply_background_command(state, runtime.background_registry(), command)
         }
-        SlashAction::Quit => state.should_quit = true,
+        SlashAction::Exit { .. } => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
         }
@@ -3211,6 +3313,26 @@ mod tests {
         assert!(shown
             .iter()
             .all(|(role, _)| matches!(role, Role::User | Role::Assistant)));
+    }
+
+    #[test]
+    fn stored_session_usage_sums_every_reported_request() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(directory.path());
+        let session = localpilot_core::SessionId::new();
+        for (input_tokens, output_tokens) in [(100, 20), (7, 3)] {
+            store
+                .append_event(
+                    session,
+                    None,
+                    localpilot_store::SessionEventKind::UsageReported {
+                        input_tokens,
+                        output_tokens,
+                    },
+                )
+                .expect("append usage");
+        }
+        assert_eq!(stored_session_usage(&store, session), Some((107, 23)));
     }
 
     #[test]

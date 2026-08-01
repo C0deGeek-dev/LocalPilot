@@ -814,6 +814,7 @@ pub struct AppModel {
     pub work: WorkState,
     pub exit_armed: bool,
     pub exit_requested: bool,
+    print_transcript_on_exit: bool,
     pub plan: Vec<PlanEntry>,
     pub usage: Option<(u64, u64)>,
     pub context_usage: Option<(usize, usize)>,
@@ -862,6 +863,7 @@ impl AppModel {
             work: WorkState::Idle,
             exit_armed: false,
             exit_requested: false,
+            print_transcript_on_exit: false,
             plan: Vec::new(),
             usage: None,
             context_usage: None,
@@ -1280,7 +1282,13 @@ impl AppModel {
             RuntimeUpdate::Usage {
                 input_tokens,
                 output_tokens,
-            } => self.usage = Some((input_tokens, output_tokens)),
+            } => {
+                let (previous_input, previous_output) = self.usage.unwrap_or_default();
+                self.usage = Some((
+                    previous_input.saturating_add(input_tokens),
+                    previous_output.saturating_add(output_tokens),
+                ));
+            }
             RuntimeUpdate::ContextUsage { used, limit } => {
                 self.context_usage = Some((used, limit));
             }
@@ -1685,6 +1693,19 @@ impl AppModel {
         self.active_reasoning = None;
         self.active_tools.clear();
         self.active_insert_before = None;
+    }
+
+    /// Record whether an explicit exit command requested a restored-buffer
+    /// transcript. Keyboard exits always leave this at the safe summary-only
+    /// default.
+    pub fn request_exit(&mut self, print_transcript: bool) {
+        self.print_transcript_on_exit = print_transcript;
+        self.exit_requested = true;
+    }
+
+    #[must_use]
+    pub const fn print_transcript_on_exit(&self) -> bool {
+        self.print_transcript_on_exit
     }
 
     pub fn set_command_catalog(&mut self, commands: impl IntoIterator<Item = CompletionCommand>) {
@@ -3087,6 +3108,20 @@ mod tests {
             },
             TerminalCapabilities::default(),
         )
+    }
+
+    #[test]
+    fn usage_updates_accumulate_for_the_whole_session() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+        });
+        app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+        });
+        assert_eq!(app.usage, Some((107, 23)));
     }
 
     fn command(name: &str, description: &str) -> CompletionCommand {

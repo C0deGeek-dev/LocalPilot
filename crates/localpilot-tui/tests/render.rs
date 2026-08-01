@@ -283,7 +283,12 @@ fn resume_and_compact_slash_commands_are_parsed() {
         parse_slash("/compact force"),
         Some(SlashAction::Compact { force: true })
     );
-    assert_eq!(parse_slash("/q"), Some(SlashAction::Quit));
+    assert_eq!(
+        parse_slash("/q"),
+        Some(SlashAction::Exit {
+            print_transcript: false
+        })
+    );
     assert_eq!(
         parse_slash("/not-a-command"),
         Some(SlashAction::Unknown("not-a-command".to_string()))

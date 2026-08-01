@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
@@ -26,11 +26,11 @@ use crossterm::terminal::{
 use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
-    render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, DiffFile,
-    DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, KeyboardSupport, PlanEntry,
-    RecoveryState, RuntimeUpdate, SettingEntry, StopState, SubmittedInput, TakeoverNavigation,
-    TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand, UserShellOutput,
-    VisualRowPart,
+    render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
+    DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
+    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, SettingEntry, StopState,
+    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
+    UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::ElicitationOutcome;
@@ -71,6 +71,56 @@ pub(crate) struct HostContext<'a> {
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
     pub(crate) config: &'a localpilot_config::Config,
     pub(crate) trust_required: bool,
+}
+
+/// Bounded, already-selected state projected into the first full-screen frame.
+/// This is deliberately narrower than a runtime event: restored user messages
+/// are view state, not newly-executed model events.
+pub(crate) enum StartupItem {
+    User(String),
+    Assistant(String),
+    Notice(String),
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    ContextUsage {
+        used: usize,
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopExit {
+    Normal,
+    TrustDenied,
+}
+
+/// A terminal-session result can only be constructed after full-screen modes
+/// have been restored. Its presentation is therefore safe for the caller to
+/// write into the shell's main buffer.
+pub(crate) struct RestoredExit {
+    pub(crate) trust_denied: bool,
+    pub(crate) presentation: Option<String>,
+}
+
+struct ExitDraft {
+    trust_denied: bool,
+    presentation: Option<String>,
+}
+
+impl ExitDraft {
+    fn after_restore(self) -> RestoredExit {
+        RestoredExit {
+            trust_denied: self.trust_denied,
+            presentation: self.presentation,
+        }
+    }
+}
+
+fn restore_exit_with(exit: ExitDraft, restore: impl FnOnce()) -> RestoredExit {
+    restore();
+    exit.after_restore()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -233,6 +283,7 @@ enum TrustEventOutcome {
     ContinueSession,
     Remember,
     Exit,
+    Deny,
 }
 
 impl std::fmt::Debug for TrustEventOutcome {
@@ -246,15 +297,17 @@ impl std::fmt::Debug for TrustEventOutcome {
             Self::ContinueSession => formatter.write_str("ContinueSession"),
             Self::Remember => formatter.write_str("Remember"),
             Self::Exit => formatter.write_str("Exit"),
+            Self::Deny => formatter.write_str("Deny"),
         }
     }
 }
 
 pub(crate) async fn run(
     header: Header,
-    startup_events: impl IntoIterator<Item = RuntimeEvent>,
+    startup_items: impl IntoIterator<Item = StartupItem>,
     context: HostContext<'_>,
-) -> Result<()> {
+) -> Result<RestoredExit> {
+    let started = Instant::now();
     install_panic_restore_hook();
     let mouse_capture = std::env::var(CHAT_MOUSE_ENV)
         .ok()
@@ -272,8 +325,8 @@ pub(crate) async fn run(
         fullscreen_model_values(context.config, context.runtime.active_provider_id()),
     );
     apply_host_preferences(&mut app);
-    for event in startup_events {
-        app.apply_runtime(map_runtime_event(event));
+    for item in startup_items {
+        apply_startup_item(&mut app, item);
     }
     if context.trust_required {
         app.require_workspace_trust(context.cwd.display().to_string());
@@ -292,6 +345,7 @@ pub(crate) async fn run(
             .map(expand_history_entry)
             .collect(),
     );
+    let exit_cwd = context.cwd.to_path_buf();
     let result = run_event_loop(
         &mut terminal,
         &mut modes,
@@ -300,14 +354,144 @@ pub(crate) async fn run(
         &mut workspace_index,
     )
     .await;
+    let exit_draft = result.as_ref().ok().map(|exit| match exit {
+        LoopExit::Normal => ExitDraft {
+            trust_denied: false,
+            presentation: Some(exit_presentation(
+                &app,
+                &exit_cwd,
+                started.elapsed(),
+                app.print_transcript_on_exit(),
+            )),
+        },
+        LoopExit::TrustDenied => ExitDraft {
+            trust_denied: true,
+            presentation: None,
+        },
+    });
     let _ = terminal.show_cursor();
     drop(terminal);
-    modes.restore();
-    result
+    if let Err(error) = result {
+        modes.restore();
+        return Err(error);
+    }
+    let exit_draft = exit_draft.context("full-screen exit outcome was not captured")?;
+    Ok(restore_exit_with(exit_draft, || modes.restore()))
+}
+
+fn apply_startup_item(app: &mut AppModel, item: StartupItem) {
+    match item {
+        StartupItem::User(text) => {
+            let _ = app.append_prompt(text, None, false);
+        }
+        StartupItem::Assistant(text) => {
+            app.apply_runtime(RuntimeUpdate::Text(text));
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        }
+        StartupItem::Notice(text) => app.apply_runtime(RuntimeUpdate::Notice(text)),
+        StartupItem::Usage {
+            input_tokens,
+            output_tokens,
+        } => app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens,
+            output_tokens,
+        }),
+        StartupItem::ContextUsage { used, limit } => {
+            app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
+        }
+    }
+}
+
+fn exit_presentation(app: &AppModel, cwd: &Path, elapsed: Duration, print: bool) -> String {
+    let mut sections = Vec::new();
+    if print {
+        let transcript = visible_transcript(app);
+        if !transcript.is_empty() {
+            sections.push(transcript);
+        }
+    }
+
+    let mut summary = vec![
+        "LocalPilot".to_string(),
+        format!("Session: {}", format_elapsed(elapsed)),
+    ];
+    if let Some((input, output)) = app.usage {
+        summary.push(format!(
+            "Tokens: {} input · {} output",
+            format_count(input),
+            format_count(output)
+        ));
+    }
+    if let Some(status) = crate::repl::workspace_git_status(cwd) {
+        let state = match status.dirty {
+            Some(true) => " · uncommitted changes",
+            Some(false) => " · clean",
+            None => "",
+        };
+        summary.push(format!("Workspace: {}{state}", status.branch));
+    }
+    summary.push(format!(
+        "Resume: localpilot chat --resume {}",
+        app.header.session_id
+    ));
+    sections.push(summary.join("\n"));
+    format!("{}\n", sections.join("\n\n"))
+}
+
+fn visible_transcript(app: &AppModel) -> String {
+    app.timeline
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let label = match item.kind {
+                ItemKind::User => "You",
+                ItemKind::Assistant => "LocalPilot",
+                ItemKind::Reasoning => return None,
+                ItemKind::Tool => "Tool",
+                ItemKind::Question => "Question",
+                ItemKind::Shell => "Shell",
+                ItemKind::Notice => "Notice",
+            };
+            let visible = if item.kind == ItemKind::Tool && !item.expanded {
+                item.text.lines().next().unwrap_or_default()
+            } else {
+                &item.text
+            };
+            let visible = sanitize_text(visible);
+            (!visible.trim().is_empty()).then(|| format!("{label}\n{visible}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
 }
 
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
-    const SUPPORTED: &[&str] = &["model", "new", "fork", "clone", "clear", "quit"];
+    const SUPPORTED: &[&str] = &["model", "new", "fork", "clone", "clear", "exit", "quit"];
     let mut command_catalog = localpilot_tui::AppState::slash_commands()
         .iter()
         .filter(|(name, _)| SUPPORTED.contains(name))
@@ -1204,7 +1388,10 @@ async fn execute_fullscreen_slash(
                 ))),
             }
         }
-        SlashAction::Quit => return true,
+        SlashAction::Exit { print_transcript } => {
+            app.request_exit(print_transcript);
+            return true;
+        }
         SlashAction::Invalid { command, reason } => {
             app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "invalid /{command}: {reason}"
@@ -1237,7 +1424,7 @@ async fn run_event_loop(
     app: &mut AppModel,
     context: HostContext<'_>,
     workspace_index: &mut WorkspaceFileIndex,
-) -> Result<()> {
+) -> Result<LoopExit> {
     let HostContext {
         runtime,
         approval_rx,
@@ -1272,6 +1459,7 @@ async fn run_event_loop(
                     crate::repl::start_session_knowledge_index(cwd, ingest);
                 }
                 TrustEventOutcome::Exit => break,
+                TrustEventOutcome::Deny => return Ok(LoopExit::TrustDenied),
             }
             continue;
         }
@@ -1285,6 +1473,10 @@ async fn run_event_loop(
         }
         match next {
             Event::Key(key) if is_key_action(key) => {
+                if is_quit_key(key) {
+                    app.request_exit(false);
+                    break;
+                }
                 if is_clipboard_image_key(key) {
                     attach_clipboard_image_idle(app, runtime, config, false).await;
                     continue;
@@ -1372,7 +1564,10 @@ async fn run_event_loop(
             | Event::Key(_) => {}
         }
     }
-    Ok(())
+    if let Some(usage) = crate::repl::stored_session_usage(runtime.store(), runtime.session_id()) {
+        app.usage = Some(usage);
+    }
+    Ok(LoopExit::Normal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1412,6 +1607,7 @@ async fn drive_operation_chain(
                 )
                 .await?
                 {
+                    discard_queued_operations(queue);
                     return Ok(true);
                 }
             }
@@ -1432,6 +1628,7 @@ async fn drive_operation_chain(
                 )
                 .await?
                 {
+                    discard_queued_operations(queue);
                     return Ok(true);
                 }
             }
@@ -1439,6 +1636,10 @@ async fn drive_operation_chain(
         current = queue.pop_front();
     }
     Ok(false)
+}
+
+fn discard_queued_operations(queue: &mut VecDeque<QueuedOperation>) {
+    queue.clear();
 }
 
 #[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
@@ -1611,6 +1812,10 @@ fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> Tru
             TrustEventOutcome::Pending
         }
         Event::Key(key) if is_key_action(key) => {
+            if is_quit_key(key) {
+                app.request_exit(false);
+                return TrustEventOutcome::Exit;
+            }
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Copy(text) => TrustEventOutcome::Copy(text),
@@ -1626,7 +1831,7 @@ fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> Tru
                 TrustAction::None => TrustEventOutcome::Pending,
                 TrustAction::ContinueSession => TrustEventOutcome::ContinueSession,
                 TrustAction::Remember => TrustEventOutcome::Remember,
-                TrustAction::Deny => TrustEventOutcome::Exit,
+                TrustAction::Deny => TrustEventOutcome::Deny,
             }
         }
         _ => TrustEventOutcome::Pending,
@@ -1769,6 +1974,11 @@ fn handle_turn_event(
 ) -> bool {
     match event {
         Event::Key(key) if is_key_action(key) => {
+            if is_quit_key(key) {
+                app.request_exit(false);
+                cancel.cancel();
+                return true;
+            }
             if is_clipboard_image_key(key) {
                 attach_clipboard_image_with_capability(app, image_capability, false);
                 return false;
@@ -1789,17 +1999,19 @@ fn handle_turn_event(
                     copy_to_clipboard(app, text);
                     false
                 }
-                AppCommand::RunSlash(submitted) => {
-                    if matches!(parse_slash(&submitted.prompt), Some(SlashAction::Quit)) {
+                AppCommand::RunSlash(submitted) => match parse_slash(&submitted.prompt) {
+                    Some(SlashAction::Exit { print_transcript }) => {
+                        app.request_exit(print_transcript);
                         cancel.cancel();
                         true
-                    } else {
+                    }
+                    _ => {
                         app.apply_runtime(RuntimeUpdate::Notice(
                             "slash commands run when the current operation is idle".to_string(),
                         ));
                         false
                     }
-                }
+                },
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
                         prepare_prompt_operation(app, history, cwd, submitted, true)
@@ -2290,6 +2502,12 @@ fn handle_approval_event(
     if !is_key_action(key) {
         return false;
     }
+    if is_quit_key(key) {
+        app.request_exit(false);
+        deny_pending(app, pending);
+        cancel.cancel();
+        return true;
+    }
     if is_cancel(key) {
         let command = app.handle_input(InputAction::CancelOrExit, 1);
         return match command {
@@ -2365,6 +2583,12 @@ fn handle_question_event(
             resolve_question_action(app, resolution, pending)
         }
         Event::Key(key) if is_key_action(key) => {
+            if is_quit_key(key) {
+                app.request_exit(false);
+                finish_question(app, pending, ElicitationOutcome::Cancelled);
+                cancel.cancel();
+                return true;
+            }
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Exit => {
@@ -2554,6 +2778,12 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Down => Some(InputAction::MoveDown),
         _ => None,
     }
+}
+
+fn is_quit_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('q')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
 pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
@@ -3038,13 +3268,82 @@ mod tests {
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
         for supported in [
-            "model", "new", "fork", "clone", "clear", "quit", "help", "theme", "settings", "diff",
+            "model", "new", "fork", "clone", "clear", "exit", "quit", "help", "theme", "settings",
+            "diff",
         ] {
             assert!(catalog.iter().any(|command| command.name == supported));
         }
         for deferred in ["compact", "research", "skills", "sessions"] {
             assert!(!catalog.iter().any(|command| command.name == deferred));
         }
+    }
+
+    #[test]
+    fn ctrl_q_is_an_explicit_summary_only_exit() {
+        assert!(is_quit_key(press(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_quit_key(press(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn exit_print_uses_only_sanitized_visible_timeline_content() {
+        let mut app = app();
+        let _ = app.append_prompt("hello\x1b[2Jworld", None, false);
+        app.apply_runtime(RuntimeUpdate::Reasoning(
+            "HIDDEN_REASONING_SECRET".to_string(),
+        ));
+        app.apply_runtime(RuntimeUpdate::Text("visible answer".to_string()));
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-1".to_string(),
+            name: "read_file".to_string(),
+            detail: "COLLAPSED_DETAIL_SECRET".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "tool-1".to_string(),
+            name: "read_file".to_string(),
+            is_error: false,
+            cancelled: false,
+            output: "COLLAPSED_OUTPUT_SECRET".to_string(),
+            duration_ms: 20,
+        });
+        app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens: 1_234,
+            output_tokens: 56,
+        });
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let output = exit_presentation(&app, directory.path(), Duration::from_secs(62), true);
+        assert!(output.contains("You\nhelloworld"));
+        assert!(output.contains("LocalPilot\nvisible answer"));
+        assert!(output.contains("Tokens: 1,234 input · 56 output"));
+        assert!(output.contains("Resume: localpilot chat --resume fixture-session"));
+        assert!(!output.contains("HIDDEN_REASONING_SECRET"));
+        assert!(!output.contains("COLLAPSED_DETAIL_SECRET"));
+        assert!(!output.contains("COLLAPSED_OUTPUT_SECRET"));
+        assert!(!output.contains('\x1b'));
+
+        let summary = exit_presentation(&app, directory.path(), Duration::ZERO, false);
+        assert!(!summary.contains("hello"));
+        assert!(!summary.contains("visible answer"));
+    }
+
+    #[test]
+    fn restored_exit_witness_is_created_after_restore() {
+        let mut order = Vec::new();
+        let exit = restore_exit_with(
+            ExitDraft {
+                trust_denied: false,
+                presentation: Some("summary".to_string()),
+            },
+            || order.push("restore"),
+        );
+        if exit.presentation.is_some() {
+            order.push("write summary");
+        }
+        assert_eq!(order, ["restore", "write summary"]);
     }
 
     #[test]
@@ -3768,6 +4067,79 @@ mod tests {
     }
 
     #[test]
+    fn active_exit_cancels_work_and_discards_queued_operations() {
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+
+        app.editor.insert("queued prompt that must not run");
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        ));
+        assert_eq!(queue.len(), 1);
+
+        app.editor.insert("/exit print");
+        let exit = handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        );
+        assert!(exit);
+        assert!(cancel.is_cancelled());
+        assert!(app.print_transcript_on_exit());
+
+        if exit {
+            discard_queued_operations(&mut queue);
+        }
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn resume_startup_projection_restores_messages_usage_and_context() {
+        let mut app = app();
+        for item in [
+            StartupItem::User("prior prompt".to_string()),
+            StartupItem::Assistant("prior answer".to_string()),
+            StartupItem::Usage {
+                input_tokens: 100,
+                output_tokens: 25,
+            },
+            StartupItem::ContextUsage {
+                used: 300,
+                limit: 4_000,
+            },
+            StartupItem::Notice("resume ready".to_string()),
+        ] {
+            apply_startup_item(&mut app, item);
+        }
+
+        assert_eq!(app.timeline.items()[0].kind, ItemKind::User);
+        assert_eq!(app.timeline.items()[0].text, "prior prompt");
+        assert_eq!(app.timeline.items()[1].kind, ItemKind::Assistant);
+        assert_eq!(app.timeline.items()[1].text, "prior answer");
+        assert_eq!(app.usage, Some((100, 25)));
+        assert_eq!(app.context_usage, Some((300, 4_000)));
+        assert_eq!(
+            app.timeline.items().last().expect("notice").kind,
+            ItemKind::Notice
+        );
+    }
+
+    #[test]
     fn active_turn_never_queues_a_slash_command_as_provider_input() {
         let temp = tempfile::tempdir().expect("temp history");
         let history = localpilot_store::PromptHistory::with_store(Some(
@@ -4260,7 +4632,7 @@ mod tests {
                 Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
                 &hit_map,
             ),
-            TrustEventOutcome::Exit
+            TrustEventOutcome::Deny
         );
 
         app.select_trust_option(0);
@@ -4270,7 +4642,7 @@ mod tests {
                 Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
                 &hit_map,
             ),
-            TrustEventOutcome::Exit
+            TrustEventOutcome::Deny
         );
     }
 
