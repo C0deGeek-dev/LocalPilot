@@ -83,7 +83,7 @@ fn remember_in(cwd: &Path, path: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 pub(crate) fn remember_in_test_store(cwd: &Path, path: &Path) {
     remember_in(cwd, path);
 }

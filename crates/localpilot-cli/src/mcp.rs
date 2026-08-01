@@ -9,9 +9,9 @@ use std::sync::Arc;
 use localpilot_config::{Config, CredentialStore, McpServerConfig, ToolsConfig};
 use localpilot_mcp::{McpClient, McpTool, McpToolDescriptor, Transport};
 use localpilot_sandbox::Effect;
-use localpilot_tools::{
-    Broker, BrokerConfig, Tool, ToolLoad, ToolRegistry, ToolSearch, ToolSource,
-};
+#[cfg(any(feature = "tui", test))]
+use localpilot_tools::Tool;
+use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
 
 use crate::mcp_env::{spawn_server, ServerLaunchError};
 
@@ -65,6 +65,7 @@ impl McpTools {
     /// Build the ordinary registry after reserving a host-owned builtin name.
     /// MCP collision handling then prefixes a remote tool with the same name,
     /// keeping the host capability reachable without duplicate model specs.
+    #[cfg(any(feature = "tui", test))]
     #[must_use]
     pub fn registry_with_builtin(&self, tool: Box<dyn Tool>) -> ToolRegistry {
         let mut registry = ToolRegistry::with_builtins();
