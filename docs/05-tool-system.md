@@ -279,6 +279,12 @@ Shell and process behaviour:
   *entire* process tree is killed (`taskkill /T /F` on Windows; a process-group
   `kill` on Unix), so a shell-wrapped build's grandchildren (`make`→`cc1`,
   `gradle`→its daemon) never orphan and leak memory for the rest of the session.
+- **Whole-tree termination on cancellation.** Dropping an in-flight
+  `run_shell` future synchronously drops its capture readers, so late child
+  output cannot enter model context, and an armed process-tree guard then
+  best-effort signals the same Windows tree or Unix process group. The runtime
+  synthesizes an explicit cancelled error result and records the failed tool
+  completion rather than reporting success.
 
 ### `run_background`
 

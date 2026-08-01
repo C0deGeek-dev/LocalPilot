@@ -53,6 +53,38 @@ struct NormalizedRunShellInput {
     timeout_secs: Option<u64>,
 }
 
+/// Owns the spawned command's process tree until the child has been reaped.
+/// Dropping an in-flight `run_shell` future must not orphan a shell wrapper's
+/// grandchildren, so the fallback path signals the whole tree best-effort.
+struct ProcessTreeGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessTreeGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    async fn kill(&mut self) {
+        if let Some(pid) = self.pid {
+            kill_process_tree(pid).await;
+            self.pid = None;
+        }
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            kill_process_tree_detached(pid);
+        }
+    }
+}
+
 /// Resolve the `command` / `program` + `args` fields shared by `run_shell` and
 /// `run_background` into a single execution: a `command` (or a bare `program`
 /// with no args) runs through the platform shell; a `program` with `args` runs
@@ -495,19 +527,18 @@ impl Tool for RunShell {
         let child = command
             .spawn()
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
-        let pid = child.id();
+        let mut process_tree = ProcessTreeGuard::new(child.id());
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
+            Ok(Ok(output)) => {
+                process_tree.disarm();
+                output
+            }
             Ok(Err(e)) => {
-                if let Some(pid) = pid {
-                    kill_process_tree(pid).await;
-                }
+                process_tree.kill().await;
                 return Err(ToolError::Failed(e.to_string()));
             }
             Err(_) => {
-                if let Some(pid) = pid {
-                    kill_process_tree(pid).await;
-                }
+                process_tree.kill().await;
                 return Err(ToolError::Failed(format!(
                     "command timed out after {}s. If this is a long-running server or \
                      watcher, start it with the `run_background` tool instead.",
@@ -663,6 +694,76 @@ mod tests {
             !output.is_error,
             "sort on a null stdin should exit cleanly: {}",
             output.text
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_run_shell_reaps_the_process_tree_before_a_grandchild_can_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+        };
+        let started = dir.path().join("started.txt");
+        let leaked = dir.path().join("leaked.txt");
+
+        #[cfg(windows)]
+        let input = json!({
+            "program": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                format!(
+                    "Set-Content -LiteralPath '{}' -Value ready; ping.exe -n 4 127.0.0.1 | Out-Null; Set-Content -LiteralPath '{}' -Value leaked",
+                    started.display().to_string().replace('\'', "''"),
+                    leaked.display().to_string().replace('\'', "''")
+                )
+            ],
+            "timeout_secs": 30
+        });
+        #[cfg(not(windows))]
+        let input = json!({
+            "program": "sh",
+            "args": [
+                "-c",
+                format!(
+                    "printf ready > '{}'; sleep 3; printf leaked > '{}'",
+                    started.display(),
+                    leaked.display()
+                )
+            ],
+            "timeout_secs": 30
+        });
+
+        let mut invocation = Box::pin(RunShell.invoke(input, &ctx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut invocation => {
+                        panic!("fixture command exited before cancellation: {result:?}")
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if started.is_file() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("fixture command should publish its started marker");
+
+        drop(invocation);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !leaked.exists(),
+            "a dropped run_shell future must reap the delayed process tree"
         );
     }
 

@@ -1,6 +1,7 @@
 //! Agent-mode session runtime integration tests, driven by the fake provider.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,10 @@ use localpilot_core::{ContentBlock, Message};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::{FakeProvider, ModelEvent, ProviderError, QuotaInfo};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_sandbox::{
+    Approver, Interactivity, PermissionEngine, PermissionRequest, Profile, ScriptedApprover,
+    Workspace,
+};
 use localpilot_store::Store;
 use localpilot_tools::ToolRegistry;
 use serde_json::json;
@@ -21,6 +25,20 @@ struct Harness {
     events: broadcast::Sender<RuntimeEvent>,
     cancel: CancellationToken,
     store: Store,
+}
+
+struct PendingApprover {
+    called: Arc<AtomicBool>,
+}
+
+impl Approver for PendingApprover {
+    fn approve<'a>(
+        &'a self,
+        _request: &'a PermissionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        self.called.store(true, Ordering::SeqCst);
+        Box::pin(std::future::pending())
+    }
 }
 
 fn build(provider: FakeProvider, files: &[(&str, &str)], config: SessionConfig) -> Harness {
@@ -1161,6 +1179,136 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
     let request = provider.requests().pop().unwrap();
     let roles: Vec<_> = request.messages.iter().map(|m| m.role).collect();
     assert!(roles.contains(&localpilot_core::Role::UserShell));
+}
+
+#[tokio::test]
+async fn cancelled_user_shell_command_records_an_explicit_error_and_one_audit_pair() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let mut h = build_from_arc(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let session = h.runtime.session_id();
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        trigger.cancel();
+    });
+
+    #[cfg(windows)]
+    let command = "ping.exe -n 3 127.0.0.1 | Out-Null; Write-Output LATE";
+    #[cfg(not(windows))]
+    let command = "sleep 2; printf LATE";
+    let result = h
+        .runtime
+        .run_user_shell_command(command, &cancel, false)
+        .await;
+    assert!(result.is_error);
+    assert!(result.output.contains("cancelled"), "{}", result.output);
+
+    let transcript = h.store.read_transcript(session).unwrap();
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].role, localpilot_core::Role::UserShell);
+    assert!(message_text(&transcript).contains("cancelled"));
+
+    let events = h.store.read_events(session).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                localpilot_store::SessionEventKind::ToolStarted { name, .. }
+                    if name == "run_shell"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                localpilot_store::SessionEventKind::ToolFinished {
+                    name,
+                    is_error: true,
+                    ..
+                } if name == "run_shell"
+            ))
+            .count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let transcript_text = message_text(&h.store.read_transcript(session).unwrap());
+    let result_text = transcript_text
+        .split_once('\n')
+        .map_or(transcript_text.as_str(), |(_, result)| result);
+    assert!(
+        !result_text.contains("LATE"),
+        "output produced after cancellation must never enter the transcript"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_user_shell_during_approval_starts_no_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("must-not-exist.txt");
+    let store = Store::open(dir.path());
+    let called = Arc::new(AtomicBool::new(false));
+    let mut runtime = SessionRuntime::new(
+        Arc::new(FakeProvider::new().text("unused")),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(PendingApprover {
+            called: Arc::clone(&called),
+        }),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    let session = runtime.session_id();
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let approval_called = Arc::clone(&called);
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !approval_called.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the permission engine should request approval");
+        trigger.cancel();
+    });
+
+    #[cfg(windows)]
+    let command = format!(
+        "Set-Content -LiteralPath '{}' -Value spawned",
+        marker.display().to_string().replace('\'', "''")
+    );
+    #[cfg(not(windows))]
+    let command = format!("touch '{}'", marker.display());
+    let result = runtime
+        .run_user_shell_command(&command, &cancel, false)
+        .await;
+    assert!(called.load(Ordering::SeqCst));
+    assert!(result.is_error);
+    assert!(result.output.contains("cancelled"), "{}", result.output);
+    assert!(!marker.exists(), "approval cancellation must spawn nothing");
+
+    let transcript = store.read_transcript(session).unwrap();
+    assert_eq!(transcript.len(), 1);
+    assert!(message_text(&transcript).contains("cancelled"));
+    let events = store.read_events(session).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        localpilot_store::SessionEventKind::ToolFinished { is_error: true, .. }
+    )));
 }
 
 #[tokio::test]

@@ -1068,12 +1068,44 @@ impl SessionRuntime {
         args: &[String],
         exclude_from_context: bool,
     ) -> localpilot_core::ToolResult {
+        let input = serde_json::json!({ "program": program, "args": args });
+        let shown = if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", args.join(" "))
+        };
+        self.run_user_shell_input(input, shown, exclude_from_context, None)
+            .await
+    }
+
+    /// Run a user-authored shell command through the ordinary tool registry and
+    /// permission path while allowing an interactive host to cancel approval or
+    /// execution. Cancellation produces an explicit error result and audit
+    /// event; dropping an active `run_shell` dispatch reaps its process tree.
+    pub async fn run_user_shell_command(
+        &mut self,
+        command: &str,
+        cancel: &CancellationToken,
+        exclude_from_context: bool,
+    ) -> localpilot_core::ToolResult {
+        self.run_user_shell_input(
+            serde_json::json!({ "command": command }),
+            command.to_string(),
+            exclude_from_context,
+            Some(cancel),
+        )
+        .await
+    }
+
+    async fn run_user_shell_input(
+        &mut self,
+        input: serde_json::Value,
+        shown: String,
+        exclude_from_context: bool,
+        cancel: Option<&CancellationToken>,
+    ) -> localpilot_core::ToolResult {
         let call_id = format!("user-shell-{}", EventId::new());
-        let call = ToolCall::new(
-            ToolUseId::from(call_id.as_str()),
-            "run_shell",
-            serde_json::json!({ "program": program, "args": args }),
-        );
+        let call = ToolCall::new(ToolUseId::from(call_id.as_str()), "run_shell", input);
         self.record_event(SessionEventKind::ToolStarted {
             id: call_id.clone(),
             name: "run_shell".to_string(),
@@ -1088,21 +1120,41 @@ impl SessionRuntime {
             agents: None,
         };
         let engine = self.engine.snapshot();
-        let result = self
-            .tools
-            .dispatch(&call, &ctx, &engine, self.approver.as_ref())
-            .await;
+        let (result, cancelled) = if let Some(cancel) = cancel {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => (
+                    localpilot_core::ToolResult::error(
+                        call.id.clone(),
+                        "cancelled by the user; execution aborted",
+                    ),
+                    true,
+                ),
+                result = self.tools.dispatch(
+                    &call,
+                    &ctx,
+                    &engine,
+                    self.approver.as_ref(),
+                ) => (result, false),
+            }
+        } else {
+            (
+                self.tools
+                    .dispatch(&call, &ctx, &engine, self.approver.as_ref())
+                    .await,
+                false,
+            )
+        };
+        if cancelled {
+            self.record_event(SessionEventKind::Cancelled);
+        }
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
             name: "run_shell".to_string(),
             is_error: result.is_error,
         });
         if !exclude_from_context {
-            let rendered = if args.is_empty() {
-                format!("$ {program}\n{}", result.output)
-            } else {
-                format!("$ {program} {}\n{}", args.join(" "), result.output)
-            };
+            let rendered = format!("$ {shown}\n{}", result.output);
             self.append(Message::text(Role::UserShell, rendered));
         }
         result
