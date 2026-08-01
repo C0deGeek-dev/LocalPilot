@@ -291,6 +291,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
         let input = json!({ "url": "https://example.test" });
         let output = tool.invoke(input.clone(), &context).await.unwrap();
@@ -314,6 +315,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         }
     }
 

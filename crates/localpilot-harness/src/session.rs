@@ -728,6 +728,11 @@ pub struct SessionRuntime {
     /// default) means no human is reachable on this session — a piped run, a CI
     /// run, a subagent — and the tool says so rather than waiting.
     prompter: Option<std::sync::Arc<dyn localpilot_tools::UserPrompter>>,
+    /// The host that can reach this session's swarm peers, enabling the `swarm`
+    /// tool. `None` (the default) means this session is not collaborating, which
+    /// is the overwhelmingly common case; the tool then reports itself
+    /// unavailable rather than failing obscurely.
+    peers: Option<std::sync::Arc<dyn localpilot_tools::SwarmPeers>>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -870,6 +875,7 @@ impl SessionRuntime {
             named_targets: Vec::new(),
             agents: None,
             prompter: None,
+            peers: None,
             broker: None,
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
@@ -1262,6 +1268,7 @@ impl SessionRuntime {
             processes: Some(self.background.as_ref()),
             agents: None,
             prompter: None,
+            peers: None,
         };
         let engine = self.engine.snapshot();
         let result = self
@@ -1358,6 +1365,13 @@ impl SessionRuntime {
 
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
         self.agents = Some(agents);
+    }
+
+    /// Install the host that can reach this session's swarm peers, enabling the
+    /// `swarm` tool. A server hosting a swarm wires this per session; every
+    /// other caller leaves it unset.
+    pub fn set_peers(&mut self, peers: std::sync::Arc<dyn localpilot_tools::SwarmPeers>) {
+        self.peers = Some(peers);
     }
 
     pub fn set_broker(&mut self, broker: Option<Broker>) {
@@ -2855,6 +2869,7 @@ impl SessionRuntime {
                                     .as_ref()
                                     .map(|h| h as &dyn localpilot_tools::AgentHost),
                                 prompter: self.prompter.as_deref(),
+                                peers: self.peers.as_deref(),
                             };
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,

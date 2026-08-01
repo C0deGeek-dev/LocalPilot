@@ -616,6 +616,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
     }
@@ -632,6 +633,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
         // A command that sleeps well past the 1s timeout: the timeout path must
         // return a "timed out" error and exercise the tree-reap (kill_process_tree
@@ -664,6 +666,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
         let input = json!({ "program": "sort", "timeout_secs": 10 });
         let output = RunShell

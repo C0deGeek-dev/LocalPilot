@@ -252,7 +252,9 @@ impl SwarmHost {
             .await
             .ok_or_else(|| SpawnError::Registry(RegistryError::NotFound.to_string()))?;
         self.swarms.join_as_root(swarm, session, name).await?;
-        Ok(self.host_for(session, handle).await)
+        let host = self.host_for(session, handle).await;
+        self.bind_peers(swarm, session).await;
+        Ok(host)
     }
 
     /// The host for a session, if this swarm host is serving it.
@@ -317,6 +319,7 @@ impl SwarmHost {
             )
             .await?;
         self.host_for(session, handle).await;
+        self.bind_peers(&request.swarm, session).await;
         Ok(Spawned::Started { session })
     }
 
@@ -468,6 +471,18 @@ impl SwarmHost {
     /// is serving it any more.
     pub async fn unhost(&self, session: SessionId) -> Option<Arc<SessionHost>> {
         self.hosts.write().await.remove(&session)
+    }
+
+    /// Give `session` its view of the swarm, so the messaging tool it already
+    /// carries stops reporting itself unavailable.
+    ///
+    /// Done here rather than in the factory because the view has to name the
+    /// session, and the session id does not exist until the runtime is built.
+    async fn bind_peers(&self, swarm: &SwarmId, session: SessionId) {
+        if let Some(handle) = self.sessions.get(session).await {
+            let peers = super::messaging::SessionPeers::new(self.clone(), swarm.clone(), session);
+            handle.lock().await.set_peers(Arc::new(peers));
+        }
     }
 
     /// The host for `session`, creating it if this is the first time.

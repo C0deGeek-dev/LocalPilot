@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: `swarm` — agent-to-agent messaging.** Sessions collaborating on one
+  repository can now message each other: `send` to one peer by name or id,
+  `broadcast` to the agents you spawned (the whole swarm only if you are the
+  coordinator), and `roster` to see who is here. Scope is the spawn tree, so one
+  worker cannot cost every other worker a turn. Delivery rides the same
+  soft-interrupt substrate as the user's own steering, in three modes —
+  `notify`, `interrupt`, and `wake` (which starts a turn on an idle recipient,
+  since there is nothing to interrupt). A long message requires a one-line
+  summary, because the recipient is mid-task and has to decide whether to break
+  off before reading the rest. Action verbs and field names are normalised, so a
+  model writing `dm`/`tell`/`msg` with the body under `text` or `content` is
+  understood rather than made to retry. The tool declares no effects and is
+  gated by a host capability instead: a session that is not in a swarm — nearly
+  every session — is told so and carries on.
+
 - **Added: swarm state and parallel headless workers for the opt-in server.** A
   server can now host several sessions in one repository working on one plan.
   Swarms are scoped by *repository* rather than by path — every git worktree of

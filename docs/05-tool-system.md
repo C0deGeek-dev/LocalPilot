@@ -223,6 +223,53 @@ Rules:
   Nothing else from the child crosses over — its tool calls and stream output
   belong to its transcript, not the caller's
 
+### `swarm`
+
+Agent-to-agent messaging for the sessions collaborating on one repository.
+Registered always, but gated by a **host capability** rather than by the
+permission engine: it declares no effects (a message touches no file and runs no
+command), and a session that is not part of a swarm is told so and moves on. It
+is therefore inert on the single-agent path, which is nearly every session.
+
+One tool with three actions rather than three tools. A session not in a swarm
+should cost one unused entry in the schema, not three — and a model shown
+`swarm_send`, `swarm_broadcast`, and `swarm_roster` will reliably invent
+`swarm_reply`.
+
+- `send` — one peer, addressed by name or by session id. An unknown *or
+  ambiguous* name is refused: delivering "tell the reviewer" to an arbitrary one
+  of two reviewers is worse than not delivering it.
+- `broadcast` — every agent below the sender in the spawn tree. `scope: swarm`
+  reaches every member, and is **coordinator-only**: without that, one worker
+  deciding to keep everyone informed costs every other worker a turn, and the
+  cost scales with the square of the swarm.
+- `roster` — who is here, what each is doing, and which of them the asker
+  spawned.
+
+**Verb and field normalisation.** Models do not spell an action the way the
+schema does; they write `dm`, `tell`, `msg`, `announce`, and put the body under
+`text` or `content` or `message`. All of those are accepted. Refusing them costs
+a turn every time and usually produces the same guess again.
+
+**A long body requires a `tldr`.** Above ~600 bytes the message is rejected
+without a one-line summary. The recipient is another agent in the middle of its
+own task, deciding whether this is worth breaking off for — and it cannot make
+that decision by reading the whole message, because reading it *is* breaking off
+for it.
+
+**Delivery modes**, all riding the same soft-interrupt substrate the user's own
+steering uses, so there is exactly one set of ordering rules:
+
+| Mode | Behaviour |
+| --- | --- |
+| `notify` (default) | Queued for the recipient's next safe boundary, non-urgent. |
+| `interrupt` | Queued urgent — admitted between tool calls rather than after the batch. |
+| `wake` | Interrupt if the recipient is mid-turn; if it is idle, start a turn, since there is nothing to interrupt. |
+
+A message to a member that has already finished is **not** reported as
+delivered: it has no turn to reach and will never start another, and counting it
+would be a lie the sender then acts on.
+
 ### `search_definitions`
 
 Searches code and returns the **enclosing declaration** — function, type, module,

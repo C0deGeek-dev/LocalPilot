@@ -372,6 +372,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         }
     }
 

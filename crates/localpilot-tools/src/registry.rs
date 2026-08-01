@@ -15,6 +15,7 @@ use crate::builtins::{
 use crate::builtins_ask::AskUser;
 use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
+use crate::builtins_swarm::Swarm;
 use crate::catalog::{Catalog, ToolSource};
 use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
 
@@ -71,6 +72,7 @@ impl ToolRegistry {
         registry.register(Box::new(GitCommit));
         registry.register(Box::new(Delegate));
         registry.register(Box::new(AskUser));
+        registry.register(Box::new(Swarm));
         registry.register(Box::new(UpdatePlan));
         registry
     }
@@ -463,6 +465,7 @@ mod retention_tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
 
         let mut registry = ToolRegistry::new();

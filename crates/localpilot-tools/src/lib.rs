@@ -12,6 +12,7 @@ mod builtins;
 mod builtins_ask;
 mod builtins_background;
 mod builtins_shell;
+mod builtins_swarm;
 mod catalog;
 mod contract;
 mod error;
@@ -33,6 +34,7 @@ pub use builtins::{
 pub use builtins_ask::{AskUser, ASK_USER};
 pub use builtins_background::{BackgroundProcesses, ProcStatus, RunBackground};
 pub use builtins_shell::RunShell;
+pub use builtins_swarm::{Swarm, SWARM};
 pub use catalog::{
     fingerprint, Catalog, CatalogDelta, CatalogEntry, DeprecationOverlay, ToolSource,
 };
@@ -51,7 +53,8 @@ pub use repair::{
 };
 pub use schema_intent::{field_intent, is_repair_exempt, INTENT_KEY};
 pub use tool::{
-    AgentHost, GateVerdict, OutputRetention, QuestionOption, Tool, ToolContext, ToolGate,
+    AgentHost, Audience, Delivered, Delivery, GateVerdict, OutputRetention, PeerMessage,
+    PeerSummary, QuestionOption, SwarmIdentity, SwarmPeers, Tool, ToolContext, ToolGate,
     ToolOutput, UserAnswer, UserPrompter, UserQuestion,
 };
 pub use validate::{

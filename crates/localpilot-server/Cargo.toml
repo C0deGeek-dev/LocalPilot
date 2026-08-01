@@ -18,6 +18,9 @@ localpilot-store = { path = "../localpilot-store" }
 # The swarm layer holds the shared task graph and mutates it under the swarm
 # registry's own write lock.
 localpilot-taskgraph = { path = "../localpilot-taskgraph" }
+# The tool-facing swarm view implements `localpilot-tools`' `SwarmPeers`, which
+# is where the messaging tool reaches the registry from.
+localpilot-tools = { path = "../localpilot-tools" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -45,7 +48,6 @@ tokio-util = { workspace = true }
 localpilot-llm = { path = "../localpilot-llm" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
-localpilot-tools = { path = "../localpilot-tools" }
 # The host tests register a first-party test tool that blocks inside `invoke` to
 # open a deterministic mid-turn window; implementing the `Tool` trait needs the
 # same `#[async_trait]` the trait is declared with — an existing pinned

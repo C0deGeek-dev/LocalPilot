@@ -1,6 +1,5 @@
 ---
 source: crates/localpilot-tools/tests/tools.rs
-assertion_line: 109
 expression: "serde_json::to_string_pretty(&schemas).unwrap()"
 ---
 [
@@ -848,6 +847,63 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "questions"
       ],
       "title": "AskUserInput",
+      "type": "object"
+    }
+  ],
+  [
+    "swarm",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "action": {
+          "description": "What to do: `send` a message to one peer, `broadcast` to the agents you spawned (or, if you are the coordinator, to the whole swarm), or `roster` to see who is here.",
+          "type": "string"
+        },
+        "body": {
+          "default": null,
+          "description": "The message itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivery": {
+          "default": null,
+          "description": "`notify` (default) to leave the recipient undisturbed, `interrupt` to reach its running turn, or `wake` to also start a turn if it is idle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "default": null,
+          "description": "For `broadcast`: `swarm` to address every member. Coordinator only; otherwise the message goes to the agents you spawned.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tldr": {
+          "default": null,
+          "description": "A one-line summary. Required when the body is long.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "default": null,
+          "description": "For `send`: the peer, by name or session id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "SwarmInput",
       "type": "object"
     }
   ],

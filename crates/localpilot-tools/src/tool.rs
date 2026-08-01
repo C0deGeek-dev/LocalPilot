@@ -29,6 +29,121 @@ pub struct ToolContext<'a> {
     /// there is no human on this session — a piped run, a CI run, a subagent —
     /// and `ask_user` says so rather than waiting for an answer that cannot come.
     pub prompter: Option<&'a dyn UserPrompter>,
+    /// The host that can reach this session's swarm peers. `None` means this
+    /// session is not collaborating — the overwhelmingly common case — and the
+    /// swarm tool reports itself unavailable instead of failing obscurely.
+    pub peers: Option<&'a dyn SwarmPeers>,
+}
+
+/// Who this session is inside its swarm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmIdentity {
+    /// This session's id, as text.
+    pub session: String,
+    /// The name peers address it by.
+    pub name: String,
+    /// Whether it may address the whole swarm rather than only its own subtree.
+    pub is_coordinator: bool,
+}
+
+/// One other member, as the model sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSummary {
+    /// The peer's session id, as text.
+    pub session: String,
+    /// The peer's name.
+    pub name: String,
+    /// `coordinator` or `worker`.
+    pub role: String,
+    /// Where the peer is in its life, in a word.
+    pub status: String,
+    /// Whether the peer is inside this session's own subtree — the scope a
+    /// non-coordinator may broadcast to.
+    pub in_my_subtree: bool,
+}
+
+/// Who a message is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Audience {
+    /// One peer, named by session id or by an unambiguous name.
+    One(String),
+    /// Everything below this session in the spawn tree, this session excluded.
+    Subtree,
+    /// Every member of the swarm. Coordinator-only.
+    Swarm,
+}
+
+/// How urgently a message should reach its recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// Record it for attached clients; do not disturb a running turn. The
+    /// cheapest option, and the right one for anything the recipient does not
+    /// have to act on.
+    #[default]
+    Notify,
+    /// Put it into the recipient's running turn at its next safe boundary.
+    Interrupt,
+    /// Interrupt if the recipient is busy; start a turn if it is idle. For a
+    /// message that is useless unless it is acted on.
+    Wake,
+}
+
+/// A message one member is sending to others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerMessage {
+    /// Who it is for.
+    pub audience: Audience,
+    /// A one-line summary. Required for a long body: a recipient mid-task needs
+    /// to decide whether to read the rest *before* reading the rest.
+    pub tldr: Option<String>,
+    /// The message.
+    pub body: String,
+    /// How urgently it should land.
+    pub delivery: Delivery,
+}
+
+/// What sending resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivered {
+    /// How many members it reached.
+    pub reached: usize,
+    /// Their names, for the sender's record.
+    pub recipients: Vec<String>,
+}
+
+/// The host side of agent-to-agent messaging.
+///
+/// A tool cannot route a message by itself: it has no registry, no spawn tree,
+/// and no way to reach another session's turn. The host implements this and
+/// hands it in through [`ToolContext`], exactly as it does for delegation and
+/// user prompts, so the swarm tool stays an ordinary tool with no special path
+/// through the registry.
+///
+/// Every method is async, including the two that merely read. They reach state
+/// behind the server's async locks, and a synchronous signature would force
+/// either a blocking call inside the runtime — which panics outright on a
+/// current-thread one — or a cache that goes stale exactly when the swarm is
+/// changing.
+pub trait SwarmPeers: Send + Sync {
+    /// Who this session is.
+    fn identity<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SwarmIdentity> + Send + 'a>>;
+
+    /// Every other member of this session's swarm.
+    fn roster<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<PeerSummary>> + Send + 'a>>;
+
+    /// Deliver `message`, or explain why it could not be.
+    ///
+    /// # Errors
+    /// A model-readable reason: an unknown or ambiguous recipient, or an
+    /// audience this session is not allowed to address.
+    fn send<'a>(
+        &'a self,
+        message: &'a PeerMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Delivered, String>> + Send + 'a>>;
 }
 
 /// The host side of delegation.

@@ -52,6 +52,7 @@ async fn an_mcp_write_is_denied_like_a_builtin_write() {
         processes: None,
         agents: None,
         prompter: None,
+        peers: None,
     };
     let result = registry
         .dispatch(
@@ -97,6 +98,7 @@ async fn mcp_tool_output_is_redacted() {
         processes: None,
         agents: None,
         prompter: None,
+        peers: None,
     };
     let result = registry
         .dispatch(
@@ -158,6 +160,7 @@ async fn repeated_mcp_registry_rebuilds_preserve_dynamic_metadata_and_routing() 
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         };
         let result = registry
             .dispatch(

@@ -242,6 +242,7 @@ mod tests {
             processes: None,
             agents: None,
             prompter,
+            peers: None,
         };
         AskUser.invoke(input, &ctx).await
     }

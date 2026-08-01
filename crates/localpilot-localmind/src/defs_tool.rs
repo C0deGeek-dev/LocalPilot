@@ -776,6 +776,7 @@ mod safety_tests {
             processes: None,
             agents: None,
             prompter: None,
+            peers: None,
         }
     }
 

@@ -9,11 +9,16 @@
 //!   fan-out bounded.
 //! - [`spawn`] starts workers under those caps, runs them in parallel, and flows
 //!   their answers back to whoever spawned them.
+//! - [`messaging`] routes agent-to-agent messages: scope is the spawn tree, and
+//!   delivery rides the same soft-interrupt substrate the user's own steering
+//!   uses.
 
+pub mod messaging;
 pub mod registry;
 pub mod scope;
 pub mod spawn;
 
+pub use messaging::SessionPeers;
 pub use registry::{
     Admission, MemberRole, MemberStatus, Reservation, SwarmError, SwarmLimits, SwarmMember,
     SwarmRegistry,
