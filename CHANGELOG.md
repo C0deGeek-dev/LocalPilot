@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: a source fingerprint, and a build that knows what it built.** A commit
+  hash answers "which commit", not "which bytes" — an uncommitted edit, a staged
+  hunk, and a stray new file all produce a different binary from the same `HEAD`.
+  LocalPilot can now reduce a working tree to one stable label: the short commit
+  hash when the tree is clean, and the hash plus a fingerprint over the status,
+  the diff, and the *contents* of untracked files when it is not. Returning a
+  tree to its earlier bytes returns its earlier label. A binary built from that
+  tree carries the identity with it, so a later step can refuse to ship a binary
+  that no longer matches the source it claims. The build that produces it keeps
+  to its own target directory and its own profile, and leaves a core free,
+  because the session that asked for the build is still running. The build script
+  now watches the repository only when it actually read something from it — a
+  caller that supplies the identity no longer pays for a full rebuild on every
+  commit.
+
 - **Added: `run_plan` — the swarm plan driver, and the prompts that go with it.**
   A coordinator can now hand a whole task graph to the driver: it dispatches what
   is ready, spawns a worker per task, and refills on each completion rather than

@@ -2462,3 +2462,107 @@ mod tests {
         ));
     }
 }
+
+/// The build script's metadata policy, included from the same file the script
+/// itself uses so the two can never drift. A build script cannot be tested where
+/// it lives; this is how it gets tested.
+#[cfg(test)]
+#[path = "../build_meta.rs"]
+mod build_meta;
+
+#[cfg(test)]
+mod build_meta_tests {
+    use super::build_meta::{resolve, UNKNOWN_HASH};
+
+    /// Stand-ins for the two repository lookups, so a test never depends on the
+    /// state of the checkout it runs in.
+    fn described() -> Option<String> {
+        Some("v2.6.0-3-gabc1234".to_string())
+    }
+    fn head() -> Option<String> {
+        Some("abc1234def5678".to_string())
+    }
+    fn absent() -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn an_ordinary_source_build_reads_the_repository_and_therefore_watches_it() {
+        let meta = resolve(None, None, None, "2.6.0", described, head);
+
+        assert_eq!(meta.version, "v2.6.0-3-gabc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint, None);
+        assert!(
+            meta.watch_git,
+            "a version read from the repo goes stale on the next commit unless watched"
+        );
+    }
+
+    #[test]
+    fn a_supplied_identity_embeds_verbatim_and_stops_watching_the_repository() {
+        let meta = resolve(
+            Some("2.6.0-selfdev-abc1234".to_string()),
+            Some("abc1234def5678".to_string()),
+            Some("ff00".to_string()),
+            "2.6.0",
+            || panic!("describe must not be consulted when the version was supplied"),
+            || panic!("head must not be consulted when the hash was supplied"),
+        );
+
+        assert_eq!(meta.version, "2.6.0-selfdev-abc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint.as_deref(), Some("ff00"));
+        assert!(
+            !meta.watch_git,
+            "nothing was read from the repo, so a commit cannot invalidate this build"
+        );
+    }
+
+    #[test]
+    fn supplying_only_one_value_still_watches_the_repository() {
+        let meta = resolve(
+            Some("2.6.0-selfdev-abc1234".to_string()),
+            None,
+            None,
+            "2.6.0",
+            || panic!("describe must not be consulted when the version was supplied"),
+            head,
+        );
+
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert!(
+            meta.watch_git,
+            "the hash still came from the repo, so the repo still has to be watched"
+        );
+    }
+
+    #[test]
+    fn a_blank_environment_value_is_not_an_answer() {
+        let meta = resolve(
+            Some("   ".to_string()),
+            Some(String::new()),
+            Some("  ".to_string()),
+            "2.6.0",
+            described,
+            head,
+        );
+
+        assert_eq!(meta.version, "v2.6.0-3-gabc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint, None);
+        assert!(meta.watch_git);
+    }
+
+    #[test]
+    fn outside_a_repository_the_package_version_and_an_unknown_hash_are_embedded() {
+        let meta = resolve(None, None, None, "2.6.0", absent, absent);
+
+        assert_eq!(meta.version, "2.6.0");
+        assert_eq!(meta.git_hash, UNKNOWN_HASH);
+        assert!(
+            !meta.watch_git,
+            "there is no repository to watch, so no trigger should be emitted"
+        );
+    }
+}

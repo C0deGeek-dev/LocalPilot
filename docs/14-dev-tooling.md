@@ -322,6 +322,56 @@ README alone — the numbered spec set, the topic docs
 and `CHANGELOG.md` for user-facing changes. Durable architecture decisions
 still graduate to an ADR in [`10-decisions.md`](10-decisions.md).
 
+## 8. Self-dev builds
+
+A *self-dev build* is LocalPilot building the binary it intends to become. It is
+an ordinary `cargo build` with four deliberate differences, all of them policy
+rather than cleverness. `localpilot-selfdev` owns them
+([02-architecture.md](02-architecture.md#localpilot-selfdev)).
+
+**Its own target directory.** Sharing `target/` would invalidate the artefacts
+the running session and `rust-analyzer` depend on, turning every rebuild into a
+full rebuild of your inner loop. Self-dev artefacts go to their own directory
+under the per-user data root, beside (never inside) the release cache.
+
+**Its own profile.** `[profile.selfdev]` inherits `release` — same codegen
+units, same panic strategy, same `debug_assertions` state as a shipped binary —
+but sets `opt-level = 0`. A binary that exists to be replaced within the minute
+should not spend that minute being optimised. Debug info is kept: a self-dev
+binary is the one most likely to need a backtrace.
+
+**A job count that leaves room.** One fewer job than the machine has cores,
+floored at one, because the session that started the build still has to answer
+while it runs. Override it explicitly when you are not running a live session.
+
+**Source identity passed in, not sniffed.** The build receives the commit hash,
+the source fingerprint, and the version string as environment values, and the
+build script embeds what it is told. Two things follow:
+
+- A later step can ask a binary what source it came from and check the answer
+  against the tree in hand, which is what makes "refuse to ship a stale binary"
+  possible at all.
+- The build script watches the repository **only when it read something from
+  it**. An ordinary source build still watches `.git/HEAD`, the branch ref, and
+  `packed-refs`, so its `git describe` version does not go stale after you
+  commit. A build that was handed the identity watches nothing, so committing
+  does not force a rebuild. The policy lives in
+  `crates/localpilot-cli/build_meta.rs`, included by both the build script and
+  the crate's tests so the two cannot drift.
+
+The fingerprint covers the commit hash, `git status`, `git diff HEAD`, **and the
+contents of untracked files** — an untracked file being exactly the case a
+commit hash cannot see. It is a SHA-256 over a length-framed digest, so no two
+different trees can produce the same value by concatenation accident. Ignored
+paths (`target/`, editor state) are excluded, because `git status` excludes
+them.
+
+```powershell
+# What is this tree, exactly?
+#   clean: <short-hash>            dirty: <short-hash>-dirty-<fingerprint>
+# The label is stable: return the bytes and you return the label.
+```
+
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers
 must be plan-agnostic — no box/decision IDs or plan filenames; and a decision

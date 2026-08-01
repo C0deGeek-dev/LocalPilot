@@ -1932,6 +1932,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-selfdev"
+version = "2.6.0"
+dependencies = [
+ "localpilot-dist",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.9",
+]
+
+[[package]]
 name = "localpilot-selfreview"
 version = "2.6.0"
 dependencies = [

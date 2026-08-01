@@ -306,6 +306,21 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
 
+### `localpilot-selfdev`
+
+Owns the primitives for building LocalPilot from its own source and swapping
+onto the result:
+
+- `SourceState` — a content fingerprint of the working tree (commit hash,
+  status, diff, and untracked file *contents*) reduced to one stable
+  `version_label`, so "which bytes" is answerable and not just "which commit"
+- an isolated build (own cargo profile, own target directory, a job count that
+  leaves a core for the running session) that passes the source identity to the
+  build script as environment rather than making it watch `.git`
+
+Must not own: the decision to reload. This crate makes each step safe to take;
+whether to take it is the caller's policy.
+
 ### `localpilot-selfreview`
 
 Owns the read-only front of the human-gated self-improvement loop
