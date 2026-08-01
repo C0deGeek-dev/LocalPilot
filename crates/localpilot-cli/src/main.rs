@@ -35,6 +35,7 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod self_review_cmd;
+mod server_cmd;
 mod session_cmd;
 mod skill_discovery;
 mod skills_cmd;
@@ -257,6 +258,40 @@ enum Command {
         #[arg(long)]
         resume: Option<String>,
     },
+    /// Serve this workspace's sessions over the opt-in local-IPC transport (a
+    /// Unix domain socket or a Windows named pipe) until Ctrl-C. Clients attach
+    /// with `localpilot connect`. Strictly opt-in: the default in-process
+    /// `chat`/`ask`/`print`/`harness` path is unchanged and never starts it.
+    Serve {
+        /// Model name to request; defaults to the provider's configured model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass | unrestricted).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+    },
+    /// Connect to this workspace's `serve` server and relay a session over
+    /// stdin/stdout (plain text): stdin lines become prompts, session events
+    /// stream to stdout. Errors clearly when no server is running unless
+    /// `--server` is passed to start one first.
+    Connect {
+        /// Resume an existing session by id or name instead of opening a new one.
+        #[arg(long)]
+        resume: Option<String>,
+        /// Start a server for this workspace if none is running, then connect.
+        #[arg(long)]
+        server: bool,
+    },
+    /// Internal: run the detached server the auto-spawn (`connect --server`)
+    /// path starts. Not for direct use — `localpilot serve` is the entry point.
+    #[command(name = "__server-serve", hide = true)]
+    ServerServe,
     /// Model Context Protocol surfaces.
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -1366,6 +1401,26 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 resume,
             )
             .await?;
+        }
+        Command::Serve {
+            model,
+            provider,
+            permission,
+            bypass,
+        } => {
+            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            server_cmd::serve(model.as_deref(), provider.as_deref(), profile).await?;
+        }
+        Command::Connect { resume, server } => {
+            server_cmd::connect(resume.as_deref(), server).await?;
+        }
+        Command::ServerServe => {
+            // The detached daemon the auto-spawn path starts: the spawn argv
+            // carries no flags, so resolve model/provider from config and use the
+            // default profile. If the endpoint is already owned, `serve` prints
+            // that and exits 0.
+            let profile = session_cmd::resolve_profile(None, false);
+            server_cmd::serve(None, None, profile).await?;
         }
         Command::Version { command } => {
             let mut stdout = io::stdout().lock();

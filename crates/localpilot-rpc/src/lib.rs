@@ -24,4 +24,4 @@ pub use protocol::{
     AttachTarget, ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent,
     ServerRecord, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
-pub use serve::{serve, RpcError, ServeContext};
+pub use serve::{map_event, serve, RpcError, ServeContext};

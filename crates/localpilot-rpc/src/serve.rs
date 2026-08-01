@@ -397,7 +397,12 @@ pub(crate) fn next_incomplete_step(root: &Path) -> Option<String> {
         .map(|line| line.trim_start_matches("- [ ]").trim().to_string())
 }
 
-pub(crate) fn map_event(event: RuntimeEvent) -> ServerEvent {
+/// Map one runtime session event onto its wire form.
+///
+/// This is the single source of truth for the `RuntimeEvent` → [`ServerEvent`]
+/// projection, shared by the stdio serve loop here and the opt-in local-IPC
+/// server (`localpilot-server` via the CLI) so the two never drift.
+pub fn map_event(event: RuntimeEvent) -> ServerEvent {
     match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },

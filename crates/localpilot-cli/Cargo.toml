@@ -96,6 +96,10 @@ localpilot-research = { path = "../localpilot-research" }
 localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }
+# The opt-in local-IPC server (`serve`/`connect`): transport, daemon lifecycle,
+# session registry, per-session host, and attach dispatch. Strictly opt-in — the
+# default chat/ask/print/harness in-process path never touches it (D003).
+localpilot-server = { path = "../localpilot-server" }
 localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }

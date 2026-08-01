@@ -149,7 +149,11 @@ cursor-paged `events` feed, and `reply_permission`, with
 `--continue`/`--resume` to pick an earlier session back up and
 `--no-approvals` for watch-and-steer coaching (the reply tool is withheld, so
 every ask denies). Corrections the driver makes become review-gated lesson
-candidates. Run `localpilot --help` for the complete command tree.
+candidates. `localpilot serve` + `localpilot connect` are an opt-in local-IPC
+server (a Unix socket or Windows named pipe, never a network server) that hosts
+sessions in one process so several clients can attach to the same session at
+once; it runs only when you start it, and the default in-process path is
+unchanged. Run `localpilot --help` for the complete command tree.
 
 ### Terminal controls
 

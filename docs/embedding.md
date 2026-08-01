@@ -1,25 +1,29 @@
 # Embedding and Headless Drive
 
-Two supported ways to drive LocalPilot without its own UI, in order of
+Three supported ways to drive LocalPilot without its own UI, in order of
 preference:
 
 1. **In-process embedding** — link the crates and own a `SessionRuntime`.
 2. **`localpilot rpc`** — newline-delimited JSON over stdin/stdout for hosts
    in another language or process.
+3. **`localpilot serve` + `localpilot connect`** — an **opt-in** local-IPC
+   server that hosts sessions in one long-lived process, so several clients can
+   attach to the same session at once (see below).
 
 There is deliberately no HTTP server and no packaged product SDK: the library
 surface below is the embedding contract, and the RPC protocol is its
 process-boundary mirror.
 
-There is also groundwork for a third, **opt-in local-IPC server transport** (the
+The third option is the **opt-in local-IPC server transport** (the
 `localpilot-server` crate): a framed transport over a Unix domain socket or a
 Windows named pipe, plus daemon lifecycle (detached spawn, a retry-connect ready
 handshake, single-owner exclusivity), a registry that hosts many sessions in one
 process, and a per-session host layer for multi-client fanout and out-of-band
 control (below). It is still local-only — not an HTTP server and not a product
-SDK — and reuses the same LF-delimited JSON framing as the stdio path. There is
-no `serve`/`connect` command yet, and the stdio drive below is unchanged and
-remains the supported process-boundary surface.
+SDK — and reuses the same LF-delimited JSON framing as the stdio path. It is
+strictly opt-in: it runs only when you invoke `serve`/`connect`, and the default
+in-process `chat`/`ask`/`print`/`harness` path is byte-for-byte unchanged and
+never starts it.
 
 ### Multi-client fanout and out-of-band control (server crate)
 
@@ -48,8 +52,8 @@ running turn without waiting for it:
   request onto these methods, ready for a transport to route control frames
   through.
 
-This is a library surface on top of the registry handle; there is still no wire
-protocol or `serve`/`connect` command exposing it.
+This is the library surface the `serve`/`connect` commands drive over the wire
+(see [Running the opt-in server](#running-the-opt-in-server-serve--connect)).
 
 ### Attaching to a session (server crate)
 
@@ -90,8 +94,47 @@ every field added hereafter: default it and/or skip it when absent, so
 forward/backward compatibility holds without a second version handshake. The
 explicit `RPC_PROTOCOL_VERSION` still gates wire compatibility in `hello`; the
 serde-default discipline *coexists* with it for per-field evolution rather than
-replacing it. There is still no `serve`/`connect` command exposing any of this;
-`attach` is the protocol groundwork the future server command will drive.
+replacing it. The `serve`/`connect` commands drive this handshake — see
+[Running the opt-in server](#running-the-opt-in-server-serve--connect).
+
+### Running the opt-in server (`serve` / `connect`)
+
+The server is off unless you start it, and it is scoped to one workspace: the
+endpoint address is derived from the workspace root, so two projects never
+collide. Nothing about `chat`/`ask`/`print`/`harness` changes — those stay
+in-process (ADR/D003).
+
+Start a server for the current workspace (foreground, `Ctrl-C` to stop):
+
+```console
+$ localpilot serve                 # uses the workspace's default model/provider
+$ localpilot serve --model <name> --provider <id> --bypass
+```
+
+`serve` acquires a single-owner lock first: if a server is already running for
+this workspace it prints that and exits cleanly rather than double-serving.
+
+Attach a client (plain text: stdin lines become prompts; session events stream
+to stdout):
+
+```console
+$ localpilot connect               # opens a new session
+$ localpilot connect --resume <id|name>   # resumes an existing session
+$ localpilot connect --server      # start a server first if none is running
+```
+
+Several `connect` clients can attach to the **same** session at once — open one
+with `connect`, note the session id it prints, and attach another with
+`connect --resume <id>`. Every attached client sees the same event stream (the
+turn's text, tool activity, and stop), and any of them can drive a turn, steer
+it, cancel it, or read `status`. In the plain-text client, a permission ask is
+answered by typing `/allow` or `/deny`; `Ctrl-C` cancels the running turn.
+
+Under the hood each connection sends one `attach` (open-new / resume-by-id /
+resume-by-name), the server confirms with `attached`, and the connection is
+bound to that session for its lifetime — the exact handshake documented above.
+Detaching a client (EOF, or a `shutdown` command) leaves the session running
+for any other attached client.
 
 ## In-process embedding
 

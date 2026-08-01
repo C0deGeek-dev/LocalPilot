@@ -6,6 +6,29 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: `localpilot serve` + `localpilot connect` — the opt-in local-IPC
+  server.** A new `serve` command hosts this workspace's sessions in one
+  long-lived process over the local transport (a Unix domain socket or a Windows
+  named pipe — never a network server), and `connect` is a thin plain-text
+  client that attaches over stdin/stdout (stdin lines become prompts, session
+  events stream to stdout; a permission ask is answered with `/allow`/`/deny`,
+  `Ctrl-C` cancels a turn). Several `connect` clients can attach to the **same**
+  session at once (`connect --resume <id|name>`): every client sees the same
+  event stream and any of them can drive, steer, cancel, or read `status`, with
+  fanout handled by the per-session host's broadcast. `serve` acquires a
+  single-owner lock first (a second `serve` for the same workspace reports the
+  running one and exits 0); `connect --server` starts a server first if none is
+  running. The wire is the existing `attach` handshake and the RPC event
+  vocabulary. **Strictly opt-in (D003):** none of this runs unless you invoke
+  `serve`/`connect`, and the default in-process `chat`/`ask`/`print`/`harness`
+  path is byte-for-byte unchanged. Internally, the stdio `rpc` command and the
+  server factory now build sessions through **one** shared recipe
+  (`SessionSetup::build`), so their runtime construction can never drift; the
+  `RuntimeEvent`→`ServerEvent` projection (`localpilot-rpc::map_event`) is now
+  public and shared by both. See
+  [docs/embedding.md](docs/embedding.md#running-the-opt-in-server-serve--connect)
+  and [docs/install.md](docs/install.md#running-the-optional-server).
+
 - **Internal/Added: connection-scoped session attach handshake + additive
   protocol evolution.** The shared RPC envelope (`localpilot-rpc`) gains, purely
   additively, a `ClientCommand::Attach { target }` command — where `target` is

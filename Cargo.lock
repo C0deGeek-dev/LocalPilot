@@ -1647,6 +1647,7 @@ dependencies = [
  "localpilot-rpc",
  "localpilot-sandbox",
  "localpilot-selfreview",
+ "localpilot-server",
  "localpilot-skills",
  "localpilot-store",
  "localpilot-tools",

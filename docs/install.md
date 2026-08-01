@@ -261,6 +261,22 @@ feature set is empty, so a bare `cargo install localpilot` yields a binary
 without `chat` (the `ask`/`print`/`harness` commands still work). (Available once
 the crate is published; the source build above always works.)
 
+## Running the optional server
+
+By default LocalPilot runs in-process: `chat`, `ask`, `print`, and `harness`
+never start a background service. If you want several clients to share one
+long-lived session, start the **opt-in** local-IPC server for a workspace and
+attach clients to it:
+
+```console
+$ localpilot serve        # foreground; Ctrl-C to stop (scoped to this workspace)
+$ localpilot connect      # attach a plain-text client (--resume <id|name>, --server)
+```
+
+It is a local-only Unix-socket / Windows-named-pipe transport — never a network
+server — and stays entirely opt-in. See
+[embedding.md](embedding.md#running-the-opt-in-server-serve--connect).
+
 ## Next steps
 
 - Configure a provider — see [providers.md](providers.md).
