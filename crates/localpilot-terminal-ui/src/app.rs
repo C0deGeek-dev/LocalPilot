@@ -62,6 +62,7 @@ pub struct TerminalCapabilities {
     pub synchronized_output: bool,
     pub keyboard: KeyboardSupport,
     pub clipboard_write: bool,
+    pub screen_reader: bool,
 }
 
 impl Default for TerminalCapabilities {
@@ -72,6 +73,7 @@ impl Default for TerminalCapabilities {
             synchronized_output: false,
             keyboard: KeyboardSupport::Basic,
             clipboard_write: false,
+            screen_reader: false,
         }
     }
 }
@@ -1534,7 +1536,7 @@ impl AppModel {
 
     pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
         self.dialog = Some(DialogState::Trust {
-            path: sanitize_text(&path.into()),
+            path: sanitize_inline(&path.into()),
         });
     }
 
@@ -1550,9 +1552,9 @@ impl AppModel {
         risk_class: impl Into<String>,
     ) {
         self.dialog = Some(DialogState::Approval {
-            tool: sanitize_text(&tool.into()),
-            target: sanitize_text(&target.into()),
-            risk_class: sanitize_text(&risk_class.into()),
+            tool: sanitize_inline(&tool.into()),
+            target: sanitize_inline(&target.into()),
+            risk_class: sanitize_inline(&risk_class.into()),
         });
     }
 

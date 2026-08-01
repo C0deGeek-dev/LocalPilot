@@ -24,15 +24,25 @@ pub struct FrameLayout {
 impl FrameLayout {
     #[must_use]
     pub fn calculate(area: Rect, requested_editor_rows: u16) -> Option<Self> {
+        Self::calculate_for_mode(area, requested_editor_rows, false)
+    }
+
+    #[must_use]
+    pub fn calculate_for_mode(
+        area: Rect,
+        requested_editor_rows: u16,
+        screen_reader: bool,
+    ) -> Option<Self> {
         if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
             return None;
         }
 
         let narrow = area.width < NARROW_WIDTH;
         let stacked = narrow && area.height >= 14;
+        let tabs_height: u16 = if screen_reader && narrow { 2 } else { 1 };
         let status_height = if stacked { 2 } else { 1 };
         let footer_height = if stacked { 2 } else { 1 };
-        let fixed_without_editor = 1u16
+        let fixed_without_editor = tabs_height
             .saturating_add(status_height)
             .saturating_add(footer_height)
             .saturating_add(2)
@@ -47,7 +57,7 @@ impl FrameLayout {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
+                Constraint::Length(tabs_height),
                 Constraint::Min(MINIMUM_TIMELINE_HEIGHT),
                 Constraint::Length(status_height),
                 Constraint::Length(composer_height),
@@ -128,6 +138,14 @@ mod tests {
         assert!(layout.timeline.height >= MINIMUM_TIMELINE_HEIGHT);
         assert!(layout.stacked);
         assert_eq!(layout.composer_content.height, 8);
+    }
+
+    #[test]
+    fn narrow_screen_reader_layout_reserves_a_wrapped_tab_sentence() {
+        let layout =
+            FrameLayout::calculate_for_mode(Rect::new(0, 0, 40, 20), 1, true).expect("layout");
+        assert_eq!(layout.tabs.height, 2);
+        assert!(layout.timeline.height >= MINIMUM_TIMELINE_HEIGHT);
     }
 
     #[test]

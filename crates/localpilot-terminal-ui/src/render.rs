@@ -14,6 +14,7 @@ use crate::{
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
 const BANNER_ROWS: u16 = 7;
+const SCREEN_READER_PREFIX_EXTRA: u16 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabHit {
@@ -133,6 +134,7 @@ pub struct HitMap {
     pub frame: Option<FrameLayout>,
     pub tabs: Vec<TabHit>,
     pub timeline: Rect,
+    pub timeline_wrap_width: u16,
     pub timeline_rows: Vec<TimelineRowHit>,
     pub completion_rows: Vec<CompletionHit>,
     pub theme_rows: Vec<ThemeHit>,
@@ -170,7 +172,11 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
                 .max(1)
         };
     let requested_editor_rows = u16::try_from(requested_editor_rows).unwrap_or(u16::MAX);
-    let Some(layout) = FrameLayout::calculate(area, requested_editor_rows) else {
+    let Some(layout) = FrameLayout::calculate_for_mode(
+        area,
+        requested_editor_rows,
+        app.capabilities.screen_reader,
+    ) else {
         frame.render_widget(
             Paragraph::new(format!(
                 "{APP_NAME}\nresize to at least {MINIMUM_WIDTH} × {MINIMUM_HEIGHT}"
@@ -183,6 +189,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             frame: None,
             tabs: Vec::new(),
             timeline: Rect::default(),
+            timeline_wrap_width: 1,
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
@@ -196,6 +203,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     };
 
     let tabs = render_tabs(frame, layout.tabs, app);
+    let timeline_wrap_width = timeline_wrap_width(layout.timeline_content.width, app);
     let (scrollbar, mut timeline_rows) = render_timeline(frame, layout, app);
     let quick_help_area = render_quick_help(frame, layout.timeline_content, app);
     let (completion_area, completion_rows) = render_completion(frame, layout.timeline_content, app);
@@ -212,6 +220,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         frame: Some(layout),
         tabs,
         timeline: layout.timeline_content,
+        timeline_wrap_width,
         timeline_rows,
         completion_rows,
         theme_rows,
@@ -325,6 +334,7 @@ fn render_takeover(
             frame: None,
             tabs: Vec::new(),
             timeline: Rect::default(),
+            timeline_wrap_width: 1,
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
@@ -449,12 +459,16 @@ fn render_takeover(
     };
 
     let scrollbar = ScrollbarGeometry::calculate(
-        Rect::new(
-            area.right().saturating_sub(2),
-            area.y.saturating_add(1),
-            1,
-            area.height.saturating_sub(3),
-        ),
+        if app.capabilities.screen_reader {
+            Rect::default()
+        } else {
+            Rect::new(
+                area.right().saturating_sub(2),
+                area.y.saturating_add(1),
+                1,
+                area.height.saturating_sub(3),
+            )
+        },
         start,
         total_rows,
         scrollbar_rows,
@@ -481,6 +495,7 @@ fn render_takeover(
         frame: None,
         tabs: Vec::new(),
         timeline: content,
+        timeline_wrap_width: content.width.max(1),
         timeline_rows: Vec::new(),
         completion_rows: Vec::new(),
         theme_rows: Vec::new(),
@@ -972,6 +987,30 @@ fn render_completion(
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Vec<TabHit> {
     let theme = theme(app);
+    if app.capabilities.screen_reader {
+        let remaining = app
+            .tabs
+            .iter()
+            .filter(|tab| **tab != app.active_tab)
+            .map(|tab| tab.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sentence = if remaining.is_empty() {
+            format!("Home: current tab: {}", app.active_tab.label())
+        } else {
+            format!(
+                "Home: current tab: {}; tabs: {remaining}",
+                app.active_tab.label()
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(sentence)
+                .style(theme.ui(UiRole::Foreground))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return Vec::new();
+    }
     let mut hits = Vec::new();
     let mut x = area.x.saturating_add(2);
     let right = area.right().saturating_sub(2);
@@ -1008,7 +1047,8 @@ fn render_timeline(
     app: &AppModel,
 ) -> (ScrollbarGeometry, Vec<TimelineRowHit>) {
     let area = layout.timeline_content;
-    let view = app.timeline.view(area.width.max(1), area.height.max(1));
+    let wrap_width = timeline_wrap_width(area.width, app);
+    let view = app.timeline.view(wrap_width, area.height.max(1));
     let banner_visible = view.pinned.is_none()
         && view.start == 0
         && (view.total_rows.saturating_add(usize::from(BANNER_ROWS)) <= usize::from(area.height)
@@ -1035,9 +1075,22 @@ fn render_timeline(
             timeline_line(row, app, area.width)
                 .render(Rect::new(area.x, y, area.width, 1), frame.buffer_mut());
             if matches!(row.part, VisualRowPart::Content { .. }) {
+                let first = matches!(row.part, VisualRowPart::Content { first: true, .. });
+                let content_column = role_prefix(
+                    row.kind,
+                    row.activity,
+                    first,
+                    theme(app),
+                    app.capabilities.screen_reader,
+                )
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>();
                 row_hits.push(TimelineRowHit {
                     y,
-                    content_x: area.x.saturating_add(row.content_column),
+                    content_x: area
+                        .x
+                        .saturating_add(u16::try_from(content_column).unwrap_or(u16::MAX)),
                     row: row.clone(),
                 });
             }
@@ -1050,7 +1103,11 @@ fn render_timeline(
         view.viewport_rows
     };
     let scrollbar = ScrollbarGeometry::calculate(
-        layout.scrollbar,
+        if app.capabilities.screen_reader {
+            Rect::default()
+        } else {
+            layout.scrollbar
+        },
         view.start,
         view.total_rows,
         scrollbar_viewport_rows,
@@ -1059,8 +1116,39 @@ fn render_timeline(
     (scrollbar, row_hits)
 }
 
+fn timeline_wrap_width(width: u16, app: &AppModel) -> u16 {
+    if app.capabilities.screen_reader {
+        width.saturating_sub(SCREEN_READER_PREFIX_EXTRA).max(1)
+    } else {
+        width.max(1)
+    }
+}
+
 fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
     let theme = theme(app);
+    if app.capabilities.screen_reader {
+        let rows = [
+            format!(
+                "{APP_NAME} v{} uses AI.",
+                app.header
+                    .version
+                    .strip_prefix('v')
+                    .unwrap_or(&app.header.version)
+            ),
+            "Check important results.".to_string(),
+            String::new(),
+            format!("{} · {}", app.header.provider, app.header.model),
+            "Tip: press ? for shortcuts".to_string(),
+            "Type / to browse commands".to_string(),
+        ];
+        for (offset, row) in rows.into_iter().take(usize::from(area.height)).enumerate() {
+            Line::styled(row, theme.ui(UiRole::Foreground)).render(
+                Rect::new(area.x, area.y.saturating_add(offset as u16), area.width, 1),
+                frame.buffer_mut(),
+            );
+        }
+        return;
+    }
     let mark = theme.ui(UiRole::Accent);
     let rows = vec![
         Line::from(vec![
@@ -1110,6 +1198,22 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
 
 fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, app: &AppModel) {
     let theme = theme(app);
+    if app.capabilities.screen_reader {
+        Line::styled("User message", theme.ui(UiRole::Prompt))
+            .render(Rect::new(area.x, area.y, area.width, 1), frame.buffer_mut());
+        let pending = if pin.pending { " (pending)" } else { "" };
+        let text = format!("  {}{pending}", pin.text);
+        let trailing = pin.trailing.as_deref().unwrap_or("");
+        Line::styled(
+            two_sided(&text, trailing, area.width),
+            theme.ui(UiRole::Foreground),
+        )
+        .render(
+            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+            frame.buffer_mut(),
+        );
+        return;
+    }
     let glyph = if pin.overflowing { "↓ " } else { "❯ " };
     let trailing = pin.trailing.as_deref().unwrap_or("");
     let pending = if pin.pending { " (pending)" } else { "" };
@@ -1156,16 +1260,28 @@ fn render_pinned_prompt(frame: &mut Frame<'_>, area: Rect, pin: &PinnedPrompt, a
 fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
     let theme = theme(app);
     if row.part == VisualRowPart::FrameTop {
+        if app.capabilities.screen_reader {
+            return Line::styled("User message", theme.ui(UiRole::Prompt));
+        }
         return framed_rule(width, true, theme.ui(UiRole::SurfaceEdge));
     }
     if row.part == VisualRowPart::FrameBottom {
+        if app.capabilities.screen_reader {
+            return Line::default();
+        }
         return framed_rule(width, false, theme.ui(UiRole::SurfaceEdge));
     }
 
     let VisualRowPart::Content { first, last } = row.part else {
         return Line::default();
     };
-    let mut spans = role_prefix(row.kind, row.activity, first, theme);
+    let mut spans = role_prefix(
+        row.kind,
+        row.activity,
+        first,
+        theme,
+        app.capabilities.screen_reader,
+    );
     let prefix_width = spans
         .iter()
         .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
@@ -1228,7 +1344,7 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         spans.push(Span::styled(" ", theme.ui(UiRole::Surface)));
     }
     let line = Line::from(spans);
-    if row.kind == ItemKind::User {
+    if row.kind == ItemKind::User && !app.capabilities.screen_reader {
         line.style(theme.ui(UiRole::Surface))
     } else {
         line
@@ -1245,7 +1361,71 @@ fn role_prefix(
     activity: Option<ActivityState>,
     first: bool,
     theme: ThemeResolver,
+    screen_reader: bool,
 ) -> Vec<Span<'static>> {
+    if screen_reader {
+        let (label, role) = match kind {
+            ItemKind::User | ItemKind::Assistant => ("  ", UiRole::Foreground),
+            ItemKind::Reasoning => (
+                if first { "Reasoning: " } else { "           " },
+                UiRole::Muted,
+            ),
+            ItemKind::Tool => match activity {
+                Some(ActivityState::Success) => (
+                    if first {
+                        "Tool completed: "
+                    } else {
+                        "                "
+                    },
+                    UiRole::Success,
+                ),
+                Some(ActivityState::Error) => (
+                    if first {
+                        "Tool failed: "
+                    } else {
+                        "             "
+                    },
+                    UiRole::Error,
+                ),
+                Some(ActivityState::Running) | None => (
+                    if first {
+                        "Tool running: "
+                    } else {
+                        "              "
+                    },
+                    UiRole::Code,
+                ),
+            },
+            ItemKind::Shell => match activity {
+                Some(ActivityState::Success) => (
+                    if first {
+                        "Shell completed: "
+                    } else {
+                        "                 "
+                    },
+                    UiRole::Success,
+                ),
+                Some(ActivityState::Error) => (
+                    if first {
+                        "Shell failed: "
+                    } else {
+                        "              "
+                    },
+                    UiRole::Error,
+                ),
+                Some(ActivityState::Running) | None => (
+                    if first {
+                        "Shell running: "
+                    } else {
+                        "               "
+                    },
+                    UiRole::Code,
+                ),
+            },
+            ItemKind::Notice => (if first { "Notice: " } else { "        " }, UiRole::Warning),
+        };
+        return vec![Span::styled(label, theme.ui(role))];
+    }
     match kind {
         ItemKind::User => vec![
             Span::styled(" ", theme.ui(UiRole::Surface)),
@@ -1460,6 +1640,10 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
     let Some(dialog) = &app.dialog else {
         return;
     };
+    if app.capabilities.screen_reader {
+        render_screen_reader_dialog(frame, frame_area, app, dialog);
+        return;
+    }
     let width = frame_area.width.saturating_sub(4).min(72);
     let height = frame_area.height.saturating_sub(2).min(7);
     if width < 20 || height < 5 {
@@ -1518,6 +1702,62 @@ fn render_dialog(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) {
             .style(theme.ui(UiRole::Surface))
             .wrap(Wrap { trim: false }),
         inner,
+    );
+}
+
+fn render_screen_reader_dialog(
+    frame: &mut Frame<'_>,
+    frame_area: Rect,
+    app: &AppModel,
+    dialog: &DialogState,
+) {
+    let width = frame_area.width.saturating_sub(4).min(72);
+    let height = frame_area.height.saturating_sub(2).min(7);
+    if width < 20 || height < 5 {
+        return;
+    }
+    let area = Rect::new(
+        frame_area.x + frame_area.width.saturating_sub(width) / 2,
+        frame_area.y + frame_area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let theme = theme(app);
+    let lines = match dialog {
+        DialogState::Trust { path } => vec![
+            Line::styled("Trust this workspace?", theme.ui(UiRole::Prompt)),
+            Line::styled(middle_elide(path, area.width), theme.ui(UiRole::Foreground)),
+            Line::styled(
+                "LocalPilot will use the active permission profile.",
+                theme.ui(UiRole::Muted),
+            ),
+            Line::styled("Current selection: 1. Yes", theme.ui(UiRole::Foreground)),
+            Line::styled("1. Yes · 2. No · Enter confirm", theme.ui(UiRole::Muted)),
+        ],
+        DialogState::Approval {
+            tool,
+            target,
+            risk_class,
+        } => vec![
+            Line::styled("Permission required", theme.ui(UiRole::Prompt)),
+            Line::styled(
+                format!("{tool} · {risk_class}"),
+                theme.ui(UiRole::Foreground),
+            ),
+            Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
+            Line::styled(
+                "Current selection: 1. Allow once",
+                theme.ui(UiRole::Foreground),
+            ),
+            Line::styled("1. Allow once · 2. Deny", theme.ui(UiRole::Muted)),
+        ],
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.ui(UiRole::Background))
+            .wrap(Wrap { trim: false }),
+        area,
     );
 }
 
@@ -2393,6 +2633,78 @@ mod tests {
                 assert_eq!(layout.footer.height, 1);
             }
         }
+    }
+
+    #[test]
+    fn screen_reader_projection_linearizes_roles_chrome_dialogs_and_scrollbars() {
+        let mut app = model();
+        app.capabilities.screen_reader = true;
+        app.set_tabs([
+            TabId::Session,
+            TabId::Plan,
+            TabId::Activity,
+            TabId::Settings,
+        ]);
+        let _ = app.timeline.push(ItemKind::User, "Review this change");
+        let _ = app.timeline.push(ItemKind::Assistant, "Ready");
+        app.apply_runtime(crate::RuntimeUpdate::Reasoning("Checking context".into()));
+        app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
+            id: "tool-1".into(),
+            name: "inspect".into(),
+        });
+        app.apply_runtime(crate::RuntimeUpdate::ToolFinished {
+            id: "tool-1".into(),
+            name: "inspect".into(),
+            is_error: false,
+            output: String::new(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw screen-reader frame");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Home: current tab: Session; tabs: Plan, Activity, Settings"));
+        assert!(rendered.contains("User message"));
+        assert!(rendered.contains("Reasoning: Checking context"));
+        assert!(rendered.contains("Tool completed: inspect completed"));
+        assert!(!rendered.contains("● Ready"));
+        assert!(!rendered.contains(">_"));
+
+        for number in 0..80 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw overflowing screen-reader frame");
+        let hit_map = hit_map.expect("screen-reader hit map");
+        assert!(hit_map.scrollbar.total_rows > hit_map.scrollbar.viewport_rows);
+        assert!(hit_map.scrollbar.thumb.is_none());
+        assert_eq!(hit_map.scrollbar.track, Rect::default());
+
+        app.request_approval("write_file", "src/main.rs", "project write");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw accessible approval");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Permission required"));
+        assert!(rendered.contains("Current selection: 1. Allow once"));
+        assert!(!rendered.contains("╭"));
+
+        let mut narrow = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");
+        narrow
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw narrow screen-reader frame");
+        let rendered = narrow.backend().to_string();
+        assert!(rendered.contains("Home: current tab: Session; tabs:"));
+        assert!(!rendered.contains('›'));
     }
 
     #[test]

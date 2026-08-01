@@ -47,6 +47,14 @@ immediately on release; `false` and `0` retain the default behavior. These
 environment-only controls do not extend the stable TOML schema. Mouse reporting
 is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or `0`) before launch
 for a keyboard-only fallback that leaves pointer handling to the terminal.
+Set `LOCALPILOT_CHAT_SCREEN_READER=true` (or `1`) for the target-shaped
+full-screen accessible projection: tabs become a wrapped current-tab sentence,
+conversation rows use explicit textual roles and states, decorative banner and
+prompt chrome is removed, dialogs expose their current selection in text, and
+in-app scrollbar glyphs are hidden. The composer and alternate-screen lifecycle
+remain unchanged, while non-TTY output continues to use LocalPilot's separate
+plain path. Terminal chrome is static; there is no animated spinner or motion
+effect to disable.
 
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard

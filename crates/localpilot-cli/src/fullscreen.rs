@@ -46,6 +46,7 @@ const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 const CHAT_COPY_ON_SELECT_ENV: &str = "LOCALPILOT_CHAT_COPY_ON_SELECT";
 const CHAT_MOUSE_ENV: &str = "LOCALPILOT_CHAT_MOUSE";
+const CHAT_SCREEN_READER_ENV: &str = "LOCALPILOT_CHAT_SCREEN_READER";
 const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
 const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
@@ -617,6 +618,14 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
                 .to_string(),
         },
         SettingEntry {
+            section: "Accessibility".to_string(),
+            name: "Screen reader".to_string(),
+            value: enabled(app.capabilities.screen_reader),
+            description: format!(
+                "Set {CHAT_SCREEN_READER_ENV}=true for a role-labeled full-screen projection."
+            ),
+        },
+        SettingEntry {
             section: "Appearance".to_string(),
             name: "Color mode".to_string(),
             value: app.theme.display_name().to_string(),
@@ -708,6 +717,17 @@ fn apply_host_preferences(app: &mut AppModel) {
     {
         app.apply_runtime(RuntimeUpdate::Warning(format!(
             "{CHAT_MOUSE_ENV} must be true, false, 1, or 0; using true"
+        )));
+    }
+    if std::env::var_os(CHAT_SCREEN_READER_ENV).is_some()
+        && std::env::var(CHAT_SCREEN_READER_ENV)
+            .ok()
+            .as_deref()
+            .and_then(parse_bool_setting)
+            .is_none()
+    {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "{CHAT_SCREEN_READER_ENV} must be true, false, 1, or 0; using false"
         )));
     }
 }
@@ -1797,7 +1817,7 @@ fn handle_mouse_event(
             } else {
                 app.timeline.scroll_by(
                     -WHEEL_SCROLL_ROWS,
-                    hit_map.timeline.width,
+                    hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
                 );
             }
@@ -1814,7 +1834,7 @@ fn handle_mouse_event(
             } else {
                 app.timeline.scroll_by(
                     WHEEL_SCROLL_ROWS,
-                    hit_map.timeline.width,
+                    hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
                 );
             }
@@ -1841,7 +1861,7 @@ fn handle_mouse_event(
                         } else {
                             app.timeline.scroll_by(
                                 delta,
-                                hit_map.timeline.width,
+                                hit_map.timeline_wrap_width,
                                 hit_map.timeline.height,
                             );
                         }
@@ -1933,7 +1953,7 @@ fn handle_mouse_event(
                     } else {
                         app.timeline.scroll_to_row(
                             start,
-                            hit_map.timeline.width,
+                            hit_map.timeline_wrap_width,
                             hit_map.timeline.height,
                         );
                     }
@@ -2002,10 +2022,10 @@ fn advance_mouse_selection(app: &mut AppModel, hit_map: &HitMap, mouse_state: &M
     };
     if row < hit_map.timeline.y {
         app.timeline
-            .scroll_by(-1, hit_map.timeline.width, hit_map.timeline.height);
+            .scroll_by(-1, hit_map.timeline_wrap_width, hit_map.timeline.height);
     } else if row >= hit_map.timeline.bottom() {
         app.timeline
-            .scroll_by(1, hit_map.timeline.width, hit_map.timeline.height);
+            .scroll_by(1, hit_map.timeline_wrap_width, hit_map.timeline.height);
     }
     extend_mouse_selection(app, hit_map, mouse_state, column, row);
 }
@@ -2074,11 +2094,11 @@ fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation,
     match navigation {
         TimelineNavigation::PageUp => {
             app.timeline
-                .scroll_by(-page, hit_map.timeline.width, hit_map.timeline.height)
+                .scroll_by(-page, hit_map.timeline_wrap_width, hit_map.timeline.height)
         }
         TimelineNavigation::PageDown => {
             app.timeline
-                .scroll_by(page, hit_map.timeline.width, hit_map.timeline.height)
+                .scroll_by(page, hit_map.timeline_wrap_width, hit_map.timeline.height)
         }
     }
 }
@@ -2373,6 +2393,11 @@ impl TerminalModes {
                 KeyboardSupport::Basic
             },
             clipboard_write,
+            screen_reader: std::env::var(CHAT_SCREEN_READER_ENV)
+                .ok()
+                .as_deref()
+                .and_then(parse_bool_setting)
+                .unwrap_or(false),
         };
         Ok((guard, capabilities))
     }
