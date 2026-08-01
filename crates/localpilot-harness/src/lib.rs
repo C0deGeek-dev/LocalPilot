@@ -21,6 +21,7 @@ mod hooks;
 mod judge;
 mod launch_targets;
 mod lessons;
+mod paths_in_play;
 mod planning;
 mod precondition;
 mod progress;
@@ -54,6 +55,7 @@ pub use handoff::{
 pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
 pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
+pub use paths_in_play::PathsInPlay;
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use project_analysis::{

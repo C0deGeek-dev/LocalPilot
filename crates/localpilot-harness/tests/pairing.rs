@@ -116,7 +116,7 @@ async fn rejected_batch_with_blank_name_synthesizes_a_rejection_result() {
         .iter()
         .flat_map(|m| &m.content)
         .find_map(|b| match b {
-            ContentBlock::ToolResult(r) if r.is_error => Some(r.output.clone()),
+            ContentBlock::ToolResult(r) if r.is_error() => Some(r.output.clone()),
             _ => None,
         })
         .expect("a synthesized rejection result");

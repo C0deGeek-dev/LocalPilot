@@ -165,6 +165,31 @@ Rules:
 
 Finds files by name pattern, respecting ignore files; capped results.
 
+### `ask_user`
+
+Puts a decision to the user: one to four questions, each offering two to four
+options, asked in order. Free text is always offered as a final row — the
+options are the model's guess at the answer space, the user is the authority on
+it — and multi-select is per question, for choices that genuinely combine.
+
+Rules:
+
+- it declares **no effects**, so the permission engine never gates it. The real
+  gate is the host capability: a profile that grants everything cannot conjure a
+  user, and a profile that grants nothing does not stop one being asked
+- where **no human is reachable** — a non-interactive run, or a host that wired
+  no prompter — it returns a model-visible string saying so and telling the model
+  to choose and state its assumption. A piped run, a CI run, and a subagent
+  therefore never stall. Subagents get no prompter, consistent with a child never
+  answering its own asks
+- a **dismissed** question is not a failure: the transcript hands the decision
+  back to the model with an instruction to say which way it went
+- malformed calls (no questions, too many, one option, too many options, a blank
+  question, duplicate labels within a question) are rejected before a human is
+  made to look at them
+
+See ADR-0121.
+
 ### `delegate`
 
 Hands a bounded, self-contained task to a **subagent** — a child session with its
@@ -187,8 +212,11 @@ Rules:
   own and are authorized individually
 - subagents nest one level deep by default — a subagent cannot spawn another
 - the caller gets a bounded summary, not the child's transcript
-- a refusal (ceiling reached, no usable tools, unknown agent) comes back as
-  readable output, not a failed call
+- a refusal (ceiling reached, no usable tools) comes back as readable output
+  with a `ReportedFailure` outcome: `status: error` so the model cannot read a
+  delegation that never ran as done, without counting against tool-health
+  guards (ADR-0116). A session with no agent definitions at all is a
+  configuration fact, reported as a success that says to do the work directly
 - the child's tool calls are charged to the delegating turn's own per-turn
   ceiling, so delegation cannot be used to slip past it, and its token usage is
   republished to the caller so a delegating turn reports what it really cost.
@@ -359,6 +387,27 @@ Tool result text must be:
 - deterministic enough for tests
 - explicit about truncation
 - free of secrets where redaction is possible
+
+A result carries a three-state **outcome**, not a boolean (ADR-0116):
+
+- `Ok` — the tool ran and the work it wrapped succeeded.
+- `ReportedFailure` — the tool ran to completion and the work it wrapped
+  reported failure: a non-zero exit, a non-2xx `fetch`, a background process
+  dying inside its grace period, a refused delegation, an MCP response with
+  `isError: true`. The tool is healthy; the world said no.
+- `Unusable` — the tool could not do its job at all: a spawn error, a timeout,
+  invalid input, an unknown tool, a denial, a gate block, a cancellation.
+
+Both failure kinds render `status: error` to the model; the distinction feeds
+tool-health guards (only `Unusable` counts as a malfunction) and the turn
+handoff. On the wire the pre-outcome `is_error` boolean is always written
+alongside the refinement, so transcripts written before the outcome existed
+keep parsing.
+
+These bounds apply to **every** result the model can see: a tool *error* takes
+the same redaction and the same context bound as a success, at the same
+dispatch chokepoint (ADR-0117). There is no unredacted, unbounded path out of a
+tool.
 
 Oversized output is bounded at a single seam — the dispatch chokepoint, after
 redaction: the head and tail stay in context with an explicit truncation note,

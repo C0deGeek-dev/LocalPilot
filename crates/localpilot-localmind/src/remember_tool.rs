@@ -147,6 +147,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         }
     }
 
@@ -163,7 +164,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
 
         // It is a review candidate, visible in the review queue...
         let review = crate::ops::review_list(dir.path()).unwrap();

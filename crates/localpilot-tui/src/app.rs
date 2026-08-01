@@ -352,6 +352,62 @@ fn handle_key(state: &mut AppState, key: Key) {
         return;
     }
 
+    // A question the agent is waiting on captures input next. Unlike the
+    // approval branch — which throws its decision away here and is answered in
+    // the REPL — this one mutates its own selection state, so the deterministic
+    // `run()` loop can drive the whole widget without the REPL.
+    if let Some(question) = &mut state.question {
+        match key {
+            // Ctrl+C stays global: cancelling the turn cancels the question.
+            Key::CtrlC => {}
+            Key::Up => {
+                question.move_selection(-1);
+                return;
+            }
+            Key::Down => {
+                question.move_selection(1);
+                return;
+            }
+            Key::Char(' ') if question.other.is_none() => {
+                question.toggle();
+                return;
+            }
+            Key::Char(c) if question.other.is_some() => {
+                if let Some(text) = question.other.as_mut() {
+                    text.push(c);
+                }
+                return;
+            }
+            Key::Backspace if question.other.is_some() => {
+                if let Some(text) = question.other.as_mut() {
+                    text.pop();
+                }
+                return;
+            }
+            Key::Enter => {
+                // On the free-text row, the first Enter opens text entry; the
+                // second answers with what was typed.
+                if question.on_other_row() && question.other.is_none() {
+                    question.other = Some(String::new());
+                    return;
+                }
+                state.question = None;
+                return;
+            }
+            Key::Esc => {
+                // In text entry, Esc backs out to the list rather than
+                // discarding the whole question.
+                if question.other.is_some() {
+                    question.other = None;
+                } else {
+                    state.question = None;
+                }
+                return;
+            }
+            _ => return,
+        }
+    }
+
     // While the slash-command autocomplete is open it captures input: arrows
     // navigate, Enter/Tab accept the highlighted command, Esc dismisses, and
     // edits refilter the list (closing it once the input leaves slash context).

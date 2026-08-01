@@ -130,6 +130,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         }
     }
 
@@ -166,7 +167,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains("Accepted memory matches"),
             "got: {}",
@@ -186,7 +187,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error, "an empty store must not be an error");
+        assert!(!out.is_error(), "an empty store must not be an error");
         assert!(out.text.contains("no accepted memory"), "got: {}", out.text);
     }
 
@@ -200,7 +201,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("no accepted memory"));
         assert!(!dir.path().join(".localmind.toml").exists());
         assert!(!dir.path().join(".localmind").exists());

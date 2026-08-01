@@ -1680,6 +1680,7 @@ name = "localpilot-config"
 version = "2.6.0"
 dependencies = [
  "figment",
+ "globset",
  "ignore",
  "indexmap",
  "insta",

@@ -1,5 +1,6 @@
 ---
 source: crates/localpilot-tools/tests/tools.rs
+assertion_line: 109
 expression: "serde_json::to_string_pretty(&schemas).unwrap()"
 ---
 [
@@ -772,6 +773,81 @@ expression: "serde_json::to_string_pretty(&schemas).unwrap()"
         "task"
       ],
       "title": "DelegateInput",
+      "type": "object"
+    }
+  ],
+  [
+    "ask_user",
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "OptionInput": {
+          "properties": {
+            "description": {
+              "default": null,
+              "description": "What choosing this means, when the label alone is not enough.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "The answer text the user picks.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "QuestionInput": {
+          "properties": {
+            "header": {
+              "default": null,
+              "description": "A short label for the question's topic (a few words).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "multi_select": {
+              "default": false,
+              "description": "Whether several options may be chosen together. Only for choices that genuinely combine.",
+              "type": "boolean"
+            },
+            "options": {
+              "description": "Two to four distinct answers to offer. The user can always type something else instead, so these are a best guess, not a ceiling.",
+              "items": {
+                "$ref": "#/definitions/OptionInput"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question to put to the user.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "options",
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "questions": {
+          "description": "The questions to ask, in order. One to four.",
+          "items": {
+            "$ref": "#/definitions/QuestionInput"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "title": "AskUserInput",
       "type": "object"
     }
   ],

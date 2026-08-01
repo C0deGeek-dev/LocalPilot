@@ -68,6 +68,7 @@ ratatui = { version = "=0.29.0", default-features = false, features = [
 ] }
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
 futures = "=0.3.31"
+globset = "=0.4.16"
 ignore = "=0.4.23"
 # PNG-encode a captured clipboard image (RGBA → PNG), TUI only. `arboard`'s
 # image-data feature pulls `image` regardless, so we reuse it for encoding and

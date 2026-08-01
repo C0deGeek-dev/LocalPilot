@@ -111,6 +111,89 @@ pub struct ApprovalRequest {
     pub risk_class: String,
 }
 
+/// One question the agent is waiting on, and the user's in-progress answer.
+///
+/// The widget mirrors the slash and file pickers — the same arrow-key
+/// navigation and the same highlight — because that is the interaction the user
+/// already knows here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionPrompt {
+    /// A short label for the question's topic.
+    pub header: Option<String>,
+    /// The question itself.
+    pub question: String,
+    /// The offered answers, each `(label, description)`.
+    pub options: Vec<(String, Option<String>)>,
+    /// The highlighted row. The row past the last option is the free-text row,
+    /// which is always offered: the options are the model's guess at the answer
+    /// space, and the user is the authority on it.
+    pub selected: usize,
+    /// Which options are ticked, for a multi-select question.
+    pub checked: Vec<bool>,
+    /// Whether several options may be chosen together.
+    pub multi_select: bool,
+    /// The free-text answer being typed, or `None` while the list has focus.
+    pub other: Option<String>,
+    /// This question's 1-based position, and how many are being asked.
+    pub index: usize,
+    pub total: usize,
+}
+
+impl QuestionPrompt {
+    /// The index of the free-text row — one past the last option.
+    #[must_use]
+    pub fn other_row(&self) -> usize {
+        self.options.len()
+    }
+
+    /// Whether the free-text row is highlighted.
+    #[must_use]
+    pub fn on_other_row(&self) -> bool {
+        self.selected == self.other_row()
+    }
+
+    /// Move the highlight by one row, clamped to the list (including the
+    /// free-text row).
+    pub fn move_selection(&mut self, delta: isize) {
+        let last = self.other_row();
+        let next = isize::try_from(self.selected).unwrap_or(0) + delta;
+        self.selected = next.clamp(0, isize::try_from(last).unwrap_or(0)) as usize;
+    }
+
+    /// Tick or untick the highlighted option. A no-op on a single-select
+    /// question and on the free-text row.
+    pub fn toggle(&mut self) {
+        if !self.multi_select || self.on_other_row() {
+            return;
+        }
+        if let Some(checked) = self.checked.get_mut(self.selected) {
+            *checked = !*checked;
+        }
+    }
+
+    /// The labels the user has chosen: the ticked ones for a multi-select
+    /// question, otherwise the highlighted one.
+    #[must_use]
+    pub fn chosen(&self) -> Vec<String> {
+        if self.multi_select {
+            let ticked: Vec<String> = self
+                .options
+                .iter()
+                .zip(&self.checked)
+                .filter(|(_, checked)| **checked)
+                .map(|((label, _), _)| label.clone())
+                .collect();
+            if !ticked.is_empty() {
+                return ticked;
+            }
+        }
+        self.options
+            .get(self.selected)
+            .map(|(label, _)| vec![label.clone()])
+            .unwrap_or_default()
+    }
+}
+
 /// A large pasted block collapsed to a short placeholder in the input line. The
 /// full content is restored before the prompt is sent to the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +356,8 @@ pub struct AppState {
     pub mode: Mode,
     pub profile: Profile,
     pub approval: Option<ApprovalRequest>,
+    /// A question the agent is waiting on, blocking the turn until answered.
+    pub question: Option<QuestionPrompt>,
     /// A blocking first-run trust gate, shown until the folder is trusted.
     pub trust: Option<TrustPrompt>,
     /// Whether the workspace folder has been trusted this session.
@@ -324,6 +409,7 @@ impl AppState {
     pub fn new(header: Header, mode: Mode, profile: Profile) -> Self {
         Self {
             header,
+            question: None,
             transcript: Vec::new(),
             streaming: String::new(),
             input: String::new(),
@@ -1143,6 +1229,8 @@ impl AppState {
             }
             UiEvent::ApprovalRequested(request) => self.approval = Some(request),
             UiEvent::ApprovalResolved => self.approval = None,
+            UiEvent::QuestionAsked(question) => self.question = Some(question),
+            UiEvent::QuestionResolved => self.question = None,
             UiEvent::ToggleThinking => self.thinking.visible = !self.thinking.visible,
             UiEvent::ShowMemoryPanel(body) => {
                 self.memory_panel.body = body;
@@ -1257,6 +1345,10 @@ pub enum UiEvent {
     },
     ApprovalRequested(ApprovalRequest),
     ApprovalResolved,
+    /// The agent asked the user a question.
+    QuestionAsked(QuestionPrompt),
+    /// The question was answered or dismissed.
+    QuestionResolved,
     ToggleThinking,
     /// Show the "memories used this turn" inspector panel with the given rendered
     /// body (the host computes it from the event log + LocalMind provenance).
@@ -1448,6 +1540,18 @@ fn scrub_event(event: UiEvent) -> UiEvent {
             is_error,
             output: scrub_text(output),
         },
+        // The question and its options are model-authored text, so they take
+        // the same scrub as every other externally sourced payload.
+        UiEvent::QuestionAsked(question) => UiEvent::QuestionAsked(QuestionPrompt {
+            header: question.header.map(scrub_text),
+            question: scrub_text(question.question),
+            options: question
+                .options
+                .into_iter()
+                .map(|(label, description)| (scrub_text(label), description.map(scrub_text)))
+                .collect(),
+            ..question
+        }),
         UiEvent::ApprovalRequested(request) => UiEvent::ApprovalRequested(ApprovalRequest {
             tool: scrub_text(request.tool),
             target: scrub_text(request.target),
@@ -1473,6 +1577,7 @@ fn scrub_event(event: UiEvent) -> UiEvent {
         | UiEvent::TurnComplete
         | UiEvent::PlanSettled
         | UiEvent::ApprovalResolved
+        | UiEvent::QuestionResolved
         | UiEvent::ToggleThinking
         | UiEvent::ToggleMemoryPanel
         | UiEvent::Quit) => event,

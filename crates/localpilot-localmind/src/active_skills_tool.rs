@@ -157,6 +157,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         }
     }
 
@@ -192,7 +193,7 @@ mod tests {
 
         let out = ActiveSkills.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains(&id),
             "the skill id must be listed: {}",
@@ -217,7 +218,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.to_lowercase().contains("do not execute"),
             "the body must be framed as advisory guidance: {}",
@@ -232,7 +233,7 @@ mod tests {
 
         let out = ActiveSkills.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("no active skills"), "got: {}", out.text);
         // Read-only: a bare prompt never initializes the project.
         assert!(!dir.path().join(".localmind.toml").exists());

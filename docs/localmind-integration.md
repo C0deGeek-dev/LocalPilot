@@ -669,7 +669,11 @@ Notes:
   exits `141` (the SIGPIPE convention) so a wrapper can tell "the reader left" from
   a real failure. Set `[harness] turn_timeout_secs` to bound a long turn by
   wall-clock (off by default). Either way `print` ends with a one-line, parseable
-  `handoff:` summary on stderr — stop reason, tool calls, files changed, and whether
+  `handoff:` summary on stderr — stop reason, tool calls, files changed, whether
   memory was written (always `false` for one-shot `print`, which reads memory but
-  never closes out) — so a non-interactive caller always has a terminal state to act
-  on. See ADR-0049.
+  never closes out), the counts of tool malfunctions and of calls whose wrapped
+  work reported failure, and any tools that crossed the stuck threshold — so a
+  non-interactive caller always has a terminal state to act on, and can tell a
+  clean turn from one whose every build failed (ADR-0118). Failing tool calls,
+  warnings, and stuck signals also appear as bounded one-line diagnostics on
+  stderr; stdout stays the answer alone. See ADR-0049.

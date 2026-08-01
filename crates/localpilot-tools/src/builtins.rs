@@ -16,6 +16,7 @@ use crate::contract::{
 };
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use localpilot_core::ToolOutcome;
 
 /// Approval detail from a single string field of the input. Tools know their
 /// own schema; this is a typed read, not cross-tool key-guessing.
@@ -1521,7 +1522,13 @@ impl Tool for Fetch {
             format!("HTTP {status} {content_type}\n")
         };
         let mut result = cap(format!("{header}{body}"));
-        result.is_error = !status.is_success();
+        // A delivered non-2xx response is the server saying no; transport
+        // failures return `Err` and stay malfunctions.
+        result.outcome = if status.is_success() {
+            ToolOutcome::Ok
+        } else {
+            ToolOutcome::ReportedFailure
+        };
         Ok(result)
     }
 }
@@ -2169,8 +2176,11 @@ impl Tool for Delegate {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: DelegateInput = parse_input(&input)?;
         let Some(host) = ctx.agents else {
+            // A configuration fact, not a failure: nothing was attempted, and
+            // doing the work directly is the correct next step.
             return Ok(ToolOutput::ok(
-                "delegation is not available in this session: no agent definitions are loaded.                  Do the work directly."
+                "delegation is not available in this session: no agent definitions are loaded. \
+                 Do the work directly."
                     .to_string(),
             ));
         };
@@ -2195,8 +2205,12 @@ impl Tool for Delegate {
         match host.run(agent, &input.task).await {
             Ok(summary) => Ok(cap(summary)),
             // A refused or failed delegation is information the model should
-            // reason about, not a tool crash: it comes back as readable output.
-            Err(reason) => Ok(ToolOutput::ok(format!("delegation did not run: {reason}"))),
+            // reason about, not a tool crash — but the status must say so too:
+            // the tool worked and the delegation it wrapped did not happen, so
+            // this is a reported failure, never `status: success` for work
+            // that was not performed.
+            Err(reason) => Ok(ToolOutput::ok(format!("delegation did not run: {reason}"))
+                .with_outcome(ToolOutcome::ReportedFailure)),
         }
     }
 }

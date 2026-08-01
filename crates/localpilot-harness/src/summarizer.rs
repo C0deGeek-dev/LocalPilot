@@ -376,7 +376,7 @@ fn render_exchange(index: usize, exchange: &[Message]) -> String {
             Role::Tool => {
                 for block in &message.content {
                     if let ContentBlock::ToolResult(result) = block {
-                        out.push_str(if result.is_error {
+                        out.push_str(if result.is_error() {
                             "  tool_error: "
                         } else {
                             "  tool_result: "

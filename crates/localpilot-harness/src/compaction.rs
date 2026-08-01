@@ -553,7 +553,7 @@ fn semantic_digest(dropped: &[Vec<Message>]) -> SemanticDigest {
                         buckets.file_paths.extend(call_paths);
                     }
                     ContentBlock::ToolResult(result) => {
-                        if result.is_error {
+                        if result.is_error() {
                             buckets.failures.insert(truncate(&result.output, 120));
                         }
                         sources.push(SummarySource::new(

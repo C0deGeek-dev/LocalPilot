@@ -36,6 +36,7 @@ use crate::contract::{
 };
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use localpilot_core::ToolOutcome;
 
 /// Default grace period: how long [`BackgroundProcesses::start`] waits before
 /// deciding a process stayed up.
@@ -433,7 +434,9 @@ impl Tool for RunBackground {
                              as a background process.\n--- output ---\n{log}",
                             grace.as_secs()
                         ));
-                        out.is_error = true;
+                        // The process was started and watched successfully; its
+                        // early death is the wrapped work reporting failure.
+                        out.outcome = ToolOutcome::ReportedFailure;
                         Ok(out)
                     }
                 }
@@ -480,8 +483,10 @@ fn require_id(id: &Option<String>) -> Result<String, ToolError> {
 }
 
 fn no_such_process(id: &str) -> Result<ToolOutput, ToolError> {
+    // Repeatedly polling a stale id is precisely the spin the stuck guard
+    // exists to catch, so an unknown id is a malfunction, not a report.
     let mut out = ToolOutput::ok(format!("no background process `{id}`"));
-    out.is_error = true;
+    out.outcome = ToolOutcome::Unusable;
     Ok(out)
 }
 

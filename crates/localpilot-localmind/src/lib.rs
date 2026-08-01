@@ -463,7 +463,7 @@ fn render_transcript(messages: &[Message]) -> String {
                     let _ = writeln!(out, "{speaker} calls {}: {}", call.name, call.input);
                 }
                 ContentBlock::ToolResult(result) => {
-                    let label = if result.is_error {
+                    let label = if result.is_error() {
                         "tool error"
                     } else {
                         "tool result"
@@ -490,10 +490,18 @@ fn render_session_signals<'a>(kinds: impl Iterator<Item = &'a SessionEventKind>)
         match kind {
             SessionEventKind::ToolFinished {
                 name,
-                is_error: true,
+                is_error,
+                outcome,
                 ..
             } => {
-                *failed_tools.entry(name.clone()).or_default() += 1;
+                // Count tool *malfunctions*, not failing wrapped work: a turn
+                // of red test runs teaches nothing about run_shell's health.
+                // Events written before the outcome existed degrade to the
+                // boolean's meaning.
+                let malfunction = outcome.map_or(*is_error, |o| o.is_malfunction());
+                if malfunction {
+                    *failed_tools.entry(name.clone()).or_default() += 1;
+                }
             }
             SessionEventKind::RecoveryDiagnostic { kind, health } => {
                 recoveries.push(format!("{kind} (health: {health})"));
@@ -688,16 +696,19 @@ mod tests {
                 id: "1".into(),
                 name: "run_shell".into(),
                 is_error: true,
+                outcome: None,
             },
             SessionEventKind::ToolFinished {
                 id: "2".into(),
                 name: "run_shell".into(),
                 is_error: true,
+                outcome: None,
             },
             SessionEventKind::ToolFinished {
                 id: "3".into(),
                 name: "read_file".into(),
                 is_error: false,
+                outcome: None,
             },
             SessionEventKind::RecoveryDiagnostic {
                 kind: "degenerate_output".into(),

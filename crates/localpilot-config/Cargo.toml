@@ -18,6 +18,7 @@ keychain = ["dep:keyring"]
 
 [dependencies]
 figment = { workspace = true }
+globset = { workspace = true }
 ignore = { workspace = true }
 indexmap = { workspace = true }
 keyring = { workspace = true, optional = true }

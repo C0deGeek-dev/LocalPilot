@@ -13,7 +13,8 @@ use indexmap::IndexMap;
 use localpilot_config::redact::redact;
 use localpilot_config::{CheckConfig, RuleSeverity};
 use localpilot_core::{
-    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
+    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolOutcome, ToolResult,
+    ToolUseId,
 };
 use localpilot_llm::{
     InputBlockKind, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError,
@@ -89,6 +90,13 @@ pub struct TurnHandoff {
     /// `print` one-shot path, which reads accepted memory but never closes out —
     /// the field surfaces that so a caller knows to run an explicit close-out.
     pub memory_written: bool,
+    /// Calls the tool could not perform at all (spawn error, denial, timeout).
+    pub tool_failures: usize,
+    /// Calls whose tool ran fine and whose wrapped work reported failure (a
+    /// failing test run, a non-2xx fetch).
+    pub reported_failures: usize,
+    /// Tools that crossed the per-turn stuck threshold.
+    pub stuck_tools: Vec<String>,
 }
 
 impl TurnHandoff {
@@ -101,11 +109,19 @@ impl TurnHandoff {
             .iter()
             .map(|f| serde_json::Value::String(f.clone()))
             .collect::<Vec<_>>();
+        let stuck = self
+            .stuck_tools
+            .iter()
+            .map(|t| serde_json::Value::String(t.clone()))
+            .collect::<Vec<_>>();
         serde_json::json!({
             "stop": format!("{:?}", self.reason),
             "tool_calls": self.tool_calls,
             "files_changed": files,
             "memory_written": self.memory_written,
+            "tool_failures": self.tool_failures,
+            "reported_failures": self.reported_failures,
+            "stuck_tools": stuck,
         })
         .to_string()
     }
@@ -610,8 +626,10 @@ impl ToolFailureGuard {
         *count
     }
 
-    /// Reset counters for a successful (non-error) tool invocation.
-    fn record_success(&mut self, tool_name: &str) {
+    /// Clear the counter on any call that proves the tool works — a success,
+    /// or a completed run whose wrapped work reported failure. The guard
+    /// measures tool health, not task progress.
+    fn record_working(&mut self, tool_name: &str) {
         self.failures.remove(tool_name);
     }
 
@@ -631,6 +649,18 @@ fn same_error_hint(tool: &str) -> String {
          body to a script file (.py/.ps1/.sh) and run that file; if a required tool is missing, say \
          so instead of working around it; otherwise read the relevant file or inputs before \
          retrying."
+    )
+}
+
+/// A strategy-change hint appended when a *healthy* tool keeps reporting the
+/// same failing work — a test suite failing identically three runs straight
+/// with nothing landing in between. Unlike [`same_error_hint`], the tool is
+/// fine; re-running is what will not help.
+fn same_failure_hint(tool: &str) -> String {
+    format!(
+        "\n\n[recovery] `{tool}` has now reported the same failure several times. Re-running it \
+         will not change the result: read the failing output above, change what produced it, and \
+         only then run it again."
     )
 }
 
@@ -694,6 +724,10 @@ pub struct SessionRuntime {
     /// Subagent definitions this session may delegate to. `None` means the host
     /// wired none, and `delegate` reports itself unavailable.
     agents: Option<std::sync::Arc<localpilot_agents::AgentSet>>,
+    /// The host that can put a question to the user for `ask_user`. `None` (the
+    /// default) means no human is reachable on this session — a piped run, a CI
+    /// run, a subagent — and the tool says so rather than waiting.
+    prompter: Option<std::sync::Arc<dyn localpilot_tools::UserPrompter>>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -761,6 +795,14 @@ pub struct SessionRuntime {
     /// Whether the current turn persisted learning to memory. Reset at each turn
     /// start; the run-turn path only reads memory, so it stays `false` here.
     turn_memory_written: bool,
+    /// Calls this turn the tool could not perform at all. The counters live
+    /// here rather than in any event consumer because a broadcast subscriber
+    /// can lag and drop events; the runtime sees every call by construction.
+    turn_tool_failures: usize,
+    /// Calls this turn whose wrapped work reported failure.
+    turn_reported_failures: usize,
+    /// Tools that crossed the per-turn stuck threshold this turn.
+    turn_stuck_tools: Vec<String>,
     /// The memories injected into the current turn's context. Reset at each turn
     /// start, set from the context contribution, and delivered to the context
     /// hooks once at the turn's exit (`stop`) for best-effort usage tracking —
@@ -774,6 +816,10 @@ pub struct SessionRuntime {
     /// already-seen, unchanged re-read can be elided to a stub (opt-in via
     /// `elide_seen_reads`). In-memory and session-scoped.
     read_history: crate::elision::ReadHistory,
+    /// Workspace files this session has touched, shared with the pre-turn
+    /// context hook so a path-scoped instruction file reaches the model exactly
+    /// when its `applyTo` glob matches something in play.
+    paths_in_play: crate::PathsInPlay,
 }
 
 impl SessionRuntime {
@@ -823,6 +869,7 @@ impl SessionRuntime {
             rule_engine,
             named_targets: Vec::new(),
             agents: None,
+            prompter: None,
             broker: None,
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
@@ -831,9 +878,13 @@ impl SessionRuntime {
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
             turn_memory_written: false,
+            turn_tool_failures: 0,
+            turn_reported_failures: 0,
+            turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
             last_handoff: None,
             read_history: crate::elision::ReadHistory::default(),
+            paths_in_play: crate::PathsInPlay::new(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -1210,6 +1261,7 @@ impl SessionRuntime {
             retention: Some(&retention),
             processes: Some(self.background.as_ref()),
             agents: None,
+            prompter: None,
         };
         let engine = self.engine.snapshot();
         let result = self
@@ -1219,7 +1271,8 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
             name: "run_shell".to_string(),
-            is_error: result.is_error,
+            is_error: result.is_error(),
+            outcome: Some(result.outcome),
         });
         if !exclude_from_context {
             let rendered = if args.is_empty() {
@@ -1285,6 +1338,13 @@ impl SessionRuntime {
     /// from the local, disposable store so a common need is advertised from turn
     /// one (ADR-0012). Best-effort: a missing or unreadable record is ignored.
     /// Attach the subagent definitions this session may delegate to.
+    /// Install the host that can put a question to the user, enabling
+    /// `ask_user`. An interactive front-end wires this; a headless caller leaves
+    /// it unset, and the tool reports itself unavailable instead of stalling.
+    pub fn set_prompter(&mut self, prompter: std::sync::Arc<dyn localpilot_tools::UserPrompter>) {
+        self.prompter = Some(prompter);
+    }
+
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
         self.agents = Some(agents);
     }
@@ -2021,6 +2081,9 @@ impl SessionRuntime {
         self.turn_tool_calls = 0;
         self.turn_files_changed.clear();
         self.turn_memory_written = false;
+        self.turn_tool_failures = 0;
+        self.turn_reported_failures = 0;
+        self.turn_stuck_tools.clear();
         self.turn_memories_used.clear();
         // A bounded per-turn deadline, when configured: the turn stops cleanly with
         // a handoff at this instant rather than hanging. `None` leaves it unbounded.
@@ -2780,6 +2843,7 @@ impl SessionRuntime {
                                 agents: host
                                     .as_ref()
                                     .map(|h| h as &dyn localpilot_tools::AgentHost),
+                                prompter: self.prompter.as_deref(),
                             };
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
@@ -2861,6 +2925,7 @@ impl SessionRuntime {
                         id: id.clone(),
                         name: name.clone(),
                         is_error: true,
+                        outcome: Some(ToolOutcome::Unusable),
                     });
                     self.hooks.notify(&HookEvent::ToolFinished {
                         id: id.clone(),
@@ -2923,9 +2988,17 @@ impl SessionRuntime {
                     result.output = scrubbed;
                 }
 
+                // Every workspace file a call named is now "in play", whether the
+                // call read it, wrote it, or failed on it: a path-scoped
+                // instruction file is about the file, not about the outcome.
+                if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                    self.paths_in_play
+                        .record(self.workspace.root(), std::path::Path::new(&norm));
+                }
+
                 // Record a successful workspace mutation for the per-turn handoff,
                 // so a timed-out or cut-off run still reports which files it touched.
-                if !result.is_error && is_file_write_tool(name) {
+                if !result.is_error() && is_file_write_tool(name) {
                     if let Some(path) = file_write_path(input) {
                         if !self.turn_files_changed.contains(&path) {
                             self.turn_files_changed.push(path);
@@ -2947,7 +3020,7 @@ impl SessionRuntime {
                 // model is never handed stale bytes. The elided read still records as
                 // a successful `read_file`, so `RequiresPriorRead` and the scorecards
                 // see the same events.
-                if self.config.elide_seen_reads && !result.is_error && name == "read_file" {
+                if self.config.elide_seen_reads && !result.is_error() && name == "read_file" {
                     if let Some(norm) = normalized_tool_path(&self.workspace, input) {
                         let (start, end) = read_file_range(input);
                         if let Ok((mtime, len)) = file_mtime_len(&norm) {
@@ -2974,85 +3047,117 @@ impl SessionRuntime {
                         .push_str(&format!("\n\n[check-before-launch] {message}"));
                 }
 
-                // Track per-tool failure counts for the safeguard.
-                if result.is_error {
-                    unproductive_streak += 1;
-                    let count = self.tool_failure_guard.record_failure(name);
-                    match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
-                        std::cmp::Ordering::Less => {
+                // Track tool health and turn progress. The two failure kinds
+                // diverge here: only a tool that could not do its job counts
+                // against the per-tool stuck guard, while both kinds count as
+                // unproductive (a missing binary comes back as exit 127 — a
+                // *reported* failure — and must not spin unchecked).
+                match result.outcome {
+                    ToolOutcome::Unusable => {
+                        unproductive_streak += 1;
+                        self.turn_tool_failures += 1;
+                        let count = self.tool_failure_guard.record_failure(name);
+                        match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
+                            std::cmp::Ordering::Less => {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "tool `{name}` failed ({}/{})",
+                                    count, DEFAULT_TOOL_FAILURE_THRESHOLD
+                                )));
+                            }
+                            std::cmp::Ordering::Equal => {
+                                let msg = format!(
+                                    "tool `{name}` has failed {count} times this turn; a \
+                                     different approach is likely needed"
+                                );
+                                let _ = events.send(RuntimeEvent::Warning(msg.clone()));
+                                let _ = events.send(RuntimeEvent::ToolStuck {
+                                    name: name.clone(),
+                                    count,
+                                });
+                                if !self.turn_stuck_tools.contains(name) {
+                                    self.turn_stuck_tools.push(name.clone());
+                                }
+                            }
+                            std::cmp::Ordering::Greater => {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "tool `{name}` failed again (#{count}); still stuck"
+                                )));
+                            }
+                        }
+                        // Same-error breaker: when a tool fails identically several
+                        // times in a row, force a strategy change *before* the failure
+                        // budget is spent by surfacing a hint in the model-visible
+                        // result, rather than letting it re-send the same call.
+                        if self.error_breaker.observe(name, &result.output) {
                             let _ = events.send(RuntimeEvent::Warning(format!(
-                                "tool `{name}` failed ({}/{})",
-                                count, DEFAULT_TOOL_FAILURE_THRESHOLD
+                                "tool `{name}` keeps failing the same way; nudging a strategy change"
                             )));
+                            let hint = same_error_hint(name);
+                            result.output.push_str(&hint);
                         }
-                        std::cmp::Ordering::Equal => {
-                            let msg = format!(
-                                "tool `{name}` has failed {count} times this turn; stopping further \
-                                 calls and trying another approach"
-                            );
-                            let _ = events.send(RuntimeEvent::Warning(msg.clone()));
-                            let _ = events.send(RuntimeEvent::ToolStuck {
-                                name: name.clone(),
-                                count,
-                            });
-                        }
-                        std::cmp::Ordering::Greater => {
+                    }
+                    ToolOutcome::ReportedFailure => {
+                        unproductive_streak += 1;
+                        self.turn_reported_failures += 1;
+                        // The call spawned, ran, and captured output — direct
+                        // evidence the tool works, which is the property the
+                        // stuck guard measures. Clear it like a success.
+                        self.tool_failure_guard.record_working(name);
+                        // Three identical failing runs with nothing landing in
+                        // between deserve a nudge, but a failing-work nudge:
+                        // re-running will not change the result. In a genuine
+                        // edit/test loop the intervening success resets the
+                        // breaker, so it never fires there.
+                        if self.error_breaker.observe(name, &result.output) {
                             let _ = events.send(RuntimeEvent::Warning(format!(
-                                "tool `{name}` failed again (#{count}); still stuck"
+                                "tool `{name}` keeps reporting the same failure; nudging a \
+                                 strategy change"
                             )));
+                            result.output.push_str(&same_failure_hint(name));
                         }
                     }
-                    // Same-error breaker: when a tool fails identically several
-                    // times in a row, force a strategy change *before* the failure
-                    // budget is spent by surfacing a hint in the model-visible
-                    // result, rather than letting it re-send the same call.
-                    if self.error_breaker.observe(name, &result.output) {
-                        let hint = same_error_hint(name);
-                        let _ = events.send(RuntimeEvent::Warning(format!(
-                            "tool `{name}` keeps failing the same way; nudging a strategy change"
-                        )));
-                        result.output.push_str(&hint);
-                    }
-                } else {
-                    unproductive_streak = 0;
-                    self.tool_failure_guard.record_success(name);
-                    // Feed the broker's learned re-rank: a revealed tool that ran
-                    // successfully ranks higher next time (no-op when learning off
-                    // or the tool was not revealed).
-                    if let Some(broker) = &self.broker {
-                        broker.note_success(name);
-                    }
-                    self.error_breaker.reset();
-                    // No-progress breaker: a successful call that keeps repeating
-                    // with the same result, or a turn cycling a tiny set of calls,
-                    // gets one strategy-change nudge before the budget controller
-                    // may stop the turn. The signature pairs the tool with its
-                    // arguments; the output is the observable state, so a re-read
-                    // after a real change (different output) is not flagged.
-                    let signature = format!("{name}\u{1f}{input}");
-                    if no_progress.observe(&signature, &result.output) {
-                        let _ = events.send(RuntimeEvent::Warning(
-                            "tool calls are not making forward progress; nudging a strategy change"
-                                .to_string(),
-                        ));
-                        result.output.push_str(&no_progress_hint());
+                    ToolOutcome::Ok => {
+                        unproductive_streak = 0;
+                        self.tool_failure_guard.record_working(name);
+                        // Feed the broker's learned re-rank: a revealed tool that ran
+                        // successfully ranks higher next time (no-op when learning off
+                        // or the tool was not revealed).
+                        if let Some(broker) = &self.broker {
+                            broker.note_success(name);
+                        }
+                        self.error_breaker.reset();
+                        // No-progress breaker: a successful call that keeps repeating
+                        // with the same result, or a turn cycling a tiny set of calls,
+                        // gets one strategy-change nudge before the budget controller
+                        // may stop the turn. The signature pairs the tool with its
+                        // arguments; the output is the observable state, so a re-read
+                        // after a real change (different output) is not flagged.
+                        let signature = format!("{name}\u{1f}{input}");
+                        if no_progress.observe(&signature, &result.output) {
+                            let _ = events.send(RuntimeEvent::Warning(
+                                "tool calls are not making forward progress; nudging a strategy change"
+                                    .to_string(),
+                            ));
+                            result.output.push_str(&no_progress_hint());
+                        }
                     }
                 }
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
                     output: result.output.clone(),
                 });
                 self.record_event(SessionEventKind::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
+                    outcome: Some(result.outcome),
                 });
                 self.hooks.notify(&HookEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
                 });
                 // Verifier stage: judge the call against its contract and record
                 // the verdict durably, so a later claim can be checked against it.
@@ -3067,6 +3172,14 @@ impl SessionRuntime {
                 ));
             }
         }
+    }
+
+    /// A handle on the workspace files this session has touched. Cloned by the
+    /// project-instructions hook so a path-scoped rule can be matched against
+    /// what is actually in play.
+    #[must_use]
+    pub fn paths_in_play(&self) -> crate::PathsInPlay {
+        self.paths_in_play.clone()
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,
@@ -3101,6 +3214,9 @@ impl SessionRuntime {
             tool_calls: self.turn_tool_calls,
             files_changed: self.turn_files_changed.clone(),
             memory_written: self.turn_memory_written,
+            tool_failures: self.turn_tool_failures,
+            reported_failures: self.turn_reported_failures,
+            stuck_tools: self.turn_stuck_tools.clone(),
         });
         if reason == StopReason::Cancelled {
             self.record_event(SessionEventKind::Cancelled);
@@ -3678,7 +3794,7 @@ mod tests {
         let mut guard = ToolFailureGuard::default();
         guard.record_failure("edit_file");
         guard.record_failure("edit_file");
-        guard.record_success("edit_file");
+        guard.record_working("edit_file");
         // After success the counter is gone: the next failure starts again at one.
         assert_eq!(guard.record_failure("edit_file"), 1);
     }
