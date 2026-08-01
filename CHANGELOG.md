@@ -6,10 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- **The new full-screen terminal-chat shell and timeline are available for branch testing.**
-  `LOCALPILOT_CHAT_UI=fullscreen localpilot chat` selects an alternate-buffer
-  host backed by the new backend-neutral `localpilot-terminal-ui` crate; unset
-  or `inline` keeps the current working REPL as the rollback. The foundation
+- **The full-screen terminal-chat shell and timeline are now the interactive default.**
+  Bare `localpilot chat` selects the alternate-buffer host backed by the
+  backend-neutral `localpilot-terminal-ui` crate. `LOCALPILOT_CHAT_UI=inline`
+  remains only as a temporary legacy rollback while the remaining physical and
+  cross-terminal acceptance matrix closes. The foundation
   carries stable content IDs, virtualized content-anchored history, framed
   prompts, compact activity, semantic themes, responsive status/composer/footer
   regions, a screenshot-measured true-color palette with a dark application
@@ -17,7 +18,7 @@ is SemVer-stable; the configuration schema stability policy is in
   grapheme/display-width editor geometry, a provider-neutral runtime-
   event adapter, transactional terminal restore, and contextual Ctrl+C handling:
   copy selected text, cancel active work when no text is selected, and exit only
-  on a consecutive second press. The branch host now draws before workspace
+  on a consecutive second press. The full-screen host now draws before workspace
   projections, restores the workspace-trust gate and durable prompt history,
   submits through the existing `SessionRuntime`, streams stable timeline items,
   shows a live response-byte counter, denies tool approvals safely, and keeps an

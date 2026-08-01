@@ -21,21 +21,23 @@ The configuration schema is **stable under semantic versioning** from v1.0:
 The configuration schema is SemVer-stable (LocalPilot has been ≥ 1.0.0 since
 2026-06-24); any change is noted in `CHANGELOG.md`.
 
-## Transitional interactive-chat host
+## Interactive chat host
 
-The full-screen chat foundation is temporarily opt-in while it is completed:
+Interactive `localpilot chat` uses the full-screen terminal application by
+default:
 
 ```powershell
-$env:LOCALPILOT_CHAT_UI = "fullscreen"
 localpilot chat
 ```
 
-Unset the variable or set it to `inline` to use the current working inline REPL.
-Any other value is rejected with a configuration error. This is an environment-
-only transition switch, not part of the stable TOML schema; the inline host and
-selector are removed when full-screen feature parity is accepted (ADR-0107).
+`LOCALPILOT_CHAT_UI=fullscreen` is an accepted explicit spelling. Set
+`LOCALPILOT_CHAT_UI=inline` only to use the temporary legacy rollback while the
+remaining cross-terminal acceptance matrix is completed. Any other value is
+rejected with a configuration error. This environment-only recovery switch is
+not part of the stable TOML schema and does not affect non-interactive/plain
+output. The inline host and selector are removed after the gates in ADR-0109.
 
-While using the full-screen branch host, `LOCALPILOT_CHAT_THEME` accepts
+For the full-screen host, `LOCALPILOT_CHAT_THEME` accepts
 `default`, `dim`, `high-contrast`, or `colorblind`. An invalid value is shown as
 a sanitized timeline warning and falls back to `default`. The default uses a
 stable true-color palette so large frames and active chrome do not inherit a
@@ -79,11 +81,11 @@ Enter confirms it and Escape exits. Screen-reader mode exposes the same three
 choices and current selection as text. Session-only trust starts the same
 trust-gated workspace services without writing the trusted-folder list.
 
-The branch host uses the same resolved provider vision capability as the inline
-host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
-as an atomic placeholder; the encoded image is sent only with that submitted
-turn and is never written to prompt history. Provider declarations may set
-`supports_vision = true`, while `[discovery] vision_probe = true` enables the
+The full-screen host uses the same resolved provider vision capability as the
+inline host. On a vision-capable model, Ctrl+V can attach an image from the
+clipboard as an atomic placeholder; the encoded image is sent only with that
+submitted turn and is never written to prompt history. Provider declarations
+may set `supports_vision = true`, while `[discovery] vision_probe = true` enables the
 existing best-effort local-server capability probe.
 
 Ctrl+G edits the idle composer in a foreground external editor. The host checks

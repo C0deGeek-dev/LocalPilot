@@ -2,6 +2,25 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0109: Full-Screen Chat Is The Interactive Default
+
+Status: accepted. Advances ADR-0107's transition without yet removing its
+temporary rollback host.
+
+Bare interactive `localpilot chat` now launches the authoritative full-screen
+alternate-buffer host. `LOCALPILOT_CHAT_UI=fullscreen` remains an accepted
+explicit spelling; `LOCALPILOT_CHAT_UI=inline` selects the legacy inline host
+only as a temporary recovery path. Invalid values remain errors. This selector
+does not affect non-interactive/plain output.
+
+The inline host is not a second product direction. Its removal is gated on the
+remaining physical Windows, cross-terminal, and screen-reader checks plus a
+small extraction: full-screen code still consumes shared slash-command and
+approval types currently housed in `localpilot-tui`. Keeping that tested escape
+hatch until the matrix closes limits terminal-specific rollout risk; making the
+accepted full-screen experience the default prevents the rollback from defining
+normal product behavior.
+
 ## ADR-0108: A Scoped Owner Exception Allows Observable Terminal-Chat Parity
 
 Status: accepted. Amends ADR-0005 and `docs/00-clean-room.md` for one surface;
@@ -59,10 +78,12 @@ The implementation boundary is intentionally narrow:
    global Ctrl+C handler must not preempt selection copy or terminal cleanup.
    The driver owns key-event routing and terminal cleanup.
 
-During the transition, unset/`inline` selection retains the existing inline UI
-as the default rollback and `fullscreen` selects the new host. Both compile
-against the same runtime contracts. The compatibility host and selector are
-removed when full-screen parity is accepted; they are not two permanent UIs.
+The foundation initially kept the inline UI as the default rollback while
+`fullscreen` selected the new host. ADR-0109 advances that transition:
+full-screen is now the default and explicit `inline` is the temporary rollback.
+Both compile against the same runtime contracts. The compatibility host and
+selector are removed after their remaining physical gates and shared-type
+extraction close; they are not two permanent UIs.
 
 The historical alternate-screen renderer, current inline state/widgets, and the
 abandoned custom terminal surface are evidence about failure modes, not source

@@ -179,9 +179,9 @@ are visible stable timeline items marked pending; cancelling with Escape ends
 the current turn before those prompts run in order. Runtime output is inserted
 before later pending prompts, so visible and provider transcript order agree.
 
-`localpilot-tui` is the legacy inline rollback during the transition. It owns:
-
-Owns:
+`localpilot-tui` is the explicit legacy inline rollback while the remaining
+physical terminal matrix is completed. Full-screen chat is the interactive
+default (ADR-0109). The legacy crate owns:
 
 - terminal layout
 - message rendering
@@ -203,7 +203,8 @@ finished transcript blocks are written once into native scrollback and a fixed-
 height bottom band holds the only redrawn surface (ADR-0039). The new host uses
 an alternate buffer, full-frame rendering, captured mouse input, and application-
 owned content selection (ADR-0107). The rollback and its selector are removed
-once full-screen parity is accepted.
+once the remaining terminal matrix is accepted and the slash-command/approval
+types shared with the full-screen host have moved to a neutral home.
 
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.

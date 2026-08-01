@@ -1,9 +1,10 @@
 //! `localpilot chat` — the interactive terminal REPL.
 //!
-//! This is the established inline terminal driver. During the full-screen
-//! transition, [`run_chat`] remains the one session initializer and selects the
-//! terminal host only after provider/runtime setup. The inline rendering and
-//! input logic remain unit-tested in `localpilot-tui`; the new backend-neutral
+//! [`run_chat`] is the one interactive-session initializer and selects its
+//! terminal host only after provider/runtime setup. Full-screen chat is the
+//! default; the established inline driver remains an explicit temporary
+//! rollback while its terminal matrix is completed. Its rendering and input
+//! logic remain unit-tested in `localpilot-tui`; the authoritative full-screen
 //! application lives in `localpilot-terminal-ui`.
 
 use std::future::Future;
@@ -108,8 +109,8 @@ pub(crate) fn workspace_git_status(root: &std::path::Path) -> Option<WorkspaceGi
 
 fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
     match value.and_then(std::ffi::OsStr::to_str) {
-        None | Some("") | Some("inline") => Ok(ChatUi::Inline),
-        Some("fullscreen") => Ok(ChatUi::Fullscreen),
+        None | Some("") | Some("fullscreen") => Ok(ChatUi::Fullscreen),
+        Some("inline") => Ok(ChatUi::Inline),
         Some(value) => Err(anyhow::anyhow!(
             "invalid {CHAT_UI_ENV} value `{value}`; expected `inline` or `fullscreen`"
         )),
@@ -3050,12 +3051,16 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn full_screen_host_is_opt_in_during_the_transition() {
+    fn full_screen_host_is_default_with_an_explicit_legacy_rollback() {
         use std::ffi::OsStr;
 
         assert_eq!(
             selected_chat_ui(None).expect("default host"),
-            ChatUi::Inline
+            ChatUi::Fullscreen
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new(""))).expect("empty host override"),
+            ChatUi::Fullscreen
         );
         assert_eq!(
             selected_chat_ui(Some(OsStr::new("inline"))).expect("inline host"),
