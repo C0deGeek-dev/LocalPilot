@@ -126,6 +126,22 @@ those need an Apple Developer ID and an EV certificate respectively, both paid
 annual accounts, and neither is in place. On macOS you may need
 `xattr -d com.apple.quarantine ./localpilot` after unpacking.
 
+### Bringing a Claude Code session across
+
+```sh
+localpilot import claude-code                     # newest session for this directory
+localpilot import claude-code --session <id>      # a specific session id
+localpilot import claude-code --project <path>    # a .jsonl file or project directory
+```
+
+Imports a Claude Code session (`~/.claude/projects/.../<id>.jsonl`) into this
+workspace as a resumable LocalPilot session. The history is text-flattened — tool
+calls and results become plain-text markers and reasoning is dropped — so it
+resumes under any provider, and it is redacted on write. Resume it with
+`localpilot --resume imported_cc_<id>`; it shows a `[cc-import]` badge in
+`localpilot session list`. A re-import never overwrites an existing session (use
+`--force` to import again under a new name).
+
 ### Staying up to date
 
 ```sh
