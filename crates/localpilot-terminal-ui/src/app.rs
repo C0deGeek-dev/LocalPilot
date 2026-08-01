@@ -11,6 +11,7 @@ use crate::{
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_SETTINGS_QUERY_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabId {
@@ -202,18 +203,41 @@ impl fmt::Debug for DiffFile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TakeoverState {
     kind: TakeoverKind,
     scroll: usize,
     file_scroll: usize,
     selected: usize,
     settings: Vec<SettingEntry>,
+    settings_query: String,
     sessions: Vec<SessionEntry>,
     diff_files: Vec<DiffFile>,
     diff_pane: DiffPane,
     selected_file: usize,
     tree_visible: bool,
+}
+
+impl fmt::Debug for TakeoverState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TakeoverState")
+            .field("kind", &self.kind)
+            .field("scroll", &self.scroll)
+            .field("file_scroll", &self.file_scroll)
+            .field("selected", &self.selected)
+            .field("setting_count", &self.settings.len())
+            .field(
+                "settings_query",
+                &format_args!("<{} bytes redacted>", self.settings_query.len()),
+            )
+            .field("session_count", &self.sessions.len())
+            .field("diff_file_count", &self.diff_files.len())
+            .field("diff_pane", &self.diff_pane)
+            .field("selected_file", &self.selected_file)
+            .field("tree_visible", &self.tree_visible)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,6 +248,7 @@ pub(crate) struct TakeoverView<'a> {
     pub selected: usize,
     pub commands: &'a [CompletionCommand],
     pub settings: &'a [SettingEntry],
+    pub settings_query: &'a str,
     pub sessions: &'a [SessionEntry],
     pub diff_files: &'a [DiffFile],
     pub diff_pane: DiffPane,
@@ -231,12 +256,51 @@ pub(crate) struct TakeoverView<'a> {
     pub tree_visible: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingEdit {
+    CopyOnSelect,
+    Theme,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct SettingEntry {
     pub section: String,
     pub name: String,
     pub value: String,
     pub description: String,
+    pub edit: Option<SettingEdit>,
+    pub is_default: bool,
+}
+
+impl fmt::Debug for SettingEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SettingEntry")
+            .field("section", &self.section)
+            .field("name", &self.name)
+            .field(
+                "value",
+                &format_args!("<{} bytes redacted>", self.value.len()),
+            )
+            .field("edit", &self.edit)
+            .field("is_default", &self.is_default)
+            .finish()
+    }
+}
+
+fn filtered_setting_indices(state: &TakeoverState) -> Vec<usize> {
+    let query = state.settings_query.trim().to_lowercase();
+    state
+        .settings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, setting)| {
+            (query.is_empty()
+                || setting.name.to_lowercase().contains(&query)
+                || setting.section.to_lowercase().contains(&query))
+            .then_some(index)
+        })
+        .collect()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -437,10 +501,11 @@ fn tool_output_body(output: &str) -> &str {
         .trim()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ThemePickerState {
     original: Theme,
     selected: usize,
+    return_to: Option<Box<TakeoverState>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -874,6 +939,8 @@ pub struct AppModel {
     pub context_usage: Option<(usize, usize)>,
     pub stream_bytes: usize,
     copy_on_select: bool,
+    default_copy_on_select: bool,
+    default_theme: Theme,
     pub dialog: Option<DialogState>,
     takeover: Option<TakeoverState>,
     theme_picker: Option<ThemePickerState>,
@@ -923,6 +990,8 @@ impl AppModel {
             context_usage: None,
             stream_bytes: 0,
             copy_on_select: false,
+            default_copy_on_select: false,
+            default_theme: Theme::Default,
             dialog: None,
             takeover: None,
             theme_picker: None,
@@ -1460,6 +1529,7 @@ impl AppModel {
             selected: state.selected,
             commands: &self.command_catalog,
             settings: &state.settings,
+            settings_query: &state.settings_query,
             sessions: &state.sessions,
             diff_files: &state.diff_files,
             diff_pane: state.diff_pane,
@@ -1469,14 +1539,11 @@ impl AppModel {
     }
 
     #[must_use]
-    pub(crate) const fn theme_picker(&self) -> Option<ThemePickerView> {
-        match self.theme_picker {
-            Some(state) => Some(ThemePickerView {
-                original: state.original,
-                selected: state.selected,
-            }),
-            None => None,
-        }
+    pub(crate) fn theme_picker(&self) -> Option<ThemePickerView> {
+        self.theme_picker.as_ref().map(|state| ThemePickerView {
+            original: state.original,
+            selected: state.selected,
+        })
     }
 
     pub fn open_theme_picker(&mut self) {
@@ -1491,6 +1558,26 @@ impl AppModel {
         self.theme_picker = Some(ThemePickerState {
             original: self.theme,
             selected,
+            return_to: None,
+        });
+    }
+
+    fn open_theme_picker_from_settings(&mut self) {
+        let Some(return_to) = self
+            .takeover
+            .take()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return;
+        };
+        let selected = Theme::ALL
+            .iter()
+            .position(|theme| *theme == self.theme)
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePickerState {
+            original: self.theme,
+            selected,
+            return_to: Some(Box::new(return_to)),
         });
     }
 
@@ -1516,6 +1603,7 @@ impl AppModel {
             file_scroll: 0,
             selected: 0,
             settings: Vec::new(),
+            settings_query: String::new(),
             sessions: Vec::new(),
             diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
@@ -1541,14 +1629,91 @@ impl AppModel {
                     name: sanitize_inline(&entry.name),
                     value: sanitize_inline(&entry.value),
                     description: sanitize_inline(&entry.description),
+                    edit: entry.edit,
+                    is_default: entry.is_default,
                 })
                 .collect(),
+            settings_query: String::new(),
             sessions: Vec::new(),
             diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
         });
+    }
+
+    fn append_settings_query(&mut self, text: &str) {
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return;
+        };
+        let text = sanitize_inline(text);
+        let remaining = MAX_SETTINGS_QUERY_BYTES.saturating_sub(state.settings_query.len());
+        let end = previous_char_boundary(&text, remaining);
+        state.settings_query.push_str(&text[..end]);
+        state.selected = 0;
+        state.scroll = 0;
+    }
+
+    fn backspace_settings_query(&mut self) {
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return;
+        };
+        if let Some((start, _)) = state.settings_query.grapheme_indices(true).next_back() {
+            state.settings_query.truncate(start);
+        }
+        state.selected = 0;
+        state.scroll = 0;
+    }
+
+    fn clear_settings_query(&mut self) -> bool {
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return false;
+        };
+        if state.settings_query.is_empty() {
+            return false;
+        }
+        state.settings_query.clear();
+        state.selected = 0;
+        state.scroll = 0;
+        true
+    }
+
+    fn edit_selected_setting(&mut self, reset: bool) {
+        let edit = self.takeover.as_ref().and_then(|state| {
+            (state.kind == TakeoverKind::Settings)
+                .then(|| filtered_setting_indices(state))
+                .and_then(|indices| indices.get(state.selected).copied())
+                .and_then(|index| state.settings.get(index))
+                .and_then(|setting| setting.edit)
+        });
+        match edit {
+            Some(SettingEdit::CopyOnSelect) => {
+                self.copy_on_select = if reset {
+                    self.default_copy_on_select
+                } else {
+                    !self.copy_on_select
+                };
+                self.sync_setting_values();
+            }
+            Some(SettingEdit::Theme) if reset => {
+                self.theme = self.default_theme;
+                self.sync_setting_values();
+            }
+            Some(SettingEdit::Theme) => self.open_theme_picker_from_settings(),
+            None => {}
+        }
     }
 
     pub fn open_diff(&mut self, files: impl IntoIterator<Item = DiffFile>) {
@@ -1582,6 +1747,7 @@ impl AppModel {
             file_scroll: 0,
             selected,
             settings: Vec::new(),
+            settings_query: String::new(),
             sessions: Vec::new(),
             diff_files,
             diff_pane: DiffPane::Content,
@@ -1612,6 +1778,7 @@ impl AppModel {
             file_scroll: 0,
             selected,
             settings: Vec::new(),
+            settings_query: String::new(),
             sessions,
             diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
@@ -1625,7 +1792,9 @@ impl AppModel {
             return;
         };
         match state.kind {
-            TakeoverKind::Settings if selected < state.settings.len() => state.selected = selected,
+            TakeoverKind::Settings if selected < filtered_setting_indices(state).len() => {
+                state.selected = selected;
+            }
             TakeoverKind::Sessions if selected < state.sessions.len() => state.selected = selected,
             TakeoverKind::Diff
                 if state
@@ -1664,7 +1833,7 @@ impl AppModel {
             let total = if state.kind == TakeoverKind::Sessions {
                 state.sessions.len()
             } else {
-                state.settings.len()
+                filtered_setting_indices(state).len()
             };
             state.selected = state
                 .selected
@@ -1718,7 +1887,7 @@ impl AppModel {
             let total = if state.kind == TakeoverKind::Sessions {
                 state.sessions.len()
             } else {
-                state.settings.len()
+                filtered_setting_indices(state).len()
             };
             state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
             state.selected = start.min(total.saturating_sub(1));
@@ -2269,11 +2438,53 @@ impl AppModel {
 
     pub fn set_copy_on_select(&mut self, enabled: bool) {
         self.copy_on_select = enabled;
+        self.sync_setting_values();
     }
 
     #[must_use]
     pub const fn copy_on_select(&self) -> bool {
         self.copy_on_select
+    }
+
+    /// Captures the environment-seeded session defaults used by the settings
+    /// takeover's non-persistent reset action.
+    pub fn capture_setting_defaults(&mut self) {
+        self.default_copy_on_select = self.copy_on_select;
+        self.default_theme = self.theme;
+        self.sync_setting_values();
+    }
+
+    #[must_use]
+    pub const fn copy_on_select_is_default(&self) -> bool {
+        self.copy_on_select == self.default_copy_on_select
+    }
+
+    #[must_use]
+    pub fn theme_is_default(&self) -> bool {
+        self.theme == self.default_theme
+    }
+
+    fn sync_setting_values(&mut self) {
+        let Some(state) = self
+            .takeover
+            .as_mut()
+            .filter(|state| state.kind == TakeoverKind::Settings)
+        else {
+            return;
+        };
+        for setting in &mut state.settings {
+            match setting.edit {
+                Some(SettingEdit::CopyOnSelect) => {
+                    setting.value = if self.copy_on_select { "On" } else { "Off" }.to_string();
+                    setting.is_default = self.copy_on_select == self.default_copy_on_select;
+                }
+                Some(SettingEdit::Theme) => {
+                    setting.value = self.theme.display_name().to_string();
+                    setting.is_default = self.theme == self.default_theme;
+                }
+                None => {}
+            }
+        }
     }
 
     fn open_reverse_history(&mut self) {
@@ -2360,6 +2571,9 @@ impl AppModel {
     fn handle_takeover_input(&mut self, action: InputAction) -> AppCommand {
         match action {
             InputAction::Escape => {
+                if self.clear_settings_query() {
+                    return AppCommand::None;
+                }
                 self.takeover = None;
                 AppCommand::None
             }
@@ -2396,9 +2610,51 @@ impl AppModel {
                         }
                     }
                 }
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::Settings)
+                {
+                    self.append_settings_query(&text);
+                }
+                AppCommand::None
+            }
+            InputAction::Insert(text) | InputAction::Paste(text)
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::Settings) =>
+            {
+                self.append_settings_query(&text);
+                AppCommand::None
+            }
+            InputAction::Backspace
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::Settings) =>
+            {
+                self.backspace_settings_query();
+                AppCommand::None
+            }
+            InputAction::OpenReverseHistory
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::Settings) =>
+            {
+                self.edit_selected_setting(true);
                 AppCommand::None
             }
             InputAction::Submit | InputAction::AcceptCompletion => {
+                if self
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|state| state.kind == TakeoverKind::Settings)
+                {
+                    self.edit_selected_setting(false);
+                    return AppCommand::None;
+                }
                 let selection = self.takeover.as_ref().and_then(|state| {
                     (state.kind == TakeoverKind::Sessions)
                         .then(|| state.sessions.get(state.selected))
@@ -2467,7 +2723,7 @@ impl AppModel {
     }
 
     fn move_theme_picker(&mut self, delta: isize) {
-        let Some(picker) = self.theme_picker else {
+        let Some(picker) = self.theme_picker.as_ref() else {
             return;
         };
         let len = Theme::ALL.len();
@@ -2486,6 +2742,8 @@ impl AppModel {
         if restore {
             self.theme = picker.original;
         }
+        self.takeover = picker.return_to.map(|state| *state);
+        self.sync_setting_values();
     }
 
     fn handle_completion_input(&mut self, action: InputAction) -> AppCommand {
@@ -3701,12 +3959,16 @@ mod tests {
                 name: "Mouse".to_string(),
                 value: "On".to_string(),
                 description: "Captured input".to_string(),
+                edit: None,
+                is_default: true,
             },
             SettingEntry {
                 section: "Session".to_string(),
                 name: "Model".to_string(),
                 value: "unsafe\u{1b}[2Jmodel\nnext\tvalue".to_string(),
                 description: "Current model".to_string(),
+                edit: None,
+                is_default: true,
             },
         ]);
 
@@ -3722,6 +3984,101 @@ mod tests {
         assert_eq!(view.settings[1].value, "unsafemodel next value");
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert!(!app.has_takeover());
+    }
+
+    #[test]
+    fn settings_search_filters_clears_before_close_and_redacts_debug_text() {
+        let mut app = model();
+        app.open_settings([
+            SettingEntry {
+                section: "Input".into(),
+                name: "Copy on selection".into(),
+                value: "Off".into(),
+                description: "Copy selected text".into(),
+                edit: Some(SettingEdit::CopyOnSelect),
+                is_default: true,
+            },
+            SettingEntry {
+                section: "Appearance".into(),
+                name: "Color mode".into(),
+                value: "Default".into(),
+                description: "Choose colors".into(),
+                edit: Some(SettingEdit::Theme),
+                is_default: true,
+            },
+        ]);
+
+        assert_eq!(
+            app.handle_input(InputAction::Insert("PLANTED_COLOR_QUERY".into()), 80),
+            AppCommand::None
+        );
+        let state = app.takeover.as_ref().expect("settings state");
+        assert_eq!(filtered_setting_indices(state), Vec::<usize>::new());
+        let debug = format!("{state:?}");
+        assert!(!debug.contains("PLANTED_COLOR_QUERY"));
+        assert!(debug.contains("<19 bytes redacted>"));
+
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(app.has_takeover());
+        assert!(app.takeover().expect("settings").settings_query.is_empty());
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_takeover());
+    }
+
+    #[test]
+    fn editable_settings_toggle_reset_and_theme_picker_returns_to_settings() {
+        let mut app = model();
+        app.capture_setting_defaults();
+        app.open_settings([
+            SettingEntry {
+                section: "Input".into(),
+                name: "Copy on selection".into(),
+                value: "Off".into(),
+                description: "Copy selected text".into(),
+                edit: Some(SettingEdit::CopyOnSelect),
+                is_default: true,
+            },
+            SettingEntry {
+                section: "Appearance".into(),
+                name: "Color mode".into(),
+                value: "Default".into(),
+                description: "Choose colors".into(),
+                edit: Some(SettingEdit::Theme),
+                is_default: true,
+            },
+        ]);
+
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.copy_on_select());
+        assert_eq!(app.takeover().expect("settings").settings[0].value, "On");
+        assert!(!app.takeover().expect("settings").settings[0].is_default);
+        assert_eq!(
+            app.handle_input(InputAction::OpenReverseHistory, 80),
+            AppCommand::None
+        );
+        assert!(!app.copy_on_select());
+        assert!(app.takeover().expect("settings").settings[0].is_default);
+
+        app.scroll_takeover_by(1, 2, 2);
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.has_theme_picker());
+        assert!(!app.has_takeover());
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.theme, Theme::Dim);
+        let _ = app.handle_input(InputAction::Submit, 80);
+        assert!(!app.has_theme_picker());
+        assert!(app.has_takeover());
+        let view = app.takeover().expect("returned settings");
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.settings[1].value, "Dim");
+        assert!(!view.settings[1].is_default);
+
+        let _ = app.handle_input(InputAction::OpenReverseHistory, 80);
+        assert_eq!(app.theme, Theme::Default);
+        assert_eq!(
+            app.takeover().expect("reset settings").settings[1].value,
+            "Default"
+        );
     }
 
     #[test]

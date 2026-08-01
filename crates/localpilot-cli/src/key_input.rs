@@ -56,6 +56,13 @@ impl PasteBurst {
         (self.has_pending() && idle).then(|| self.take())
     }
 
+    /// Commit a pending burst immediately when the input owner changes (for
+    /// example, when a tool dialog takes focus). This keeps text already typed
+    /// for the composer out of the newly opened dialog.
+    pub(crate) fn flush_pending(&mut self) -> Option<String> {
+        self.has_pending().then(|| self.take())
+    }
+
     fn take(&mut self) -> String {
         self.active_until = None;
         self.pending_cr = false;

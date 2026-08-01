@@ -398,6 +398,49 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
     Some(help)
 }
 
+fn settings_indices(takeover: TakeoverView<'_>) -> Vec<usize> {
+    let query = takeover.settings_query.trim().to_lowercase();
+    takeover
+        .settings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, setting)| {
+            (query.is_empty()
+                || setting.name.to_lowercase().contains(&query)
+                || setting.section.to_lowercase().contains(&query))
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn settings_footer(takeover: TakeoverView<'_>, indices: &[usize], width: u16) -> String {
+    let selected = indices
+        .get(takeover.selected)
+        .and_then(|index| takeover.settings.get(*index));
+    let exit = if takeover.settings_query.is_empty() {
+        "Esc close"
+    } else {
+        "Esc clear"
+    };
+    let compact = width < 50;
+    match selected {
+        Some(setting) if setting.edit.is_some() && !setting.is_default && compact => {
+            format!("Enter edit · Ctrl+R reset · {exit}")
+        }
+        Some(setting) if setting.edit.is_some() && !setting.is_default => {
+            format!("Type search · ↑/↓ select · Enter edit · Ctrl+R reset · {exit}")
+        }
+        Some(setting) if setting.edit.is_some() && compact => {
+            format!("Enter edit · {exit}")
+        }
+        Some(setting) if setting.edit.is_some() => {
+            format!("Type search · ↑/↓ select · Enter edit · {exit}")
+        }
+        _ if compact => format!("↑/↓ select · {exit}"),
+        _ => format!("Type search · ↑/↓ select · Page Up/Page Down · {exit}"),
+    }
+}
+
 fn render_takeover(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -448,13 +491,30 @@ fn render_takeover(
         ),
     );
 
-    let footer_height = if matches!(
-        takeover.kind,
-        TakeoverKind::Sessions | TakeoverKind::Settings
-    ) {
-        2
-    } else {
-        1
+    let setting_indices = settings_indices(takeover);
+    if takeover.kind == TakeoverKind::Settings {
+        let count = setting_indices.len();
+        let label = if count == 1 {
+            "1 item".to_string()
+        } else {
+            format!("{count} items")
+        };
+        let width = u16::try_from(label.width()).unwrap_or(area.width);
+        frame.render_widget(
+            Paragraph::new(label).style(theme.ui(UiRole::Muted)),
+            Rect::new(
+                area.right().saturating_sub(width).saturating_sub(2),
+                area.y,
+                width.min(area.width),
+                1,
+            ),
+        );
+    }
+
+    let footer_height = match takeover.kind {
+        TakeoverKind::Settings => 3,
+        TakeoverKind::Sessions => 2,
+        TakeoverKind::Diff | TakeoverKind::Help => 1,
     };
     let content = Rect::new(
         area.x.saturating_add(2),
@@ -488,48 +548,106 @@ fn render_takeover(
             (start, lines.len(), viewport_rows, Vec::new(), Vec::new())
         }
         TakeoverKind::Settings => {
-            let maximum = takeover.settings.len().saturating_sub(viewport_rows);
+            let section_rows = setting_indices
+                .iter()
+                .filter_map(|index| takeover.settings.get(*index))
+                .map(|setting| setting.section.as_str())
+                .fold((0usize, None), |(count, previous), section| {
+                    (
+                        count + usize::from(previous != Some(section)),
+                        Some(section),
+                    )
+                })
+                .0;
+            // Section headers are only used when the complete filtered list fits.
+            // Otherwise every setting remains a one-row scroll target.
+            let compact = area.width < 50
+                || setting_indices.len().saturating_add(section_rows) > viewport_rows;
+            let maximum = setting_indices.len().saturating_sub(viewport_rows);
             let start = takeover.scroll.min(maximum);
             let mut hits = Vec::new();
-            for (offset, (index, setting)) in takeover
-                .settings
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(viewport_rows)
-                .enumerate()
-            {
-                let y = content
-                    .y
-                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
-                let selected = index == takeover.selected;
-                let prefix = if selected { "❯ " } else { "  " };
-                let left = format!("{prefix}{} · {}", setting.section, setting.name);
+            let mut y = content.y;
+            let mut previous_section: Option<&str> = None;
+            if setting_indices.is_empty() {
                 frame.render_widget(
-                    Paragraph::new(two_sided(&left, &setting.value, content.width)).style(
-                        theme.ui(if selected {
-                            UiRole::TabActive
-                        } else {
-                            UiRole::Foreground
-                        }),
-                    ),
+                    Paragraph::new("No settings match this search").style(theme.ui(UiRole::Muted)),
+                    content,
+                );
+            }
+            for (filtered_index, setting_index) in
+                setting_indices.iter().copied().enumerate().skip(start)
+            {
+                let setting = &takeover.settings[setting_index];
+                if !compact && previous_section != Some(setting.section.as_str()) {
+                    if y >= content.bottom() {
+                        break;
+                    }
+                    frame.render_widget(
+                        Paragraph::new(setting.section.clone()).style(theme.ui(UiRole::Accent)),
+                        Rect::new(content.x, y, content.width, 1),
+                    );
+                    y = y.saturating_add(1);
+                    previous_section = Some(&setting.section);
+                }
+                if y >= content.bottom() {
+                    break;
+                }
+                let selected = filtered_index == takeover.selected;
+                let prefix = if compact && content.width < 32 {
+                    ""
+                } else if selected {
+                    "❯ "
+                } else {
+                    "  "
+                };
+                let left = if compact {
+                    format!("{prefix}{} · {}", setting.section, setting.name)
+                } else {
+                    format!("{prefix}{}", setting.name)
+                };
+                let line = if compact
+                    && left
+                        .width()
+                        .saturating_add(setting.value.width())
+                        .saturating_add(1)
+                        > usize::from(content.width)
+                {
+                    truncate_end(&left, content.width)
+                } else {
+                    two_sided(&left, &setting.value, content.width)
+                };
+                frame.render_widget(
+                    Paragraph::new(line).style(theme.ui(if selected {
+                        UiRole::TabActive
+                    } else {
+                        UiRole::Foreground
+                    })),
                     Rect::new(content.x, y, content.width, 1),
                 );
                 hits.push(TakeoverHit {
-                    index,
+                    index: filtered_index,
                     area: Rect::new(content.x, y, content.width, 1),
                 });
+                y = y.saturating_add(1);
             }
-            if let Some(selected) = takeover.settings.get(takeover.selected) {
+            if let Some(selected) = setting_indices
+                .get(takeover.selected)
+                .and_then(|index| takeover.settings.get(*index))
+            {
+                let description = if app.capabilities.screen_reader {
+                    format!(
+                        "Current selection: {} = {}; {}",
+                        selected.name, selected.value, selected.description
+                    )
+                } else {
+                    selected.description.clone()
+                };
                 frame.render_widget(
-                    Paragraph::new(truncate_end(
-                        &selected.description,
-                        area.width.saturating_sub(3),
-                    ))
-                    .style(theme.ui(UiRole::Muted)),
+                    Paragraph::new(truncate_end(&description, area.width.saturating_sub(3)))
+                        .style(theme.ui(UiRole::Muted)),
                     Rect::new(
                         area.x.saturating_add(1),
-                        area.bottom().saturating_sub(2),
+                        area.bottom().saturating_sub(3),
                         area.width.saturating_sub(3),
                         1,
                     ),
@@ -537,7 +655,7 @@ fn render_takeover(
             }
             (
                 start,
-                takeover.settings.len(),
+                setting_indices.len(),
                 viewport_rows,
                 hits,
                 Vec::new(),
@@ -650,12 +768,31 @@ fn render_takeover(
         scrollbar_rows,
     );
     draw_scrollbar(frame, scrollbar, app);
+    if takeover.kind == TakeoverKind::Settings {
+        let search = if takeover.settings_query.is_empty() {
+            "Search: type to filter".to_string()
+        } else {
+            format!("Search: {}", takeover.settings_query)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_end(&search, area.width.saturating_sub(3)))
+                .style(theme.ui(UiRole::Foreground)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.bottom().saturating_sub(2),
+                area.width.saturating_sub(3),
+                1,
+            ),
+        );
+    }
     let footer = match takeover.kind {
-        TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close",
-        TakeoverKind::Sessions if area.width < 50 => "Enter resume · Esc return",
-        TakeoverKind::Sessions => "↑/↓ select · Enter resume · Esc return",
-        TakeoverKind::Settings => "↑/↓ select · Page Up/Page Down · Esc close",
-        TakeoverKind::Diff => "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close",
+        TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close".to_string(),
+        TakeoverKind::Sessions if area.width < 50 => "Enter resume · Esc return".to_string(),
+        TakeoverKind::Sessions => "↑/↓ select · Enter resume · Esc return".to_string(),
+        TakeoverKind::Settings => settings_footer(takeover, &setting_indices, area.width),
+        TakeoverKind::Diff => {
+            "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close".to_string()
+        }
     };
     frame.render_widget(
         Paragraph::new(footer).style(theme.ui(UiRole::Muted)),
@@ -2556,8 +2693,9 @@ fn footer_state(app: &AppModel) -> String {
             false,
         ) if held && new_output => {
             format!(
-                "↓ new output · ● Working · {} · Esc interrupt",
-                format_stream_size(app.stream_bytes)
+                "↓ new output · ● Working · {} · {}",
+                format_stream_size(app.stream_bytes),
+                working_input_actions(app)
             )
         }
         (
@@ -2566,8 +2704,9 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) if held => format!(
-            "timeline held · ● Working · {} · Esc interrupt",
-            format_stream_size(app.stream_bytes)
+            "timeline held · ● Working · {} · {}",
+            format_stream_size(app.stream_bytes),
+            working_input_actions(app)
         ),
         (
             crate::WorkState::Busy {
@@ -2575,8 +2714,9 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) => format!(
-            "● Working · {} · Esc interrupt",
-            format_stream_size(app.stream_bytes)
+            "● Working · {} · {}",
+            format_stream_size(app.stream_bytes),
+            working_input_actions(app)
         ),
         (
             crate::WorkState::Busy {
@@ -2584,6 +2724,14 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) => "cancelling · Ctrl+C again to exit".to_string(),
+    }
+}
+
+fn working_input_actions(app: &AppModel) -> &'static str {
+    if app.editor.text().is_empty() {
+        "Esc interrupt"
+    } else {
+        "Esc interrupt · Ctrl+Q enqueue"
     }
 }
 
@@ -2811,12 +2959,16 @@ mod tests {
                 name: "Mouse reporting".into(),
                 value: "On".into(),
                 description: "Capture pointer events".into(),
+                edit: None,
+                is_default: true,
             },
             crate::SettingEntry {
                 section: "Appearance".into(),
                 name: "Color mode".into(),
                 value: "Default".into(),
                 description: "Semantic terminal colors".into(),
+                edit: Some(crate::SettingEdit::Theme),
+                is_default: true,
             },
         ]);
         app.scroll_takeover_by(1, 2, 10);
@@ -2829,10 +2981,66 @@ mod tests {
         let rendered = terminal.backend().to_string();
         let hit_map = hit_map.expect("settings hit map");
         assert!(rendered.contains("Settings"));
-        assert!(rendered.contains("Appearance · Color mode"));
+        assert!(rendered.contains("2 items"));
+        assert!(rendered.contains("Appearance"));
+        assert!(rendered.contains("Color mode"));
         assert!(rendered.contains("Semantic terminal colors"));
+        assert!(rendered.contains("Search: type to filter"));
+        assert!(rendered.contains("Enter edit"));
         assert_eq!(hit_map.takeover_rows.len(), 2);
         assert_eq!(hit_map.takeover_rows[1].index, 1);
+    }
+
+    #[test]
+    fn settings_takeover_has_compact_screen_reader_and_empty_search_states() {
+        for screen_reader in [false, true] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.open_settings([
+                crate::SettingEntry {
+                    section: "Input".into(),
+                    name: "Mouse reporting".into(),
+                    value: "On".into(),
+                    description: "Capture pointer events".into(),
+                    edit: None,
+                    is_default: true,
+                },
+                crate::SettingEntry {
+                    section: "Appearance".into(),
+                    name: "Color mode".into(),
+                    value: "Default".into(),
+                    description: "Semantic terminal colors".into(),
+                    edit: Some(crate::SettingEdit::Theme),
+                    is_default: true,
+                },
+            ]);
+            let mut terminal = Terminal::new(TestBackend::new(30, 10)).expect("terminal");
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, &app)))
+                .expect("draw compact settings");
+            let rendered = terminal.backend().to_string();
+            assert!(rendered.contains("2 items"));
+            assert!(rendered.contains("Input · Mouse reporting"));
+            assert!(rendered.contains("Search: type to filter"));
+            assert!(!rendered.contains("Enter edit"));
+            assert_eq!(hit_map.expect("settings hits").takeover_rows.len(), 2);
+            if screen_reader {
+                assert!(rendered.contains("Current selection"));
+            }
+
+            let _ = app.handle_input(crate::InputAction::Insert("no-match".into()), 25);
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw empty settings search");
+            let rendered = terminal.backend().to_string();
+            assert!(rendered.contains("0 items"));
+            assert!(rendered.contains("No settings match"));
+            assert!(rendered.contains("Search: no-match"));
+            assert!(rendered.contains("Esc clear"));
+        }
     }
 
     #[test]
@@ -3944,6 +4152,8 @@ mod tests {
         assert!(footer.trim_end().ends_with("model"));
         assert!(!footer.contains("agent · default"));
         assert!(!footer.contains("? help"));
+        app.editor.insert("steer next");
+        assert!(footer_state(&app).contains("Ctrl+Q enqueue"));
         assert_eq!(
             buffer[(layout.footer.x + 1, layout.footer.y)].style().fg,
             ThemeResolver::new(Theme::Default, ColorSupport::Color)

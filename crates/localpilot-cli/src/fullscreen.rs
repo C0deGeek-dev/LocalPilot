@@ -30,8 +30,8 @@ use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
     KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection,
-    SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme,
-    TimelineNavigation, UserShellCommand, UserShellOutput, VisualRowPart,
+    SettingEdit, SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities,
+    Theme, TimelineNavigation, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::ElicitationOutcome;
@@ -41,7 +41,10 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::key_input::{is_cancel, is_clipboard_image_key, is_key_action};
+use crate::key_input::{
+    is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
+    may_be_unbracketed_paste_key, PasteAction, PasteBurst,
+};
 use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead, ElicitationCall};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -929,7 +932,7 @@ fn parse_hunk_starts(header: &str) -> Option<(u32, u32)> {
     Some((old, new))
 }
 
-fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
+fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Vec<SettingEntry> {
     let enabled = |value| if value { "On" } else { "Off" }.to_string();
     vec![
         SettingEntry {
@@ -939,6 +942,8 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             description: format!(
                 "Set {CHAT_MOUSE_ENV}=false before launch for keyboard-only input."
             ),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Input".to_string(),
@@ -947,6 +952,8 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             description: format!(
                 "Set {CHAT_COPY_ON_SELECT_ENV}=true to copy immediately after a drag selection."
             ),
+            edit: Some(SettingEdit::CopyOnSelect),
+            is_default: app.copy_on_select_is_default(),
         },
         SettingEntry {
             section: "Input".to_string(),
@@ -959,6 +966,8 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             .to_string(),
             description: "Ctrl+C and right-click copy use the platform clipboard when available."
                 .to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Input".to_string(),
@@ -970,6 +979,25 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             .to_string(),
             description: "Enhanced reporting distinguishes more modified key combinations."
                 .to_string(),
+            edit: None,
+            is_default: true,
+        },
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Prompt history".to_string(),
+            value: enabled(config.history.persistence.is_enabled()),
+            description: "Prompt recall follows the resolved LocalPilot history configuration."
+                .to_string(),
+            edit: None,
+            is_default: true,
+        },
+        SettingEntry {
+            section: "Input".to_string(),
+            name: "Compact paste".to_string(),
+            value: "On".to_string(),
+            description: "Multiline pastes stay atomic and compact until submission.".to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Accessibility".to_string(),
@@ -978,6 +1006,21 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             description: format!(
                 "Set {CHAT_SCREEN_READER_ENV}=true for a role-labeled full-screen projection."
             ),
+            edit: None,
+            is_default: true,
+        },
+        SettingEntry {
+            section: "Navigation".to_string(),
+            name: "Tabs".to_string(),
+            value: app
+                .tabs
+                .iter()
+                .map(|tab| tab.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+            description: "Only tabs backed by an active LocalPilot surface are shown.".to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Appearance".to_string(),
@@ -986,24 +1029,41 @@ fn fullscreen_settings(app: &AppModel) -> Vec<SettingEntry> {
             description: format!(
                 "Use /theme to preview modes or set {CHAT_THEME_ENV} before launch."
             ),
+            edit: Some(SettingEdit::Theme),
+            is_default: app.theme_is_default(),
+        },
+        SettingEntry {
+            section: "Maintenance".to_string(),
+            name: "Updates".to_string(),
+            value: "Manual".to_string(),
+            description: "Use the LocalPilot update command to check and apply releases."
+                .to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Session".to_string(),
             name: "Provider".to_string(),
             value: app.header.provider.clone(),
             description: "The provider currently serving this conversation.".to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Session".to_string(),
             name: "Model".to_string(),
             value: app.header.model.clone(),
             description: "Use /model to choose from configured LocalPilot providers.".to_string(),
+            edit: None,
+            is_default: true,
         },
         SettingEntry {
             section: "Session".to_string(),
             name: "Mode and profile".to_string(),
             value: format!("{} · {}", app.header.mode, app.header.profile),
             description: "The active LocalPilot execution mode and permission profile.".to_string(),
+            edit: None,
+            is_default: true,
         },
     ]
 }
@@ -1074,6 +1134,7 @@ fn apply_host_preferences(app: &mut AppModel) {
             "{CHAT_SCREEN_READER_ENV} must be true, false, 1, or 0; using false"
         )));
     }
+    app.capture_setting_defaults();
 }
 
 fn apply_theme_preference(app: &mut AppModel, value: Option<OsString>) {
@@ -1448,7 +1509,7 @@ async fn execute_fullscreen_slash(
         ));
     }
     if submitted.prompt.trim() == "/settings" {
-        let settings = fullscreen_settings(app);
+        let settings = fullscreen_settings(app, config);
         app.open_settings(settings);
         return false;
     }
@@ -1635,16 +1696,32 @@ async fn run_event_loop(
     } = context;
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
+    let mut paste_burst = PasteBurst::default();
     while !app.exit_requested {
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
+            if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                if !app.workspace_trust_pending() {
+                    let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                }
+            }
             advance_mouse_selection(app, &hit_map, &mouse_state);
             continue;
         }
         let next = event::read().context("read full-screen terminal event")?;
         if app.workspace_trust_pending() {
             mouse_state.reset_gesture();
+            if let Event::Key(key) = &next {
+                if is_key_action(*key) {
+                    let buffered_after = buffered_after_fullscreen_key(*key)
+                        .context("poll after workspace-trust paste key")?;
+                    if handle_dialog_paste_burst(app, &mut paste_burst, *key, buffered_after, false)
+                    {
+                        continue;
+                    }
+                }
+            }
             match handle_trust_event(app, next, &hit_map) {
                 TrustEventOutcome::Pending => {}
                 TrustEventOutcome::Copy(text) => copy_to_clipboard(app, text),
@@ -1661,6 +1738,21 @@ async fn run_event_loop(
             }
             continue;
         }
+        if let Event::Key(key) = &next {
+            if is_key_action(*key) {
+                let buffered_after = buffered_after_fullscreen_key(*key)
+                    .context("poll after full-screen paste key")?;
+                if handle_fullscreen_paste_burst(
+                    app,
+                    &mut paste_burst,
+                    *key,
+                    buffered_after,
+                    hit_map.editor_width,
+                ) {
+                    continue;
+                }
+            }
+        }
         match route_pointer_or_navigation(app, &next, &hit_map, &mut mouse_state) {
             RoutedEvent::Handled => continue,
             RoutedEvent::Copy(text) => {
@@ -1671,10 +1763,6 @@ async fn run_event_loop(
         }
         match next {
             Event::Key(key) if is_key_action(key) => {
-                if is_quit_key(key) {
-                    app.request_exit(false);
-                    break;
-                }
                 if is_clipboard_image_key(key) {
                     attach_clipboard_image_idle(app, runtime, config, false).await;
                     continue;
@@ -1710,6 +1798,7 @@ async fn run_event_loop(
                             history,
                             cwd,
                             &mut mouse_state,
+                            &mut paste_burst,
                             workspace_index,
                         )
                         .await?
@@ -1732,6 +1821,7 @@ async fn run_event_loop(
                             history,
                             cwd,
                             &mut mouse_state,
+                            &mut paste_burst,
                             workspace_index,
                         )
                         .await?
@@ -1783,6 +1873,7 @@ async fn drive_operation_chain(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
+    paste_burst: &mut PasteBurst,
     workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let mut current = Some(first);
@@ -1804,6 +1895,7 @@ async fn drive_operation_chain(
                     history,
                     cwd,
                     mouse_state,
+                    paste_burst,
                     workspace_index,
                 )
                 .await?
@@ -1825,6 +1917,7 @@ async fn drive_operation_chain(
                     history,
                     cwd,
                     mouse_state,
+                    paste_burst,
                     workspace_index,
                 )
                 .await?
@@ -1854,6 +1947,7 @@ async fn drive_shell(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
+    paste_burst: &mut PasteBurst,
     workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let cancel = CancellationToken::new();
@@ -1875,11 +1969,42 @@ async fn drive_shell(
             _ = tick.tick() => {
                 workspace_index.refresh(app);
                 let mut hit_map = draw_synchronized(terminal, app)?;
+                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                    if pending.is_none() {
+                        let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                    }
+                }
                 for _ in 0..64 {
                     if !event::poll(Duration::ZERO).context("poll full-screen shell input")? {
                         break;
                     }
                     let next = event::read().context("read full-screen shell input")?;
+                    if let Event::Key(key) = &next {
+                        if is_key_action(*key) {
+                            let buffered_after = buffered_after_fullscreen_key(*key)
+                                .context("poll after active shell paste key")?;
+                            let consumed = if pending.is_some() {
+                                handle_dialog_paste_burst(
+                                    app,
+                                    paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    false,
+                                )
+                            } else {
+                                handle_fullscreen_paste_burst(
+                                    app,
+                                    paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    hit_map.editor_width,
+                                )
+                            };
+                            if consumed {
+                                continue;
+                            }
+                        }
+                    }
                     let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
                     let exit = if pending.is_some() {
                         handle_approval_event(app, next, &mut pending, &cancel)
@@ -1936,6 +2061,9 @@ async fn drive_shell(
             }
             Some(call) = approval_rx.recv(), if pending.is_none() => {
                 mouse_state.reset_gesture();
+                if let Some(text) = paste_burst.flush_pending() {
+                    let _ = app.handle_input(InputAction::Paste(text), 1);
+                }
                 app.request_approval(
                     call.request.tool,
                     call.request.target,
@@ -2013,10 +2141,6 @@ fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> Tru
             TrustEventOutcome::Pending
         }
         Event::Key(key) if is_key_action(key) => {
-            if is_quit_key(key) {
-                app.request_exit(false);
-                return TrustEventOutcome::Exit;
-            }
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Copy(text) => TrustEventOutcome::Copy(text),
@@ -2052,6 +2176,7 @@ async fn drive_turn(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
+    paste_burst: &mut PasteBurst,
     workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
@@ -2077,11 +2202,44 @@ async fn drive_turn(
             _ = tick.tick() => {
                 workspace_index.refresh(app);
                 let mut hit_map = draw_synchronized(terminal, app)?;
+                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                    if pending.is_none() && pending_elicitation.is_none() {
+                        let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                    } else if pending_elicitation.is_some() {
+                        let _ = app.handle_question_input(InputAction::Paste(text));
+                    }
+                }
                 for _ in 0..64 {
                     if !event::poll(Duration::ZERO).context("poll full-screen turn input")? {
                         break;
                     }
                     let next = event::read().context("read full-screen turn input")?;
+                    if let Event::Key(key) = &next {
+                        if is_key_action(*key) {
+                            let buffered_after = buffered_after_fullscreen_key(*key)
+                                .context("poll after active full-screen paste key")?;
+                            let consumed = if pending.is_some() || pending_elicitation.is_some() {
+                                handle_dialog_paste_burst(
+                                    app,
+                                    paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    pending_elicitation.is_some(),
+                                )
+                            } else {
+                                handle_fullscreen_paste_burst(
+                                    app,
+                                    paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    hit_map.editor_width,
+                                )
+                            };
+                            if consumed {
+                                continue;
+                            }
+                        }
+                    }
                     let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
                     let exit = if pending_elicitation.is_some() {
                         handle_question_event(
@@ -2131,6 +2289,9 @@ async fn drive_turn(
             }
             Some(call) = approval_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
                 mouse_state.reset_gesture();
+                if let Some(text) = paste_burst.flush_pending() {
+                    let _ = app.handle_input(InputAction::Paste(text), 1);
+                }
                 app.request_approval(
                     call.request.tool,
                     call.request.target,
@@ -2147,6 +2308,9 @@ async fn drive_turn(
             }
             Some(call) = elicitation_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
                 mouse_state.reset_gesture();
+                if let Some(text) = paste_burst.flush_pending() {
+                    let _ = app.handle_input(InputAction::Paste(text), 1);
+                }
                 app.request_question(call.request.question, call.request.options);
                 pending_elicitation = Some(call.reply);
             }
@@ -2175,10 +2339,17 @@ fn handle_turn_event(
 ) -> bool {
     match event {
         Event::Key(key) if is_key_action(key) => {
-            if is_quit_key(key) {
-                app.request_exit(false);
-                cancel.cancel();
-                return true;
+            if is_enqueue_key(key) {
+                if let AppCommand::Submit(submitted) =
+                    app.handle_input(InputAction::Submit, hit_map.editor_width)
+                {
+                    if let Some(operation) =
+                        prepare_prompt_operation(app, history, cwd, submitted, true)
+                    {
+                        queue.push_back(operation);
+                    }
+                }
+                return false;
             }
             if is_clipboard_image_key(key) {
                 attach_clipboard_image_with_capability(app, image_capability, false);
@@ -2709,12 +2880,6 @@ fn handle_approval_event(
     if !is_key_action(key) {
         return false;
     }
-    if is_quit_key(key) {
-        app.request_exit(false);
-        deny_pending(app, pending);
-        cancel.cancel();
-        return true;
-    }
     if is_cancel(key) {
         let command = app.handle_input(InputAction::CancelOrExit, 1);
         return match command {
@@ -2790,12 +2955,6 @@ fn handle_question_event(
             resolve_question_action(app, resolution, pending)
         }
         Event::Key(key) if is_key_action(key) => {
-            if is_quit_key(key) {
-                app.request_exit(false);
-                finish_question(app, pending, ElicitationOutcome::Cancelled);
-                cancel.cancel();
-                return true;
-            }
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Exit => {
@@ -2987,10 +3146,77 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
     }
 }
 
-fn is_quit_key(key: KeyEvent) -> bool {
+fn is_enqueue_key(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('q')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
+fn buffered_after_fullscreen_key(key: KeyEvent) -> io::Result<bool> {
+    if !may_be_unbracketed_paste_key(key) {
+        return Ok(false);
+    }
+    let timeout = if is_unbracketed_paste_newline_key(key) {
+        Duration::from_millis(4)
+    } else {
+        Duration::from_millis(3)
+    };
+    event::poll(timeout)
+}
+
+/// Normalize Windows terminals that deliver paste as a rapid key-record burst.
+/// Returns `true` when the current key was consumed as paste content; a
+/// FlushThenPass inserts the accumulated paste and lets the command key continue.
+fn handle_fullscreen_paste_burst(
+    app: &mut AppModel,
+    burst: &mut PasteBurst,
+    key: KeyEvent,
+    buffered_after: bool,
+    editor_width: u16,
+) -> bool {
+    match burst.observe(key, buffered_after, Instant::now()) {
+        PasteAction::Pass => false,
+        PasteAction::Absorbed => true,
+        PasteAction::Flush(text) => {
+            let _ = app.handle_input(InputAction::Paste(text), editor_width);
+            true
+        }
+        PasteAction::FlushThenPass(text) => {
+            let _ = app.handle_input(InputAction::Paste(text), editor_width);
+            false
+        }
+    }
+}
+
+/// Apply the same burst detector while a dialog owns keyboard focus. Approval
+/// and trust dialogs have no text field, so pasted text is discarded. The
+/// question dialog accepts it only while its explicit Other editor is active.
+fn handle_dialog_paste_burst(
+    app: &mut AppModel,
+    burst: &mut PasteBurst,
+    key: KeyEvent,
+    buffered_after: bool,
+    question_dialog: bool,
+) -> bool {
+    let route_text = |app: &mut AppModel, text: String| {
+        if question_dialog {
+            // The model itself ignores text until the explicit Other editor is
+            // active, matching the bracketed Event::Paste path.
+            let _ = app.handle_question_input(InputAction::Paste(text));
+        }
+    };
+    match burst.observe(key, buffered_after, Instant::now()) {
+        PasteAction::Pass => false,
+        PasteAction::Absorbed => true,
+        PasteAction::Flush(text) => {
+            route_text(app, text);
+            true
+        }
+        PasteAction::FlushThenPass(text) => {
+            route_text(app, text);
+            false
+        }
+    }
 }
 
 pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
@@ -3254,6 +3480,36 @@ mod tests {
         assert!(invalid.timeline.items().iter().any(|item| item
             .text
             .contains("unknown terminal chat theme \"brand-theme\"")));
+    }
+
+    #[test]
+    fn settings_projection_names_observed_facts_and_only_real_session_edits() {
+        let mut app = app();
+        app.capture_setting_defaults();
+        let settings = fullscreen_settings(&app, &localpilot_config::Config::default());
+        let names = settings
+            .iter()
+            .map(|setting| setting.name.as_str())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "Mouse reporting",
+            "Copy on selection",
+            "Screen reader",
+            "Tabs",
+            "Updates",
+            "Prompt history",
+            "Compact paste",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+        assert_eq!(
+            settings
+                .iter()
+                .filter_map(|setting| setting.edit)
+                .collect::<Vec<_>>(),
+            [SettingEdit::CopyOnSelect, SettingEdit::Theme]
+        );
     }
 
     fn image_capability(vision_capable: bool) -> ImageCapabilitySnapshot {
@@ -3674,12 +3930,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_q_is_an_explicit_summary_only_exit() {
-        assert!(is_quit_key(press(
+    fn ctrl_q_is_reserved_for_active_prompt_enqueue() {
+        assert!(is_enqueue_key(press(
             KeyCode::Char('q'),
             KeyModifiers::CONTROL
         )));
-        assert!(!is_quit_key(press(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(!is_enqueue_key(press(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        )));
+        assert_eq!(
+            map_key(press(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl+Q is inert outside the active-turn host path"
+        );
     }
 
     #[test]
@@ -4327,6 +4591,140 @@ mod tests {
         let _ = app.handle_input(InputAction::Escape, hit_map.editor_width);
         assert_eq!(app.theme, Theme::Default);
         assert!(!app.has_theme_picker());
+    }
+
+    fn feed_unbracketed_multiline_paste(app: &mut AppModel) {
+        let mut burst = PasteBurst::default();
+        let keys = [
+            KeyCode::Char('a'),
+            KeyCode::Enter,
+            KeyCode::Char('b'),
+            KeyCode::Enter,
+            KeyCode::Char('c'),
+            KeyCode::Enter,
+            KeyCode::Char('d'),
+        ];
+        for (index, code) in keys.into_iter().enumerate() {
+            let consumed = handle_fullscreen_paste_burst(
+                app,
+                &mut burst,
+                press(code, KeyModifiers::NONE),
+                index + 1 < keys.len(),
+                76,
+            );
+            assert!(consumed, "paste key {index} escaped into submit routing");
+        }
+        assert!(!burst.has_pending());
+    }
+
+    #[test]
+    fn fullscreen_multiline_key_burst_is_one_paste_and_never_submits_lines() {
+        let mut app = app();
+        feed_unbracketed_multiline_paste(&mut app);
+
+        assert!(app.timeline.items().is_empty());
+        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 76) else {
+            panic!("whole paste should submit once");
+        };
+        assert_eq!(submitted.prompt, "a\nb\nc\nd");
+        assert_eq!(submitted.pastes.len(), 1);
+    }
+
+    #[test]
+    fn dialog_paste_bursts_are_inert_except_in_question_other_editor() {
+        let mut approval = app();
+        approval.request_approval("write_file", "fixture", "write");
+        let mut burst = PasteBurst::default();
+        assert!(handle_dialog_paste_burst(
+            &mut approval,
+            &mut burst,
+            press(KeyCode::Char('y'), KeyModifiers::NONE),
+            true,
+            false,
+        ));
+        assert!(handle_dialog_paste_burst(
+            &mut approval,
+            &mut burst,
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            false,
+            false,
+        ));
+        assert!(
+            approval.dialog.is_some(),
+            "pasted y/newline resolved approval"
+        );
+
+        let mut trust = app();
+        trust.require_workspace_trust("fixture");
+        let mut burst = PasteBurst::default();
+        assert!(handle_dialog_paste_burst(
+            &mut trust,
+            &mut burst,
+            press(KeyCode::Char('1'), KeyModifiers::NONE),
+            true,
+            false,
+        ));
+        assert!(handle_dialog_paste_burst(
+            &mut trust,
+            &mut burst,
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            false,
+            false,
+        ));
+        assert!(
+            trust.workspace_trust_pending(),
+            "pasted choice resolved trust"
+        );
+
+        let mut question = app();
+        question.request_question("Explain", std::iter::empty());
+        assert_eq!(
+            question.handle_question_input(InputAction::Submit),
+            QuestionAction::None
+        );
+        let mut burst = PasteBurst::default();
+        for (index, code) in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Char('y')]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(handle_dialog_paste_burst(
+                &mut question,
+                &mut burst,
+                press(code, KeyModifiers::NONE),
+                index < 2,
+                true,
+            ));
+        }
+        assert_eq!(
+            question.handle_question_input(InputAction::Submit),
+            QuestionAction::Submit("x y".to_string())
+        );
+    }
+
+    #[test]
+    fn ctrl_q_enqueues_one_atomic_paste_without_cancelling_active_work() {
+        let mut app = app();
+        app.begin_work();
+        feed_unbracketed_multiline_paste(&mut app);
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut queue = VecDeque::new();
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        ));
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.front().expect("queued").prompt().text, "a\nb\nc\nd");
+        assert!(!cancel.is_cancelled());
+        assert!(!app.exit_requested);
     }
 
     #[test]
