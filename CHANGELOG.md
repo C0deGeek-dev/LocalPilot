@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: `localpilot import claude-code`.** Import a Claude Code session
+  (`~/.claude/projects/.../<id>.jsonl`) as a resumable LocalPilot session. The
+  history is text-flattened — tool calls and results become plain-text markers
+  and provider-specific reasoning is dropped — so it resumes safely under any
+  provider; it is redacted on write like any session. Resume it by name with
+  `localpilot --resume imported_cc_<id>`; it shows a `[cc-import]` badge in
+  `session list`. A re-import never overwrites an existing session or steals its
+  name (use `--force` to import again under a new name).
+
 - **Added: already-seen read elision (opt-in).** With `[tools] elide_seen_reads`
   on, a `read_file` that returns a file+range already read this session and
   unchanged since (same mtime and length) is replaced with a compact stub

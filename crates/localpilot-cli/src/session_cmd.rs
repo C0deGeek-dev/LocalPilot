@@ -322,18 +322,54 @@ pub fn list_sessions(out: &mut impl Write) -> anyhow::Result<()> {
         return Ok(());
     }
     for entry in sessions {
-        let name = entry
-            .name
-            .as_deref()
-            .map(|n| format!("  name: {n}"))
-            .unwrap_or_default();
-        writeln!(
-            out,
-            "{}  messages: {:<4} updated: {}{name}",
-            entry.id, entry.message_count, entry.updated_unix
-        )?;
+        writeln!(out, "{}", format_session_line(&entry))?;
     }
     Ok(())
+}
+
+/// One session-list line: id, message count, updated time, optional name, and a
+/// `[cc-import]` badge for a session imported from Claude Code (its name carries
+/// the `imported_cc_` prefix the importer assigns).
+fn format_session_line(entry: &localpilot_store::SessionIndexEntry) -> String {
+    let name = entry
+        .name
+        .as_deref()
+        .map(|n| format!("  name: {n}"))
+        .unwrap_or_default();
+    let badge = entry
+        .name
+        .as_deref()
+        .is_some_and(|n| n.starts_with("imported_cc_"))
+        .then_some("  [cc-import]")
+        .unwrap_or_default();
+    format!(
+        "{}  messages: {:<4} updated: {}{name}{badge}",
+        entry.id, entry.message_count, entry.updated_unix
+    )
+}
+
+#[cfg(test)]
+mod session_line_tests {
+    use super::format_session_line;
+    use localpilot_core::SessionId;
+    use localpilot_store::SessionIndexEntry;
+
+    fn entry(name: Option<&str>) -> SessionIndexEntry {
+        SessionIndexEntry {
+            id: SessionId::new(),
+            message_count: 3,
+            created_unix: 0,
+            updated_unix: 0,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_imported_session_gets_a_cc_import_badge() {
+        assert!(format_session_line(&entry(Some("imported_cc_abc"))).contains("[cc-import]"));
+        assert!(!format_session_line(&entry(Some("my-session"))).contains("[cc-import]"));
+        assert!(!format_session_line(&entry(None)).contains("[cc-import]"));
+    }
 }
 
 /// Export a session as an inspectable, redacted bundle.

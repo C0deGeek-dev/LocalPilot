@@ -16,6 +16,7 @@ mod doctor;
 mod eval_cmd;
 mod handoff_cmd;
 mod harness_cmd;
+mod import_cmd;
 mod ingest_cmd;
 #[cfg(feature = "tui")]
 mod key_input;
@@ -376,6 +377,11 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Import a session from another coding agent into this workspace.
+    Import {
+        #[command(subcommand)]
+        command: ImportCommand,
+    },
     /// Subagent definitions: list and inspect the agents this project sees.
     Agents {
         #[command(subcommand)]
@@ -652,6 +658,29 @@ enum McpCommand {
         /// but never answer an ask, so every ask denies (watch-and-steer mode).
         #[arg(long)]
         no_approvals: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    /// Import a Claude Code session (`~/.claude/projects/.../<id>.jsonl`) as a
+    /// resumable LocalPilot session. The history is text-flattened — tool calls
+    /// and results become plain-text markers and reasoning is dropped — so it
+    /// resumes safely under any provider. Resume it by the name `imported_cc_<id>`.
+    ClaudeCode {
+        /// A Claude Code `.jsonl` file, its project directory, or a project's
+        /// working directory (its `~/.claude/projects` folder is derived). When
+        /// omitted, the current directory's project folder is used.
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+        /// A specific session id within the project (its `.jsonl` stem). When
+        /// omitted, the most recently modified session is imported.
+        #[arg(long)]
+        session: Option<String>,
+        /// Re-import even if this session was already imported, under a new name
+        /// (never overwrites an existing session or steals its name).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1810,6 +1839,26 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             })
             .await?;
         }
+        Command::Import { command } => match command {
+            ImportCommand::ClaudeCode {
+                project,
+                session,
+                force,
+            } => {
+                let cwd = std::env::current_dir()?;
+                let store = localpilot_store::Store::open(&cwd);
+                let mut stdout = io::stdout().lock();
+                import_cmd::import_claude_code(
+                    &store,
+                    &cwd,
+                    project.as_deref(),
+                    session.as_deref(),
+                    force,
+                    &mut stdout,
+                )?;
+                stdout.flush()?;
+            }
+        },
         Command::Session { command } => match command {
             SessionCommand::List => {
                 let mut stdout = io::stdout().lock();
