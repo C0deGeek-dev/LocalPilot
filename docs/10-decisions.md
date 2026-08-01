@@ -2,6 +2,164 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0115: Harness Correctness And Safety Fixes — Phase-Cadence Firing, Full Tool-Output Retention, And Secret-Path Write Gating
+
+Status: accepted. Refines ADR-0009 (discovered quality gate), the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md), and the permission
+model in [`docs/07-security-and-privacy.md`](07-security-and-privacy.md).
+
+A cluster of harness-correctness fixes that share no feature but the same bar —
+the runtime should not silently do the wrong safe-looking thing.
+
+1. **A `cadence = "phase"` quality-gate check fires at the plan boundary.** The
+   PROGRESS.md model is a flat step list with no sub-phase markers, so the only
+   unambiguous phase boundary is plan completion: the `phase_complete` trigger
+   fires when a committed step leaves no incomplete step behind, and the ratified
+   phase-cadence checks run once there instead of never. A check configured to run
+   per phase that never runs is worse than no check — it reads as covered.
+
+2. **Tool output is retained in full past the display cap.** The output cap
+   truncates what the model is *shown* in-band, but the full output is retained so
+   a later `read_tool_output` can page the untruncated bytes. Capping the retained
+   copy at the same bound as the shown copy made the paging tool a no-op past the
+   cap — the data the tool existed to reach was already gone.
+
+3. **A write to a secret-looking path asks, even in a trusted workspace.** Trust
+   authorizes ordinary edits without a prompt; it does not silently authorize
+   writing a `.env`/key/credential path. The permission engine treats a
+   secret-like write target as ask-or-deny regardless of workspace trust, because
+   the blast radius of a mistaken secret write is not what workspace trust was
+   granted for.
+
+4. **SemVer-stable config keys built but not yet wired are reserved, not deleted**
+   (D005): `[harness] mode`, `[memory] outcome_downweight`, and
+   `PackSource::ManualPin` each carry a documented "reserved" note rather than
+   being removed. Deleting a stable config key or a cross-referenced public enum
+   variant for zero runtime benefit trades a compatibility promise for nothing.
+
+## ADR-0114: The Provider Layer Is Split Into A Shared-Contract Core Plus One Crate Per Adapter
+
+Status: accepted. Refines ADR-0001 (narrow crates) and ADR-0002 (provider-neutral
+core); the crate map is in [`docs/02-architecture.md`](02-architecture.md) and the
+per-adapter build loop in [`docs/14-dev-tooling.md`](14-dev-tooling.md).
+
+`localpilot-llm` had grown to a single ~5.9k-line crate holding the trait, the
+event model, and both hand-written adapters, so editing one adapter recompiled the
+whole provider layer as one unit. It is now four crates: **`localpilot-llm-core`**
+(the shared contract — the `ModelProvider` trait, stream events, error taxonomy,
+auth, header parsing, request shapes; no adapter, so no dependency cycle);
+**`localpilot-llm-openai`** and **`localpilot-llm-anthropic`** (one adapter each,
+depending only on core); and **`localpilot-llm`** as a thin umbrella that keeps the
+registry, discovery, vision, and the test fake, and **re-exports the identical
+public surface** so `harness`/`cli`/`rpc`/`quota` compile unchanged.
+
+The move was behaviour-neutral: only cross-crate use-path rewrites and widening six
+adapter-facing items from `pub(crate)` to `pub`; the full test suite passed with no
+downstream edits. **Honestly scoped by measurement:** the win is the isolated
+inner loop — `cargo check -p localpilot-llm-anthropic` checks a 1.4k-line unit
+without re-checking the sibling adapter or core — *not* a faster full
+`cargo build --workspace`, which still recompiles the downstream spine through the
+umbrella. The docs say so rather than claiming a whole-build speedup the split does
+not deliver.
+
+## ADR-0113: A Claude Code Session Imports By Text-Flattening; The Quota Pause Is Waited Out And Escalated
+
+Status: accepted. Extends the resume/quota model in
+[`docs/06-harness-spec.md`](06-harness-spec.md) and the migration guide in
+[`docs/install.md`](install.md); bound by ADR-0004/ADR-0042 — the import reads only
+local files, never a private or subscription endpoint.
+
+Two self-contained items sharing the resume machinery.
+
+1. **Import text-flattens rather than re-homing foreign structure.**
+   `localpilot import claude-code` reads a Claude Code session
+   (`~/.claude/projects/.../<id>.jsonl`, one content block per line chained by
+   `parentUuid`), parses leniently, and flattens: tool calls and results become
+   plain-text markers and provider-specific reasoning is dropped, because foreign
+   tool ids/schemas and reasoning signatures cannot be replayed under a different
+   provider. The result is prose any adapter serializes verbatim. It writes both
+   the transcript and the event log (so the session both counts and resumes),
+   redacted on write, under a distinct `imported_cc_<id>` name with a `[cc-import]`
+   badge; a re-import never overwrites a session and refuses without `--force`. The
+   format was verified against a real Claude Code file, not inferred.
+
+2. **`wait-resume` actually waits and escalates.** The pause estimator and
+   decision rules already existed but the call site printed an ETA and exited and
+   pinned the retry attempt to 1. The paused-run marker now records the real
+   provider id and a pause-attempt count that grows the backoff across repeated
+   pauses (a provider-stated retry-after still wins), and `wait-resume` waits out
+   the window in a bounded, cancellable loop — re-checking the safety gates on a
+   capped poll, honouring `max_wait_minutes` — then resumes. A pure `wait_nap`
+   helper computes each clamped nap so the loop is unit-testable without a clock.
+
+## ADR-0112: An Already-Seen Read Elides To A Stub, In-Memory And Exact-Match
+
+Status: accepted, opt-in (`[tools] elide_seen_reads`). Extends the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md).
+
+A `read_file` that returns a path+range already read this session, unchanged since
+(same mtime and length), is replaced with a compact stub pointing at the earlier
+read instead of re-spending context on identical bytes. The read-history is
+**in-memory per session, not a durable store event**, and matching is **exact
+`(path, start, end)`, not full-read-covers-sub-range** (D008): the smallest blast
+radius (no store-format bump, no elision across a resume boundary) that still
+captures the dominant repeated-identical-read waste. Coverage matching is a
+follow-up if it is ever measured worthwhile; a conservative elision that never
+hides changed bytes is the point.
+
+## ADR-0111: A Typed Soft-Interrupt Substrate Delivers Steering At Turn-Loop Safe Points
+
+Status: accepted. Extends the turn loop in
+[`docs/06-harness-spec.md`](06-harness-spec.md); the non-user producers are
+library-only for now (D007).
+
+Steering, cancellation, and (later) background/system signals reach an in-flight
+turn through one typed `SoftInterrupt { source }` queue admitted only at labelled
+safe points in the turn loop (between tool dispatch and the next model call), never
+mid-tool. The substrate ships with `push_interrupt` and the `SoftInterruptSource`
+variants public, but **only User steering has a producer today**; the `System` and
+`BackgroundTask` sources are disclosed library-only substrate whose real producers
+belong to the deferred platform track (server control callbacks, swarm messaging).
+Building the substrate now — foundational and hard to retrofit — without inventing
+a background-callback producer that belongs to a plan not yet started satisfies the
+wire-or-disclose rule by explicit disclosure.
+
+## ADR-0110: Memory Retrieval Fuses Keyword And Dense Ranks With Reciprocal Rank Fusion
+
+Status: accepted. Amends the rank composition of ADR-0086 (normalized-relevance
+context pack) and reuses the embeddings of ADR-0059; keyword search stays the
+candidate floor, so retrieval is byte-identical when embeddings are absent.
+
+Context hits are fused from the BM25 keyword ranking and the dense/vector ranking
+by **Reciprocal Rank Fusion** (k=60): each list contributes `1/(k + rank)` and the
+sums are combined, with cosine similarity as the tiebreak. RRF ranks on position
+not raw score, so it needs no score normalization across two incomparable scales
+and an item that both rankers surface beats one that only a single ranker finds —
+while a single-list query degrades to the identity of that list's order. A separate
+per-turn injection-dedup TTL (`[memory] injection_dedup_ttl_turns` in
+`.localpilot.toml`) stops the same memory being re-injected every turn within the
+window. RRF's convexity is the reason a naive "consistent middle rank beats a
+split high/low rank" intuition is wrong and the tests assert the both-lists rule
+instead.
+
+## ADR-0109: Anthropic Prompt Caching Marks The Stable Prefix Only
+
+Status: accepted, opt-in (`prompt_caching` on a `[providers.<id>]` table). Extends
+the provider contract in [`docs/04-provider-contract.md`](04-provider-contract.md)
+and [`docs/providers.md`](providers.md).
+
+The Anthropic adapter emits a `cache_control: {type: "ephemeral"}` breakpoint on
+the **stable prefix** — the tools block plus the first, stable system block — and
+reads back `cache_creation_input_tokens`/`cache_read_input_tokens` from
+`message_start`, surfaced through `TokenUsage` with an `effective_input_tokens`
+accessor. Caching the tools+system prefix is the highest-ROI, lowest-blast-radius
+breakpoint: that prefix is the largest always-identical span of the request, so it
+is where a cache hit pays most. The **rolling message-history cache is deliberately
+deferred** (D006): a breakpoint on the growing conversation needs per-turn
+block-array expansion of collapsed turns and ≤4-breakpoint management —
+disproportionate request-path risk against a marginal gain over the prefix already
+cached. A follow-on can add it.
+
 ## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
 
 Status: accepted. Extends the release process in
