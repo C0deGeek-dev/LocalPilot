@@ -409,6 +409,21 @@ impl Timeline {
         true
     }
 
+    pub fn toggle_expandable(&mut self, id: ItemId) -> bool {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        let item = &self.items[index];
+        if !matches!(item.kind, ItemKind::Reasoning | ItemKind::Tool) || !item.text.contains('\n') {
+            return false;
+        }
+        let expanded = !item.expanded;
+        self.items[index].expanded = expanded;
+        self.wrap_cache.borrow_mut().remove(&id);
+        self.invalidate_layout();
+        true
+    }
+
     #[must_use]
     pub fn rows(&self, width: u16) -> Vec<VisualRow> {
         self.items
@@ -1321,6 +1336,10 @@ mod tests {
         assert_eq!(expanded.len(), 3);
         assert_eq!(expanded[2].text, "line two");
         assert_eq!(timeline.items().len(), 1);
+        assert!(timeline.toggle_expandable(tool));
+        assert!(!timeline.item(tool).expect("tool").expanded);
+        assert!(timeline.toggle_expandable(tool));
+        assert!(timeline.item(tool).expect("tool").expanded);
     }
 
     #[test]

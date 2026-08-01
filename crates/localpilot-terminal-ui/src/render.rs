@@ -223,13 +223,23 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         "Ctrl+R      search history",
         "Ctrl+G      external editor",
     ];
-    let right = [
-        "Page Up/Down scroll timeline",
-        "Wheel        scroll timeline",
-        "Drag         select text",
-        "Ctrl+F       search messages",
-        "Esc          stop and steer",
-    ];
+    let right = if app.capabilities.mouse_capture {
+        [
+            "Page Up/Down scroll timeline",
+            "Wheel        scroll timeline",
+            "Drag         select text",
+            "Ctrl+F       search messages",
+            "Esc          stop and steer",
+        ]
+    } else {
+        [
+            "Page Up/Down scroll timeline",
+            "Mouse        disabled",
+            "Ctrl+C       copy / exit",
+            "Ctrl+F       search messages",
+            "Esc          stop and steer",
+        ]
+    };
     let wide = area.width >= 70;
     let requested = if wide { 6 } else { 11 };
     let height = requested.min(area.height);
@@ -334,7 +344,12 @@ fn render_takeover(
         area.width.saturating_sub(5),
         area.height.saturating_sub(2 + footer_height),
     );
-    let lines = help_lines(takeover, content.width, theme);
+    let lines = help_lines(
+        takeover,
+        content.width,
+        theme,
+        app.capabilities.mouse_capture,
+    );
     let viewport_rows = usize::from(content.height);
     let maximum = lines.len().saturating_sub(viewport_rows);
     let start = takeover.scroll.min(maximum);
@@ -491,7 +506,12 @@ fn theme_description(theme: Theme) -> &'static str {
     }
 }
 
-fn help_lines(takeover: TakeoverView<'_>, width: u16, theme: ThemeResolver) -> Vec<Line<'static>> {
+fn help_lines(
+    takeover: TakeoverView<'_>,
+    width: u16,
+    theme: ThemeResolver,
+    mouse_capture: bool,
+) -> Vec<Line<'static>> {
     let mut source = vec![
         ("Conversation commands".to_string(), UiRole::Accent),
         (String::new(), UiRole::Foreground),
@@ -536,11 +556,19 @@ fn help_lines(takeover: TakeoverView<'_>, width: u16, theme: ThemeResolver) -> V
         (String::new(), UiRole::Foreground),
         ("Timeline and work".to_string(), UiRole::Accent),
         (
-            "  Wheel/Page  Scroll while keeping the composer active".to_string(),
+            if mouse_capture {
+                "  Wheel/Page  Scroll while keeping the composer active".to_string()
+            } else {
+                "  Page Up/Down Scroll while keeping the composer active".to_string()
+            },
             UiRole::Foreground,
         ),
         (
-            "  Drag        Select timeline text or move the scrollbar".to_string(),
+            if mouse_capture {
+                "  Drag        Select timeline text or move the scrollbar".to_string()
+            } else {
+                "  Mouse       Disabled for this launch".to_string()
+            },
             UiRole::Foreground,
         ),
         (

@@ -29,7 +29,7 @@ use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
     InputAction, ItemId, KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState,
     SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
-    UserShellCommand, UserShellOutput,
+    UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
@@ -44,9 +44,11 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 const CHAT_COPY_ON_SELECT_ENV: &str = "LOCALPILOT_CHAT_COPY_ON_SELECT";
+const CHAT_MOUSE_ENV: &str = "LOCALPILOT_CHAT_MOUSE";
 const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
 const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
 static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
 
@@ -162,12 +164,14 @@ struct SelectionGesture {
 #[derive(Debug, Default)]
 struct MouseState {
     selection: Option<SelectionGesture>,
+    selection_pointer: Option<(u16, u16)>,
     scrollbar_grab: Option<u16>,
 }
 
 impl MouseState {
     fn reset_gesture(&mut self) {
         self.selection = None;
+        self.selection_pointer = None;
         self.scrollbar_grab = None;
     }
 }
@@ -222,7 +226,12 @@ pub(crate) async fn run(
     context: HostContext<'_>,
 ) -> Result<()> {
     install_panic_restore_hook();
-    let (mut modes, capabilities) = TerminalModes::enter()?;
+    let mouse_capture = std::env::var(CHAT_MOUSE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_setting)
+        .unwrap_or(true);
+    let (mut modes, capabilities) = TerminalModes::enter(mouse_capture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("initialize full-screen terminal")?;
     terminal.clear().context("clear full-screen terminal")?;
@@ -335,16 +344,37 @@ fn apply_host_preferences(app: &mut AppModel) {
     }
     if let Some(value) = std::env::var_os(CHAT_COPY_ON_SELECT_ENV) {
         match value.into_string() {
-            Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => {
-                app.set_copy_on_select(true);
-            }
-            Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => {
-                app.set_copy_on_select(false);
-            }
-            Ok(_) | Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+            Ok(value) => match parse_bool_setting(&value) {
+                Some(enabled) => app.set_copy_on_select(enabled),
+                None => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                    "{CHAT_COPY_ON_SELECT_ENV} must be true, false, 1, or 0; using false"
+                ))),
+            },
+            Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "{CHAT_COPY_ON_SELECT_ENV} must be true, false, 1, or 0; using false"
             ))),
         }
+    }
+    if std::env::var_os(CHAT_MOUSE_ENV).is_some()
+        && std::env::var(CHAT_MOUSE_ENV)
+            .ok()
+            .as_deref()
+            .and_then(parse_bool_setting)
+            .is_none()
+    {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "{CHAT_MOUSE_ENV} must be true, false, 1, or 0; using true"
+        )));
+    }
+}
+
+fn parse_bool_setting(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("true") || value == "1" {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("false") || value == "0" {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -804,6 +834,7 @@ async fn run_event_loop(
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
         if !event::poll(EVENT_POLL_INTERVAL).context("poll full-screen terminal event")? {
+            advance_mouse_selection(app, &hit_map, &mouse_state);
             continue;
         }
         let next = event::read().context("read full-screen terminal event")?;
@@ -1043,6 +1074,7 @@ async fn drive_shell(
                         hit_map = draw_synchronized(terminal, app)?;
                     }
                 }
+                advance_mouse_selection(app, &hit_map, mouse_state);
                 let _ = draw_synchronized(terminal, app)?;
             }
             result = &mut operation => {
@@ -1190,6 +1222,7 @@ async fn drive_turn(
                         hit_map = draw_synchronized(terminal, app)?;
                     }
                 }
+                advance_mouse_selection(app, &hit_map, mouse_state);
                 let _ = draw_synchronized(terminal, app)?;
             }
             reason = &mut operation => {
@@ -1461,6 +1494,18 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
 
+            if let Some(hit) = hit_map.timeline_rows.iter().find(|hit| {
+                hit.y == mouse.row
+                    && mouse.column >= hit_map.timeline.x
+                    && mouse.column < hit.content_x
+                    && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
+            }) {
+                if app.timeline.toggle_expandable(hit.row.item_id) {
+                    app.timeline.clear_selection();
+                    return RoutedEvent::Handled;
+                }
+            }
+
             if rect_contains(hit_map.composer, mouse.column, mouse.row) {
                 if app.has_input_overlay() {
                     return RoutedEvent::Handled;
@@ -1485,6 +1530,7 @@ fn handle_mouse_event(
                     origin_column: mouse.column,
                     origin_row: mouse.row,
                 });
+                mouse_state.selection_pointer = Some((mouse.column, mouse.row));
             } else {
                 app.timeline.clear_selection();
             }
@@ -1515,14 +1561,8 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
             if mouse_state.selection.is_some() {
-                if mouse.row < hit_map.timeline.y {
-                    app.timeline
-                        .scroll_by(-1, hit_map.timeline.width, hit_map.timeline.height);
-                } else if mouse.row >= hit_map.timeline.bottom() {
-                    app.timeline
-                        .scroll_by(1, hit_map.timeline.width, hit_map.timeline.height);
-                }
-                extend_mouse_selection(app, hit_map, mouse_state, mouse.column, mouse.row);
+                mouse_state.selection_pointer = Some((mouse.column, mouse.row));
+                advance_mouse_selection(app, hit_map, mouse_state);
             }
             RoutedEvent::Handled
         }
@@ -1571,6 +1611,20 @@ fn handle_mouse_event(
             }
         }
     }
+}
+
+fn advance_mouse_selection(app: &mut AppModel, hit_map: &HitMap, mouse_state: &MouseState) {
+    let Some((column, row)) = mouse_state.selection_pointer else {
+        return;
+    };
+    if row < hit_map.timeline.y {
+        app.timeline
+            .scroll_by(-1, hit_map.timeline.width, hit_map.timeline.height);
+    } else if row >= hit_map.timeline.bottom() {
+        app.timeline
+            .scroll_by(1, hit_map.timeline.width, hit_map.timeline.height);
+    }
+    extend_mouse_selection(app, hit_map, mouse_state, column, row);
 }
 
 fn extend_mouse_selection(
@@ -1902,15 +1956,20 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
 
 struct TerminalModes {
     active: bool,
+    mouse_capture: bool,
 }
 
 impl TerminalModes {
-    fn enter() -> Result<(Self, TerminalCapabilities)> {
+    fn enter(mouse_capture: bool) -> Result<(Self, TerminalCapabilities)> {
         terminal::enable_raw_mode().context("enable raw terminal mode")?;
         TERMINAL_MODES_ACTIVE.store(true, Ordering::Release);
-        let mut guard = Self { active: true };
+        MOUSE_CAPTURE_ACTIVE.store(mouse_capture, Ordering::Release);
+        let mut guard = Self {
+            active: true,
+            mouse_capture,
+        };
         let mut stdout = io::stdout();
-        if let Err(error) = write_required_modes(&mut stdout) {
+        if let Err(error) = write_required_modes(&mut stdout, mouse_capture) {
             guard.restore();
             return Err(error).context("enter full-screen terminal modes");
         }
@@ -1923,7 +1982,7 @@ impl TerminalModes {
             } else {
                 ColorSupport::Color
             },
-            mouse_capture: true,
+            mouse_capture,
             synchronized_output: true,
             keyboard: if enhanced {
                 KeyboardSupport::Enhanced
@@ -1952,7 +2011,7 @@ impl SuspensibleModes for TerminalModes {
     }
 
     fn reenter(&mut self) -> Result<Self::Capabilities> {
-        let (replacement, capabilities) = Self::enter()?;
+        let (replacement, capabilities) = Self::enter(self.mouse_capture)?;
         *self = replacement;
         Ok(capabilities)
     }
@@ -1964,14 +2023,12 @@ impl Drop for TerminalModes {
     }
 }
 
-fn write_required_modes(writer: &mut impl Write) -> io::Result<()> {
-    execute!(
-        writer,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        Hide
-    )
+fn write_required_modes(writer: &mut impl Write, mouse_capture: bool) -> io::Result<()> {
+    execute!(writer, EnterAlternateScreen)?;
+    if mouse_capture {
+        execute!(writer, EnableMouseCapture)?;
+    }
+    execute!(writer, EnableBracketedPaste, Hide)
 }
 
 fn write_keyboard_enhancement(writer: &mut impl Write) -> io::Result<()> {
@@ -1984,19 +2041,21 @@ fn write_keyboard_enhancement(writer: &mut impl Write) -> io::Result<()> {
     )
 }
 
-fn write_restore_modes(writer: &mut impl Write, keyboard_flags_pushed: bool) -> io::Result<()> {
+fn write_restore_modes(
+    writer: &mut impl Write,
+    keyboard_flags_pushed: bool,
+    mouse_capture: bool,
+) -> io::Result<()> {
     if keyboard_flags_pushed {
         // Keyboard enhancement is opportunistic. Its legacy Windows command
         // may be unsupported, but that must never prevent required cleanup.
         let _ = execute!(writer, PopKeyboardEnhancementFlags);
     }
-    execute!(
-        writer,
-        Show,
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )
+    execute!(writer, Show, DisableBracketedPaste)?;
+    if mouse_capture {
+        execute!(writer, DisableMouseCapture)?;
+    }
+    execute!(writer, LeaveAlternateScreen)
 }
 
 fn restore_terminal_modes() {
@@ -2004,7 +2063,8 @@ fn restore_terminal_modes() {
         return;
     }
     let keyboard_flags_pushed = KEYBOARD_FLAGS_PUSHED.swap(false, Ordering::AcqRel);
-    let _ = write_restore_modes(&mut io::stdout(), keyboard_flags_pushed);
+    let mouse_capture = MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::AcqRel);
+    let _ = write_restore_modes(&mut io::stdout(), keyboard_flags_pushed, mouse_capture);
     let _ = terminal::disable_raw_mode();
 }
 
@@ -2565,6 +2625,99 @@ mod tests {
             ),
             RoutedEvent::Copy("copy".to_string())
         );
+    }
+
+    #[test]
+    fn held_edge_selection_continues_to_autoscroll_without_new_mouse_events() {
+        let mut app = app();
+        for number in 0..120 {
+            let _ = app
+                .timeline
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let origin = hit_map.timeline_rows.last().expect("visible timeline row");
+        let mut mouse_state = MouseState::default();
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    origin.content_x,
+                    origin.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    origin.content_x,
+                    hit_map.timeline.y.saturating_sub(1),
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+
+        let after_drag = draw_hit_map(&app, 80, 24);
+        let start_after_drag = after_drag.scrollbar.start;
+        advance_mouse_selection(&mut app, &after_drag, &mouse_state);
+        let after_stationary_tick = draw_hit_map(&app, 80, 24);
+
+        assert!(after_stationary_tick.scrollbar.start < start_after_drag);
+        assert!(app.timeline.selected_text().is_some());
+    }
+
+    #[test]
+    fn activity_prefix_click_toggles_details_without_starting_selection() {
+        let mut app = app();
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-1".to_string(),
+            name: "inspect".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::ToolFinished {
+            id: "tool-1".to_string(),
+            name: "inspect".to_string(),
+            is_error: false,
+            output: "detail one\ndetail two".to_string(),
+        });
+        let tool = app
+            .timeline
+            .items()
+            .iter()
+            .find(|item| item.kind == ItemKind::Tool)
+            .expect("tool item")
+            .id;
+        assert!(!app.timeline.item(tool).expect("tool item").expanded);
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.item_id == tool)
+            .expect("tool row hit");
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hit_map.timeline.x,
+                    hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.timeline.item(tool).expect("tool item").expanded);
+        assert!(app.timeline.selection.is_none());
     }
 
     #[test]
@@ -3223,7 +3376,7 @@ mod tests {
     #[test]
     fn terminal_mode_commands_enter_and_restore_in_safe_order() {
         let mut entered = Vec::new();
-        write_required_modes(&mut entered).expect("required mode bytes");
+        write_required_modes(&mut entered, true).expect("required mode bytes");
         let text = String::from_utf8(entered).expect("ANSI is UTF-8");
         let alternate = text.find("?1049h").expect("alternate enter");
         let paste = text.find("?2004h").expect("paste enable");
@@ -3238,8 +3391,15 @@ mod tests {
             assert!(alternate < mouse && mouse < paste);
         }
 
+        let mut mouse_free = Vec::new();
+        write_required_modes(&mut mouse_free, false).expect("mouse-free mode bytes");
+        #[cfg(not(windows))]
+        assert!(!String::from_utf8(mouse_free)
+            .expect("ANSI is UTF-8")
+            .contains("?1000h"));
+
         let mut restored = Vec::new();
-        write_restore_modes(&mut restored, true).expect("restore mode bytes");
+        write_restore_modes(&mut restored, true, true).expect("restore mode bytes");
         let text = String::from_utf8(restored).expect("ANSI is UTF-8");
         let paste = text.find("?2004l").expect("paste disable");
         let alternate = text.find("?1049l").expect("alternate leave");
@@ -3250,6 +3410,27 @@ mod tests {
             let keyboard = text.find("<u").expect("keyboard pop");
             let mouse = text.find("?1000l").expect("mouse disable");
             assert!(keyboard < paste && paste < mouse && mouse < alternate);
+        }
+
+        let mut mouse_free_restore = Vec::new();
+        write_restore_modes(&mut mouse_free_restore, false, false)
+            .expect("mouse-free restore bytes");
+        #[cfg(not(windows))]
+        assert!(!String::from_utf8(mouse_free_restore)
+            .expect("ANSI is UTF-8")
+            .contains("?1000l"));
+    }
+
+    #[test]
+    fn boolean_host_settings_accept_only_documented_values() {
+        for value in ["true", "TRUE", "1"] {
+            assert_eq!(parse_bool_setting(value), Some(true));
+        }
+        for value in ["false", "FALSE", "0"] {
+            assert_eq!(parse_bool_setting(value), Some(false));
+        }
+        for value in ["", "yes", "2"] {
+            assert_eq!(parse_bool_setting(value), None);
         }
     }
 

@@ -44,7 +44,9 @@ palette while retaining non-color focus, selection, success, and error cues.
 Mouse selection remains highlighted after release so Ctrl+C or right-click can
 copy it explicitly. Set `LOCALPILOT_CHAT_COPY_ON_SELECT=true` (or `1`) to copy
 immediately on release; `false` and `0` retain the default behavior. These
-environment-only controls do not extend the stable TOML schema.
+environment-only controls do not extend the stable TOML schema. Mouse reporting
+is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or `0`) before launch
+for a keyboard-only fallback that leaves pointer handling to the terminal.
 
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
