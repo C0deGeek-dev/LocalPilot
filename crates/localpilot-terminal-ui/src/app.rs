@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
@@ -12,6 +13,7 @@ use crate::{
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SETTINGS_QUERY_BYTES: usize = 256;
+const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabId {
@@ -99,6 +101,7 @@ pub enum InputAction {
     CancelOrExit,
     Escape,
     OpenReverseHistory,
+    StashOrPop,
     NavigateTimeline(TimelineNavigation),
     Insert(String),
     Paste(String),
@@ -933,6 +936,7 @@ pub struct AppModel {
     pub work: WorkState,
     pub exit_armed: bool,
     pub exit_requested: bool,
+    escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
     pub plan: Vec<PlanEntry>,
     pub usage: Option<(u64, u64)>,
@@ -947,6 +951,7 @@ pub struct AppModel {
     quick_help: bool,
     input_overlay: Option<InputOverlay>,
     external_edit_snapshot: Option<EditorSnapshot>,
+    stashed_draft: Option<EditorSnapshot>,
     command_catalog: Vec<CompletionCommand>,
     command_values: BTreeMap<String, Vec<CompletionItem>>,
     workspace_files: Vec<String>,
@@ -984,6 +989,7 @@ impl AppModel {
             work: WorkState::Idle,
             exit_armed: false,
             exit_requested: false,
+            escape_armed_at: None,
             print_transcript_on_exit: false,
             plan: Vec::new(),
             usage: None,
@@ -998,6 +1004,7 @@ impl AppModel {
             quick_help: false,
             input_overlay: None,
             external_edit_snapshot: None,
+            stashed_draft: None,
             command_catalog: Vec::new(),
             command_values: BTreeMap::new(),
             workspace_files: Vec::new(),
@@ -1028,6 +1035,28 @@ impl AppModel {
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
+        self.handle_input_at(action, editor_width, Instant::now())
+    }
+
+    fn handle_input_at(
+        &mut self,
+        action: InputAction,
+        editor_width: u16,
+        now: Instant,
+    ) -> AppCommand {
+        if !matches!(action, InputAction::Escape) {
+            self.escape_armed_at = None;
+        }
+        if matches!(action, InputAction::Escape)
+            && (self.dialog.is_some()
+                || self.theme_picker.is_some()
+                || self.quick_help
+                || self.takeover.is_some()
+                || self.input_overlay.is_some()
+                || self.editor.is_shell_mode())
+        {
+            self.escape_armed_at = None;
+        }
         if self.dialog.is_some() {
             if !matches!(action, InputAction::CancelOrExit) {
                 self.exit_armed = false;
@@ -1088,16 +1117,21 @@ impl AppModel {
             }
         }
         if matches!(action, InputAction::Escape) && self.editor.is_shell_mode() {
+            self.escape_armed_at = None;
             self.editor.exit_shell_mode();
             return AppCommand::None;
         }
         match action {
             InputAction::CancelOrExit => AppCommand::None,
-            InputAction::Escape => self.interrupt_work(),
+            InputAction::Escape => self.escape_or_interrupt(now),
             InputAction::OpenReverseHistory
                 if self.focus == Focus::Composer && !self.editor.is_shell_mode() =>
             {
                 self.open_reverse_history();
+                AppCommand::None
+            }
+            InputAction::StashOrPop if self.focus == Focus::Composer => {
+                self.stash_or_pop();
                 AppCommand::None
             }
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
@@ -1245,6 +1279,7 @@ impl AppModel {
             InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::OpenReverseHistory
+            | InputAction::StashOrPop
             | InputAction::Backspace
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -1945,6 +1980,7 @@ impl AppModel {
     /// configuration, completion catalogs and durable prompt history.
     pub fn clear_conversation(&mut self) {
         self.close_theme_picker(true);
+        self.escape_armed_at = None;
         self.timeline = Timeline::new();
         self.work = WorkState::Idle;
         self.stream_bytes = 0;
@@ -1959,6 +1995,16 @@ impl AppModel {
         self.active_reasoning = None;
         self.active_tools.clear();
         self.active_insert_before = None;
+    }
+
+    #[must_use]
+    pub const fn has_stashed_draft(&self) -> bool {
+        self.stashed_draft.is_some()
+    }
+
+    /// A stash belongs to the current in-memory session and is not persisted.
+    pub fn clear_stashed_draft(&mut self) {
+        self.stashed_draft = None;
     }
 
     /// Record whether an explicit exit command requested a restored-buffer
@@ -2422,6 +2468,7 @@ impl AppModel {
     }
 
     fn claim_dialog_focus(&mut self) {
+        self.escape_armed_at = None;
         self.quick_help = false;
         if self.theme_picker.is_some() {
             self.close_theme_picker(true);
@@ -2434,6 +2481,7 @@ impl AppModel {
 
     pub fn disarm_exit(&mut self) {
         self.exit_armed = false;
+        self.escape_armed_at = None;
     }
 
     pub fn set_copy_on_select(&mut self, enabled: bool) {
@@ -2546,6 +2594,7 @@ impl AppModel {
                 self.refresh_reverse_history(None);
             }
             InputAction::CancelOrExit
+            | InputAction::StashOrPop
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -2670,6 +2719,7 @@ impl AppModel {
             }
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
+            | InputAction::StashOrPop
             | InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::Backspace
@@ -2698,6 +2748,7 @@ impl AppModel {
             InputAction::Submit | InputAction::AcceptCompletion => self.close_theme_picker(false),
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
+            | InputAction::StashOrPop
             | InputAction::NavigateTimeline(_)
             | InputAction::Insert(_)
             | InputAction::Paste(_)
@@ -2802,6 +2853,7 @@ impl AppModel {
             }
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
+            | InputAction::StashOrPop
             | InputAction::NavigateTimeline(_)
             | InputAction::MoveVisualStart
             | InputAction::MoveVisualEnd
@@ -2839,6 +2891,7 @@ impl AppModel {
             }
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
+            | InputAction::StashOrPop
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -3299,6 +3352,39 @@ impl AppModel {
         }
     }
 
+    fn stash_or_pop(&mut self) {
+        if self.editor.text().is_empty() {
+            if let Some(snapshot) = self.stashed_draft.take() {
+                self.editor.restore_snapshot(snapshot);
+            }
+        } else {
+            self.stashed_draft = Some(self.editor.snapshot());
+            self.editor.clear_all();
+        }
+    }
+
+    fn escape_or_interrupt(&mut self, now: Instant) -> AppCommand {
+        if !matches!(self.work, WorkState::Idle) {
+            self.escape_armed_at = None;
+            return self.interrupt_work();
+        }
+        if self.focus != Focus::Composer || self.editor.text().is_empty() {
+            self.escape_armed_at = None;
+            return AppCommand::None;
+        }
+        let clears_draft = self.escape_armed_at.is_some_and(|armed| {
+            now.checked_duration_since(armed)
+                .is_some_and(|elapsed| elapsed <= DOUBLE_ESCAPE_WINDOW)
+        });
+        if clears_draft {
+            self.escape_armed_at = None;
+            self.editor.clear_all();
+        } else {
+            self.escape_armed_at = Some(now);
+        }
+        AppCommand::None
+    }
+
     fn interrupt_work(&mut self) -> AppCommand {
         match self.work {
             WorkState::Busy {
@@ -3625,6 +3711,131 @@ mod tests {
     }
 
     #[test]
+    fn double_escape_clears_an_idle_draft_only_inside_its_own_time_window() {
+        let start = Instant::now();
+        let mut app = model();
+        app.editor.insert("unfinished draft");
+
+        assert_eq!(
+            app.handle_input_at(InputAction::Escape, 80, start),
+            AppCommand::None
+        );
+        assert_eq!(app.editor.text(), "unfinished draft");
+        assert_eq!(
+            app.handle_input_at(
+                InputAction::Escape,
+                80,
+                start + DOUBLE_ESCAPE_WINDOW + Duration::from_millis(1),
+            ),
+            AppCommand::None
+        );
+        assert_eq!(app.editor.text(), "unfinished draft");
+        assert_eq!(
+            app.handle_input_at(
+                InputAction::Escape,
+                80,
+                start + DOUBLE_ESCAPE_WINDOW + Duration::from_millis(100),
+            ),
+            AppCommand::None
+        );
+        assert!(app.editor.text().is_empty());
+        assert!(app.escape_armed_at.is_none());
+    }
+
+    #[test]
+    fn non_escape_input_disarms_draft_clear_while_busy_escape_still_interrupts() {
+        let start = Instant::now();
+        let mut app = model();
+        app.editor.insert("keep me");
+        let _ = app.handle_input_at(InputAction::Escape, 80, start);
+        let _ = app.handle_input_at(InputAction::MoveLeft, 80, start + Duration::from_millis(10));
+        let _ = app.handle_input_at(InputAction::Escape, 80, start + Duration::from_millis(20));
+        assert_eq!(app.editor.text(), "keep me");
+
+        app.begin_work();
+        let _ = app.handle_input_at(
+            InputAction::StashOrPop,
+            80,
+            start + Duration::from_millis(25),
+        );
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+        let _ = app.handle_input_at(
+            InputAction::StashOrPop,
+            80,
+            start + Duration::from_millis(26),
+        );
+        assert_eq!(app.editor.text(), "keep me");
+        assert_eq!(
+            app.handle_input_at(InputAction::Escape, 80, start + Duration::from_millis(30)),
+            AppCommand::CancelWork
+        );
+        assert_eq!(app.editor.text(), "keep me");
+        assert!(app.escape_armed_at.is_none());
+    }
+
+    #[test]
+    fn ctrl_s_stash_pop_is_last_wins_atomic_and_debug_redacted() {
+        let first = (1..=12)
+            .map(|line| format!("SECRET_PASTE_{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = model();
+        let _ = app.handle_input(InputAction::Paste(first.clone()), 80);
+        let _ = app
+            .attach_image("image/png", "SECRET_STASH_IMAGE", 2048)
+            .expect("attach image");
+
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+        let debug = format!("{app:?}");
+        assert!(!debug.contains("SECRET_PASTE"));
+        assert!(!debug.contains("SECRET_STASH_IMAGE"));
+        assert!(debug.contains("payloads redacted"));
+
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        let AppCommand::Submit(restored) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("restored atomic draft should submit");
+        };
+        assert_eq!(restored.prompt, first);
+        assert_eq!(restored.pastes.len(), 1);
+        assert_eq!(restored.images.len(), 1);
+
+        app.editor.insert("older stash");
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        app.editor.insert("replacement");
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        assert!(app.editor.text().is_empty());
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        assert_eq!(app.editor.text(), "replacement");
+        assert!(!app.has_stashed_draft());
+    }
+
+    #[test]
+    fn stash_survives_submit_and_double_escape_but_can_be_cleared_for_a_session_change() {
+        let start = Instant::now();
+        let mut app = model();
+        app.editor.insert("saved");
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        app.editor.insert("submitted");
+        assert!(matches!(
+            app.handle_input(InputAction::Submit, 80),
+            AppCommand::Submit(_)
+        ));
+        assert!(app.has_stashed_draft());
+
+        app.editor.insert("throw away");
+        let _ = app.handle_input_at(InputAction::Escape, 80, start);
+        let _ = app.handle_input_at(InputAction::Escape, 80, start + Duration::from_millis(1));
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+
+        app.clear_stashed_draft();
+        assert!(!app.has_stashed_draft());
+    }
+
+    #[test]
     fn reverse_search_filters_and_navigates_without_a_second_editable_buffer() {
         let mut app = model();
         app.seed_history(vec![
@@ -3714,6 +3925,38 @@ mod tests {
         dialog.require_workspace_trust("fixture");
         let _ = dialog.handle_input(InputAction::OpenReverseHistory, 80);
         assert!(!dialog.has_input_overlay());
+    }
+
+    #[test]
+    fn stash_shortcut_is_contained_by_overlays_takeovers_themes_and_dialogs() {
+        let mut overlay = model();
+        overlay.seed_history(vec!["remembered".to_string()]);
+        overlay.editor.insert("draft");
+        let _ = overlay.handle_input(InputAction::OpenReverseHistory, 80);
+        let _ = overlay.handle_input(InputAction::StashOrPop, 80);
+        assert!(overlay.has_input_overlay());
+        assert!(!overlay.has_stashed_draft());
+
+        let mut takeover = model();
+        takeover.editor.insert("draft");
+        takeover.open_help();
+        let _ = takeover.handle_input(InputAction::StashOrPop, 80);
+        assert!(takeover.has_takeover());
+        assert!(!takeover.has_stashed_draft());
+
+        let mut theme = model();
+        theme.editor.insert("draft");
+        theme.open_theme_picker();
+        let _ = theme.handle_input(InputAction::StashOrPop, 80);
+        assert!(theme.theme_picker().is_some());
+        assert!(!theme.has_stashed_draft());
+
+        let mut dialog = model();
+        dialog.editor.insert("draft");
+        dialog.require_workspace_trust("workspace");
+        let _ = dialog.handle_input(InputAction::StashOrPop, 80);
+        assert!(dialog.dialog.is_some());
+        assert!(!dialog.has_stashed_draft());
     }
 
     #[test]

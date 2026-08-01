@@ -324,6 +324,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         "↑ / ↓       edit, then history",
         "Ctrl+R      search history",
         "Ctrl+G      external editor",
+        "Ctrl+S      stash / restore draft",
     ];
     let right = if app.capabilities.mouse_capture {
         [
@@ -332,6 +333,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Drag         select text",
             "Ctrl+F       search messages",
             "Esc          stop and steer",
+            "Esc Esc      clear draft",
         ]
     } else {
         [
@@ -340,10 +342,11 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Ctrl+C       copy / exit",
             "Ctrl+F       search messages",
             "Esc          stop and steer",
+            "Esc Esc      clear draft",
         ]
     };
     let wide = area.width >= 70;
-    let requested = if wide { 6 } else { 11 };
+    let requested = if wide { 7 } else { 13 };
     let height = requested.min(area.height);
     let help = Rect::new(
         area.x,
@@ -1205,6 +1208,14 @@ fn help_lines(
         ),
         (
             "  Ctrl+G      Edit the draft in your configured editor".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Ctrl+S      Stash a draft, or restore the saved draft".to_string(),
+            UiRole::Foreground,
+        ),
+        (
+            "  Esc Esc     Clear the current draft".to_string(),
             UiRole::Foreground,
         ),
         (
@@ -2600,6 +2611,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
             app.header.mode, app.header.profile, app.header.model
         )
     };
+    let context = if app.has_stashed_draft() {
+        format!("stashed · {context}")
+    } else {
+        context
+    };
     let busy = matches!(app.work, crate::WorkState::Busy { .. });
     let theme = theme(app);
     let text = if narrow {
@@ -3189,6 +3205,8 @@ mod tests {
         assert!(rendered.contains("Quick help"));
         assert!(rendered.contains("Enter       send prompt"));
         assert!(rendered.contains("Page Up/Down scroll timeline"));
+        assert!(rendered.contains("Ctrl+S      stash / restore draft"));
+        assert!(rendered.contains("Esc Esc      clear draft"));
         assert!(footer_state(&app).contains("? or Esc close"));
         assert!(hit_map.timeline_rows.len() < usize::from(hit_map.timeline.height));
     }
@@ -4126,6 +4144,36 @@ mod tests {
                 assert_eq!(layout.footer.height, 2);
                 assert!(status_left.contains("experience*]"));
             }
+        }
+    }
+
+    #[test]
+    fn stashed_footer_indicator_survives_wide_narrow_minimum_and_screen_reader_frames() {
+        for (width, height, screen_reader) in [
+            (120, 30, false),
+            (40, 20, false),
+            (30, 10, false),
+            (30, 10, true),
+        ] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.editor.insert("saved draft");
+            let _ = app.handle_input(crate::InputAction::StashOrPop, 80);
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, &app)))
+                .expect("draw stashed footer");
+            let layout = hit_map.expect("hit map").frame.expect("layout");
+            let footer = (layout.footer.y..layout.footer.bottom())
+                .map(|y| buffer_line(terminal.backend().buffer(), y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                footer.contains("stashed"),
+                "missing stash state at {width}x{height}, screen_reader={screen_reader}: {footer:?}"
+            );
         }
     }
 

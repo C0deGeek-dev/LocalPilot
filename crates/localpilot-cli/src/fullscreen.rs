@@ -634,6 +634,7 @@ fn apply_fullscreen_resume(
 ) {
     match result {
         Ok(startup) => {
+            app.clear_stashed_draft();
             app.clear_conversation();
             app.header.session_id = session.to_string();
             app.header.session_name = name.map(|name| sanitized_session_name(&name));
@@ -1623,6 +1624,7 @@ async fn execute_fullscreen_slash(
         }
         SlashAction::NewSession => {
             runtime.start_new_session();
+            app.clear_stashed_draft();
             app.clear_conversation();
             app.header.session_id = runtime.session_id().to_string();
             app.header.session_name = None;
@@ -1637,6 +1639,7 @@ async fn execute_fullscreen_slash(
             let mark_fork = matches!(action, SlashAction::Fork);
             match runtime.fork_session(mark_fork) {
                 Ok(id) => {
+                    app.clear_stashed_draft();
                     app.header.session_id = id.to_string();
                     app.header.session_name = None;
                     let verb = if mark_fork { "forked" } else { "cloned" };
@@ -3126,6 +3129,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
         KeyCode::Char('j') if ctrl && !alt => Some(InputAction::Insert("\n".to_string())),
         KeyCode::Char('k') if ctrl && !alt => Some(InputAction::DeleteToLineEnd),
         KeyCode::Char('r') if ctrl && !alt => Some(InputAction::OpenReverseHistory),
+        KeyCode::Char('s') if ctrl && !alt => Some(InputAction::StashOrPop),
         KeyCode::Char('u') if ctrl && !alt => Some(InputAction::DeleteToLineStart),
         KeyCode::Char('w') if ctrl && !alt => Some(InputAction::DeleteWordLeft),
         KeyCode::Char('y') if ctrl && !alt => Some(InputAction::AcceptCompletion),
@@ -3721,6 +3725,11 @@ mod tests {
                 InputAction::OpenReverseHistory,
             ),
             (
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+                InputAction::StashOrPop,
+            ),
+            (
                 KeyCode::Char('y'),
                 KeyModifiers::CONTROL,
                 InputAction::AcceptCompletion,
@@ -3871,6 +3880,8 @@ mod tests {
     #[test]
     fn resume_failure_preserves_view_and_success_replaces_the_projection() {
         let mut app = app();
+        app.editor.insert("session-local stash");
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
         let original = app
             .timeline
             .push(ItemKind::Assistant, "existing conversation")
@@ -3885,6 +3896,7 @@ mod tests {
             Err("resume failed: planted failure".to_string()),
         );
         assert_eq!(app.header.session_id, original_session);
+        assert!(app.has_stashed_draft());
         assert!(app.timeline.item(original).is_some());
         assert!(app
             .timeline
@@ -3910,6 +3922,7 @@ mod tests {
             ]),
         );
         assert_eq!(app.header.session_id, target.to_string());
+        assert!(!app.has_stashed_draft());
         assert_eq!(app.header.session_name.as_deref(), Some("new name second"));
         assert!(!app
             .timeline

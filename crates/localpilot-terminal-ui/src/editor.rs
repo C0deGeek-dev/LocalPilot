@@ -111,12 +111,30 @@ impl ActiveUnit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct EditorSnapshot {
     text: String,
     cursor: usize,
     units: Vec<ActiveUnit>,
     shell_mode: bool,
+}
+
+impl fmt::Debug for EditorSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EditorSnapshot")
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .field("cursor", &self.cursor)
+            .field(
+                "units",
+                &format_args!("<{} payloads redacted>", self.units.len()),
+            )
+            .field("shell_mode", &self.shell_mode)
+            .finish()
+    }
 }
 
 impl EditorSnapshot {
@@ -205,6 +223,21 @@ impl Editor {
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_units.clear();
+    }
+
+    /// Clear every piece of transient composer state without touching durable
+    /// prompt or shell history.
+    pub(crate) fn clear_all(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.preferred_column = None;
+        self.history_index = None;
+        self.shell_history_index = None;
+        self.shell_mode = false;
+        self.history_draft.clear();
+        self.history_draft_cursor = 0;
+        self.history_draft_units.clear();
+        self.units.clear();
     }
 
     #[must_use]
@@ -538,13 +571,7 @@ impl Editor {
                 AtomicPayload::Image(image) => images.push(image),
             }
         }
-        self.cursor = 0;
-        self.preferred_column = None;
-        self.history_index = None;
-        self.shell_history_index = None;
-        self.history_draft.clear();
-        self.history_draft_cursor = 0;
-        self.history_draft_units.clear();
+        self.clear_all();
         if record_history && self.history.last() != Some(&display) {
             self.history.push(display.clone());
         }
@@ -595,16 +622,7 @@ impl Editor {
         if command.is_empty() {
             return None;
         }
-        self.text.clear();
-        self.units.clear();
-        self.shell_mode = false;
-        self.cursor = 0;
-        self.preferred_column = None;
-        self.history_index = None;
-        self.shell_history_index = None;
-        self.history_draft.clear();
-        self.history_draft_cursor = 0;
-        self.history_draft_units.clear();
+        self.clear_all();
         if self.shell_history.last() != Some(&command) {
             self.shell_history.push(command.clone());
             const SHELL_HISTORY_LIMIT: usize = 100;
@@ -1169,6 +1187,49 @@ mod tests {
         editor.backspace();
         assert_eq!(editor.text(), "");
         assert!(editor.units.is_empty());
+    }
+
+    #[test]
+    fn clear_all_drops_every_transient_editor_state_but_keeps_history() {
+        let mut editor = Editor::new(vec!["remembered prompt".to_string()]);
+        editor.insert_paste(twelve_line_paste());
+        let _ = editor.insert_image("image/png", "SECRET_IMAGE", 128);
+        editor.enter_shell_mode();
+        editor.preferred_column = Some(7);
+        editor.history_index = Some(0);
+        editor.shell_history_index = Some(0);
+        editor.history_draft = "draft".to_string();
+        editor.history_draft_cursor = 2;
+        editor.history_draft_units = editor.units.clone();
+
+        editor.clear_all();
+
+        assert!(editor.text.is_empty());
+        assert_eq!(editor.cursor, 0);
+        assert!(editor.units.is_empty());
+        assert!(!editor.shell_mode);
+        assert_eq!(editor.preferred_column, None);
+        assert_eq!(editor.history_index, None);
+        assert_eq!(editor.shell_history_index, None);
+        assert!(editor.history_draft.is_empty());
+        assert_eq!(editor.history_draft_cursor, 0);
+        assert!(editor.history_draft_units.is_empty());
+        assert_eq!(editor.history, vec!["remembered prompt"]);
+    }
+
+    #[test]
+    fn editor_snapshot_debug_never_exposes_text_or_payloads() {
+        let mut editor = Editor::default();
+        editor.insert("SECRET_DRAFT ");
+        editor.insert_paste(twelve_line_paste());
+        let _ = editor.insert_image("image/png", "SECRET_IMAGE", 128);
+
+        let debug = format!("{:?}", editor.snapshot());
+        assert!(!debug.contains("SECRET_DRAFT"));
+        assert!(!debug.contains("line 1"));
+        assert!(!debug.contains("SECRET_IMAGE"));
+        assert!(debug.contains("bytes redacted"));
+        assert!(debug.contains("payloads redacted"));
     }
 
     #[test]
