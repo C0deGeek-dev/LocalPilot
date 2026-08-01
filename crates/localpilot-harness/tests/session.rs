@@ -174,7 +174,7 @@ async fn an_unchanged_reread_is_elided_but_still_counts_as_a_read() {
         !transcript
             .iter()
             .flat_map(|m| &m.content)
-            .any(|b| matches!(b, ContentBlock::ToolResult(r) if r.is_error)),
+            .any(|b| matches!(b, ContentBlock::ToolResult(r) if r.is_error())),
         "an elided read is not an error"
     );
 }
@@ -1124,7 +1124,7 @@ async fn a_denied_tool_call_becomes_an_error_result_not_a_crash() {
             _ => None,
         });
     let result = tool_result.expect("a tool result was recorded");
-    assert!(result.is_error);
+    assert!(result.is_error());
 }
 
 #[tokio::test]
@@ -1252,7 +1252,7 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
         .runtime
         .run_user_shell("git", &["--version".to_string()], true)
         .await;
-    assert!(!excluded.is_error, "{}", excluded.output);
+    assert!(!excluded.is_error(), "{}", excluded.output);
     assert!(h.store.read_transcript(session).unwrap().is_empty());
 
     // An included run lands in the transcript as a shell-role message.
@@ -1260,7 +1260,7 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
         .runtime
         .run_user_shell("git", &["--version".to_string()], false)
         .await;
-    assert!(!included.is_error, "{}", included.output);
+    assert!(!included.is_error(), "{}", included.output);
     let transcript = h.store.read_transcript(session).unwrap();
     assert_eq!(transcript.len(), 1);
     assert_eq!(transcript[0].role, localpilot_core::Role::UserShell);
@@ -1355,4 +1355,197 @@ async fn the_handoff_reports_tool_calls_and_files_changed() {
         !handoff.memory_written,
         "the run-turn path never writes memory"
     );
+}
+
+// --- outcome-aware guards (#46): reported failures are not malfunctions ------
+
+/// A `run_shell` input that completes and exits non-zero on every platform.
+fn failing_command() -> serde_json::Value {
+    json!({ "command": "exit 7" })
+}
+
+#[tokio::test]
+async fn failing_commands_never_trip_the_stuck_guard() {
+    // Twenty consecutive failing commands: every call spawned, ran, and
+    // captured output, so the per-tool stuck guard must stay silent. The stop
+    // that fires is the whole-turn unproductive limit (12), not `ToolStuck`.
+    let mut provider = FakeProvider::new();
+    for i in 0..20 {
+        provider = provider.tool_call(&format!("c{i}"), "run_shell", failing_command());
+    }
+    let provider = provider.text("giving up");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("keep trying", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::NoProgress);
+
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { .. })),
+        "a healthy tool must never be reported stuck"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            RuntimeEvent::Warning(w) if w.contains("failed (")
+        )),
+        "no failure-ladder warnings for reported failures"
+    );
+}
+
+#[tokio::test]
+async fn a_realistic_edit_test_loop_finishes_clean() {
+    // Eight repetitions of (failing command, then a successful write): the
+    // canonical debugging loop. It must finish `Done` with no stuck signal.
+    let mut provider = FakeProvider::new();
+    for i in 0..8 {
+        provider = provider
+            .tool_call(&format!("f{i}"), "run_shell", failing_command())
+            .tool_call(
+                &format!("w{i}"),
+                "write_file",
+                json!({ "path": format!("fix{i}.txt"), "content": "attempt" }),
+            );
+    }
+    let provider = provider.text("fixed it");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("fix the tests", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { .. })),
+        "the exact workflow the product exists for must not accuse the tool"
+    );
+}
+
+#[tokio::test]
+async fn a_malfunctioning_tool_still_trips_the_stuck_guard_at_six() {
+    // Eight reads of a missing path are genuine malfunctions; the guard fires
+    // exactly at the threshold.
+    let mut provider = FakeProvider::new();
+    for i in 0..8 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": "missing.txt" }),
+        );
+    }
+    let provider = provider.text("giving up");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let events = drain(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { count: 6, .. })),
+        "a genuinely unusable tool still reaches ToolStuck at 6: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn identical_reported_failures_get_the_failing_work_hint() {
+    // Three identical failing runs with nothing landing in between: the nudge
+    // fires, but with the failing-work wording — not the malfunction-shaped
+    // "write it to a script file" advice.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", failing_command())
+        .tool_call("c2", "run_shell", failing_command())
+        .tool_call("c3", "run_shell", failing_command())
+        .text("giving up");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+
+    let reason = h.runtime.run_turn("run it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let outputs = tool_result_outputs(&h.store.read_transcript(h.runtime.session_id()).unwrap());
+    assert_eq!(outputs.len(), 3);
+    assert!(
+        outputs[2].contains("reported the same failure"),
+        "the third identical failure carries the failing-work hint: {}",
+        outputs[2]
+    );
+    assert!(
+        !outputs[2].contains("script file"),
+        "malfunction advice is wrong for failing work: {}",
+        outputs[2]
+    );
+}
+
+// --- turn-handoff failure counters (#47) -------------------------------------
+
+#[tokio::test]
+async fn the_handoff_counts_both_failure_kinds_and_reads_zero_when_clean() {
+    // One reported failure (a failing command) and one malfunction (a missing
+    // file read) land in their own counters; a clean follow-up turn resets both.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", json!({ "command": "exit 7" }))
+        .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
+        .text("done")
+        .text("clean turn");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+
+    let reason = h.runtime.run_turn("try things", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.reported_failures, 1, "the failing command");
+    assert_eq!(handoff.tool_failures, 1, "the missing-file read");
+    assert!(handoff.stuck_tools.is_empty());
+    let line = handoff.to_json_line();
+    assert!(line.contains("\"reported_failures\":1"), "{line}");
+    assert!(line.contains("\"tool_failures\":1"), "{line}");
+
+    let reason = h.runtime.run_turn("say hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.reported_failures, 0);
+    assert_eq!(handoff.tool_failures, 0);
+}
+
+#[tokio::test]
+async fn a_stuck_tool_is_named_in_the_handoff() {
+    let mut provider = FakeProvider::new();
+    for i in 0..6 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": "missing.txt" }),
+        );
+    }
+    let provider = provider.text("giving up");
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.stuck_tools, vec!["read_file".to_string()]);
+    assert!(handoff
+        .to_json_line()
+        .contains("\"stuck_tools\":[\"read_file\"]"));
 }

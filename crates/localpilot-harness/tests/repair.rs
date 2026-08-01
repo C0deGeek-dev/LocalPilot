@@ -88,7 +88,7 @@ fn run_turn(
                     results.push(ResultRecord {
                         id: result.id.as_str().to_string(),
                         output: result.output.clone(),
-                        is_error: result.is_error,
+                        is_error: result.is_error(),
                     });
                 }
             }

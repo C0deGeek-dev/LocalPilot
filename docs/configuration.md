@@ -31,7 +31,10 @@ that orient the agent with project conventions and constraints:
 - **`CLAUDE.md`** and **`AGENTS.md`** — the widely-shared agent-instruction
   conventions;
 - **`.github/copilot-instructions.md`** — GitHub Copilot's convention, treated as
-  a repo-root instruction (the lowest-precedence of the four).
+  a repo-root instruction (the lowest-precedence of the four);
+- **`.github/instructions/*.instructions.md`** — GitHub Copilot's **path-scoped**
+  convention: each file carries an `applyTo` glob in YAML frontmatter and reaches
+  the model only when a file it is about is in play.
 
 LocalPilot discovers them, resolves their `@`-imports, and merges them into one
 ordered context document. That document is used **two** ways: it is **injected
@@ -44,8 +47,9 @@ review-gated (ADR-0056).
 
 **Discovery.** Three layers are collected:
 
-- **repo-root** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` and
-  `.github/copilot-instructions.md` at the workspace root;
+- **repo-root** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md`,
+  `.github/copilot-instructions.md`, and every
+  `.github/instructions/*.instructions.md` at the workspace root;
 - **nested** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` in subdirectories of
   the workspace (the walk honours ignore files and is depth-bounded);
 - **global** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` under the per-user
@@ -53,11 +57,34 @@ review-gated (ADR-0056).
 
 **Precedence** (most → least specific): **repo-root > nested directory >
 global**, and within one tier by **instruction kind** (`Navigator.md` >
-`CLAUDE.md` > `AGENTS.md` > `copilot-instructions.md`). The workspace-root files
+`CLAUDE.md` > `AGENTS.md` > `copilot-instructions.md` > path-scoped
+`*.instructions.md`). The workspace-root files
 are the authoritative project instructions and lead the merge; nested-directory
 files refine within their subtree and follow (ordered by ascending directory
 depth, then kind, then path, for determinism); the per-user global files are the
 baseline and come last.
+
+**Path scoping (`applyTo`).** A `.github/instructions/*.instructions.md` file may
+narrow itself to the files it is about:
+
+```markdown
+---
+applyTo: "**/*.ts"
+---
+Prefer named exports.
+```
+
+`applyTo` takes one glob, a comma-separated list, or a YAML list. The file is
+injected only on turns where a file **in play** matches — the workspace files the
+session has touched through tool calls, plus any workspace file the prompt names
+outright, so a rule can apply on the very first turn. A scoped file whose
+frontmatter omits `applyTo` (or leaves it empty) applies project-wide, like the
+unscoped kinds. Unscoped instruction files are never filtered.
+
+Only the **repo-root** `.github/` directory is read for these. `.github` is a
+repo-level directory — GitHub reads only the one at the root — and per-directory
+instructions already work through the nested `Navigator.md` / `CLAUDE.md` /
+`AGENTS.md` walk. See ADR-0119.
 
 **`@`-imports.** A line whose trimmed text is exactly `@<path>` imports that
 file's body inline at that point (relative paths resolve against the importing

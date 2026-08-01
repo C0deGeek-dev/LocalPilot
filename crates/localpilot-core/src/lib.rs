@@ -29,5 +29,5 @@ pub use summary::{
     SummarySourceKind, STRUCTURED_SUMMARY_SCHEMA_VERSION,
 };
 pub use text::{collapse_whitespace, one_line, truncate_collapsed, SUMMARY_CHARS};
-pub use tool::{ToolCall, ToolResult};
+pub use tool::{ToolCall, ToolOutcome, ToolResult};
 pub use usage::{TokenUsage, UsageSummary};

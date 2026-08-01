@@ -172,6 +172,7 @@ Owns:
 - message rendering
 - keyboard input
 - approval dialogs
+- the inline question widget `ask_user` and the intake guidance gate both drive
 - status lines
 - footer stats
 - optional thinking/reasoning panel

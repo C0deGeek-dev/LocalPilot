@@ -83,6 +83,76 @@ is SemVer-stable; the configuration schema stability policy is in
   wire protocol over the transport — this is the host-side substrate. See
   [docs/embedding.md](docs/embedding.md).
 
+- **Added: the agent can ask you a question (ADR-0121).** A new `ask_user` tool
+  puts one to four multiple-choice questions to you inline in the TUI, driven
+  with the arrow keys like the slash and file pickers — Space toggles on a
+  multi-select question, Enter confirms, Esc skips, and a final row always
+  accepts free text. The system prompt carries the threshold with it (ask when
+  different readings would lead to materially different work, or before
+  something hard to undo; otherwise pick the obvious option and state the
+  assumption), so it does not turn into a permission prompt for everything.
+  Where no human is reachable — a piped run, a CI run, a subagent — the tool
+  says so and the model proceeds on its own judgment instead of stalling, and a
+  dismissed question hands the decision back rather than failing. The intake
+  guidance gate now asks through the same widget on a terminal, with the stdin
+  prompt unchanged everywhere else.
+
+- **Improved: configured documentation tools actually get used (ADR-0120).**
+  The agent prompt now carries a version-sensitive documentation policy — when a
+  task depends on current behaviour of an external library, framework, SDK, API,
+  CLI, or cloud service (upgrade errors, migrations, deprecated APIs, changed
+  config shapes), consult a documentation tool rather than prior knowledge —
+  in two forms: direct use when the tool set is fully advertised, and
+  `tool_search` → `tool_load` → call when the broker is on. It appears only when
+  a documentation tool is actually reachable, stays bounded (stable local
+  questions trigger no lookup), and names no vendor. Broker resolution also
+  gained a fallback for tools its own description never matched: the MCP server
+  name and schema property names/descriptions are indexed, and a generic
+  capability vocabulary bridges `upgrade`/`migration`/`version` to
+  `docs`/`documentation`/`reference` and `dependency` to `package`/`library`, so
+  a need like "`<library>` version upgrade problem" can reach a generically
+  named documentation tool. Tools that already matched rank exactly as before,
+  and each search hit now says why it matched.
+
+- **Added: path-scoped instruction files (ADR-0119).**
+  `.github/instructions/*.instructions.md` files are now discovered, and their
+  `applyTo` frontmatter glob (one glob, a comma-separated list, or a YAML list)
+  narrows a rule to the files it is about. A scoped file is injected only on
+  turns where a matching file is in play — the workspace files the session has
+  touched, plus any workspace file the prompt names outright — so a monorepo can
+  keep its Rust and web instructions apart instead of injecting both everywhere.
+  A scoped file without `applyTo` applies project-wide, and unscoped instruction
+  files (`Navigator.md`, `CLAUDE.md`, `AGENTS.md`,
+  `.github/copilot-instructions.md`) are never filtered.
+
+- **Fixed: a failing command no longer accuses `run_shell` of being stuck.** A
+  tool result now carries a three-state outcome (ADR-0116): a completed command
+  that exits non-zero, a non-2xx `fetch`, a background process dying in its
+  grace period, a refused delegation, or an MCP response with `isError: true`
+  is the *work* reporting failure, while only a tool that could not run at all
+  (spawn error, timeout, denial) counts as a malfunction. The ordinary
+  edit/test debugging loop no longer emits false `ToolStuck` warnings, the
+  repeated-failure nudge now says to change what produced the failing output
+  instead of suggesting the tool is broken, memory no longer learns "run_shell
+  failed N times" from red test runs, and the stuck-threshold message no longer
+  claims calls are being stopped when they are not. Old transcripts and event
+  logs keep parsing: the wire format is a strict superset.
+- **Fixed: `delegate` no longer reports success for a delegation that never
+  ran, and a remote MCP failure no longer arrives as `status: success`.** Both
+  now carry the reported-failure outcome with their text intact.
+- **Fixed: a tool error now takes the same redaction and output bounding as a
+  success (ADR-0117).** Error text — including synthesized denials and gate
+  blocks — is redacted and bounded at the dispatch chokepoint, so no result the
+  model sees bypasses the safety invariants.
+- **Improved: `print` mode now reports failures and survives event-stream lag
+  (ADR-0118).** The `handoff:` line gains `tool_failures`,
+  `reported_failures`, and `stuck_tools`; failing tool calls, warnings, and
+  stuck signals appear as bounded one-line stderr diagnostics while stdout
+  stays the answer alone; a printer that falls behind the event stream skips
+  the dropped events and keeps printing instead of silently truncating the
+  answer; and stderr writes are checked (a closed stderr silences diagnostics
+  without cancelling the turn).
+
 - **Internal/Added: opt-in local-IPC server transport groundwork.** A new
   `localpilot-server` crate provides a cross-platform framed local transport
   (Unix domain socket / Windows named pipe, reusing the existing LF-delimited

@@ -259,12 +259,44 @@ fn provider_for(
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))
 }
 
+/// How one clarifying question is put to the user.
+///
+/// Guidance questions are open questions with no fixed options, so the two
+/// implementations differ only in how the answer is collected: a line of stdin,
+/// or the shared choice widget on a terminal. Both keep the same contract — an
+/// empty answer delegates that axis to the model's judgment.
+pub trait QuestionAsker {
+    /// Ask `question` and return the user's answer, empty for "you decide".
+    ///
+    /// # Errors
+    /// Returns an error only when the input surface itself fails.
+    fn ask(&mut self, question: &str, out: &mut dyn Write) -> anyhow::Result<String>;
+}
+
+/// The stdin asker: today's `write!` + `read_line` loop behind the trait. Every
+/// piped/non-TTY intake path keeps its exact behaviour.
+pub struct StdinAsker<R: std::io::BufRead>(pub R);
+
+impl<R: std::io::BufRead> QuestionAsker for StdinAsker<R> {
+    fn ask(&mut self, question: &str, out: &mut dyn Write) -> anyhow::Result<String> {
+        write!(
+            out,
+            "
+{question}
+> "
+        )?;
+        out.flush()?;
+        let mut answer = String::new();
+        self.0.read_line(&mut answer)?;
+        Ok(answer.trim().to_string())
+    }
+}
+
 /// How a below-threshold guidance assessment resolves the open decisions.
 pub enum Clarification<'a> {
-    /// Interactive surface: ask each open question on `out` and read one
-    /// answer per line from the reader; an empty answer delegates that axis
-    /// to the model's judgment.
-    Ask(&'a mut dyn std::io::BufRead),
+    /// Interactive surface: ask each open question and collect one answer per
+    /// axis; an empty answer delegates that axis to the model's judgment.
+    Ask(&'a mut dyn QuestionAsker),
     /// Non-interactive surface: emit a structured JSON report naming the open
     /// axes on `out` and stop without writing a brief.
     Emit,
@@ -321,12 +353,12 @@ pub async fn intake(
         use std::io::IsTerminal;
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     };
-    let mut stdin_lines;
+    let mut stdin_asker;
     let clarification = if assume_judgment {
         Clarification::AssumeJudgment
     } else if interactive {
-        stdin_lines = std::io::BufReader::new(std::io::stdin());
-        Clarification::Ask(&mut stdin_lines)
+        stdin_asker = StdinAsker(std::io::BufReader::new(std::io::stdin()));
+        Clarification::Ask(&mut stdin_asker)
     } else {
         Clarification::Emit
     };
@@ -421,7 +453,7 @@ pub(crate) async fn intake_flow(
             )?;
             Ok(IntakeOutcome::BriefWritten)
         }
-        Clarification::Ask(input) => {
+        Clarification::Ask(asker) => {
             writeln!(
                 out,
                 "guidance score {:.2} is below the threshold {threshold:.2}: {} decision(s) \
@@ -432,11 +464,7 @@ pub(crate) async fn intake_flow(
             )?;
             let mut answers: Vec<(String, String)> = Vec::new();
             for (axis, question) in open.iter().zip(&questions) {
-                write!(out, "\n{question}\n> ")?;
-                out.flush()?;
-                let mut answer = String::new();
-                input.read_line(&mut answer)?;
-                let answer = answer.trim().to_string();
+                let answer = asker.ask(question, out)?;
                 if !answer.is_empty() {
                     answers.push((axis.axis.clone(), answer));
                 }
@@ -1245,7 +1273,9 @@ mod tests {
             .text(HIGH_GUIDANCE)
             .text(VALID_BRIEF);
         let mut out = Vec::new();
-        let mut answers = std::io::Cursor::new(b"Windows desktop\nSQLite file\n".to_vec());
+        let mut answers = StdinAsker(std::io::Cursor::new(
+            b"Windows desktop\nSQLite file\n".to_vec(),
+        ));
         let gate = GuidanceGate {
             threshold: 0.7,
             max_questions: 5,
@@ -1296,7 +1326,7 @@ mod tests {
         // assess (low) -> brief; no re-assessment when nothing was answered.
         let provider = FakeProvider::new().text(LOW_GUIDANCE).text(VALID_BRIEF);
         let mut out = Vec::new();
-        let mut answers = std::io::Cursor::new(b"\n\n".to_vec());
+        let mut answers = StdinAsker(std::io::Cursor::new(b"\n\n".to_vec()));
         let gate = GuidanceGate {
             threshold: 0.7,
             max_questions: 5,

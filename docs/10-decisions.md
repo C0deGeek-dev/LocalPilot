@@ -98,6 +98,254 @@ product.
    a Windows-only build box per the workspace offline-evidence policy — the first
    real Unix run is where a socket-perms/path-length/reap edge could still surface.
 
+## ADR-0121: The Agent Can Ask The User, Through A Host Capability And One Shared Widget
+
+Status: accepted. Supersedes ADR-0081 §4's "no multiple-choice UI machinery
+exists", which was the standing reason the intake gate asks over stdin. Issue
+#53.
+
+The agent had no way to put a question to the user. It could only write the
+question into its answer as prose — which the user had to find, interpret, and
+answer by retyping — and the prompt told it to finish or state a blocker, never
+to ask, so ambiguity was resolved by a silent guess. Meanwhile the machinery to
+suspend a turn and wait for a human already existed and worked; its answer type
+was just hardcoded to `bool`.
+
+1. **Asking is a host capability, following the delegation precedent.** A tool
+   cannot reach the user by itself, so `UserPrompter` is handed in through
+   `ToolContext` beside `retention`, `processes`, and `agents`. `ask_user` stays
+   an ordinary tool with no special path through the registry, and the REPL —
+   the one surface with a human on it — is the only caller that wires a prompter.
+
+2. **The capability is the gate, not the permission engine.** `ask_user`
+   declares no effects: a profile that grants everything still cannot conjure a
+   user, and a profile that grants nothing should not stop one being asked. Where
+   no human is reachable the tool returns a model-visible string telling the model
+   to choose and state its assumption, exactly as `delegate` does when no agents
+   are loaded — so a piped run, a CI run, and a subagent never stall.
+
+3. **The widget lives in `localpilot-tui`, where it is testable.** It reuses the
+   pickers' window and reverse-video highlight, renders inline in the top section
+   (no modal, no alternate screen), and joins the priority chain after the
+   approval gate. `blocking_prompt_height` includes it, or the fixed band would
+   truncate the option list and its confirm hint. Unlike the approval branch —
+   which discards its decision in `app.rs` and is answered in the REPL — the
+   question branch mutates its own selection state, so the deterministic loop can
+   drive the whole widget without the REPL. The REPL still owns the *answer*,
+   because it has to be read out before the widget clears.
+
+4. **A closed channel is a dismissal, never an invented answer** — the same rule
+   the approver follows for a denial. Ctrl-C cancels the turn *and* answers the
+   waiting call, so the tool resolves instead of hanging.
+
+5. **The prompt cue carries its threshold.** "Ask when different readings would
+   lead to materially different work, or before something hard to undo;
+   otherwise pick the obvious option and state the assumption." Without the
+   second half a model starts asking permission for everything, which is worse
+   than the guess this replaces. Gated on the tool being registered and on its
+   own `PromptParts` flag.
+
+6. **Intake asks through the same widget.** `Clarification::Ask` now takes a
+   `QuestionAsker`: `StdinAsker` is today's loop moved behind the trait, so every
+   existing piped/non-TTY intake test passes unchanged and the "empty answer
+   delegates this axis" contract is preserved; a terminal drives the widget
+   instead. The stored `guidance["answers"]` and `assumed_judgment` shape does
+   not change.
+
+The approval gate is deliberately untouched: folding it into this widget is a
+change to a safety surface and deserves its own decision. Editor integrations
+(RPC/ACP) get the non-interactive string for now.
+
+## ADR-0120: Documentation Tools Are Reached By A Prompt Threshold And Capability-Aware Resolution
+
+Status: accepted. Extends the broker contract in ADR-0031 and the agent prompt.
+Issue #45.
+
+A configured MCP documentation tool was available but not reliably *used*: with
+the broker off it was advertised and ignored; with the broker on a need like
+`<library> upgrade error` did not match a tool that describes itself as
+"query documentation". Availability is not use, and the gap was in two places.
+
+1. **The prompt states when current documentation is needed, not just that
+   tools exist.** One version-sensitive policy: a task depending on current or
+   version-specific behaviour of an external library, framework, SDK, API, CLI,
+   or cloud service consults documentation instead of recollection, with upgrade
+   errors, migrations, deprecations, changed configuration shapes, and version
+   mismatches named as the triggers. It is bounded in both directions — stable
+   local implementation questions do not trigger a lookup, and with nothing
+   suitable configured the model continues from local evidence and says so.
+
+2. **The policy has two forms because reaching a tool differs by mode.** With
+   the full registry advertised, the guidance is to call the suitable tool
+   directly and the discovery surface is never mentioned; with the broker on, it
+   is `tool_search` → `tool_load` → call. The cue appears only when one of those
+   routes exists — a documentation tool is advertised, or the broker can reveal
+   one — so the model is never told to do something it cannot.
+
+3. **Vendor neutrality is structural.** No prompt text, no resolver mapping, and
+   no core working-set entry names Context7, any other MCP server, or any
+   library. What "a documentation tool" means is one generic capability
+   vocabulary, shared by the prompt gate and the resolver so they cannot drift.
+
+4. **Resolution indexes more, but ranks the same.** A tool's own name and
+   description remain the primary index with the exact-name bonus unchanged.
+   Only when those match nothing does a bounded fallback apply: the MCP server
+   name, the schema's property names and descriptions (never values or
+   examples), and capability synonyms. The fallback can surface an otherwise
+   invisible tool; it can never re-rank tools that matched directly, which is
+   what keeps every existing resolution intact. Deprecation de-ranking, score
+   floors, learned boosts, working-set limits, and reveal-never-grant are
+   untouched, and `tool_search` still returns lean locators — now each with a
+   short match reason, still never a schema.
+
+## ADR-0119: Path-Scoped Instruction Files Are Matched At Injection, Against The Files In Play
+
+Status: accepted. Extends the context-file discovery contract in
+[`docs/configuration.md`](configuration.md) and ADR-0056. Issue #44.
+
+`.github/instructions/*.instructions.md` files carry an `applyTo` glob in
+frontmatter, so a repo can say "this rule is about the Rust crates, that one is
+about the web app" without either bleeding into the other. Until now every
+instruction kind was all-or-nothing per directory, which in a monorepo is the
+difference between usable instructions and a wall of irrelevant ones.
+
+1. **Discovery adds a kind; matching happens per turn.** The glob is parsed at
+   discovery (which runs once per session — the files do not change mid-session),
+   but *whether it applies* is decided each turn, because which files are in play
+   is a per-turn fact. `ProjectContext::render_for(paths)` filters scoped files;
+   `render()` keeps rendering everything for the ingest path.
+
+2. **"In play" is what the session touched, plus what the prompt names.** The
+   runtime records every workspace path a tool call names — read, write, or
+   failed, since the rule is about the file, not the outcome — in a shared,
+   bounded, session-scoped set. The hook adds any workspace file the prompt names
+   outright, so "fix the types in src/app.ts" reaches a `**/*.ts` rule on the
+   first turn, before any tool has run.
+
+3. **Precedence sits beside repo-root instructions, after them.** A scoped rule
+   refines the general ones and is narrowed further by its own glob. A scoped
+   file with no `applyTo` applies project-wide, matching the convention's
+   default; an unparseable glob also applies rather than silently swallowing the
+   rule.
+
+4. **Only the root `.github/` is read.** A nested `.github/instructions/` is
+   deliberately not discovered, for the same reason a nested
+   `copilot-instructions.md` is not: `.github` is a repo-level directory, and
+   per-directory instructions already work through the nested
+   `Navigator.md`/`CLAUDE.md`/`AGENTS.md` walk.
+
+5. **Frontmatter parsing is deliberately narrow.** Only `applyTo` is read, and
+   only from a `---` block opening the first line of a path-scoped file. Every
+   other kind keeps its bytes verbatim, so a leading `---` in an ordinary
+   `CLAUDE.md` stays markdown.
+
+## ADR-0118: Print-Mode Diagnostics Are Loss-Tolerant, Checked, And Fed From The Harness
+
+Status: accepted. Extends the print-mode contract in
+[`docs/01-product-spec.md`](01-product-spec.md) and the turn-handoff record in
+[`docs/06-harness-spec.md`](06-harness-spec.md). Issues #47 and #50.
+
+1. **A lagged printer keeps printing.** The print-mode event loop consumes a
+   broadcast receiver, and a receiver that falls behind returns `Lagged`, not
+   `Closed`. Treating both as end-of-stream silently truncated the answer under
+   load. The loop now skips the dropped events, notes the drop count on stderr,
+   and ends only on `Closed`. Losing some events must never mean losing the rest.
+
+2. **Per-turn failure counters live in the runtime, not in any event consumer.**
+   Because a broadcast subscriber can drop events by design, any consumer-side
+   tally undercounts. The runtime — which sees every call by construction —
+   counts malfunctions and reported failures (ADR-0116's distinction) and the
+   tools that crossed the stuck threshold, and folds them into the turn handoff:
+   `tool_failures`, `reported_failures`, `stuck_tools`. A headless caller can now
+   distinguish a clean turn from one whose every build failed; existing handoff
+   keys are unchanged.
+
+3. **Failures are visible on the diagnostics stream, and only there.** The
+   printer renders failing `ToolFinished`, `Warning`, and `ToolStuck` events as
+   bounded one-line stderr notes (whitespace collapsed, capped, already redacted
+   at the dispatch chokepoint). Stdout carries the answer and nothing else.
+
+4. **Stderr gets the same checked-write discipline as stdout, with independent
+   fates.** The `eprintln!` family panics on a write error — the forbidden
+   runtime-path panic — so diagnostics go through the checked writer. A closed
+   stdout cancels the turn (the answer has nowhere to go); a closed stderr only
+   silences further diagnostics and is never reported as the consumer going away.
+
+## ADR-0117: Every Model-Visible Tool Result Takes The Same Redaction And Bounding Path
+
+Status: accepted. Closes a structural gap against the invariants in
+[`docs/05-tool-system.md`](05-tool-system.md) §Result Model and §Safety
+Invariants. Issue #52.
+
+At the dispatch chokepoint, the success arm redacted and bounded tool output;
+the error arm handed `err.to_string()` to the model verbatim — unredacted,
+unbounded. The guarantee "tool outputs are stored only after redaction" held
+per happy path, not per result, and its safety depended on every tool author
+keeping error strings short and secret-free forever.
+
+Both arms now converge on one exit: error text (including the registry's own
+synthesized refusals — unknown tool, effects error, permission denial, gate
+block, whose denial message interpolates a caller-supplied path) is redacted,
+then bounded to the context budget with the explicit truncation note, then
+formatted. The retention spill applies to oversized errors as a side effect of
+sharing the path; a second, spill-free error path was judged not worth the
+asymmetry it would reintroduce.
+
+## ADR-0116: A Tool Result Carries A Three-State Outcome, Not A Boolean
+
+Status: accepted. Refines the result model in
+[`docs/05-tool-system.md`](05-tool-system.md) and the degenerate-loop guards in
+[`docs/06-harness-spec.md`](06-harness-spec.md) (ADR-0052). Issues #46, #48,
+#49, #51.
+
+`ToolResult.is_error` conflated two materially different outcomes: the tool ran
+to completion and the work it wrapped reported failure (a `cargo test` exiting
+1 — information the model must act on), and the tool could not do its job at
+all (a spawn error, timeout, denial — nothing learned about the work). The
+session loop's guards treated the first as the second, so an ordinary
+edit/test debugging loop accused a healthy `run_shell` of being stuck.
+
+1. **The type carries the distinction.** `ToolOutcome { Ok, ReportedFailure,
+   Unusable }` replaces the boolean on `ToolResult` and `ToolOutput`, with
+   `is_error()` (what the model sees) and `is_malfunction()` (what tool-health
+   guards measure) as the two consumer questions. The model-visible rendering is
+   unchanged: both failure kinds are `status: error`.
+
+2. **The wire format is a superset, because transcript reads drop unparseable
+   lines.** `is_error` is always written; `outcome` is an optional refinement;
+   a line without it degrades to the boolean's meaning (`error` → `Unusable`).
+   The same additive pattern extends the durable `ToolFinished` session event
+   and the verifier's `Observation`, so old logs keep replaying (the #21 lesson).
+
+3. **Producers classify at the source.** A completed non-zero exit, a delivered
+   non-2xx fetch, a background process dying inside its grace period, a refused
+   delegation (#48), and an MCP response carrying `isError: true` (#49) are
+   reported failures — the tool worked; the world said no. Everything returning
+   `ToolError`, plus an unknown background id (polling a stale id is exactly the
+   spin the guard catches), is a malfunction. `delegate`'s "no agent definitions
+   are loaded" stays a success: a configuration fact whose correct next step is
+   doing the work directly.
+
+4. **Guards measure what they claim to measure.** The per-tool stuck guard
+   counts only malfunctions and is *cleared* by a reported failure — a call that
+   spawned, ran, and captured output is direct evidence against malfunction. The
+   unproductive-call streak counts both kinds (a missing binary routed through
+   the shell comes back as exit 127, a reported failure, and must not spin
+   unchecked) and still resets on success. The repeated-error breaker observes
+   both kinds but injects failing-work wording for reported failures — re-running
+   will not change the result — instead of the malfunction-shaped "write it to a
+   script file" advice. The stuck-threshold message no longer claims the runtime
+   is "stopping further calls": it never did (#51); the guard's job is
+   signalling, and the real stop remains the whole-turn unproductive limit.
+
+5. **Boolean surfaces stay boolean, converting at the edge.** The RPC/ACP
+   protocols (exactly `completed`/`failed`), the TUI event, hook events, and the
+   Anthropic wire field keep `is_error`; the verifier keeps judging a declared
+   `ResultStatus` postcondition as failed on a non-zero exit, so the claim gate
+   stays closed. The lesson extractor now counts only malfunctions as tool
+   failures, so memory stops learning "run_shell failed N times" from turns in
+   which run_shell never failed.
+
 ## ADR-0115: Harness Correctness And Safety Fixes — Phase-Cadence Firing, Full Tool-Output Retention, And Secret-Path Write Gating
 
 Status: accepted. Refines ADR-0009 (discovered quality gate), the tool-output

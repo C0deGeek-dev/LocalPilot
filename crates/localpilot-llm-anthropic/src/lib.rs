@@ -370,7 +370,7 @@ fn translate_blocks(message: &Message) -> Vec<Value> {
                 "type": "tool_result",
                 "tool_use_id": result.id.as_str(),
                 "content": result.output,
-                "is_error": result.is_error,
+                "is_error": result.is_error(),
             })),
             ContentBlock::Image { media_type, data } => blocks.push(json!({
                 "type": "image",

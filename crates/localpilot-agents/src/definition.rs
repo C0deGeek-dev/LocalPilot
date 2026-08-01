@@ -64,6 +64,10 @@ pub struct PromptParts {
     pub include_tool_instructions: bool,
     /// Inspect-before-launch guidance. On by default.
     pub include_look_before_launch: bool,
+    /// The threshold for asking the user a question. On by default, and gated
+    /// again on `ask_user` being registered — an agent that cannot reach a human
+    /// should not be told to ask one.
+    pub include_ask_user: bool,
 }
 
 impl Default for PromptParts {
@@ -74,6 +78,7 @@ impl Default for PromptParts {
             include_safety: true,
             include_tool_instructions: true,
             include_look_before_launch: true,
+            include_ask_user: true,
         }
     }
 }

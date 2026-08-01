@@ -126,6 +126,12 @@ pub enum SessionEventKind {
         id: String,
         name: String,
         is_error: bool,
+        /// Optional refinement of `is_error` distinguishing a tool that could
+        /// not run from one whose wrapped work reported failure. Absent on
+        /// events written before the distinction existed — additive, so old
+        /// logs keep replaying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<localpilot_core::ToolOutcome>,
     },
     RecoveryDiagnostic {
         kind: String,
@@ -485,6 +491,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "read_file".to_string(),
                 is_error: false,
+                outcome: Some(localpilot_core::ToolOutcome::Ok),
             },
             SessionEventKind::RecoveryDiagnostic {
                 kind: "slash_flood".to_string(),

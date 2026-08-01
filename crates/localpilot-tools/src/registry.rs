@@ -1,7 +1,7 @@
 //! The tool registry and permission-gated dispatch.
 
 use localpilot_config::redact::redact;
-use localpilot_core::{ToolCall, ToolResult};
+use localpilot_core::{ToolCall, ToolOutcome, ToolResult};
 use localpilot_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest, Profile};
 use serde_json::Value;
 
@@ -12,6 +12,7 @@ use crate::builtins::{
     GitLog, GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
     SearchText, UpdatePlan, WriteFile,
 };
+use crate::builtins_ask::AskUser;
 use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
 use crate::catalog::{Catalog, ToolSource};
@@ -69,6 +70,7 @@ impl ToolRegistry {
         registry.register(Box::new(GitRestore));
         registry.register(Box::new(GitCommit));
         registry.register(Box::new(Delegate));
+        registry.register(Box::new(AskUser));
         registry.register(Box::new(UpdatePlan));
         registry
     }
@@ -189,20 +191,17 @@ impl ToolRegistry {
         gates: &[&dyn ToolGate],
     ) -> ToolResult {
         let Some(tool) = self.get(&call.name) else {
-            return ToolResult::error(
-                call.id.clone(),
-                format_tool_output(&call.name, &format!("unknown tool: {}", call.name), true),
+            return unusable_result(
+                &call.name,
+                &call.id,
+                &format!("unknown tool: {}", call.name),
+                ctx,
             );
         };
 
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
-            Err(err) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(tool.name(), &err.to_string(), true),
-                )
-            }
+            Err(err) => return unusable_result(tool.name(), &call.id, &err.to_string(), ctx),
         };
 
         // Reversibility-aware confirmation: an irreversible tool (or one that
@@ -234,22 +233,22 @@ impl ToolRegistry {
                 Decision::Deny => false,
             };
             if !allowed {
-                return ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(tool.name(), &denial_message(tool.name(), &request), true),
+                return unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &denial_message(tool.name(), &request),
+                    ctx,
                 );
             }
         }
 
         for gate in gates {
             if let GateVerdict::Block { reason } = gate.check(call, &effects) {
-                return ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(
-                        tool.name(),
-                        &format!("blocked by {}: {reason}", gate.name()),
-                        true,
-                    ),
+                return unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &format!("blocked by {}: {reason}", gate.name()),
+                    ctx,
                 );
             }
         }
@@ -261,16 +260,33 @@ impl ToolRegistry {
                 let bounded = bound_output(tool.name(), &call.id, &redacted, ctx);
                 ToolResult {
                     id: call.id.clone(),
-                    output: format_tool_output(tool.name(), &bounded, output.is_error),
-                    is_error: output.is_error,
+                    output: format_tool_output(tool.name(), &bounded, output.outcome),
+                    outcome: output.outcome,
                 }
             }
-            Err(err) => ToolResult::error(
-                call.id.clone(),
-                format_tool_output(tool.name(), &err.to_string(), true),
-            ),
+            Err(err) => unusable_result(tool.name(), &call.id, &err.to_string(), ctx),
         }
     }
+}
+
+/// The single exit for every result the model sees without the tool having
+/// produced a normal output: tool errors and the registry's own synthesized
+/// refusals (unknown tool, effects error, denial, gate block). An error is
+/// model-visible data like any other result, so it takes the same redaction
+/// and the same context bound as the success arm — the safety invariant in
+/// `docs/05-tool-system.md` holds per result, not per happy path.
+fn unusable_result(
+    tool_name: &str,
+    call_id: &localpilot_core::ToolUseId,
+    text: &str,
+    ctx: &ToolContext<'_>,
+) -> ToolResult {
+    let redacted = redact(text);
+    let bounded = bound_output(tool_name, call_id, &redacted, ctx);
+    ToolResult::error(
+        call_id.clone(),
+        format_tool_output(tool_name, &bounded, ToolOutcome::Unusable),
+    )
 }
 
 /// The model-visible text for a denied tool call. An out-of-workspace path
@@ -356,9 +372,11 @@ impl Default for ToolRegistry {
     }
 }
 
-fn format_tool_output(tool: &str, output: &str, is_error: bool) -> String {
-    let status = if is_error { "error" } else { "success" };
-    format!("tool: {tool}\nstatus: {status}\noutput:\n{output}")
+fn format_tool_output(tool: &str, output: &str, outcome: ToolOutcome) -> String {
+    format!(
+        "tool: {tool}\nstatus: {}\noutput:\n{output}",
+        outcome.status_label()
+    )
 }
 
 #[cfg(test)]
@@ -444,6 +462,7 @@ mod retention_tests {
             retention: Some(&retention),
             processes: None,
             agents: None,
+            prompter: None,
         };
 
         let mut registry = ToolRegistry::new();
@@ -456,7 +475,7 @@ mod retention_tests {
         // only strips storage-unsafe characters).
         let call = ToolCall::new(ToolUseId::new("bigcall1"), "big", json!({}));
         let result = registry.dispatch(&call, &ctx, &engine, &approver).await;
-        assert!(!result.is_error);
+        assert!(!result.is_error());
         assert!(
             result.output.contains("retained under id bigcall1"),
             "the bounded result must point at the retained output: {}",
@@ -479,7 +498,7 @@ mod retention_tests {
             json!({ "id": "bigcall1", "start_line": tail_line, "end_line": tail_line }),
         );
         let readback = registry.dispatch(&read, &ctx, &engine, &approver).await;
-        assert!(!readback.is_error);
+        assert!(!readback.is_error());
         assert!(
             readback.output.contains(tail),
             "read_tool_output must recover the tail: {}",

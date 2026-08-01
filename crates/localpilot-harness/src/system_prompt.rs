@@ -16,7 +16,22 @@ use localpilot_tools::ToolRegistry;
 pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    build_prompt_with(&names, marker_enabled)
+    compose_with(
+        &names,
+        marker_enabled,
+        PromptParts::all(),
+        has_doc_tool(tools),
+    )
+}
+
+/// Whether the registry advertises a tool that serves documentation. Judged by
+/// the shared, vendor-neutral capability vocabulary, over each tool's own name
+/// and description — no server or library is named anywhere in this decision.
+fn has_doc_tool(tools: &ToolRegistry) -> bool {
+    tools
+        .specs()
+        .iter()
+        .any(|(name, description, _)| localpilot_tools::describes_documentation(name, description))
 }
 
 /// Build a prompt from a *subset* of the sections the main session uses.
@@ -34,7 +49,7 @@ pub fn composed_system_prompt(
 ) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    compose(&names, marker_enabled, parts)
+    compose_with(&names, marker_enabled, parts, has_doc_tool(tools))
 }
 
 /// The cue, appended only when a knowledge-base search tool is registered, that
@@ -110,6 +125,57 @@ const TOOL_MARKER_CUE: &str = concat!(
     "also just call `tool_search` directly.",
 );
 
+/// The cue, appended only when `ask_user` is registered, that tells the model it
+/// can put a decision to the user — and, just as importantly, when not to. The
+/// threshold is part of the text: without it a model starts asking permission
+/// for everything, which is worse than the silent guess this replaces.
+const ASK_USER_CUE: &str = concat!(
+    "
+
+",
+    "You can ask the user a question with `ask_user`. Ask when different readings of the request ",
+    "would lead to materially different work, or before something hard to undo. Otherwise pick the ",
+    "obvious option and state the assumption in your answer — do not ask for permission to do work ",
+    "you were already asked to do, and do not ask to report progress. Where no user is reachable ",
+    "the tool says so; then choose and say what you assumed.",
+);
+
+/// The documentation policy for a session that advertises its full tool set: the
+/// suitable tool is already visible, so the guidance is to call it directly and
+/// never mentions the broker's discovery surface.
+const DOCUMENTATION_CUE_DIRECT: &str = concat!(
+    "
+
+",
+    "When a task depends on current or version-specific behaviour of an external library, ",
+    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
+    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
+    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
+    "stale. Inspect the project first to identify the dependency, its installed version, its ",
+    "configuration, and the exact error, then call the most suitable documentation tool listed ",
+    "above. Stable local implementation questions need no documentation lookup. If no suitable ",
+    "tool can answer, continue from local evidence and say that current documentation could not ",
+    "be verified.",
+);
+
+/// The documentation policy for a brokered session, where a suitable tool may be
+/// hidden behind discovery: the same threshold, routed through the reveal flow.
+const DOCUMENTATION_CUE_BROKERED: &str = concat!(
+    "
+
+",
+    "When a task depends on current or version-specific behaviour of an external library, ",
+    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
+    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
+    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
+    "stale. Inspect the project first to identify the dependency, its installed version, its ",
+    "configuration, and the exact error, then call `tool_search` with the capability you need ",
+    "(for example `current documentation for a library version`), reveal the best match with ",
+    "`tool_load`, and call it normally. Stable local implementation questions need no ",
+    "documentation lookup. If no suitable tool can answer, continue from local evidence and say ",
+    "that current documentation could not be verified.",
+);
+
 /// Render the prompt from the sorted tool names with the marker nudge off. A
 /// test-only convenience over [`build_prompt_with`] so the existing cue tests stay
 /// terse; production code calls [`agent_system_prompt`].
@@ -119,8 +185,16 @@ fn build_prompt(names: &[&str]) -> String {
 }
 
 /// Render the prompt, optionally adding the `NEED:` marker convention.
+#[cfg(test)]
 fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
-    compose(names, marker_enabled, PromptParts::all())
+    compose_with(names, marker_enabled, PromptParts::all(), false)
+}
+
+/// [`compose_with`] with no documentation tool advertised — the common case in
+/// the section tests, which pass bare tool names.
+#[cfg(test)]
+fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
+    compose_with(names, marker_enabled, parts, false)
 }
 
 /// The agent-mode opening. Always present when `include_base` is on; it is the
@@ -188,7 +262,13 @@ needed, respond with a concise final answer that states what changed and how it
 was verified. If stuck, say exactly what blocks progress.";
 
 /// Assemble the selected sections plus the tool list and its cues.
-fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
+fn compose_with(
+    names: &[&str],
+    marker_enabled: bool,
+    parts: PromptParts,
+    doc_tool_advertised: bool,
+) -> String {
+    let ask_user_enabled = parts.include_ask_user;
     let mut sections: Vec<String> = Vec::new();
     if parts.include_base {
         sections.push(BASE_SECTION.to_string());
@@ -199,7 +279,12 @@ fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
     if parts.include_safety {
         sections.push(SAFETY_SECTION.to_string());
     }
-    sections.push(tools_section(names, marker_enabled));
+    sections.push(tools_section(
+        names,
+        marker_enabled,
+        doc_tool_advertised,
+        ask_user_enabled,
+    ));
     if parts.include_look_before_launch {
         sections.push(LOOK_BEFORE_LAUNCH_SECTION.to_string());
     }
@@ -215,7 +300,12 @@ fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
 }
 
 /// The available-tools line plus every cue gated on a registered tool name.
-fn tools_section(names: &[&str], marker_enabled: bool) -> String {
+fn tools_section(
+    names: &[&str],
+    marker_enabled: bool,
+    doc_tool_advertised: bool,
+    ask_user_enabled: bool,
+) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
     } else {
@@ -248,8 +338,25 @@ fn tools_section(names: &[&str], marker_enabled: bool) -> String {
     } else {
         ""
     };
+    // The documentation policy needs a way to reach a documentation tool: either
+    // one is advertised outright, or the broker can reveal one. With neither,
+    // the guidance would be an instruction the model cannot follow.
+    // Gated on both the definition's flag and the tool being registered: a
+    // subagent has no prompter, so telling it to ask would be a dead end.
+    let ask_user_cue = if ask_user_enabled && names.contains(&"ask_user") {
+        ASK_USER_CUE
+    } else {
+        ""
+    };
+    let documentation_cue = if names.contains(&"tool_search") {
+        DOCUMENTATION_CUE_BROKERED
+    } else if doc_tool_advertised {
+        DOCUMENTATION_CUE_DIRECT
+    } else {
+        ""
+    };
     format!(
-        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}",
+        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}",
         tools = names.join(", ")
     )
 }
@@ -521,6 +628,7 @@ mod composition_tests {
             include_safety: false,
             include_tool_instructions: false,
             include_look_before_launch: false,
+            include_ask_user: false,
         };
         let prompt = compose(&["read_file"], false, parts);
         assert!(
@@ -563,6 +671,115 @@ mod composition_tests {
         assert!(
             !prompt.contains("\n\n\n"),
             "joining introduced a triple newline: {prompt:?}"
+        );
+    }
+
+    /// A synthetic registry holding one generically-described documentation
+    /// tool. Nothing here names a real MCP server, product, or library.
+    fn registry_with_doc_tool() -> ToolRegistry {
+        struct DocsTool;
+
+        #[async_trait::async_trait]
+        impl localpilot_tools::Tool for DocsTool {
+            fn name(&self) -> &str {
+                "query"
+            }
+            fn description(&self) -> &str {
+                "Query documentation for a package"
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({ "type": "object" })
+            }
+            fn effects(
+                &self,
+                _input: &serde_json::Value,
+                _ctx: &localpilot_tools::ToolContext<'_>,
+            ) -> Result<Vec<localpilot_sandbox::Effect>, localpilot_tools::ToolError> {
+                Ok(Vec::new())
+            }
+            async fn invoke(
+                &self,
+                _input: serde_json::Value,
+                _ctx: &localpilot_tools::ToolContext<'_>,
+            ) -> Result<localpilot_tools::ToolOutput, localpilot_tools::ToolError> {
+                Ok(localpilot_tools::ToolOutput::ok("docs"))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DocsTool));
+        registry
+    }
+
+    #[test]
+    fn an_advertised_documentation_tool_gets_direct_use_guidance() {
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        assert!(
+            prompt.contains("current or version-specific behaviour"),
+            "the version-sensitive documentation policy must be present"
+        );
+        assert!(
+            prompt.contains("Upgrade errors, migration failures"),
+            "the policy must name the signals that trigger it"
+        );
+        assert!(
+            prompt.contains("call the most suitable documentation tool listed above"),
+            "with the full tool set advertised the guidance is direct use"
+        );
+        assert!(
+            !prompt.contains("tool_search"),
+            "broker-off guidance must not reference the discovery surface: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_brokered_session_gets_the_search_then_load_flow() {
+        let prompt = build_prompt(&["read_file", "tool_search", "tool_load"]);
+        assert!(prompt.contains("current or version-specific behaviour"));
+        assert!(
+            prompt.contains("call `tool_search`")
+                && prompt.contains("`tool_load`")
+                && prompt.contains("call it normally"),
+            "the brokered policy must describe search → load → call"
+        );
+    }
+
+    #[test]
+    fn the_documentation_policy_is_vendor_neutral() {
+        let brokered = build_prompt(&["read_file", "tool_search"]);
+        let direct = agent_system_prompt(&registry_with_doc_tool(), false);
+        for prompt in [&brokered, &direct] {
+            let lower = prompt.to_ascii_lowercase();
+            for vendor in ["context7", "prisma", "npm", "pypi", "github"] {
+                assert!(
+                    !lower.contains(vendor),
+                    "the policy must name no vendor, found {vendor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_documentation_policy_without_a_way_to_reach_documentation() {
+        // No documentation tool advertised and no broker to reveal one: the
+        // guidance would be an instruction the model cannot act on.
+        let prompt = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !prompt.contains("current or version-specific behaviour"),
+            "the policy must be absent when no tool could satisfy it"
+        );
+    }
+
+    #[test]
+    fn the_policy_stays_bounded_to_version_sensitive_work() {
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        assert!(
+            prompt.contains("Stable local implementation questions need no documentation lookup"),
+            "the policy must state its own threshold"
+        );
+        assert!(
+            prompt.contains("current documentation could not be verified"),
+            "the policy must say what to do when no tool can answer"
         );
     }
 }

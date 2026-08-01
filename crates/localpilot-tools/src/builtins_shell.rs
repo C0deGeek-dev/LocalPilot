@@ -22,6 +22,7 @@ use crate::contract::{
 };
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use localpilot_core::ToolOutcome;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RunShellInput {
@@ -521,7 +522,14 @@ impl Tool for RunShell {
         let code = output.status.code().unwrap_or(-1);
         let text = command_output(code, &stdout, &stderr);
         let mut result = cap(text);
-        result.is_error = !output.status.success();
+        // A completed command that exited non-zero is the world saying no,
+        // not the tool breaking: the spawn, the wait, and the capture all
+        // worked. Spawn/wait/timeout failures return `Err` above instead.
+        result.outcome = if output.status.success() {
+            ToolOutcome::Ok
+        } else {
+            ToolOutcome::ReportedFailure
+        };
         Ok(result)
     }
 }
@@ -607,6 +615,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
     }
@@ -622,6 +631,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         };
         // A command that sleeps well past the 1s timeout: the timeout path must
         // return a "timed out" error and exercise the tree-reap (kill_process_tree
@@ -653,6 +663,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         };
         let input = json!({ "program": "sort", "timeout_secs": 10 });
         let output = RunShell
@@ -660,7 +671,7 @@ mod tests {
             .await
             .expect("sort on a null stdin must exit promptly, not hit the timeout");
         assert!(
-            !output.is_error,
+            !output.is_error(),
             "sort on a null stdin should exit cleanly: {}",
             output.text
         );

@@ -5,6 +5,7 @@ use localpilot_sandbox::{Effect, Interactivity, Workspace};
 use serde_json::Value;
 
 use crate::error::ToolError;
+use localpilot_core::ToolOutcome;
 
 /// Context passed to a tool: the workspace it may touch and how the session runs.
 pub struct ToolContext<'a> {
@@ -24,6 +25,10 @@ pub struct ToolContext<'a> {
     /// wired none), and `delegate` reports itself unavailable rather than
     /// failing obscurely.
     pub agents: Option<&'a dyn AgentHost>,
+    /// The host that can put a question to the user for `ask_user`. `None` means
+    /// there is no human on this session — a piped run, a CI run, a subagent —
+    /// and `ask_user` says so rather than waiting for an answer that cannot come.
+    pub prompter: Option<&'a dyn UserPrompter>,
 }
 
 /// The host side of delegation.
@@ -44,6 +49,56 @@ pub trait AgentHost: Send + Sync {
         agent: &'a str,
         task: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>;
+}
+
+/// One selectable answer to a [`UserQuestion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// The text the user picks.
+    pub label: String,
+    /// What choosing it means, when the label alone is not enough.
+    pub description: Option<String>,
+}
+
+/// A question to put to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserQuestion {
+    /// A short chip-style label for the question's topic.
+    pub header: Option<String>,
+    /// The question itself.
+    pub question: String,
+    /// The offered answers. The model's guess at the answer space — the user is
+    /// the authority on it, which is why free text is always also offered.
+    pub options: Vec<QuestionOption>,
+    /// Whether several options may be chosen together.
+    pub multi_select: bool,
+}
+
+/// How the user answered one [`UserQuestion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserAnswer {
+    /// One or more offered labels.
+    Selected(Vec<String>),
+    /// Free text the user typed instead.
+    Other(String),
+    /// The user dismissed the question. Not a failure: the model is told to use
+    /// its own judgment and say so.
+    Dismissed,
+}
+
+/// The host side of asking the user a question.
+///
+/// A tool cannot reach the user by itself — it has no terminal and no event
+/// loop. The host implements this and hands it in through [`ToolContext`],
+/// exactly as it does for delegation, so `ask_user` stays an ordinary tool with
+/// no special path through the registry. The interactive front-end suspends the
+/// turn while it prompts, as the approval gate already does.
+pub trait UserPrompter: Send + Sync {
+    /// Ask `questions` in order and resolve to one answer each.
+    fn ask<'a>(
+        &'a self,
+        questions: &'a [UserQuestion],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<UserAnswer>> + Send + 'a>>;
 }
 
 /// A tighten-only gate consulted after the permission engine for every tool
@@ -91,7 +146,7 @@ pub trait OutputRetention: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub text: String,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
     pub truncated: bool,
 }
 
@@ -101,7 +156,7 @@ impl ToolOutput {
     pub fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            is_error: false,
+            outcome: ToolOutcome::Ok,
             truncated: false,
         }
     }
@@ -111,9 +166,24 @@ impl ToolOutput {
     pub fn truncated(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            is_error: false,
+            outcome: ToolOutcome::Ok,
             truncated: true,
         }
+    }
+
+    /// The same output with `outcome` replaced, preserving the truncation
+    /// marker — the assignment sites all refine a value returned by a capping
+    /// helper.
+    #[must_use]
+    pub fn with_outcome(mut self, outcome: ToolOutcome) -> Self {
+        self.outcome = outcome;
+        self
+    }
+
+    /// Whether the model sees this output as an error.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.outcome.is_error()
     }
 }
 

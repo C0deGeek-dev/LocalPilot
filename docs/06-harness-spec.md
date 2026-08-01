@@ -227,8 +227,11 @@ With the guidance gate enabled, a pre-brief assessment scores how much
 load-bearing guidance the idea contains. At or above
 `[harness.guidance] threshold` intake proceeds unchanged. Below it, the open
 decision axes become questions (capped at `max_questions`, most consequential
-first): on a terminal, intake asks each question on stdin — an empty answer
-delegates that one axis to the model — and folds the answers into the idea as
+first): on a terminal, intake asks each question through the shared choice
+widget (`ask_user`'s, driven by the arrow keys), falling back to a plain stdin
+prompt when the surface is not a terminal — an empty answer, or the explicit
+"let the model decide" row, delegates that one axis to the model — and folds the
+answers into the idea as
 an explicit user-decisions block before generating the brief; on a
 non-terminal, intake emits a structured JSON report (`"status":
 "needs_guidance"` with the open axes and escape hatches), writes **no**
@@ -674,8 +677,13 @@ Independent of the opt-in budget, the loop carries an always-on guard so a turn
 can never spin unbounded even with the budget off (ADR-0052). When the budget is
 disabled, the turn still stops with `NoProgress` if either the no-progress
 detector trips (a repeated or cyclic *successful* call set) or a run of
-consecutive *failing* calls — the denied/failing spin the detector never sees,
-since it is fed only by successful calls — exceeds a fixed conservative limit. The
+consecutive *non-successful* calls — the denied/failing spin the detector never
+sees, since it is fed only by successful calls — exceeds a fixed conservative
+limit. Both failure kinds count here (a missing binary routed through the shell
+comes back as a *reported* exit 127 and must not spin unchecked), but only a
+tool that could not run at all (`Unusable`, ADR-0116) counts against the
+per-tool stuck signal; a completed run whose wrapped work failed clears it,
+because it is direct evidence the tool works. The
 failure streak resets on any successful call, so a productive turn is never cut;
 when the budget is configured the controller above owns the no-progress stop and
 this guard is inert. It is a safety backstop, not a cost control — "budget off"

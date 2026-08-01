@@ -217,6 +217,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         }
     }
 
@@ -245,7 +246,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains("src/lib.rs"),
             "expected the indexed file in the result, got: {}",
@@ -263,7 +264,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error, "a missing index must not be an error");
+        assert!(!out.is_error(), "a missing index must not be an error");
         assert!(out.text.contains("no indexed project knowledge"));
     }
 
@@ -284,7 +285,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error, "a corrupt index must not break the turn");
+        assert!(!out.is_error(), "a corrupt index must not break the turn");
         assert!(
             out.text.contains("unreadable"),
             "a corrupt index must be reported distinctly, got: {}",

@@ -16,7 +16,7 @@ use ratatui::Frame;
 
 use crate::state::{
     AppState, ApprovalRequest, BackgroundProcess, FilePicker, Header, MemoryPanel, Profile,
-    SlashPicker, TranscriptLine, TrustPrompt,
+    QuestionPrompt, SlashPicker, TranscriptLine, TrustPrompt,
 };
 
 /// Most text rows the input box grows to before it starts scrolling.
@@ -236,6 +236,78 @@ fn approval_lines(approval: &ApprovalRequest, profile: &str) -> Vec<Line<'static
     ]
 }
 
+/// Lines for a question the agent is waiting on. Reuses the pickers' window and
+/// reverse-video highlight so the interaction reads as the one the user already
+/// knows. Rendered inline in the top section — no floating modal, no alternate
+/// screen (ADR-0021).
+fn question_lines(prompt: &QuestionPrompt) -> Vec<Line<'static>> {
+    let ask = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = Vec::new();
+    let heading = match (&prompt.header, prompt.total > 1) {
+        (Some(header), true) => format!("{header}  ({}/{})", prompt.index, prompt.total),
+        (Some(header), false) => header.clone(),
+        (None, true) => format!("Question {}/{}", prompt.index, prompt.total),
+        (None, false) => "Question".to_string(),
+    };
+    lines.push(Line::styled(heading, ask));
+    lines.push(Line::raw(prompt.question.clone()));
+
+    let rows = prompt.options.len() + 1;
+    for i in window(rows, prompt.selected, MAX_PICKER_ROWS as usize) {
+        let line = if i < prompt.options.len() {
+            let (label, description) = &prompt.options[i];
+            let mark = if prompt.multi_select {
+                if prompt.checked.get(i).copied().unwrap_or(false) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else {
+                ""
+            };
+            let mut spans = vec![Span::styled(
+                format!(" {mark}{label}"),
+                Style::default().fg(Color::Cyan),
+            )];
+            if let Some(description) = description {
+                spans.push(Span::styled(
+                    format!("  {description}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        } else if let Some(text) = &prompt.other {
+            // Free-text entry is open: show what is being typed.
+            Line::from(Span::styled(
+                format!(" > {text}"),
+                Style::default().fg(Color::Cyan),
+            ))
+        } else {
+            Line::from(Span::styled(
+                " Something else…",
+                Style::default().fg(Color::DarkGray),
+            ))
+        };
+        lines.push(if i == prompt.selected {
+            line.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        });
+    }
+
+    let hint = if prompt.other.is_some() {
+        "[Enter] answer    [Esc] back to the list"
+    } else if prompt.multi_select {
+        "[↑↓] move    [Space] toggle    [Enter] confirm    [Esc] skip"
+    } else {
+        "[↑↓] move    [Enter] choose    [Esc] skip"
+    };
+    lines.push(Line::styled(hint, ask));
+    lines
+}
+
 /// The visible window of a list so `selected` stays in view, capped to `max` rows.
 fn window(len: usize, selected: usize, max: usize) -> std::ops::Range<usize> {
     if len <= max {
@@ -303,6 +375,8 @@ fn top_lines(state: &AppState) -> Vec<Line<'static>> {
         trust_lines(trust)
     } else if let Some(approval) = &state.approval {
         approval_lines(approval, state.profile.label())
+    } else if let Some(question) = &state.question {
+        question_lines(question)
     } else if let Some(slash) = &state.slash_picker {
         slash_lines(slash)
     } else if let Some(files) = &state.file_picker {
@@ -543,7 +617,10 @@ pub fn live_region_height(state: &AppState, width: u16) -> u16 {
 /// fixed streaming band so per-token streaming never resizes the viewport.
 #[must_use]
 pub fn blocking_prompt_height(state: &AppState, width: u16) -> Option<u16> {
-    (state.trust.is_some() || state.approval.is_some()).then(|| live_region_height(state, width))
+    // A question grows the band too: its option list and confirm hint are what
+    // the user has to see to answer, and the fixed streaming band would cut them.
+    (state.trust.is_some() || state.approval.is_some() || state.question.is_some())
+        .then(|| live_region_height(state, width))
 }
 
 fn render_input(frame: &mut Frame, area: Rect, state: &AppState) {

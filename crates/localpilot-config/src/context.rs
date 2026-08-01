@@ -50,6 +50,11 @@ pub enum ContextKind {
     Agents,
     /// A `.github/copilot-instructions.md` file (GitHub Copilot's convention).
     Copilot,
+    /// A path-scoped `.github/instructions/*.instructions.md` file (GitHub
+    /// Copilot's convention): an `applyTo` frontmatter glob narrows the rule to
+    /// the files it is about, so it is injected only when matching files are in
+    /// play rather than for the whole project.
+    Instructions,
 }
 
 impl ContextKind {
@@ -62,6 +67,9 @@ impl ContextKind {
             ContextKind::Claude => "CLAUDE.md",
             ContextKind::Agents => "AGENTS.md",
             ContextKind::Copilot => "copilot-instructions.md",
+            // Path-scoped files carry their own names; this is the suffix they
+            // are recognized by under `.github/instructions/`.
+            ContextKind::Instructions => ".instructions.md",
         }
     }
 
@@ -71,6 +79,8 @@ impl ContextKind {
     pub fn root_relative_path(self) -> PathBuf {
         match self {
             ContextKind::Copilot => Path::new(".github").join(self.file_name()),
+            // A directory of files, not one fixed path; discovery enumerates it.
+            ContextKind::Instructions => Path::new(".github").join("instructions"),
             other => PathBuf::from(other.file_name()),
         }
     }
@@ -85,6 +95,10 @@ impl ContextKind {
             ContextKind::Claude => 1,
             ContextKind::Agents => 2,
             ContextKind::Copilot => 3,
+            // Beside the repo-root instructions but after them: a scoped rule
+            // refines the general ones, narrowed further by its glob at
+            // injection time.
+            ContextKind::Instructions => 4,
         }
     }
 
@@ -125,6 +139,136 @@ pub struct ContextFile {
     pub depth: usize,
     /// The file body, with `@`-imports resolved inline.
     pub body: String,
+    /// The `applyTo` globs from a path-scoped file's frontmatter, if any. Empty
+    /// for every unscoped kind, which always applies. A scoped file with globs
+    /// applies only when a file in play matches one of them — a per-turn fact,
+    /// so the decision is made at injection, not here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apply_to: Vec<String>,
+}
+
+impl ContextFile {
+    /// Whether this file applies given the workspace-relative paths currently in
+    /// play. A file with no `applyTo` globs always applies (every unscoped kind,
+    /// and a scoped file whose frontmatter omits or empties the key — treating
+    /// that as project-wide matches the convention's `**` default).
+    ///
+    /// Paths are matched with `/` separators regardless of platform, and both a
+    /// full relative path and its bare file name are tried, so `**/*.ts` matches
+    /// `src/app.ts` and `*.ts` matches it too.
+    #[must_use]
+    pub fn applies_to(&self, paths_in_play: &[String]) -> bool {
+        if self.apply_to.is_empty() {
+            return true;
+        }
+        let Some(set) = build_glob_set(&self.apply_to) else {
+            // An unparseable glob must not silently swallow the rule: fall back
+            // to always applying, which is the pre-`applyTo` behaviour.
+            return true;
+        };
+        paths_in_play.iter().any(|path| {
+            let normalized = path.replace('\\', "/");
+            if set.is_match(&normalized) {
+                return true;
+            }
+            normalized
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| set.is_match(name))
+        })
+    }
+}
+
+/// Compile `globs` into a matcher, or `None` when none of them parse.
+fn build_glob_set(globs: &[String]) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut any = false;
+    for pattern in globs {
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            builder.add(glob);
+            any = true;
+        }
+    }
+    any.then(|| builder.build().ok()).flatten()
+}
+
+/// Split a leading `---` YAML frontmatter block off `raw`, returning its
+/// `applyTo` globs and the remaining body.
+///
+/// Deliberately narrow: only the one key this feature needs is read, so a file
+/// carrying other frontmatter keys is neither rejected nor misinterpreted. The
+/// value is a single glob or a comma-separated list, optionally quoted; a file
+/// with no frontmatter yields no globs and its body unchanged.
+fn split_apply_to_frontmatter(raw: &str) -> (Vec<String>, String) {
+    let mut lines = raw.lines();
+    // The block must open on the very first line, per the convention.
+    if lines.next().map(str::trim) != Some("---") {
+        return (Vec::new(), raw.to_string());
+    }
+    let mut globs = Vec::new();
+    let mut in_list = false;
+    let mut closed = false;
+    let mut consumed = 1;
+    for line in lines {
+        consumed += 1;
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            closed = true;
+            break;
+        }
+        // A YAML block list under `applyTo:` — one glob per `- ` entry.
+        if in_list {
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                globs.push(unquote(item).to_string());
+                continue;
+            }
+            in_list = false;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("applyTo") {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            in_list = true;
+            continue;
+        }
+        globs.extend(
+            unquote(value)
+                .split(',')
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+                .map(ToString::to_string),
+        );
+    }
+    if !closed {
+        // An unterminated block is not frontmatter; keep the file verbatim.
+        return (Vec::new(), raw.to_string());
+    }
+    let body = raw
+        .lines()
+        .skip(consumed)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start_matches('\n')
+        .to_string();
+    (globs, body)
+}
+
+/// Strip one layer of matching single or double quotes.
+fn unquote(value: &str) -> &str {
+    let trimmed = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = trimmed
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    trimmed
 }
 
 /// The merged project context: every discovered context file in precedence order
@@ -146,10 +290,28 @@ impl ProjectContext {
     /// Render the merged instruction text: each file's body in precedence order,
     /// separated by a labelled header so provenance survives the merge. Returns an
     /// empty string when no files were discovered.
+    ///
+    /// Every discovered file is rendered, including path-scoped ones whose
+    /// `applyTo` glob may not match anything in play — use
+    /// [`ProjectContext::render_for`] when the set of files in play is known.
     #[must_use]
     pub fn render(&self) -> String {
+        self.render_files(self.files.iter())
+    }
+
+    /// Render only the files that apply given the workspace-relative paths
+    /// currently in play. Unscoped instructions always apply; a path-scoped file
+    /// applies when one of its `applyTo` globs matches a path in play. With no
+    /// paths in play, only the unscoped files render — a scoped rule about the
+    /// web app should not reach a turn that never touches it.
+    #[must_use]
+    pub fn render_for(&self, paths_in_play: &[String]) -> String {
+        self.render_files(self.files.iter().filter(|f| f.applies_to(paths_in_play)))
+    }
+
+    fn render_files<'a>(&self, files: impl Iterator<Item = &'a ContextFile>) -> String {
         let mut out = String::new();
-        for file in &self.files {
+        for file in files {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
@@ -236,6 +398,8 @@ impl ContextDiscovery {
         if let Some(file) = self.load(&copilot, ContextKind::Copilot, ContextScope::RepoRoot, 0) {
             files.push(file);
         }
+        // Path-scoped instructions live beside them, under `.github/instructions/`.
+        files.extend(self.discover_path_scoped());
 
         // Nested layer: instruction files in subdirectories of the workspace.
         files.extend(self.discover_nested());
@@ -262,6 +426,38 @@ impl ContextDiscovery {
         });
 
         ProjectContext { files }
+    }
+
+    /// Enumerate `.github/instructions/*.instructions.md` — the path-scoped
+    /// instruction files. Only the repo-root `.github/` is read: `.github` is a
+    /// repo-level directory, and per-directory instructions already work through
+    /// the nested `Navigator.md`/`CLAUDE.md`/`AGENTS.md` walk. Ordered by path so
+    /// discovery is deterministic across platforms.
+    fn discover_path_scoped(&self) -> Vec<ContextFile> {
+        let dir = self
+            .workspace_root
+            .join(ContextKind::Instructions.root_relative_path());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| name.ends_with(ContextKind::Instructions.file_name()))
+            })
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .filter_map(|path| {
+                self.load(path, ContextKind::Instructions, ContextScope::RepoRoot, 0)
+            })
+            .collect()
     }
 
     /// Walk the workspace tree (honouring ignore files) for instruction files in
@@ -327,6 +523,13 @@ impl ContextDiscovery {
             return None;
         }
         let raw = std::fs::read_to_string(path).ok()?;
+        // Only the path-scoped kind carries frontmatter; for every other kind a
+        // leading `---` is ordinary markdown and must survive untouched.
+        let (apply_to, raw) = if kind == ContextKind::Instructions {
+            split_apply_to_frontmatter(&raw)
+        } else {
+            (Vec::new(), raw)
+        };
         let mut visiting = HashSet::new();
         // The root file counts as the first level of the import budget.
         visiting.insert(canonical(path));
@@ -337,6 +540,7 @@ impl ContextDiscovery {
             scope,
             depth,
             body,
+            apply_to,
         })
     }
 
@@ -676,5 +880,144 @@ mod tests {
             .unwrap();
         assert_eq!(file.scope, ContextScope::Nested);
         assert_eq!(file.depth, 2);
+    }
+
+    #[test]
+    fn discovers_path_scoped_instruction_files_with_their_globs() {
+        let ws = tempfile::tempdir().unwrap();
+        write(
+            &ws.path()
+                .join(".github")
+                .join("instructions")
+                .join("ts.instructions.md"),
+            "---\napplyTo: \"**/*.ts\"\n---\nPrefer named exports.",
+        );
+
+        let ctx = discovery(ws.path(), None).discover();
+        assert_eq!(ctx.files.len(), 1);
+        let file = &ctx.files[0];
+        assert_eq!(file.kind, ContextKind::Instructions);
+        assert_eq!(file.scope, ContextScope::RepoRoot);
+        assert_eq!(file.apply_to, vec!["**/*.ts".to_string()]);
+        // The frontmatter is consumed, not injected as instruction text.
+        assert_eq!(file.body.trim(), "Prefer named exports.");
+    }
+
+    #[test]
+    fn apply_to_accepts_a_comma_separated_list_and_a_yaml_list() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join(".github").join("instructions");
+        write(
+            &dir.join("inline.instructions.md"),
+            "---\napplyTo: '**/*.ts, **/*.tsx'\n---\nweb rules",
+        );
+        write(
+            &dir.join("list.instructions.md"),
+            "---\napplyTo:\n  - \"crates/**\"\n  - src/**\n---\nrust rules",
+        );
+
+        let ctx = discovery(ws.path(), None).discover();
+        let globs: Vec<Vec<String>> = ctx.files.iter().map(|f| f.apply_to.clone()).collect();
+        assert!(globs.contains(&vec!["**/*.ts".to_string(), "**/*.tsx".to_string()]));
+        assert!(globs.contains(&vec!["crates/**".to_string(), "src/**".to_string()]));
+    }
+
+    #[test]
+    fn a_scoped_file_applies_only_to_matching_paths() {
+        let ws = tempfile::tempdir().unwrap();
+        write(
+            &ws.path()
+                .join(".github")
+                .join("instructions")
+                .join("ts.instructions.md"),
+            "---\napplyTo: \"**/*.ts\"\n---\nPrefer named exports.",
+        );
+        let ctx = discovery(ws.path(), None).discover();
+        let file = &ctx.files[0];
+
+        assert!(file.applies_to(&["src/app.ts".to_string()]));
+        assert!(file.applies_to(&["app.ts".to_string()]));
+        assert!(!file.applies_to(&["src/main.rs".to_string()]));
+        assert!(!file.applies_to(&[]), "nothing in play matches nothing");
+    }
+
+    #[test]
+    fn an_unscoped_kind_always_applies_and_keeps_a_leading_rule() {
+        let ws = tempfile::tempdir().unwrap();
+        // A leading `---` in an ordinary instruction file is markdown, not
+        // frontmatter, and must survive verbatim.
+        write(&ws.path().join("CLAUDE.md"), "---\nuse four-space indent");
+        let ctx = discovery(ws.path(), None).discover();
+        let file = &ctx.files[0];
+        assert!(file.apply_to.is_empty());
+        assert!(file.applies_to(&[]));
+        assert!(file.body.starts_with("---"));
+    }
+
+    #[test]
+    fn render_for_filters_scoped_files_but_never_unscoped_ones() {
+        let ws = tempfile::tempdir().unwrap();
+        write(&ws.path().join("CLAUDE.md"), "always");
+        write(
+            &ws.path()
+                .join(".github")
+                .join("instructions")
+                .join("ts.instructions.md"),
+            "---\napplyTo: \"**/*.ts\"\n---\nweb rule",
+        );
+        let ctx = discovery(ws.path(), None).discover();
+
+        let none_in_play = ctx.render_for(&[]);
+        assert!(none_in_play.contains("always"));
+        assert!(!none_in_play.contains("web rule"));
+
+        let ts_in_play = ctx.render_for(&["src/app.ts".to_string()]);
+        assert!(ts_in_play.contains("always"));
+        assert!(ts_in_play.contains("web rule"));
+
+        // The unfiltered render still shows everything discovered.
+        assert!(ctx.render().contains("web rule"));
+    }
+
+    #[test]
+    fn path_scoped_files_rank_after_the_root_instruction_files() {
+        let ws = tempfile::tempdir().unwrap();
+        write(&ws.path().join("AGENTS.md"), "agents rules");
+        write(
+            &ws.path().join(".github").join("copilot-instructions.md"),
+            "copilot rules",
+        );
+        write(
+            &ws.path()
+                .join(".github")
+                .join("instructions")
+                .join("a.instructions.md"),
+            "scoped rules",
+        );
+        let rendered = discovery(ws.path(), None).discover().render();
+        let agents_at = rendered.find("agents rules").unwrap();
+        let copilot_at = rendered.find("copilot rules").unwrap();
+        let scoped_at = rendered.find("scoped rules").unwrap();
+        assert!(
+            agents_at < copilot_at && copilot_at < scoped_at,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_nested_instructions_directory_is_not_discovered() {
+        let ws = tempfile::tempdir().unwrap();
+        write(
+            &ws.path()
+                .join("web")
+                .join(".github")
+                .join("instructions")
+                .join("ts.instructions.md"),
+            "nested scoped rules",
+        );
+        // `.github` is a repo-level directory; only the root one is read, which
+        // matches how the convention is defined and how Copilot reads it.
+        let ctx = discovery(ws.path(), None).discover();
+        assert!(ctx.files.is_empty(), "{:?}", ctx.files);
     }
 }

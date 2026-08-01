@@ -437,6 +437,59 @@ pub fn prune_sessions(
     Ok(())
 }
 
+/// The bounded stderr line for a runtime event a headless caller should see,
+/// or `None` for events that stay silent. Diagnostics only — nothing returned
+/// here may reach stdout, which carries the answer and nothing else.
+fn diagnostic_line_for(event: &RuntimeEvent) -> Option<String> {
+    match event {
+        RuntimeEvent::ToolFinished {
+            name,
+            is_error: true,
+            output,
+            ..
+        } => Some(format!(
+            "tool failed: {name}: {}\n",
+            failure_preview(output)
+        )),
+        RuntimeEvent::Warning(warning) => Some(format!("warning: {}\n", failure_preview(warning))),
+        RuntimeEvent::ToolStuck { name, count } => Some(format!(
+            "stuck: tool `{name}` failed {count} times this turn\n"
+        )),
+        _ => None,
+    }
+}
+
+/// Collapse whitespace and cap the preview so a large tool result cannot flood
+/// the diagnostics stream. The text was already redacted at the dispatch
+/// chokepoint; this bounds, it does not sanitize.
+fn failure_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview: String = collapsed.chars().take(MAX_CHARS).collect();
+    if collapsed.chars().count() > MAX_CHARS {
+        preview.push('…');
+    }
+    preview
+}
+
+/// One step of the print-mode event loop.
+enum PrinterStep {
+    Event(RuntimeEvent),
+    /// The receiver fell behind and `n` events were discarded by the channel.
+    /// The stream continues — losing some events must not mean losing the rest.
+    Dropped(u64),
+    /// The channel is closed: the turn is over.
+    End,
+}
+
+async fn next_printer_event(rx: &mut broadcast::Receiver<RuntimeEvent>) -> PrinterStep {
+    match rx.recv().await {
+        Ok(event) => PrinterStep::Event(event),
+        Err(broadcast::error::RecvError::Lagged(n)) => PrinterStep::Dropped(n),
+        Err(broadcast::error::RecvError::Closed) => PrinterStep::End,
+    }
+}
+
 async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Result<PrintOutcome> {
     let (events, mut rx) = broadcast::channel(1024);
     let cancel = CancellationToken::new();
@@ -448,8 +501,36 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
     let printer_cancel = cancel.clone();
     let printer = tokio::spawn(async move {
         let mut out = std::io::stdout();
+        let mut err = std::io::stderr();
         let mut consumer_gone = false;
-        while let Ok(event) = rx.recv().await {
+        // Two independent "consumer gone" flags: a closed *stdout* cancels the
+        // turn (the answer has nowhere to go); a closed *stderr* only silences
+        // further diagnostics and is never reported as the consumer going away.
+        // Both go through the checked writer — the bare `eprintln!` family
+        // panics the process on a write error, the same forbidden runtime-path
+        // panic the stdout comment below explains.
+        let mut diagnostics_gone = false;
+        loop {
+            let event = match next_printer_event(&mut rx).await {
+                PrinterStep::Event(event) => event,
+                PrinterStep::Dropped(missed) => {
+                    // Diagnostics only — dropped events must not end the stream.
+                    if !diagnostics_gone {
+                        let note = format!(
+                            "print: fell behind the event stream; {missed} event(s) dropped\n"
+                        );
+                        diagnostics_gone =
+                            !matches!(write_streamed(&mut err, &note), WriteStatus::Ok);
+                    }
+                    continue;
+                }
+                PrinterStep::End => break,
+            };
+            if !diagnostics_gone {
+                if let Some(line) = diagnostic_line_for(&event) {
+                    diagnostics_gone = !matches!(write_streamed(&mut err, &line), WriteStatus::Ok);
+                }
+            }
             match event {
                 RuntimeEvent::Text(text) => match write_streamed(&mut out, &text) {
                     WriteStatus::Ok => {}
@@ -460,7 +541,8 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
                     }
                     WriteStatus::Failed(error) => {
                         // A genuine IO fault still surfaces — but never as a panic.
-                        eprintln!("print: failed writing to stdout: {error}");
+                        let note = format!("print: failed writing to stdout: {error}\n");
+                        let _ = write_streamed(&mut err, &note);
                         break;
                     }
                 },
@@ -492,11 +574,15 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
     // stop reason, tool calls, files changed, whether memory was written — even
     // when the turn timed out or the consumer went away.
     if let Some(handoff) = runtime.last_turn_handoff() {
-        eprintln!("handoff: {}", handoff.to_json_line());
+        let line = format!("handoff: {}\n", handoff.to_json_line());
+        let _ = write_streamed(&mut std::io::stderr(), &line);
     }
 
     if reason == StopReason::Degraded {
-        eprintln!("warning: the model was marked degraded after repeated bad output");
+        let _ = write_streamed(
+            &mut std::io::stderr(),
+            "warning: the model was marked degraded after repeated bad output\n",
+        );
     }
     Ok(PrintOutcome { consumer_gone })
 }
@@ -504,6 +590,81 @@ async fn run_and_print(mut runtime: SessionRuntime, prompt: &str) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failing_tool_events_map_to_bounded_stderr_lines() {
+        // A failing tool names itself on the diagnostics stream...
+        let line = diagnostic_line_for(&RuntimeEvent::ToolFinished {
+            id: "c1".to_string(),
+            name: "run_shell".to_string(),
+            is_error: true,
+            output: "exit: 1\n--- stdout ---\n\n--- stderr ---\nboom".to_string(),
+        })
+        .expect("a failing tool is diagnosed");
+        assert!(line.starts_with("tool failed: run_shell:"));
+        assert!(!line.trim_end_matches('\n').contains('\n'), "one line only");
+
+        // ...a successful one stays silent...
+        assert!(diagnostic_line_for(&RuntimeEvent::ToolFinished {
+            id: "c2".to_string(),
+            name: "run_shell".to_string(),
+            is_error: false,
+            output: "exit: 0".to_string(),
+        })
+        .is_none());
+
+        // ...and answer text never becomes a diagnostic.
+        assert!(diagnostic_line_for(&RuntimeEvent::Text("the answer".to_string())).is_none());
+    }
+
+    #[test]
+    fn a_huge_failing_output_is_capped_in_the_preview() {
+        let huge = "x".repeat(64 * 1024);
+        let line = diagnostic_line_for(&RuntimeEvent::ToolFinished {
+            id: "c1".to_string(),
+            name: "run_shell".to_string(),
+            is_error: true,
+            output: huge,
+        })
+        .expect("a failing tool is diagnosed");
+        assert!(
+            line.len() < 1024,
+            "unbounded stderr line: {} bytes",
+            line.len()
+        );
+        assert!(line.contains('…'), "the cap is explicit");
+    }
+
+    #[tokio::test]
+    async fn lagged_printer_receiver_keeps_reading() {
+        // A slow consumer must skip the dropped events and keep printing;
+        // only a closed channel ends the loop.
+        let (tx, mut rx) = broadcast::channel(2);
+        for i in 0..5 {
+            tx.send(RuntimeEvent::Text(format!("chunk {i}")))
+                .expect("receiver alive");
+        }
+
+        let PrinterStep::Dropped(missed) = next_printer_event(&mut rx).await else {
+            panic!("an overrun receiver reports the drop, not end-of-stream");
+        };
+        assert_eq!(missed, 3);
+
+        // The surviving tail of the stream is still delivered after the lag.
+        let PrinterStep::Event(RuntimeEvent::Text(text)) = next_printer_event(&mut rx).await else {
+            panic!("the stream continues after a lag");
+        };
+        assert_eq!(text, "chunk 3");
+
+        drop(tx);
+        let PrinterStep::Event(_) = next_printer_event(&mut rx).await else {
+            panic!("buffered events drain before close");
+        };
+        assert!(matches!(
+            next_printer_event(&mut rx).await,
+            PrinterStep::End
+        ));
+    }
 
     #[test]
     fn flags_map_to_profiles() {

@@ -184,6 +184,7 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
         }
     }
 
@@ -214,7 +215,7 @@ mod tests {
 
         let out = ReviewList.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("1 pending"), "got: {}", out.text);
         assert!(out.text.contains("lesson-a"), "got: {}", out.text);
         assert!(
@@ -232,7 +233,7 @@ mod tests {
 
         let out = ReviewList.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error, "an empty queue must not be an error");
+        assert!(!out.is_error(), "an empty queue must not be an error");
         assert!(
             out.text.contains("review queue is empty"),
             "got: {}",
@@ -247,7 +248,7 @@ mod tests {
 
         let out = ReviewList.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("review queue is empty"));
         // Read-only: a bare prompt never initializes the project.
         assert!(!dir.path().join(".localmind.toml").exists());
@@ -266,7 +267,7 @@ mod tests {
             .invoke(json!({ "state": "accepted" }), &context(&ws))
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("1 pending"), "got: {}", out.text);
         assert!(out.text.contains("no Accepted items"), "got: {}", out.text);
     }
