@@ -10,6 +10,7 @@
 //! Provenance: request and streaming shapes implemented from the public
 //! Anthropic API reference (<https://docs.anthropic.com/en/api/messages>). No
 //! vendor SDK code, prompts, or identifiers were copied.
+#![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
@@ -19,14 +20,14 @@ use indexmap::IndexMap;
 use localpilot_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 use serde_json::{json, Value};
 
-use crate::error::{ProviderError, QuotaInfo};
-use crate::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
-use crate::headers::{parse_retry_after, parse_rfc3339_epoch};
-use crate::provider::{
+use localpilot_llm_core::error::{ProviderError, QuotaInfo};
+use localpilot_llm_core::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
+use localpilot_llm_core::headers::{parse_retry_after, parse_rfc3339_epoch};
+use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-use crate::request::{ModelRequest, ToolSpec};
+use localpilot_llm_core::request::{ModelRequest, ToolSpec};
 
 /// The documented Messages API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -1082,8 +1083,13 @@ mod tests {
     }
 
     fn caching_provider() -> AnthropicProvider {
-        AnthropicProvider::new("anthropic", "Anthropic", "https://api.anthropic.com/v1", None)
-            .with_prompt_caching(true)
+        AnthropicProvider::new(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            None,
+        )
+        .with_prompt_caching(true)
     }
 
     fn a_tool(name: &str) -> ToolSpec {

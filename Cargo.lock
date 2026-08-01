@@ -1754,8 +1754,39 @@ version = "2.6.0"
 dependencies = [
  "async-trait",
  "futures",
- "indexmap",
  "localpilot-config",
+ "localpilot-core",
+ "localpilot-llm-anthropic",
+ "localpilot-llm-core",
+ "localpilot-llm-openai",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "localpilot-llm-anthropic"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "localpilot-core",
+ "localpilot-llm-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "localpilot-llm-core"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
  "localpilot-core",
  "proptest",
  "reqwest",
@@ -1763,8 +1794,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.9",
  "tokio",
+]
+
+[[package]]
+name = "localpilot-llm-openai"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "localpilot-core",
+ "localpilot-llm-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
  "tracing",
- "wiremock",
 ]
 
 [[package]]

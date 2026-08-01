@@ -79,7 +79,7 @@ const THINKING_BAILOUT: usize = 32 * 1024;
 /// continuing to route it to [`ModelEvent::ReasoningDelta`] (the "thinking"
 /// panel) for the rest of the turn.
 #[derive(Default)]
-pub(crate) struct InlineThinkingFilter {
+pub struct InlineThinkingFilter {
     in_thinking: bool,
     held: String,
     /// Cumulative bytes classified as reasoning in the current, still-open
@@ -98,7 +98,7 @@ impl InlineThinkingFilter {
     /// split-tag holdback) on every call, `in_thinking` or not. So `held`
     /// alone never reflects how long the current span has run;
     /// `thinking_bytes` tracks that instead.
-    pub(crate) fn push(&mut self, delta: &str) -> Vec<ModelEvent> {
+    pub fn push(&mut self, delta: &str) -> Vec<ModelEvent> {
         self.held.push_str(delta);
         let mut events = Vec::new();
         loop {
@@ -160,7 +160,7 @@ impl InlineThinkingFilter {
     /// reasoning — unless it already bailed out past `THINKING_BAILOUT` in
     /// `push`, in which case `in_thinking` is already `false` here and this
     /// flushes as plain content too.
-    pub(crate) fn finish(&mut self) -> Vec<ModelEvent> {
+    pub fn finish(&mut self) -> Vec<ModelEvent> {
         if self.held.is_empty() {
             return Vec::new();
         }
