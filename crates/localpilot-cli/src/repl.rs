@@ -412,7 +412,10 @@ pub async fn run_chat(
 
     let fullscreen_startup = if chat_ui == ChatUi::Fullscreen {
         resume
-            .map(|session| prepare_fullscreen_resume(&mut runtime, session))
+            .map(|session| {
+                prepare_fullscreen_resume(&mut runtime, session)
+                    .unwrap_or_else(|notice| vec![crate::fullscreen::StartupItem::Notice(notice)])
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -582,10 +585,10 @@ pub async fn run_chat(
     Ok(ChatOutcome::success())
 }
 
-fn prepare_fullscreen_resume(
+pub(crate) fn prepare_fullscreen_resume(
     runtime: &mut SessionRuntime,
     session: localpilot_core::SessionId,
-) -> Vec<crate::fullscreen::StartupItem> {
+) -> Result<Vec<crate::fullscreen::StartupItem>, String> {
     use crate::fullscreen::StartupItem;
     use localpilot_core::Role;
 
@@ -624,9 +627,9 @@ fn prepare_fullscreen_resume(
                 "resumed session {session}; current profile and trust apply"
             )));
         }
-        Err(error) => startup.push(StartupItem::Notice(format!("resume failed: {error}"))),
+        Err(error) => return Err(format!("resume failed: {error}")),
     }
-    startup
+    Ok(startup)
 }
 
 pub(crate) fn stored_session_usage(
@@ -1519,11 +1522,9 @@ fn continue_session(state: &mut AppState, runtime: &mut SessionRuntime, id: Opti
 }
 
 fn load_session_from_input(state: &mut AppState, runtime: &mut SessionRuntime, id: &str) {
-    match id.parse::<localpilot_core::SessionId>() {
+    match crate::session_cmd::resolve_session_ref_in_store(runtime.store(), id) {
         Ok(session) => load_session_id(state, runtime, session),
-        Err(_) => {
-            state.apply(UiEvent::Notice(format!("not a session id: {id}")));
-        }
+        Err(error) => state.apply(UiEvent::Notice(error.to_string())),
     }
 }
 

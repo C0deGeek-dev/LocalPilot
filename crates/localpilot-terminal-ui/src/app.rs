@@ -135,6 +135,7 @@ enum InputOverlay {
 pub enum TakeoverKind {
     Diff,
     Help,
+    Sessions,
     Settings,
 }
 
@@ -208,6 +209,7 @@ struct TakeoverState {
     file_scroll: usize,
     selected: usize,
     settings: Vec<SettingEntry>,
+    sessions: Vec<SessionEntry>,
     diff_files: Vec<DiffFile>,
     diff_pane: DiffPane,
     selected_file: usize,
@@ -222,6 +224,7 @@ pub(crate) struct TakeoverView<'a> {
     pub selected: usize,
     pub commands: &'a [CompletionCommand],
     pub settings: &'a [SettingEntry],
+    pub sessions: &'a [SessionEntry],
     pub diff_files: &'a [DiffFile],
     pub diff_pane: DiffPane,
     pub selected_file: usize,
@@ -234,6 +237,56 @@ pub struct SettingEntry {
     pub name: String,
     pub value: String,
     pub description: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    pub selector: String,
+    pub name: Option<String>,
+    pub message_count: usize,
+    pub updated: Option<String>,
+    pub current: bool,
+}
+
+impl fmt::Debug for SessionEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted_name = self
+            .name
+            .as_ref()
+            .map(|name| format!("<{} bytes redacted>", name.len()));
+        formatter
+            .debug_struct("SessionEntry")
+            .field(
+                "selector",
+                &format_args!("<{} bytes redacted>", self.selector.len()),
+            )
+            .field("name", &redacted_name)
+            .field("message_count", &self.message_count)
+            .field("updated", &self.updated)
+            .field("current", &self.current)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionSelection {
+    selector: String,
+}
+
+impl SessionSelection {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.selector
+    }
+}
+
+impl fmt::Debug for SessionSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SessionSelection")
+            .field(&format_args!("<{} bytes redacted>", self.selector.len()))
+            .finish()
+    }
 }
 
 fn diff_line_is_navigable(line: &DiffLine) -> bool {
@@ -482,6 +535,7 @@ pub enum AppCommand {
     Exit,
     NavigateTimeline(TimelineNavigation),
     NavigateTakeover(TakeoverNavigation),
+    ActivateSession(SessionSelection),
     OpenExternalEditor,
     RunShell(UserShellCommand),
     RunSlash(SubmittedInput),
@@ -848,8 +902,8 @@ impl AppModel {
             workspace_dirty: header.workspace_dirty,
             mode: sanitize_text(&header.mode),
             profile: sanitize_text(&header.profile),
-            session_id: sanitize_text(&header.session_id),
-            session_name: header.session_name.map(|name| sanitize_text(&name)),
+            session_id: sanitize_inline(&header.session_id),
+            session_name: header.session_name.map(|name| sanitize_inline(&name)),
         };
         Self {
             header,
@@ -1406,6 +1460,7 @@ impl AppModel {
             selected: state.selected,
             commands: &self.command_catalog,
             settings: &state.settings,
+            sessions: &state.sessions,
             diff_files: &state.diff_files,
             diff_pane: state.diff_pane,
             selected_file: state.selected_file,
@@ -1461,6 +1516,7 @@ impl AppModel {
             file_scroll: 0,
             selected: 0,
             settings: Vec::new(),
+            sessions: Vec::new(),
             diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
             selected_file: 0,
@@ -1487,6 +1543,7 @@ impl AppModel {
                     description: sanitize_inline(&entry.description),
                 })
                 .collect(),
+            sessions: Vec::new(),
             diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
             selected_file: 0,
@@ -1525,7 +1582,38 @@ impl AppModel {
             file_scroll: 0,
             selected,
             settings: Vec::new(),
+            sessions: Vec::new(),
             diff_files,
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
+        });
+    }
+
+    pub fn open_sessions(&mut self, sessions: impl IntoIterator<Item = SessionEntry>) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.close_theme_picker(true);
+        self.input_overlay = None;
+        let sessions = sessions
+            .into_iter()
+            .map(|entry| SessionEntry {
+                selector: sanitize_inline(&entry.selector),
+                name: entry.name.map(|name| sanitize_inline(&name)),
+                message_count: entry.message_count,
+                updated: entry.updated.map(|updated| sanitize_inline(&updated)),
+                current: entry.current,
+            })
+            .collect::<Vec<_>>();
+        let selected = sessions.iter().position(|entry| entry.current).unwrap_or(0);
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::Sessions,
+            scroll: selected,
+            file_scroll: 0,
+            selected,
+            settings: Vec::new(),
+            sessions,
+            diff_files: Vec::new(),
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
@@ -1538,6 +1626,7 @@ impl AppModel {
         };
         match state.kind {
             TakeoverKind::Settings if selected < state.settings.len() => state.selected = selected,
+            TakeoverKind::Sessions if selected < state.sessions.len() => state.selected = selected,
             TakeoverKind::Diff
                 if state
                     .diff_files
@@ -1548,7 +1637,10 @@ impl AppModel {
                 state.selected = selected;
                 state.diff_pane = DiffPane::Content;
             }
-            TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Settings => {}
+            TakeoverKind::Diff
+            | TakeoverKind::Help
+            | TakeoverKind::Sessions
+            | TakeoverKind::Settings => {}
         }
     }
 
@@ -1568,17 +1660,17 @@ impl AppModel {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
-        if state.kind == TakeoverKind::Settings {
+        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) {
+            let total = if state.kind == TakeoverKind::Sessions {
+                state.sessions.len()
+            } else {
+                state.settings.len()
+            };
             state.selected = state
                 .selected
                 .saturating_add_signed(delta)
-                .min(state.settings.len().saturating_sub(1));
-            keep_selection_visible(
-                &mut state.scroll,
-                state.selected,
-                state.settings.len(),
-                viewport_rows,
-            );
+                .min(total.saturating_sub(1));
+            keep_selection_visible(&mut state.scroll, state.selected, total, viewport_rows);
             return;
         }
         if state.kind == TakeoverKind::Diff {
@@ -1622,9 +1714,14 @@ impl AppModel {
         let Some(state) = self.takeover.as_mut() else {
             return;
         };
-        if state.kind == TakeoverKind::Settings {
+        if matches!(state.kind, TakeoverKind::Sessions | TakeoverKind::Settings) {
+            let total = if state.kind == TakeoverKind::Sessions {
+                state.sessions.len()
+            } else {
+                state.settings.len()
+            };
             state.scroll = start.min(total_rows.saturating_sub(viewport_rows));
-            state.selected = start.min(state.settings.len().saturating_sub(1));
+            state.selected = start.min(total.saturating_sub(1));
             return;
         }
         if state.kind == TakeoverKind::Diff {
@@ -2301,6 +2398,20 @@ impl AppModel {
                 }
                 AppCommand::None
             }
+            InputAction::Submit | InputAction::AcceptCompletion => {
+                let selection = self.takeover.as_ref().and_then(|state| {
+                    (state.kind == TakeoverKind::Sessions)
+                        .then(|| state.sessions.get(state.selected))
+                        .flatten()
+                        .map(|entry| SessionSelection {
+                            selector: entry.selector.clone(),
+                        })
+                });
+                if selection.is_some() {
+                    self.takeover = None;
+                }
+                selection.map_or(AppCommand::None, AppCommand::ActivateSession)
+            }
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::Insert(_)
@@ -2319,9 +2430,7 @@ impl AppModel {
             | InputAction::DeleteWordLeft
             | InputAction::DeleteToLineStart
             | InputAction::DeleteToLineEnd
-            | InputAction::OpenExternalEditor
-            | InputAction::AcceptCompletion
-            | InputAction::Submit => AppCommand::None,
+            | InputAction::OpenExternalEditor => AppCommand::None,
         }
     }
 
@@ -3611,6 +3720,55 @@ mod tests {
         assert_eq!(view.selected, 1);
         assert_eq!(view.scroll, 1);
         assert_eq!(view.settings[1].value, "unsafemodel next value");
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_takeover());
+    }
+
+    #[test]
+    fn sessions_takeover_selects_current_sanitizes_values_and_returns_a_typed_action() {
+        let mut app = model();
+        app.open_sessions([
+            SessionEntry {
+                selector: "first-selector".to_string(),
+                name: Some("PLANTED_FIRST_NAME".to_string()),
+                message_count: 3,
+                updated: Some("2026-08-01 10:00".to_string()),
+                current: false,
+            },
+            SessionEntry {
+                selector: "current\u{1b}[2J-selector".to_string(),
+                name: Some("PLANTED_CURRENT_NAME\nnext".to_string()),
+                message_count: 7,
+                updated: Some("2026-08-01 09:00".to_string()),
+                current: true,
+            },
+        ]);
+
+        let view = app.takeover().expect("sessions");
+        assert_eq!(view.kind, TakeoverKind::Sessions);
+        assert_eq!(view.selected, 1);
+        assert_eq!(view.scroll, 1);
+        assert_eq!(view.sessions[1].selector, "current-selector");
+        assert_eq!(
+            view.sessions[1].name.as_deref(),
+            Some("PLANTED_CURRENT_NAME next")
+        );
+        let debug = format!("{:?}", view.sessions);
+        assert!(!debug.contains("PLANTED_FIRST_NAME"));
+        assert!(!debug.contains("current-selector"));
+
+        app.select_takeover_row(0);
+        let AppCommand::ActivateSession(selection) = app.handle_input(InputAction::Submit, 80)
+        else {
+            panic!("session Enter should return a typed activation");
+        };
+        assert_eq!(selection.as_str(), "first-selector");
+        assert!(!format!("{selection:?}").contains("first-selector"));
+        assert!(!app.has_takeover());
+
+        app.open_sessions(std::iter::empty());
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.has_takeover());
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert!(!app.has_takeover());
     }

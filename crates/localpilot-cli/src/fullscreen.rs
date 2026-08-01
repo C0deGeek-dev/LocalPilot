@@ -25,12 +25,13 @@ use crossterm::terminal::{
 };
 use localpilot_core::ContentBlock;
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
+use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, SettingEntry, StopState,
-    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
-    UserShellCommand, UserShellOutput, VisualRowPart,
+    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection,
+    SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme,
+    TimelineNavigation, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::ElicitationOutcome;
@@ -52,6 +53,7 @@ const CHAT_SCREEN_READER_ENV: &str = "LOCALPILOT_CHAT_SCREEN_READER";
 const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
 const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SESSION_CHOOSER_ROWS: usize = 100;
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
@@ -491,7 +493,10 @@ fn format_count(value: u64) -> String {
 }
 
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
-    const SUPPORTED: &[&str] = &["model", "new", "fork", "clone", "clear", "exit", "quit"];
+    const SUPPORTED: &[&str] = &[
+        "model", "new", "fork", "clone", "clear", "sessions", "session", "resume", "continue",
+        "name", "rename", "exit", "quit",
+    ];
     let mut command_catalog = localpilot_tui::AppState::slash_commands()
         .iter()
         .filter(|(name, _)| SUPPORTED.contains(name))
@@ -521,6 +526,144 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         description: "Review tracked workspace changes".to_string(),
     });
     command_catalog
+}
+
+fn sorted_session_entries(mut sessions: Vec<SessionIndexEntry>) -> Vec<SessionIndexEntry> {
+    sessions.sort_by(|a, b| {
+        b.updated_unix
+            .cmp(&a.updated_unix)
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+    sessions
+}
+
+fn latest_other_session(
+    sessions: Vec<SessionIndexEntry>,
+    current: localpilot_core::SessionId,
+) -> Option<localpilot_core::SessionId> {
+    sorted_session_entries(sessions)
+        .into_iter()
+        .find(|entry| entry.id != current)
+        .map(|entry| entry.id)
+}
+
+fn format_session_updated_at(updated_unix: u64, offset: time::UtcOffset) -> Option<String> {
+    let timestamp = i64::try_from(updated_unix).ok()?;
+    let updated = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .ok()?
+        .to_offset(offset);
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        updated.year(),
+        u8::from(updated.month()),
+        updated.day(),
+        updated.hour(),
+        updated.minute()
+    ))
+}
+
+fn format_session_updated(updated_unix: u64) -> Option<String> {
+    format_session_updated_at(
+        updated_unix,
+        LOCAL_UTC_OFFSET
+            .get()
+            .copied()
+            .unwrap_or(time::UtcOffset::UTC),
+    )
+}
+
+fn fullscreen_session_entries(
+    sessions: Vec<SessionIndexEntry>,
+    current: localpilot_core::SessionId,
+) -> Vec<SessionEntry> {
+    let sessions = sorted_session_entries(sessions);
+    let indexed_current = sessions.iter().find(|entry| entry.id == current).cloned();
+    let mut sessions = sessions
+        .into_iter()
+        .take(MAX_SESSION_CHOOSER_ROWS)
+        .collect::<Vec<_>>();
+    if sessions.iter().all(|entry| entry.id != current) {
+        let current_entry = indexed_current.unwrap_or(SessionIndexEntry {
+            id: current,
+            message_count: 0,
+            created_unix: 0,
+            updated_unix: 0,
+            name: None,
+        });
+        if sessions.len() == MAX_SESSION_CHOOSER_ROWS {
+            sessions.pop();
+        }
+        sessions.push(current_entry);
+    }
+    sessions
+        .into_iter()
+        .map(|entry| SessionEntry {
+            selector: entry.id.to_string(),
+            name: entry.name,
+            message_count: entry.message_count,
+            updated: (entry.updated_unix > 0)
+                .then(|| format_session_updated(entry.updated_unix))
+                .flatten(),
+            current: entry.id == current,
+        })
+        .collect()
+}
+
+fn session_name(runtime: &SessionRuntime, session: localpilot_core::SessionId) -> Option<String> {
+    runtime
+        .store()
+        .list_sessions()
+        .ok()?
+        .into_iter()
+        .find(|entry| entry.id == session)
+        .and_then(|entry| entry.name)
+}
+
+fn sanitized_session_name(name: &str) -> String {
+    sanitize_text(name).replace(['\n', '\t'], " ")
+}
+
+fn apply_fullscreen_resume(
+    app: &mut AppModel,
+    session: localpilot_core::SessionId,
+    name: Option<String>,
+    result: Result<Vec<StartupItem>, String>,
+) {
+    match result {
+        Ok(startup) => {
+            app.clear_conversation();
+            app.header.session_id = session.to_string();
+            app.header.session_name = name.map(|name| sanitized_session_name(&name));
+            for item in startup {
+                apply_startup_item(app, item);
+            }
+        }
+        Err(notice) => app.apply_runtime(RuntimeUpdate::Notice(notice)),
+    }
+}
+
+fn load_fullscreen_session(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    session: localpilot_core::SessionId,
+) {
+    let result = crate::repl::prepare_fullscreen_resume(runtime, session);
+    let name = result
+        .as_ref()
+        .ok()
+        .and_then(|_| session_name(runtime, session));
+    apply_fullscreen_resume(app, session, name, result);
+}
+
+fn activate_session_selection(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    selection: &SessionSelection,
+) {
+    match crate::session_cmd::resolve_session_ref_in_store(runtime.store(), selection.as_str()) {
+        Ok(session) => load_fullscreen_session(app, runtime, session),
+        Err(error) => app.apply_runtime(RuntimeUpdate::Notice(error.to_string())),
+    }
 }
 
 fn load_workspace_diff(cwd: &Path) -> Result<Vec<DiffFile>> {
@@ -1362,6 +1505,57 @@ async fn execute_fullscreen_slash(
             app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
             app.apply_runtime(RuntimeUpdate::Notice("conversation cleared".to_string()));
         }
+        SlashAction::Sessions => match runtime.store().list_sessions() {
+            Ok(sessions) => {
+                let entries = fullscreen_session_entries(sessions, runtime.session_id());
+                app.open_sessions(entries);
+            }
+            Err(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "session index unreadable: {error}"
+            ))),
+        },
+        SlashAction::LoadSession(reference) => {
+            match crate::session_cmd::resolve_session_ref_in_store(runtime.store(), &reference) {
+                Ok(session) => load_fullscreen_session(app, runtime, session),
+                Err(error) => app.apply_runtime(RuntimeUpdate::Notice(error.to_string())),
+            }
+        }
+        SlashAction::ContinueSession(reference) => {
+            let target = match reference {
+                Some(reference) => {
+                    crate::session_cmd::resolve_session_ref_in_store(runtime.store(), &reference)
+                        .map(Some)
+                }
+                None => runtime
+                    .store()
+                    .list_sessions()
+                    .map(|sessions| latest_other_session(sessions, runtime.session_id()))
+                    .map_err(anyhow::Error::from),
+            };
+            match target {
+                Ok(Some(session)) => load_fullscreen_session(app, runtime, session),
+                Ok(None) => app.apply_runtime(RuntimeUpdate::Notice(
+                    "no previous session in this workspace".to_string(),
+                )),
+                Err(error) => app.apply_runtime(RuntimeUpdate::Notice(error.to_string())),
+            }
+        }
+        SlashAction::NameSession(name) => {
+            let session = runtime.session_id();
+            match runtime.store().set_session_name(session, &name) {
+                Ok(()) => {
+                    let name = name.trim();
+                    app.header.session_name = Some(sanitized_session_name(name));
+                    app.apply_runtime(RuntimeUpdate::Notice(format!(
+                        "named this session \"{}\"",
+                        sanitized_session_name(name)
+                    )));
+                }
+                Err(error) => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "could not name session: {error}"
+                ))),
+            }
+        }
         SlashAction::NewSession => {
             runtime.start_new_session();
             app.clear_conversation();
@@ -1546,6 +1740,9 @@ async fn run_event_loop(
                     }
                     AppCommand::NavigateTimeline(navigation) => {
                         apply_timeline_navigation(app, navigation, &hit_map);
+                    }
+                    AppCommand::ActivateSession(selection) => {
+                        activate_session_selection(app, runtime, &selection);
                     }
                     AppCommand::None | AppCommand::CancelWork => {}
                 }
@@ -2032,6 +2229,12 @@ fn handle_turn_event(
                 }
                 AppCommand::NavigateTimeline(navigation) => {
                     apply_timeline_navigation(app, navigation, hit_map);
+                    false
+                }
+                AppCommand::ActivateSession(_) => {
+                    app.apply_runtime(RuntimeUpdate::Notice(
+                        "sessions can be changed when the current operation is idle".to_string(),
+                    ));
                     false
                 }
                 AppCommand::None | AppCommand::OpenExternalEditor => false,
@@ -3268,14 +3471,184 @@ mod tests {
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
         for supported in [
-            "model", "new", "fork", "clone", "clear", "exit", "quit", "help", "theme", "settings",
-            "diff",
+            "model", "new", "fork", "clone", "clear", "sessions", "session", "resume", "continue",
+            "name", "rename", "exit", "quit", "help", "theme", "settings", "diff",
         ] {
             assert!(catalog.iter().any(|command| command.name == supported));
         }
-        for deferred in ["compact", "research", "skills", "sessions"] {
+        for deferred in ["compact", "research", "skills"] {
             assert!(!catalog.iter().any(|command| command.name == deferred));
         }
+    }
+
+    #[test]
+    fn session_projection_is_recent_first_bounded_and_keeps_the_current_row() {
+        let current = localpilot_core::SessionId::new();
+        let mut indexed = (1..=MAX_SESSION_CHOOSER_ROWS)
+            .map(|updated_unix| SessionIndexEntry {
+                id: localpilot_core::SessionId::new(),
+                message_count: updated_unix,
+                created_unix: updated_unix as u64,
+                updated_unix: updated_unix as u64,
+                name: None,
+            })
+            .collect::<Vec<_>>();
+        let newest = indexed.last().expect("newest fixture").id.to_string();
+        indexed.push(SessionIndexEntry {
+            id: current,
+            message_count: 4,
+            created_unix: 0,
+            updated_unix: 0,
+            name: Some("PLANTED_SESSION_NAME".to_string()),
+        });
+
+        let projected = fullscreen_session_entries(indexed, current);
+        assert_eq!(projected.len(), MAX_SESSION_CHOOSER_ROWS);
+        assert_eq!(projected[0].selector, newest);
+        assert!(projected.last().expect("current row").current);
+        assert_eq!(projected.iter().filter(|entry| entry.current).count(), 1);
+        assert!(!format!("{projected:?}").contains("PLANTED_SESSION_NAME"));
+
+        let absent_current = localpilot_core::SessionId::new();
+        let projected = fullscreen_session_entries(Vec::new(), absent_current);
+        assert_eq!(projected.len(), 1);
+        assert!(projected[0].current);
+        assert_eq!(projected[0].updated, None);
+    }
+
+    #[test]
+    fn session_dates_and_bare_continue_selection_are_deterministic() {
+        assert_eq!(
+            format_session_updated_at(0, time::UtcOffset::UTC).as_deref(),
+            Some("1970-01-01 00:00")
+        );
+        assert!(format_session_updated_at(u64::MAX, time::UtcOffset::UTC).is_none());
+
+        let current = localpilot_core::SessionId::new();
+        let older = localpilot_core::SessionId::new();
+        let newest_other = localpilot_core::SessionId::new();
+        let entry = |id, updated_unix| SessionIndexEntry {
+            id,
+            message_count: 0,
+            created_unix: updated_unix,
+            updated_unix,
+            name: None,
+        };
+        assert_eq!(
+            latest_other_session(
+                vec![entry(older, 1), entry(current, 9), entry(newest_other, 5),],
+                current,
+            ),
+            Some(newest_other)
+        );
+        assert_eq!(latest_other_session(vec![entry(current, 9)], current), None);
+    }
+
+    #[test]
+    fn session_row_click_focuses_without_activating() {
+        let mut app = app();
+        let selected = localpilot_core::SessionId::new().to_string();
+        app.open_sessions([
+            SessionEntry {
+                selector: localpilot_core::SessionId::new().to_string(),
+                name: Some("Current".to_string()),
+                message_count: 2,
+                updated: None,
+                current: true,
+            },
+            SessionEntry {
+                selector: selected.clone(),
+                name: Some("Previous".to_string()),
+                message_count: 8,
+                updated: None,
+                current: false,
+            },
+        ]);
+        let hit_map = draw_hit_map(&app, 80, 20);
+        let second = hit_map.takeover_rows[1];
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    second.area.x,
+                    second.area.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.has_takeover());
+        let AppCommand::ActivateSession(selection) =
+            app.handle_input(InputAction::Submit, hit_map.editor_width)
+        else {
+            panic!("Enter should activate the focused row");
+        };
+        assert_eq!(selection.as_str(), selected);
+    }
+
+    #[test]
+    fn resume_failure_preserves_view_and_success_replaces_the_projection() {
+        let mut app = app();
+        let original = app
+            .timeline
+            .push(ItemKind::Assistant, "existing conversation")
+            .expect("timeline item");
+        let original_session = app.header.session_id.clone();
+        let target = localpilot_core::SessionId::new();
+
+        apply_fullscreen_resume(
+            &mut app,
+            target,
+            Some("unused name".to_string()),
+            Err("resume failed: planted failure".to_string()),
+        );
+        assert_eq!(app.header.session_id, original_session);
+        assert!(app.timeline.item(original).is_some());
+        assert!(app
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text.contains("planted failure")));
+
+        apply_fullscreen_resume(
+            &mut app,
+            target,
+            Some("new\u{1b}[2J name\nsecond".to_string()),
+            Ok(vec![
+                StartupItem::User("restored prompt".to_string()),
+                StartupItem::Assistant("restored answer".to_string()),
+                StartupItem::Usage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                },
+                StartupItem::ContextUsage {
+                    used: 20,
+                    limit: 100,
+                },
+            ]),
+        );
+        assert_eq!(app.header.session_id, target.to_string());
+        assert_eq!(app.header.session_name.as_deref(), Some("new name second"));
+        assert!(!app
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text == "existing conversation"));
+        assert_eq!(app.usage, Some((11, 7)));
+        assert!(app
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text == "restored prompt"));
+        assert!(app
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text == "restored answer"));
     }
 
     #[test]

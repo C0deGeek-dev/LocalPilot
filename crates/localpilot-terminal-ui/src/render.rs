@@ -434,6 +434,7 @@ fn render_takeover(
     let theme = theme(app);
     let title = match takeover.kind {
         TakeoverKind::Help => " Help ",
+        TakeoverKind::Sessions => " Sessions ",
         TakeoverKind::Settings => " Settings ",
         TakeoverKind::Diff => " Diff ",
     };
@@ -447,7 +448,10 @@ fn render_takeover(
         ),
     );
 
-    let footer_height = if takeover.kind == TakeoverKind::Settings {
+    let footer_height = if matches!(
+        takeover.kind,
+        TakeoverKind::Sessions | TakeoverKind::Settings
+    ) {
         2
     } else {
         1
@@ -539,6 +543,94 @@ fn render_takeover(
                 Vec::new(),
             )
         }
+        TakeoverKind::Sessions => {
+            let maximum = takeover.sessions.len().saturating_sub(viewport_rows);
+            let start = takeover.scroll.min(maximum);
+            let mut hits = Vec::new();
+            if takeover.sessions.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("No saved sessions in this workspace")
+                        .style(theme.ui(UiRole::Muted)),
+                    content,
+                );
+            }
+            for (offset, (index, session)) in takeover
+                .sessions
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(viewport_rows)
+                .enumerate()
+            {
+                let y = content
+                    .y
+                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+                let selected = index == takeover.selected;
+                let prefix = if selected { "❯ " } else { "  " };
+                let label = session.name.as_deref().unwrap_or(&session.selector);
+                let current = if session.current { " · current" } else { "" };
+                let left = if session.name.is_some() && content.width >= 54 {
+                    format!("{prefix}{label} · {}{current}", session.selector)
+                } else {
+                    format!("{prefix}{label}{current}")
+                };
+                let count = if session.message_count == 1 {
+                    "1 message".to_string()
+                } else {
+                    format!("{} messages", session.message_count)
+                };
+                let right = session
+                    .updated
+                    .as_deref()
+                    .filter(|_| content.width >= 48)
+                    .map_or(count.clone(), |updated| format!("{count} · {updated}"));
+                frame.render_widget(
+                    Paragraph::new(two_sided(&left, &right, content.width)).style(theme.ui(
+                        if selected {
+                            UiRole::TabActive
+                        } else {
+                            UiRole::Foreground
+                        },
+                    )),
+                    Rect::new(content.x, y, content.width, 1),
+                );
+                hits.push(TakeoverHit {
+                    index,
+                    area: Rect::new(content.x, y, content.width, 1),
+                });
+            }
+            if let Some(selected) = takeover.sessions.get(takeover.selected) {
+                let label = selected.name.as_deref().unwrap_or(&selected.selector);
+                let current = if selected.current {
+                    "; current session"
+                } else {
+                    ""
+                };
+                frame.render_widget(
+                    Paragraph::new(truncate_end(
+                        &format!(
+                            "Current selection: {label}; id {}{current}",
+                            selected.selector
+                        ),
+                        area.width.saturating_sub(3),
+                    ))
+                    .style(theme.ui(UiRole::Muted)),
+                    Rect::new(
+                        area.x.saturating_add(1),
+                        area.bottom().saturating_sub(2),
+                        area.width.saturating_sub(3),
+                        1,
+                    ),
+                );
+            }
+            (
+                start,
+                takeover.sessions.len(),
+                viewport_rows,
+                hits,
+                Vec::new(),
+            )
+        }
         TakeoverKind::Diff => render_diff_takeover(frame, content, app, takeover),
     };
 
@@ -558,13 +650,15 @@ fn render_takeover(
         scrollbar_rows,
     );
     draw_scrollbar(frame, scrollbar, app);
+    let footer = match takeover.kind {
+        TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close",
+        TakeoverKind::Sessions if area.width < 50 => "Enter resume · Esc return",
+        TakeoverKind::Sessions => "↑/↓ select · Enter resume · Esc return",
+        TakeoverKind::Settings => "↑/↓ select · Page Up/Page Down · Esc close",
+        TakeoverKind::Diff => "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close",
+    };
     frame.render_widget(
-        Paragraph::new(match takeover.kind {
-            TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close",
-            TakeoverKind::Settings => "↑/↓ select · Page Up/Page Down · Esc close",
-            TakeoverKind::Diff => "↑/↓ navigate · ←/→ switch pane · t hide/show files · Esc close",
-        })
-        .style(theme.ui(UiRole::Muted)),
+        Paragraph::new(footer).style(theme.ui(UiRole::Muted)),
         Rect::new(
             area.x.saturating_add(1),
             area.bottom().saturating_sub(1),
@@ -2666,6 +2760,49 @@ mod tests {
         assert!(rendered.contains("Semantic terminal colors"));
         assert_eq!(hit_map.takeover_rows.len(), 2);
         assert_eq!(hit_map.takeover_rows[1].index, 1);
+    }
+
+    #[test]
+    fn sessions_takeover_renders_current_selection_actions_and_click_targets() {
+        for (width, height, screen_reader) in [(120, 30, false), (30, 10, false), (30, 10, true)] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.open_sessions([
+                crate::SessionEntry {
+                    selector: "11111111-1111-1111-1111-111111111111".into(),
+                    name: Some("Current work".into()),
+                    message_count: 12,
+                    updated: Some("2026-08-01 10:00".into()),
+                    current: true,
+                },
+                crate::SessionEntry {
+                    selector: "22222222-2222-2222-2222-222222222222".into(),
+                    name: Some("Earlier work".into()),
+                    message_count: 4,
+                    updated: Some("2026-07-31 18:30".into()),
+                    current: false,
+                },
+            ]);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, &app)))
+                .expect("draw sessions");
+
+            let rendered = terminal.backend().to_string();
+            let hit_map = hit_map.expect("session hit map");
+            assert!(rendered.contains("Sessions"));
+            assert!(rendered.contains("Current selection"));
+            assert!(rendered.contains("Enter resume"));
+            assert!(rendered.contains("Esc return"));
+            assert!(!rendered.contains("resize to view help"));
+            assert_eq!(hit_map.takeover_rows.len(), 2);
+            assert_eq!(hit_map.takeover_rows[0].index, 0);
+            assert_eq!(hit_map.takeover_rows[0].area.width, width.saturating_sub(5));
+            if screen_reader {
+                assert!(hit_map.scrollbar.thumb.is_none());
+            }
+        }
     }
 
     #[test]
