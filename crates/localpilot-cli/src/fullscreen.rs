@@ -43,6 +43,7 @@ use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead};
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
+const CHAT_COPY_ON_SELECT_ENV: &str = "LOCALPILOT_CHAT_COPY_ON_SELECT";
 const CHAT_EDITOR_ENV: &str = "LOCALPILOT_EDITOR";
 const MAX_EXTERNAL_EDITOR_BYTES: u64 = 8 * 1024 * 1024;
 static TERMINAL_MODES_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -321,18 +322,29 @@ fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) ->
 }
 
 fn apply_host_preferences(app: &mut AppModel) {
-    let Some(value) = std::env::var_os(CHAT_THEME_ENV) else {
-        return;
-    };
-    let Ok(value) = value.into_string() else {
-        app.apply_runtime(RuntimeUpdate::Warning(format!(
-            "{CHAT_THEME_ENV} contains non-Unicode text; using the default theme"
-        )));
-        return;
-    };
-    match value.parse::<Theme>() {
-        Ok(theme) => app.theme = theme,
-        Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+    if let Some(value) = std::env::var_os(CHAT_THEME_ENV) {
+        match value.into_string() {
+            Ok(value) => match value.parse::<Theme>() {
+                Ok(theme) => app.theme = theme,
+                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+            },
+            Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "{CHAT_THEME_ENV} contains non-Unicode text; using the default theme"
+            ))),
+        }
+    }
+    if let Some(value) = std::env::var_os(CHAT_COPY_ON_SELECT_ENV) {
+        match value.into_string() {
+            Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => {
+                app.set_copy_on_select(true);
+            }
+            Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => {
+                app.set_copy_on_select(false);
+            }
+            Ok(_) | Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "{CHAT_COPY_ON_SELECT_ENV} must be true, false, 1, or 0; using false"
+            ))),
+        }
     }
 }
 
@@ -1529,7 +1541,7 @@ fn handle_mouse_event(
                 }
             }
             mouse_state.reset_gesture();
-            if selecting.is_some() {
+            if selecting.is_some() && app.copy_on_select() {
                 app.timeline
                     .selected_text()
                     .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
@@ -2416,6 +2428,7 @@ mod tests {
     #[test]
     fn mouse_drag_selects_graphemes_and_copy_on_release_persists() {
         let mut app = app();
+        app.set_copy_on_select(true);
         let _ = app.timeline.push(ItemKind::Assistant, "alpha 界 beta");
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
@@ -2498,6 +2511,60 @@ mod tests {
             RoutedEvent::Handled
         );
         assert!(app.timeline.selected_text().is_none());
+    }
+
+    #[test]
+    fn default_selection_waits_for_explicit_right_click_copy() {
+        let mut app = app();
+        let _ = app.timeline.push(ItemKind::Assistant, "copy explicitly");
+        assert!(!app.copy_on_select());
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Assistant)
+            .expect("assistant row hit");
+        let start = hit.content_x;
+        let end = hit.content_x.saturating_add(3);
+        let mut mouse_state = MouseState::default();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+        ] {
+            let column = if matches!(kind, MouseEventKind::Down(_)) {
+                start
+            } else {
+                end
+            };
+            assert_eq!(
+                route_pointer_or_navigation(
+                    &mut app,
+                    &Event::Mouse(mouse(kind, column, hit.y)),
+                    &hit_map,
+                    &mut mouse_state,
+                ),
+                RoutedEvent::Handled
+            );
+        }
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::Up(MouseButton::Left), end, hit.y)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.timeline.selected_text().as_deref(), Some("copy"));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Right), end, hit.y,)),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Copy("copy".to_string())
+        );
     }
 
     #[test]

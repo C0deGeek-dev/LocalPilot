@@ -1355,6 +1355,13 @@ fn footer_state(app: &AppModel) -> String {
             .map_or(fallback, |item| item.description.as_str());
         return format!("{detail} · ↑↓ navigate · Enter/Tab accept · Esc close");
     }
+    if app.timeline.selected_text().is_some() {
+        return if app.capabilities.clipboard_write {
+            "selection · Ctrl+C / right-click copy".to_string()
+        } else {
+            "selection · clipboard unavailable".to_string()
+        };
+    }
     if app.shell_mode() {
         return "shell mode · Esc exit shell mode".to_string();
     }
@@ -2309,6 +2316,27 @@ mod tests {
                 .ui(UiRole::Accent)
                 .fg
         );
+    }
+
+    #[test]
+    fn selected_text_footer_exposes_available_copy_action() {
+        let mut app = model();
+        let item = app
+            .timeline
+            .push(ItemKind::Assistant, "copy this")
+            .expect("timeline item");
+        app.timeline.start_selection(crate::ContentPoint {
+            item_id: item,
+            byte: 0,
+        });
+        app.timeline.extend_selection(crate::ContentPoint {
+            item_id: item,
+            byte: 4,
+        });
+
+        assert_eq!(footer_state(&app), "selection · clipboard unavailable");
+        app.capabilities.clipboard_write = true;
+        assert_eq!(footer_state(&app), "selection · Ctrl+C / right-click copy");
     }
 
     #[test]

@@ -397,6 +397,7 @@ pub struct AppModel {
     pub usage: Option<(u64, u64)>,
     pub context_usage: Option<(usize, usize)>,
     pub stream_bytes: usize,
+    copy_on_select: bool,
     pub dialog: Option<DialogState>,
     takeover: Option<TakeoverState>,
     theme_picker: Option<ThemePickerState>,
@@ -444,6 +445,7 @@ impl AppModel {
             usage: None,
             context_usage: None,
             stream_bytes: 0,
+            copy_on_select: false,
             dialog: None,
             takeover: None,
             theme_picker: None,
@@ -1217,6 +1219,15 @@ impl AppModel {
 
     pub fn disarm_exit(&mut self) {
         self.exit_armed = false;
+    }
+
+    pub fn set_copy_on_select(&mut self, enabled: bool) {
+        self.copy_on_select = enabled;
+    }
+
+    #[must_use]
+    pub const fn copy_on_select(&self) -> bool {
+        self.copy_on_select
     }
 
     fn open_reverse_history(&mut self) {

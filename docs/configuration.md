@@ -41,7 +41,10 @@ a sanitized timeline warning and falls back to `default`. The default uses a
 stable true-color palette so large frames and active chrome do not inherit a
 terminal profile's potentially saturated ANSI colors. `NO_COLOR` disables the
 palette while retaining non-color focus, selection, success, and error cues.
-These environment-only controls do not extend the stable TOML schema.
+Mouse selection remains highlighted after release so Ctrl+C or right-click can
+copy it explicitly. Set `LOCALPILOT_CHAT_COPY_ON_SELECT=true` (or `1`) to copy
+immediately on release; `false` and `0` retain the default behavior. These
+environment-only controls do not extend the stable TOML schema.
 
 The branch host uses the same resolved provider vision capability as the inline
 host. On a vision-capable model, Ctrl+V can attach an image from the clipboard
@@ -67,7 +70,7 @@ directly.
 `/help` opens a scrollable full-screen keyboard and command reference; Escape
 returns to the untouched conversation, including while work continues behind
 the help view. Press `?` on an empty idle composer for transient two-column quick
-help. `/theme` opens a centered semantic-color preview: arrows or mouse focus
+help. `/theme` opens a centered semantic-color preview: arrows or mouse selection
 preview the entire UI, Escape restores the prior theme, and Enter accepts the
 choice for the current process. Set `LOCALPILOT_CHAT_THEME` to make the launch
 choice explicit. Slash invocations never enter prompt history or the provider

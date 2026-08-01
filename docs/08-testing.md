@@ -48,11 +48,12 @@ not need a real console:
   tests also cover plain-submit versus newline, Escape cancellation, ordered
   pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
   timestamps, async workspace-file completion, reverse/timeline search routing,
-  mouse selection/scrollbar gestures, isolated clipboard-image attachments, and
+  mouse selection/scrollbar gestures, explicit right-click copy, opt-in
+  copy-on-select, isolated clipboard-image attachments, and
   external-editor command resolution plus terminal leave/re-entry ordering. The
   same host tests pin the truthful slash catalog, configured-provider `/model`
   values, contained quick/full help, help wheel/thumb navigation, cancelable
-  whole-UI theme preview and mouse focus, local refusal during active work, and
+  whole-UI theme preview and mouse selection, local refusal during active work, and
   the invariant that slash input never enters the provider FIFO or prompt-
   history store.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
