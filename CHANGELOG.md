@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: a publish gauntlet that refuses to promote a stale or broken build,
+  and `localpilot version --json`.** The new flag prints this binary's own build
+  identity — version, commit hash, and source fingerprint — as one JSON line. The
+  gauntlet reads it and holds a candidate to three checks before any channel may
+  point at it: its embedded hash *and* fingerprint must match the source it was
+  built from (so a rebuild of different bytes at the same commit is caught, not
+  just a different commit); the source tree must not have changed while the build
+  ran; and the candidate must complete a real RPC handshake within a deadline —
+  proof it can boot its config, provider, tools, and session and answer on the
+  wire, not merely print a version. A candidate that hangs is killed at the
+  deadline rather than waited on.
+
 - **Added: an immutable store for self-built versions, and marker-file channel
   pointers.** Each self-dev build lands in its own directory named by its source
   label and is never written to again; a rebuild of the same source is a no-op,

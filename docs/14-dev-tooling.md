@@ -372,6 +372,24 @@ them.
 # The label is stable: return the bytes and you return the label.
 ```
 
+**The publish gauntlet.** Before a channel is ever pointed at a freshly built
+binary, that binary has to earn it. `localpilot version --json` prints the
+identity a build embedded — `{version, git_hash, fingerprint}` — and the gauntlet
+holds a candidate to three checks in rising cost:
+
+1. **Identity** — the reported `git_hash` *and* `fingerprint` must equal the tree
+   the build came from. The hash alone would wave through a dirty rebuild of
+   different bytes at the same commit; the fingerprint is what closes that gap.
+2. **Freshness** — the source tree is re-read after the build. If it moved while
+   the build ran, the candidate is already behind and is superseded, not shipped.
+3. **Handshake** — the candidate is spawned in `rpc` mode and must complete a real
+   init round-trip within a deadline. This is deliberately more than
+   `--version`: it proves the binary can construct its config, provider, tools,
+   and session and answer on the wire. A candidate that hangs is killed at the
+   deadline, never waited on forever.
+
+Only a binary that passes all three may be promoted.
+
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers
 must be plan-agnostic — no box/decision IDs or plan filenames; and a decision

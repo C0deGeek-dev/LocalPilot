@@ -14,6 +14,7 @@
 mod builder;
 mod channel;
 mod error;
+mod gauntlet;
 mod git;
 mod marker;
 mod paths;
@@ -26,6 +27,10 @@ pub use builder::{
 };
 pub use channel::{Channel, ChannelName, Channels, CURRENT, SLOW, STABLE};
 pub use error::SelfDevError;
+pub use gauntlet::{
+    check_fresh, check_identity, read_reported_identity, smoke_handshake, vet, write_smoke_config,
+    ReportedIdentity, DEFAULT_HANDSHAKE_TIMEOUT,
+};
 pub use marker::{BuildMarker, BUILD_MARKER_VERSION};
 pub use paths::default_root;
 pub use source::SourceState;

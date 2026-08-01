@@ -122,7 +122,14 @@ enum Command {
     /// Inspect and choose between installed versions.
     Version {
         #[command(subcommand)]
-        command: VersionCommand,
+        command: Option<VersionCommand>,
+        /// Emit this binary's own version and embedded build identity as JSON
+        /// (`{version, git_hash, fingerprint}`), the contract the self-dev publish
+        /// gauntlet reads to check a candidate against the source it was built
+        /// from. With no subcommand and without this flag, prints the version
+        /// string.
+        #[arg(long)]
+        json: bool,
     },
     /// Initialize project-local harness state (.localpilot.toml + .gitignore).
     Init {
@@ -1244,6 +1251,21 @@ fn maybe_show_learning_notice() {
     );
 }
 
+/// This binary's own build identity as a compact JSON line — the contract the
+/// self-dev publish gauntlet reads to check a candidate against the source it
+/// claims to come from. The three values are embedded at build time by
+/// `build.rs` (see `build_meta.rs`): the version string, the commit hash, and
+/// the source fingerprint the build was handed. `fingerprint` is the empty
+/// string for a build that was not given one (an ordinary release build).
+fn build_identity_json() -> String {
+    serde_json::json!({
+        "version": env!("LOCALPILOT_VERSION"),
+        "git_hash": env!("LOCALPILOT_GIT_HASH"),
+        "fingerprint": env!("LOCALPILOT_SOURCE_FINGERPRINT"),
+    })
+    .to_string()
+}
+
 fn main() -> anyhow::Result<std::process::ExitCode> {
     // The clap command tree and the top-level command future are large; on Windows
     // the OS main thread's ~1 MiB default stack overflows building them in a debug
@@ -1422,15 +1444,17 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let profile = session_cmd::resolve_profile(None, false);
             server_cmd::serve(None, None, profile).await?;
         }
-        Command::Version { command } => {
+        Command::Version { command, json } => {
             let mut stdout = io::stdout().lock();
             match command {
-                VersionCommand::List => update::list_versions(&mut stdout)?,
-                VersionCommand::Pin { version, clear } => {
+                Some(VersionCommand::List) => update::list_versions(&mut stdout)?,
+                Some(VersionCommand::Pin { version, clear }) => {
                     let requested = if clear { None } else { version.as_deref() };
                     update::set_pin(requested, &mut stdout)?;
                 }
-                VersionCommand::Rollback => update::rollback(&mut stdout)?,
+                Some(VersionCommand::Rollback) => update::rollback(&mut stdout)?,
+                None if json => writeln!(stdout, "{}", build_identity_json())?,
+                None => writeln!(stdout, "{}", env!("LOCALPILOT_VERSION"))?,
             }
             stdout.flush()?;
         }
