@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: graceful shutdown for a running turn.** A host can now ask a turn to
+  *wind down* instead of cancelling it. Where cancelling discards — aborting the
+  in-flight tool and throwing the turn away — a graceful shutdown finishes safely:
+  it stops at the next boundary, answers every pending tool call so the transcript
+  stays valid and resumable, and flushes the session first. A tool whose whole job
+  is to wait is answered with a non-error result that carries its exact original
+  input, so the model can re-issue the identical call after the process returns;
+  any tool that changes something is answered as interrupted, because repeating it
+  would repeat the effect. This is the safe-stop primitive an in-place update or
+  reload needs, since a process replacement runs no destructors.
+
 - **Added: a publish gauntlet that refuses to promote a stale or broken build,
   and `localpilot version --json`.** The new flag prints this binary's own build
   identity — version, commit hash, and source fingerprint — as one JSON line. The

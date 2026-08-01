@@ -469,5 +469,6 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
         StopReason::TimedOut => "timed_out",
+        StopReason::Quiesced => "quiesced",
     }
 }

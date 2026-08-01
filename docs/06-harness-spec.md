@@ -559,6 +559,39 @@ needs an ADR.
 The permission half of the contract lives in
 [`docs/07`](07-security-and-privacy.md) §Reliability Contract.
 
+## Graceful Shutdown (Quiesce)
+
+A host can ask a running turn to *wind down gracefully* rather than be cancelled.
+Cancelling discards: it aborts the in-flight tool, persists no partial reply, and
+stops. Quiescing **finishes safely**: the turn stops at the next safe boundary,
+but nothing in flight is thrown away that could be resumed, and the session is
+flushed before the loop returns. It is the primitive a graceful update or an
+exec-in-place reload builds on — persist, quiesce, then swap — because a process
+replacement runs no destructors, so nothing durable may be left only in memory
+when it happens.
+
+The request is raised on a clonable signal (`quiesce_signal()`), so a host on
+another task can wind the turn down while it runs, exactly as it can steer. It is
+honoured at the same safe boundaries as cancellation:
+
+- **Before a provider call, and while the response streams** — no tool is
+  running, so the turn simply flushes and stops.
+- **Between tool calls, and while a tool is running** — the interesting case. The
+  running call and every still-queued call in the batch are answered, so the
+  wire's one-`tool_result`-per-`tool_use` pairing stays valid, and then the turn
+  stops. How each is answered depends on the tool:
+  - A **wait-like tool** — one whose whole job is to wait, so re-issuing it has no
+    extra effect — is answered with a **non-error, resumable** result that embeds
+    its exact original input. The model can re-issue the identical call verbatim
+    after the process comes back.
+  - Every other interrupted or skipped tool is answered with a plain interrupted
+    result, because re-issuing a tool that *changes* something would repeat the
+    effect.
+
+The turn stops with reason `Quiesced`, which is distinct from `Cancelled`
+precisely because it is not a discard. Enforced by the `localpilot-harness`
+`quiesce` test suite (`cargo test -p localpilot-harness --test quiesce`).
+
 ## Bad-Output Recovery
 
 A turn can end badly without a provider error: degenerate text (a punctuation

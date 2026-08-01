@@ -69,6 +69,12 @@ pub enum StopReason {
     /// unbounded hang. The per-turn handoff (`last_turn_handoff`) summarizes what
     /// the turn had done when it was cut off.
     TimedOut,
+    /// A graceful shutdown was requested (`quiesce_signal`): the turn stopped at
+    /// the next safe boundary after flushing the session. Distinct from
+    /// `Cancelled` because it is *not* a discard — a wait-like tool interrupted
+    /// mid-flight leaves a resumable, non-error result, so the turn can be
+    /// continued after the process comes back (e.g. a self-dev reload).
+    Quiesced,
 }
 
 /// A bounded, parseable summary of what a turn accomplished, surfaced at the
@@ -450,6 +456,41 @@ impl SteerQueue {
     }
 }
 
+/// A one-way "wind this turn down gracefully" request, honoured at the same safe
+/// boundaries as cancellation but with a gentler contract.
+///
+/// Where cancelling *discards* the running turn, quiescing *finishes it safely*:
+/// the turn stops at the next boundary, but a wait-like tool caught mid-flight is
+/// answered with a non-error, resumable result (so the exact call can be
+/// re-issued later) rather than an abort, and the session is flushed before the
+/// loop returns. It is the primitive a graceful shutdown or an exec-in-place
+/// reload builds on — persist, quiesce, then swap — because `exec` runs no
+/// destructors, so nothing durable may be left only in memory when it fires.
+///
+/// A clone shares one underlying signal, so a host holding a clone can request a
+/// quiesce on the running turn from another task, exactly as [`SteerQueue`] lets
+/// it steer.
+#[derive(Debug, Clone, Default)]
+pub struct QuiesceSignal(CancellationToken);
+
+impl QuiesceSignal {
+    /// Request a graceful wind-down of the running turn. Idempotent.
+    pub fn request(&self) {
+        self.0.cancel();
+    }
+
+    /// Whether a wind-down has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// The underlying token, for awaiting the request inside a `select!`.
+    fn token(&self) -> &CancellationToken {
+        &self.0
+    }
+}
+
 const REPAIR_PROMPT: &str =
     "Your previous response was unusable. Stop, and produce a clean, well-formed reply.";
 
@@ -754,6 +795,9 @@ pub struct SessionRuntime {
     compaction_cache: Option<(u64, usize, CompactionResult)>,
     /// Steering input queued by the host while a turn runs.
     steer: SteerQueue,
+    /// A graceful-shutdown request the host can raise while a turn runs, honoured
+    /// at the turn's safe boundaries (pre-stream, per stream event, per tool).
+    quiesce: QuiesceSignal,
     /// Registered lifecycle observers, context hooks, and tool gates.
     hooks: HookFabric,
     /// Per-tool failure counts within the current turn.
@@ -872,6 +916,7 @@ impl SessionRuntime {
             history_generation: 0,
             compaction_cache: None,
             steer: SteerQueue::default(),
+            quiesce: QuiesceSignal::default(),
             hooks: HookFabric::default(),
             tool_failure_guard: ToolFailureGuard::default(),
             error_breaker: RepeatedErrorBreaker::default(),
@@ -1543,6 +1588,15 @@ impl SessionRuntime {
         self.steer.clone()
     }
 
+    /// A clonable handle for requesting a graceful wind-down of the running turn.
+    /// The request is honoured at the turn's next safe boundary: a wait-like tool
+    /// caught mid-flight is answered with a resumable, non-error result and the
+    /// session is flushed before the loop returns with [`StopReason::Quiesced`].
+    #[must_use]
+    pub fn quiesce_signal(&self) -> QuiesceSignal {
+        self.quiesce.clone()
+    }
+
     /// A clonable handle to the background-process registry, so the UI can list
     /// and stop processes while a turn is in flight (the registry is
     /// interior-mutable behind a single lock).
@@ -2168,6 +2222,10 @@ impl SessionRuntime {
             .config
             .turn_timeout
             .map(|timeout| tokio::time::Instant::now() + timeout);
+        // A clone of the graceful-shutdown signal, awaited in the same `select!`s
+        // as `cancel`. A clone shares the underlying token, so a request raised on
+        // the runtime's handle from another task is seen here.
+        let quiesce = self.quiesce.clone();
         let contribution = self.hooks.contribute(user_input);
         let retrieval_text = contribution.text.unwrap_or_default();
         if !contribution.memories.is_empty() {
@@ -2233,6 +2291,12 @@ impl SessionRuntime {
         'turn: loop {
             if cancel.is_cancelled() {
                 return self.stop(events, StopReason::Cancelled);
+            }
+            // A graceful wind-down requested before this iteration streams: no tool
+            // is running here, so there is nothing to leave resumable — flush and
+            // stop cleanly.
+            if quiesce.is_requested() {
+                return self.stop(events, StopReason::Quiesced);
             }
             if deadline.is_some_and(|dl| tokio::time::Instant::now() >= dl) {
                 return self.stop(events, StopReason::TimedOut);
@@ -2321,6 +2385,13 @@ impl SessionRuntime {
                 tokio::select! {
                     () = cancel.cancelled() => {
                         return self.stop(events, StopReason::Cancelled);
+                    }
+                    // A graceful wind-down requested while streaming: no tool is
+                    // running, so the partial response is discarded (like cancel)
+                    // and the turn stops after a flush. The next turn can resume the
+                    // conversation cleanly.
+                    () = quiesce.token().cancelled() => {
+                        return self.stop(events, StopReason::Quiesced);
                     }
                     // Bounded turn deadline (when configured). `sleep_until` targets
                     // an absolute instant, so re-arming it each iteration does not
@@ -2691,6 +2762,14 @@ impl SessionRuntime {
 
             // Execute tool calls through the permission-gated registry.
             for (call_index, (id, name, input, _)) in calls.iter().enumerate() {
+                // A graceful wind-down requested between tool calls: answer this
+                // call and every remaining tool_use (resumable for a wait-like
+                // tool, interrupted otherwise), flush, and stop. Checked before
+                // dispatch so a queued call is never started once a shutdown is in
+                // progress.
+                if quiesce.is_requested() {
+                    return self.quiesce_tool_batch(&calls, call_index, events);
+                }
                 // Point C: an urgent interrupt arrived mid-batch. Answer this call
                 // and every remaining tool_use with a skipped result (the wire
                 // contract requires one result per tool_use), admit the interrupt,
@@ -2925,6 +3004,11 @@ impl SessionRuntime {
                             };
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
+                                // A graceful wind-down requested while this tool is
+                                // running: abort the wait and fall through to the
+                                // quiesce path below, which leaves a resumable
+                                // result for a wait-like tool rather than an abort.
+                                () = quiesce.token().cancelled() => None,
                                 result = self.tools.dispatch_reporting(
                                     &active_call,
                                     &ctx,
@@ -3005,6 +3089,13 @@ impl SessionRuntime {
                     )));
                 }
                 let Some(mut result) = result else {
+                    // The dispatch produced no result: it was interrupted. A
+                    // graceful wind-down takes the resumable path (this call and
+                    // the rest of the batch answered without an abort); otherwise
+                    // it was a cancel, which discards.
+                    if quiesce.is_requested() {
+                        return self.quiesce_tool_batch(&calls, call_index, events);
+                    }
                     let aborted = localpilot_core::ToolResult::error(
                         ToolUseId::from(id.as_str()),
                         "cancelled by the user; execution aborted",
@@ -3323,6 +3414,62 @@ impl SessionRuntime {
         reason
     }
 
+    /// Answer every not-yet-answered `tool_use` in `calls[from..]` for a graceful
+    /// wind-down, then flush and stop with [`StopReason::Quiesced`].
+    ///
+    /// Each answered call keeps the wire's one-result-per-`tool_use` contract, so
+    /// the persisted history stays valid and a resumed session replays cleanly.
+    /// A **wait-like** tool (one whose whole job is to wait, so re-running it has
+    /// no extra side effect) is answered with a *non-error, resumable* result that
+    /// embeds its original input JSON — the model can re-issue the exact call on
+    /// resume. Every other interrupted tool is answered with a plain interrupted
+    /// result, and every queued-but-unstarted call with a skipped one.
+    ///
+    /// `from` is the index of the first call that has no result yet — the calls
+    /// before it already ran and were answered in earlier iterations.
+    fn quiesce_tool_batch(
+        &mut self,
+        calls: &[(String, String, serde_json::Value, Option<serde_json::Value>)],
+        from: usize,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> StopReason {
+        for (position, (id, name, input, _)) in calls[from..].iter().enumerate() {
+            // The first unanswered call may have been interrupted mid-run; the
+            // rest were never started. Only the first can be a running wait; a
+            // queued call is simply skipped.
+            let running = position == 0;
+            let message = if running && is_resumable_wait_tool(name) {
+                resumable_wait_result(id, name, input)
+            } else if running {
+                tool_error_message(
+                    id,
+                    "interrupted: a graceful shutdown ended the turn before this tool finished",
+                )
+            } else {
+                tool_error_message(
+                    id,
+                    "skipped: a graceful shutdown ended the turn before this tool ran",
+                )
+            };
+            let is_error = message_is_error(&message);
+            self.record_event(SessionEventKind::ToolFinished {
+                id: id.clone(),
+                name: name.clone(),
+                is_error,
+                outcome: Some(if is_error {
+                    ToolOutcome::Unusable
+                } else {
+                    ToolOutcome::Ok
+                }),
+            });
+            self.append(message);
+        }
+        let _ = events.send(RuntimeEvent::Warning(
+            "graceful shutdown: flushing the session and stopping the turn".to_string(),
+        ));
+        self.stop(events, StopReason::Quiesced)
+    }
+
     fn persist_recovery(&self, diagnostic: &localpilot_recovery::RecoveryDiagnostic) {
         if let Ok(json) = serde_json::to_string(diagnostic) {
             let key = format!("recovery-{}", self.session_id);
@@ -3343,6 +3490,46 @@ fn tool_error_message(id: &str, output: &str) -> Message {
             localpilot_core::ToolResult::error(ToolUseId::from(id), output),
         )],
     )
+}
+
+/// Whether a tool is *wait-like*: its whole job is to wait for something, so
+/// interrupting it leaves nothing half-done and re-issuing the identical call on
+/// resume simply resumes the wait. These are the tools that get a resumable,
+/// non-error result on a graceful shutdown rather than an interrupted one.
+///
+/// A tool that *changes* something (a write, a shell command, an edit) is
+/// deliberately excluded: re-issuing it would repeat the effect, so an
+/// interrupted result is the honest answer.
+fn is_resumable_wait_tool(name: &str) -> bool {
+    matches!(name, "run_background" | "swarm")
+}
+
+/// A non-error `tool_result` for a wait-like tool interrupted by a graceful
+/// shutdown, embedding the *exact* original input so the model can re-issue the
+/// identical call verbatim on resume. It is deliberately not an error: nothing
+/// failed and nothing was left half-done — the wait was simply cut short.
+fn resumable_wait_result(id: &str, name: &str, input: &serde_json::Value) -> Message {
+    let payload = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let text = format!(
+        "Not an error: this `{name}` call was interrupted by a graceful shutdown before its \
+         wait completed. Nothing failed and nothing was left half-done. To resume, re-issue the \
+         identical call with this input: {payload}"
+    );
+    Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(
+            localpilot_core::ToolResult::success(ToolUseId::from(id), text),
+        )],
+    )
+}
+
+/// Whether a synthesized tool-result message carries an error outcome, for the
+/// `ToolFinished` audit event that accompanies it.
+fn message_is_error(message: &Message) -> bool {
+    message.content.iter().any(|block| match block {
+        ContentBlock::ToolResult(result) => result.is_error(),
+        _ => false,
+    })
 }
 
 /// Replace raw control characters (other than tab, newline, carriage return)

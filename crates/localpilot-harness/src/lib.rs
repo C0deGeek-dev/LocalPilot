@@ -85,9 +85,9 @@ pub use localx_eval_core::{
     RankingTrust, ResultsBlock, Scorecard, SpeedBlock, RANKING_FIXTURES, RUBRIC, SCORECARD_SCHEMA,
 };
 pub use session::{
-    effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
-    SessionRecovery, SessionRuntime, SoftInterrupt, SoftInterruptSource, SteerQueue, StopReason,
-    SwitchError, SwitchOutcome, TurnHandoff,
+    effective_context_limit, ManualCompaction, PlanStep, QuiesceSignal, RuntimeEvent,
+    SessionConfig, SessionRecovery, SessionRuntime, SoftInterrupt, SoftInterruptSource, SteerQueue,
+    StopReason, SwitchError, SwitchOutcome, TurnHandoff,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
 pub use system_prompt::{
