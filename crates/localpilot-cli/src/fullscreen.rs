@@ -1038,17 +1038,7 @@ fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) ->
 }
 
 fn apply_host_preferences(app: &mut AppModel) {
-    if let Some(value) = std::env::var_os(CHAT_THEME_ENV) {
-        match value.into_string() {
-            Ok(value) => match value.parse::<Theme>() {
-                Ok(theme) => app.theme = theme,
-                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
-            },
-            Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
-                "{CHAT_THEME_ENV} contains non-Unicode text; using the default theme"
-            ))),
-        }
-    }
+    apply_theme_preference(app, std::env::var_os(CHAT_THEME_ENV));
     if let Some(value) = std::env::var_os(CHAT_COPY_ON_SELECT_ENV) {
         match value.into_string() {
             Ok(value) => match parse_bool_setting(&value) {
@@ -1083,6 +1073,20 @@ fn apply_host_preferences(app: &mut AppModel) {
         app.apply_runtime(RuntimeUpdate::Warning(format!(
             "{CHAT_SCREEN_READER_ENV} must be true, false, 1, or 0; using false"
         )));
+    }
+}
+
+fn apply_theme_preference(app: &mut AppModel, value: Option<OsString>) {
+    if let Some(value) = value {
+        match value.into_string() {
+            Ok(value) => match value.parse::<Theme>() {
+                Ok(theme) => app.theme = theme,
+                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+            },
+            Err(_) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "{CHAT_THEME_ENV} contains non-Unicode text; using the default theme"
+            ))),
+        }
     }
 }
 
@@ -3234,6 +3238,24 @@ mod tests {
         )
     }
 
+    #[test]
+    fn theme_host_preference_is_opt_in_and_invalid_values_keep_the_default() {
+        let mut unset = app();
+        apply_theme_preference(&mut unset, None);
+        assert_eq!(unset.theme, Theme::Default);
+
+        let mut terminal = app();
+        apply_theme_preference(&mut terminal, Some(OsString::from("terminal")));
+        assert_eq!(terminal.theme, Theme::Terminal);
+
+        let mut invalid = app();
+        apply_theme_preference(&mut invalid, Some(OsString::from("brand-theme")));
+        assert_eq!(invalid.theme, Theme::Default);
+        assert!(invalid.timeline.items().iter().any(|item| item
+            .text
+            .contains("unknown terminal chat theme \"brand-theme\"")));
+    }
+
     fn image_capability(vision_capable: bool) -> ImageCapabilitySnapshot {
         ImageCapabilitySnapshot {
             provider_id: "fixture".to_string(),
@@ -4279,7 +4301,11 @@ mod tests {
         app.open_theme_picker();
         let hit_map = draw_hit_map(&app, 80, 24);
         assert_eq!(hit_map.theme_rows.len(), Theme::ALL.len());
-        let dim = hit_map.theme_rows[1];
+        let dim_index = Theme::ALL
+            .iter()
+            .position(|theme| *theme == Theme::Dim)
+            .expect("dim theme");
+        let dim = hit_map.theme_rows[dim_index];
         let mut mouse_state = MouseState::default();
 
         assert_eq!(

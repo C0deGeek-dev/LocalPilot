@@ -7,9 +7,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView};
 use crate::{
-    ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
-    TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
-    MINIMUM_HEIGHT, MINIMUM_WIDTH,
+    ActivityState, AppModel, ColorSupport, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt,
+    TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart,
+    APP_NAME, MINIMUM_HEIGHT, MINIMUM_WIDTH,
 };
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
@@ -822,8 +822,8 @@ fn render_diff_takeover(
             UiRole::Selection
         } else {
             match line.kind {
-                crate::DiffLineKind::Addition => UiRole::Success,
-                crate::DiffLineKind::Deletion => UiRole::Error,
+                crate::DiffLineKind::Addition => UiRole::DiffAddition,
+                crate::DiffLineKind::Deletion => UiRole::DiffDeletion,
                 crate::DiffLineKind::Hunk => UiRole::Accent,
                 crate::DiffLineKind::Context | crate::DiffLineKind::Metadata => UiRole::Foreground,
             }
@@ -854,8 +854,20 @@ fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) 
     let Some(picker) = app.theme_picker() else {
         return Vec::new();
     };
-    let width = 62.min(frame_area.width.saturating_sub(4)).max(30);
-    let height = 13.min(frame_area.height.saturating_sub(2)).max(10);
+    let screen_reader = app.capabilities.screen_reader;
+    let compact = frame_area.width < 50 || frame_area.height < 13;
+    let width = if compact {
+        frame_area.width
+    } else {
+        62.min(frame_area.width.saturating_sub(4))
+    };
+    let height = if compact {
+        frame_area.height
+    } else if screen_reader {
+        12.min(frame_area.height)
+    } else {
+        13.min(frame_area.height.saturating_sub(2))
+    };
     let area = Rect::new(
         frame_area
             .x
@@ -868,27 +880,54 @@ fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) 
     );
     let theme = theme(app);
     frame.render_widget(Clear, area);
-    let block = Block::bordered()
-        .title(" Select a color mode ")
-        .style(theme.ui(UiRole::Surface))
-        .border_style(theme.ui(UiRole::Border));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = if screen_reader {
+        frame.render_widget(Block::default().style(theme.ui(UiRole::Background)), area);
+        frame.render_widget(
+            Paragraph::new("Select a color mode").style(theme.ui(UiRole::Prompt)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        area
+    } else {
+        let block = Block::bordered()
+            .title(" Select a color mode ")
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .style(theme.ui(UiRole::Surface))
+            .border_style(theme.ui(UiRole::Border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
     if inner.height == 0 {
         return Vec::new();
     }
-    frame.render_widget(
-        Paragraph::new("Choose LocalPilot's semantic terminal colors.")
-            .style(theme.ui(UiRole::Foreground)),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
+    let show_intro = !compact;
+    if show_intro {
+        frame.render_widget(
+            Paragraph::new("Choose LocalPilot's semantic terminal colors.")
+                .style(theme.ui(UiRole::Foreground)),
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(u16::from(screen_reader)),
+                inner.width,
+                1,
+            ),
+        );
+    }
 
-    let option_width = 22.min(inner.width);
+    let option_start = inner
+        .y
+        .saturating_add(if screen_reader { 1 } else { 0 })
+        .saturating_add(u16::from(show_intro));
+    let option_width = if compact {
+        inner.width
+    } else {
+        22.min(inner.width)
+    };
     let mut hits = Vec::new();
     for (index, option) in Theme::ALL.iter().enumerate() {
         let row = u16::try_from(index).unwrap_or(u16::MAX);
-        let y = inner.y.saturating_add(2).saturating_add(row);
-        if y >= inner.bottom().saturating_sub(2) {
+        let y = option_start.saturating_add(row);
+        if y >= inner.bottom() {
             break;
         }
         let selected = index == picker.selected;
@@ -908,18 +947,25 @@ fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) 
 
     let preview_x = inner.x.saturating_add(option_width).saturating_add(1);
     let preview_width = inner.right().saturating_sub(preview_x);
-    if preview_width > 0 {
-        for (offset, (text, role)) in [
-            ("1 - fn previous()", UiRole::Error),
-            ("1 + fn improved()", UiRole::Success),
-            ("2   return result", UiRole::Code),
-            ("3   // selected", UiRole::Focus),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+    if !compact && !screen_reader && preview_width > 0 {
+        let sample = if app.capabilities.color == ColorSupport::NoColor {
+            [
+                ("- removed (underlined)", UiRole::DiffDeletion),
+                ("+ added (bold)", UiRole::DiffAddition),
+                ("  colors disabled", UiRole::Foreground),
+                ("  selected", UiRole::Focus),
+            ]
+        } else {
+            [
+                ("1 - fn previous()", UiRole::DiffDeletion),
+                ("1 + fn improved()", UiRole::DiffAddition),
+                ("2   return result", UiRole::Code),
+                ("3   // selected", UiRole::Focus),
+            ]
+        };
+        for (offset, (text, role)) in sample.into_iter().enumerate() {
             let row = u16::try_from(offset).unwrap_or(u16::MAX);
-            let y = inner.y.saturating_add(2).saturating_add(row);
+            let y = option_start.saturating_add(row);
             if y >= inner.bottom().saturating_sub(2) {
                 break;
             }
@@ -934,19 +980,46 @@ fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) 
         .get(picker.selected)
         .copied()
         .unwrap_or(Theme::Default);
+    let option_end =
+        option_start.saturating_add(u16::try_from(Theme::ALL.len()).unwrap_or(u16::MAX));
+    let footer_y = inner.bottom().saturating_sub(1);
+    let selection_y = footer_y.saturating_sub(1);
+    let description_y = if screen_reader {
+        selection_y.saturating_sub(1)
+    } else {
+        footer_y.saturating_sub(1)
+    }
+    .max(option_end.min(inner.bottom().saturating_sub(1)));
     frame.render_widget(
         Paragraph::new(theme_description(selected)).style(theme.ui(UiRole::Muted)),
-        Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+        Rect::new(inner.x, description_y, inner.width, 1),
     );
+    if screen_reader {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Current selection: {}. {}",
+                picker.selected + 1,
+                selected.display_name()
+            ))
+            .style(theme.ui(UiRole::Focus)),
+            Rect::new(inner.x, selection_y, inner.width, 1),
+        );
+    }
+    let footer = if compact {
+        "Enter select · Esc cancel"
+    } else {
+        "↑/↓ preview · Enter select · Esc cancel"
+    };
     frame.render_widget(
-        Paragraph::new("↑/↓ preview · Enter select · Esc cancel").style(theme.ui(UiRole::Muted)),
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        Paragraph::new(footer).style(theme.ui(UiRole::Muted)),
+        Rect::new(inner.x, footer_y, inner.width, 1),
     );
     hits
 }
 
 fn theme_description(theme: Theme) -> &'static str {
     match theme {
+        Theme::Terminal => "Use the terminal's base-16 palette",
         Theme::Default => "Balanced colors for dark terminal backgrounds",
         Theme::Dim => "Lower-intensity chrome and conversation colors",
         Theme::HighContrast => "Strong non-color separation and bright focus",
@@ -2850,6 +2923,11 @@ mod tests {
         assert!(rendered.contains("new"));
         assert_eq!(hit_map.takeover_file_rows.len(), 1);
         assert_eq!(hit_map.takeover_rows.len(), 3);
+        let deletion = hit_map.takeover_rows[1].area;
+        assert_eq!(
+            terminal.backend().buffer()[(deletion.x, deletion.y)].style(),
+            ThemeResolver::new(Theme::Default, ColorSupport::Color).ui(UiRole::DiffDeletion)
+        );
     }
 
     #[test]
@@ -2926,11 +3004,61 @@ mod tests {
         let hit_map = hit_map.expect("hit map");
         assert_eq!(hit_map.theme_rows.len(), Theme::ALL.len());
         assert!(rendered.contains("Select a color mode"));
-        assert!(rendered.contains("1. Default ✓"));
-        assert!(rendered.contains("❯2. Dim"));
+        assert!(rendered.contains("1. Terminal"));
+        assert!(rendered.contains("2. Default ✓"));
+        assert!(rendered.contains("❯3. Dim"));
         assert!(rendered.contains("1 - fn previous()"));
         assert!(rendered.contains("Enter select · Esc cancel"));
         assert_eq!(app.theme, Theme::Dim);
+    }
+
+    #[test]
+    fn theme_picker_keeps_all_five_choices_at_minimum_and_is_explicit_for_screen_readers() {
+        for screen_reader in [false, true] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.open_theme_picker();
+            let mut terminal = Terminal::new(TestBackend::new(30, 10)).expect("terminal");
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, &app)))
+                .expect("draw compact theme picker");
+
+            let rendered = terminal.backend().to_string();
+            let hit_map = hit_map.expect("theme hits");
+            assert!(rendered.contains("Select a color mode"));
+            assert!(rendered.contains("1. Terminal"));
+            assert!(rendered.contains("2. Default ✓"));
+            assert!(rendered.contains("3. Dim"));
+            assert!(rendered.contains("4. High contrast"));
+            assert!(rendered.contains("5. Colorblind"));
+            assert!(rendered.contains("Enter select · Esc cancel"));
+            assert_eq!(hit_map.theme_rows.len(), 5);
+            if screen_reader {
+                assert!(rendered.contains("Current selection: 2. Default"));
+                assert!(!rendered.contains('╭'));
+            } else {
+                assert!(rendered.contains('╭'));
+            }
+        }
+    }
+
+    #[test]
+    fn no_color_theme_picker_names_non_color_diff_cues() {
+        let mut app = model();
+        app.capabilities.color = ColorSupport::NoColor;
+        app.open_theme_picker();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw no-color theme picker");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("removed (underlined)"));
+        assert!(rendered.contains("added (bold)"));
+        assert!(rendered.contains("colors disabled"));
     }
 
     #[test]
@@ -3513,12 +3641,7 @@ mod tests {
 
     #[test]
     fn theme_frame_goldens_route_active_tabs_through_the_resolver() {
-        for theme_name in [
-            Theme::Default,
-            Theme::Dim,
-            Theme::HighContrast,
-            Theme::Colorblind,
-        ] {
+        for theme_name in Theme::ALL {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).expect("test terminal");
             let mut app = model();

@@ -10,13 +10,15 @@ use crate::{ColorSupport, SemanticRole, TextStyle};
 pub enum Theme {
     #[default]
     Default,
+    Terminal,
     Dim,
     HighContrast,
     Colorblind,
 }
 
 impl Theme {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Terminal,
         Self::Default,
         Self::Dim,
         Self::HighContrast,
@@ -27,6 +29,7 @@ impl Theme {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Terminal => "terminal",
             Self::Dim => "dim",
             Self::HighContrast => "high-contrast",
             Self::Colorblind => "colorblind",
@@ -37,6 +40,7 @@ impl Theme {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Default => "Default",
+            Self::Terminal => "Terminal",
             Self::Dim => "Dim",
             Self::HighContrast => "High contrast",
             Self::Colorblind => "Colorblind",
@@ -53,7 +57,7 @@ impl fmt::Display for ThemeParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "unknown terminal chat theme {:?}; expected default, dim, high-contrast, or colorblind",
+            "unknown terminal chat theme {:?}; expected default, terminal, dim, high-contrast, or colorblind",
             self.value
         )
     }
@@ -67,6 +71,7 @@ impl FromStr for Theme {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(Self::Default),
+            "terminal" | "base16" | "base-16" => Ok(Self::Terminal),
             "dim" => Ok(Self::Dim),
             "high-contrast" | "high_contrast" => Ok(Self::HighContrast),
             "colorblind" | "color-blind" => Ok(Self::Colorblind),
@@ -94,6 +99,8 @@ pub enum UiRole {
     Warning,
     Success,
     Error,
+    DiffAddition,
+    DiffDeletion,
     Code,
 }
 
@@ -161,9 +168,13 @@ fn no_color_style(role: UiRole) -> Style {
         UiRole::Accent | UiRole::Focus | UiRole::Prompt | UiRole::Success => {
             Style::default().add_modifier(Modifier::BOLD)
         }
+        UiRole::DiffAddition => Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED),
         UiRole::Warning | UiRole::Error => Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::UNDERLINED),
+        UiRole::DiffDeletion => Style::default().add_modifier(Modifier::UNDERLINED),
         UiRole::Muted | UiRole::TabInactive | UiRole::Border => {
             Style::default().add_modifier(Modifier::DIM)
         }
@@ -176,6 +187,7 @@ fn no_color_style(role: UiRole) -> Style {
 fn color_style(theme: Theme, role: UiRole) -> Style {
     let (foreground, background, modifier) = match theme {
         Theme::Default => default_colors(role),
+        Theme::Terminal => terminal_colors(role),
         Theme::Dim => dim_colors(role),
         Theme::HighContrast => high_contrast_colors(role),
         Theme::Colorblind => colorblind_colors(role),
@@ -188,6 +200,27 @@ fn color_style(theme: Theme, role: UiRole) -> Style {
         style = style.add_modifier(modifier);
     }
     style
+}
+
+fn terminal_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
+    match role {
+        UiRole::Background | UiRole::Surface | UiRole::SurfaceEdge | UiRole::Foreground => {
+            (Color::Reset, None, None)
+        }
+        UiRole::Prompt => (Color::Reset, None, Some(Modifier::BOLD)),
+        UiRole::Muted | UiRole::TabInactive | UiRole::Border => {
+            (Color::DarkGray, None, Some(Modifier::DIM))
+        }
+        UiRole::Accent | UiRole::Focus => (Color::Blue, None, Some(Modifier::BOLD)),
+        UiRole::TabActive => (Color::Black, Some(Color::Blue), Some(Modifier::BOLD)),
+        UiRole::Selection => (Color::Black, Some(Color::LightBlue), None),
+        UiRole::Warning => (Color::Yellow, None, Some(Modifier::BOLD)),
+        UiRole::Success => (Color::Green, None, Some(Modifier::BOLD)),
+        UiRole::Error => (Color::Red, None, Some(Modifier::BOLD)),
+        UiRole::DiffAddition => (Color::LightGreen, None, Some(Modifier::BOLD)),
+        UiRole::DiffDeletion => (Color::LightRed, None, Some(Modifier::UNDERLINED)),
+        UiRole::Code => (Color::Cyan, None, None),
+    }
 }
 
 fn default_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
@@ -227,6 +260,16 @@ fn default_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
         UiRole::Warning => (Color::Rgb(0xd2, 0x99, 0x22), None, None),
         UiRole::Success => (Color::Rgb(0x3f, 0xb9, 0x50), None, None),
         UiRole::Error => (Color::Rgb(0xf8, 0x51, 0x49), None, Some(Modifier::BOLD)),
+        UiRole::DiffAddition => (
+            Color::Rgb(0xaf, 0xff, 0xc3),
+            Some(Color::Rgb(0x12, 0x32, 0x20)),
+            None,
+        ),
+        UiRole::DiffDeletion => (
+            Color::Rgb(0xff, 0xb8, 0xb0),
+            Some(Color::Rgb(0x3a, 0x19, 0x1b)),
+            None,
+        ),
         UiRole::Code => (Color::Rgb(0xa5, 0xd6, 0xff), None, None),
     }
 }
@@ -247,6 +290,12 @@ fn dim_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
         UiRole::Warning => (Color::DarkGray, None, Some(Modifier::UNDERLINED)),
         UiRole::Success => (Color::Cyan, None, None),
         UiRole::Error => (Color::LightRed, None, None),
+        UiRole::DiffAddition => (Color::Cyan, Some(Color::Black), Some(Modifier::BOLD)),
+        UiRole::DiffDeletion => (
+            Color::LightRed,
+            Some(Color::Black),
+            Some(Modifier::UNDERLINED),
+        ),
         UiRole::Code => (Color::Gray, Some(Color::Black), None),
     }
 }
@@ -264,6 +313,8 @@ fn high_contrast_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>
         UiRole::Warning => (Color::Yellow, None, Some(Modifier::BOLD)),
         UiRole::Success => (Color::LightGreen, None, Some(Modifier::BOLD)),
         UiRole::Error => (Color::LightRed, None, Some(Modifier::BOLD)),
+        UiRole::DiffAddition => (Color::Black, Some(Color::White), Some(Modifier::BOLD)),
+        UiRole::DiffDeletion => (Color::White, Some(Color::Black), Some(Modifier::UNDERLINED)),
         UiRole::Code => (Color::Black, Some(Color::White), None),
     }
 }
@@ -294,6 +345,16 @@ fn colorblind_colors(role: UiRole) -> (Color, Option<Color>, Option<Modifier>) {
         UiRole::TabActive => (Color::White, Some(Color::Blue), Some(Modifier::BOLD)),
         UiRole::Selection => (Color::Black, Some(Color::LightBlue), None),
         UiRole::Warning | UiRole::Error => (Color::LightYellow, None, Some(Modifier::BOLD)),
+        UiRole::DiffAddition => (
+            Color::LightYellow,
+            Some(Color::Rgb(0x3d, 0x31, 0x00)),
+            Some(Modifier::BOLD),
+        ),
+        UiRole::DiffDeletion => (
+            Color::LightBlue,
+            Some(Color::Rgb(0x0c, 0x2d, 0x48)),
+            Some(Modifier::UNDERLINED),
+        ),
         UiRole::Code => (Color::LightYellow, Some(Color::Black), None),
     }
 }
@@ -303,8 +364,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parser_accepts_the_four_public_theme_names() {
+    fn parser_accepts_the_five_public_theme_names() {
         assert_eq!("default".parse::<Theme>(), Ok(Theme::Default));
+        assert_eq!("terminal".parse::<Theme>(), Ok(Theme::Terminal));
+        assert_eq!("base-16".parse::<Theme>(), Ok(Theme::Terminal));
         assert_eq!("dim".parse::<Theme>(), Ok(Theme::Dim));
         assert_eq!("high-contrast".parse::<Theme>(), Ok(Theme::HighContrast));
         assert_eq!("colorblind".parse::<Theme>(), Ok(Theme::Colorblind));
@@ -335,6 +398,83 @@ mod tests {
         let error = resolver.ui(UiRole::Error).fg;
         assert!(!matches!(success, Some(Color::Red | Color::Green)));
         assert!(!matches!(error, Some(Color::Red | Color::Green)));
+    }
+
+    #[test]
+    fn theme_order_keeps_default_second_without_changing_the_default_variant() {
+        assert_eq!(Theme::default(), Theme::Default);
+        assert_eq!(
+            Theme::ALL,
+            [
+                Theme::Terminal,
+                Theme::Default,
+                Theme::Dim,
+                Theme::HighContrast,
+                Theme::Colorblind,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_theme_uses_only_reset_or_named_base16_colors() {
+        let resolver = ThemeResolver::new(Theme::Terminal, ColorSupport::Color);
+        for role in [
+            UiRole::Background,
+            UiRole::Surface,
+            UiRole::SurfaceEdge,
+            UiRole::Foreground,
+            UiRole::Prompt,
+            UiRole::Muted,
+            UiRole::Accent,
+            UiRole::Border,
+            UiRole::Focus,
+            UiRole::TabActive,
+            UiRole::TabInactive,
+            UiRole::Selection,
+            UiRole::Warning,
+            UiRole::Success,
+            UiRole::Error,
+            UiRole::DiffAddition,
+            UiRole::DiffDeletion,
+            UiRole::Code,
+        ] {
+            let style = resolver.ui(role);
+            assert!(!matches!(style.fg, Some(Color::Rgb(..))));
+            assert!(!matches!(style.bg, Some(Color::Rgb(..))));
+        }
+    }
+
+    #[test]
+    fn diff_roles_are_distinct_from_labels_in_every_palette_and_no_color() {
+        for theme in Theme::ALL {
+            let resolver = ThemeResolver::new(theme, ColorSupport::Color);
+            let addition = resolver.ui(UiRole::DiffAddition);
+            let deletion = resolver.ui(UiRole::DiffDeletion);
+            assert_ne!(addition, deletion, "{theme:?}");
+            assert_eq!(resolver.ui(UiRole::Success).bg, None, "{theme:?}");
+            assert_eq!(resolver.ui(UiRole::Error).bg, None, "{theme:?}");
+            assert_ne!(addition, resolver.ui(UiRole::Success), "{theme:?}");
+            assert_ne!(deletion, resolver.ui(UiRole::Error), "{theme:?}");
+        }
+
+        let no_color = ThemeResolver::new(Theme::Default, ColorSupport::NoColor);
+        let addition = no_color.ui(UiRole::DiffAddition);
+        let deletion = no_color.ui(UiRole::DiffDeletion);
+        assert!(addition.add_modifier.contains(Modifier::BOLD));
+        assert!(deletion.add_modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(addition, deletion);
+        assert_ne!(addition, no_color.ui(UiRole::Success));
+        assert_ne!(deletion, no_color.ui(UiRole::Error));
+
+        let colorblind = ThemeResolver::new(Theme::Colorblind, ColorSupport::Color);
+        let colorblind_addition = colorblind.ui(UiRole::DiffAddition);
+        let colorblind_deletion = colorblind.ui(UiRole::DiffDeletion);
+        assert_eq!(colorblind_addition.bg, Some(Color::Rgb(0x3d, 0x31, 0x00)));
+        assert_eq!(colorblind_deletion.bg, Some(Color::Rgb(0x0c, 0x2d, 0x48)));
+        for style in [colorblind_addition, colorblind_deletion] {
+            assert!(!matches!(style.fg, Some(Color::Red | Color::Green)));
+            assert!(!matches!(style.bg, Some(Color::Red | Color::Green)));
+        }
     }
 
     #[test]
