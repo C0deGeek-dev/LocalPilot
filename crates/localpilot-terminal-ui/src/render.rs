@@ -1893,7 +1893,6 @@ fn role_prefix(
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
-    let area = inset_chrome(area);
     let theme = theme(app);
     let left = status_left(app);
     let right = status_right(app);
@@ -2591,7 +2590,6 @@ fn framed_composer_rule(
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
-    let area = inset_chrome(area);
     let state = footer_state(app);
     let shortcuts = "? help · / commands";
     let context = if matches!(app.work, crate::WorkState::Busy { .. }) {
@@ -2628,15 +2626,6 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
             Rect::new(x, area.y, 9.min(area.right().saturating_sub(x)), 1),
         );
     }
-}
-
-fn inset_chrome(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y,
-        area.width.saturating_sub(3),
-        area.height,
-    )
 }
 
 fn footer_state(app: &AppModel) -> String {
@@ -2884,9 +2873,16 @@ mod tests {
         assert!(hit_map.timeline.height > 0);
         assert!(hit_map.composer.height > 0);
         assert_eq!(
-            hit_map.timeline.right(),
+            hit_map.timeline.right().saturating_add(1),
             hit_map.scrollbar.track.x,
-            "timeline wrapping width must always exclude the scrollbar gutter"
+            "timeline wrapping must leave one blank cell before the scrollbar"
+        );
+        let layout = hit_map.frame.expect("frame layout");
+        assert_eq!(layout.status.x, hit_map.timeline.x);
+        assert_eq!(layout.footer.x, hit_map.timeline.x);
+        assert_eq!(
+            terminal.backend().buffer()[(hit_map.timeline.right(), hit_map.timeline.y)].symbol(),
+            " "
         );
     }
 

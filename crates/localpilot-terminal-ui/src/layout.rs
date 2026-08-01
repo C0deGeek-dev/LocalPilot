@@ -4,6 +4,9 @@ pub const MINIMUM_WIDTH: u16 = 30;
 pub const MINIMUM_HEIGHT: u16 = 10;
 const NARROW_WIDTH: u16 = 60;
 const MINIMUM_TIMELINE_HEIGHT: u16 = 3;
+const CONTENT_LEFT_INSET: u16 = 2;
+const CHROME_RIGHT_INSET: u16 = 2;
+const TIMELINE_SCROLLBAR_GAP: u16 = 1;
 
 /// The sole source of frame geometry for drawing and input hit-testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,18 +69,32 @@ impl FrameLayout {
             .split(area);
 
         let timeline = rows[1];
-        let timeline_content = Rect::new(
-            timeline.x.saturating_add(2),
-            timeline.y,
-            timeline.width.saturating_sub(4),
-            timeline.height,
-        );
         let scrollbar = Rect::new(
-            timeline.right().saturating_sub(2),
+            timeline.right().saturating_sub(CHROME_RIGHT_INSET),
             timeline.y,
             1,
             timeline.height,
         );
+        let timeline_content = Rect::new(
+            timeline.x.saturating_add(CONTENT_LEFT_INSET),
+            timeline.y,
+            timeline
+                .width
+                .saturating_sub(CONTENT_LEFT_INSET)
+                .saturating_sub(CHROME_RIGHT_INSET)
+                .saturating_sub(TIMELINE_SCROLLBAR_GAP),
+            timeline.height,
+        );
+        let inset_chrome = |row: Rect| {
+            Rect::new(
+                row.x.saturating_add(CONTENT_LEFT_INSET),
+                row.y,
+                row.width
+                    .saturating_sub(CONTENT_LEFT_INSET)
+                    .saturating_sub(CHROME_RIGHT_INSET),
+                row.height,
+            )
+        };
         let composer = Rect::new(
             rows[3].x.saturating_add(1),
             rows[3].y,
@@ -97,10 +114,10 @@ impl FrameLayout {
             timeline,
             timeline_content,
             scrollbar,
-            status: rows[2],
+            status: inset_chrome(rows[2]),
             composer,
             composer_content,
-            footer: rows[4],
+            footer: inset_chrome(rows[4]),
             narrow,
             stacked,
         })
@@ -122,7 +139,11 @@ mod tests {
         assert_eq!(layout.scrollbar.width, 1);
         assert_eq!(layout.timeline_content.x, 2);
         assert_eq!(layout.scrollbar.x, 78);
-        assert_eq!(layout.timeline_content.right(), layout.scrollbar.x);
+        assert_eq!(layout.timeline_content.right() + 1, layout.scrollbar.x);
+        assert_eq!(layout.status.x, layout.timeline_content.x);
+        assert_eq!(layout.footer.x, layout.timeline_content.x);
+        assert_eq!(layout.status.right(), layout.scrollbar.x);
+        assert_eq!(layout.footer.right(), layout.scrollbar.x);
         assert_eq!(layout.composer.x, 1);
         assert_eq!(layout.composer_content.x, 2);
         assert_eq!(layout.composer_content.height, 1);
@@ -159,5 +180,21 @@ mod tests {
     fn undersized_frames_do_not_produce_interactive_geometry() {
         assert!(FrameLayout::calculate(Rect::new(0, 0, 29, 24), 1).is_none());
         assert!(FrameLayout::calculate(Rect::new(0, 0, 80, 9), 1).is_none());
+    }
+
+    #[test]
+    fn content_and_chrome_gutters_stay_consistent_at_every_supported_width() {
+        for width in MINIMUM_WIDTH..=200 {
+            let layout =
+                FrameLayout::calculate(Rect::new(0, 0, width, 24), 1).expect("supported frame");
+            assert_eq!(layout.timeline_content.x, CONTENT_LEFT_INSET);
+            assert_eq!(layout.timeline_content.width, width - 5);
+            assert_eq!(layout.timeline_content.right() + 1, layout.scrollbar.x);
+            assert_eq!(layout.status.x, layout.timeline_content.x);
+            assert_eq!(layout.footer.x, layout.timeline_content.x);
+            assert_eq!(layout.status.right(), layout.scrollbar.x);
+            assert_eq!(layout.footer.right(), layout.scrollbar.x);
+            assert!(layout.timeline_content.width >= 25);
+        }
     }
 }
