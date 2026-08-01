@@ -2,9 +2,9 @@
 
 This file starts the decision log. Add new records at the top.
 
-## ADR-0117: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
+## ADR-0123: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
 
-Status: accepted. Builds on ADR-0116 (the opt-in server) and reuses ADR-0111 (the
+Status: accepted. Builds on ADR-0122 (the opt-in server) and reuses ADR-0111 (the
 soft-interrupt substrate); the crate map is in
 [`docs/02-architecture.md`](02-architecture.md).
 
@@ -62,7 +62,7 @@ approver is single-owner (only the connection that created a session answers its
 asks; a second client's reply fails closed with a clear error). Broadening it to
 per-client ask routing is a follow-up, not silently dropped.
 
-## ADR-0116: An Opt-In Persistent Server Over A Local-IPC Transport, With A Safe-Only Daemon Lifecycle
+## ADR-0122: An Opt-In Persistent Server Over A Local-IPC Transport, With A Safe-Only Daemon Lifecycle
 
 Status: accepted, opt-in. Extends the embedding surface in
 [`docs/embedding.md`](embedding.md); bound by ADR-0007 (tri-platform tier-1),
