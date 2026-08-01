@@ -48,8 +48,9 @@ not need a real console:
   tests also cover plain-submit versus newline, Escape cancellation, ordered
   pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
   timestamps, async workspace-file completion, reverse/timeline search routing,
-  mouse selection/scrollbar gestures, explicit right-click copy, opt-in
-  copy-on-select, isolated clipboard-image attachments, and
+  mouse selection/scrollbar gestures, contextual timeline-copy/composer-paste
+  right-click routing, opt-in copy-on-select, isolated clipboard-image
+  attachments, and
   external-editor command resolution plus terminal leave/re-entry ordering. The
   same host tests pin the truthful slash catalog, configured-provider `/model`
   values, contained quick/full help, help wheel/thumb navigation, cancelable

@@ -28,7 +28,8 @@ is SemVer-stable; the configuration schema stability policy is in
   picker uses a readable refactor sample for its semantic color preview. The
   full-screen host also supports
   application-owned drag selection/copy, wheel and page navigation, draggable
-  scrollbar navigation, precise composer clicks, boundary-aware history,
+  scrollbar navigation, precise composer clicks, contextual right-click copy in
+  the timeline and atomic text paste in the composer, boundary-aware history,
   reverse and timeline search, fuzzy slash/file completion, atomic compact
   multiline paste, and clipboard-image placeholders whose bytes stay out of
   prompt history. The full-screen-only `ask_user` tool now pauses a model turn

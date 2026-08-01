@@ -279,6 +279,7 @@ enum RoutedEvent {
     Unhandled,
     Handled,
     Copy(String),
+    PasteClipboard,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -965,7 +966,7 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
                 "Unavailable"
             }
             .to_string(),
-            description: "Ctrl+C and right-click copy use the platform clipboard when available."
+            description: "Ctrl+C or timeline right-click copies; composer right-click pastes text when the platform clipboard is available."
                 .to_string(),
             edit: None,
             is_default: true,
@@ -1762,6 +1763,10 @@ async fn run_event_loop(
                 copy_to_clipboard(app, text);
                 continue;
             }
+            RoutedEvent::PasteClipboard => {
+                paste_text_from_clipboard(app, hit_map.editor_width);
+                continue;
+            }
             RoutedEvent::Unhandled => {}
         }
         match next {
@@ -2018,6 +2023,10 @@ async fn drive_shell(
                                 copy_to_clipboard(app, text);
                                 false
                             }
+                            RoutedEvent::PasteClipboard => {
+                                paste_text_from_clipboard(app, hit_map.editor_width);
+                                false
+                            }
                             RoutedEvent::Unhandled => handle_turn_event(
                                 app,
                                 next,
@@ -2259,6 +2268,10 @@ async fn drive_turn(
                             RoutedEvent::Handled => false,
                             RoutedEvent::Copy(text) => {
                                 copy_to_clipboard(app, text);
+                                false
+                            }
+                            RoutedEvent::PasteClipboard => {
+                                paste_text_from_clipboard(app, hit_map.editor_width);
                                 false
                             }
                             RoutedEvent::Unhandled => handle_turn_event(
@@ -2705,9 +2718,16 @@ fn handle_mouse_event(
             if hit_map.takeover {
                 return RoutedEvent::Handled;
             }
-            app.timeline
-                .selected_text()
-                .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
+            if rect_contains(hit_map.composer, mouse.column, mouse.row) {
+                return RoutedEvent::PasteClipboard;
+            }
+            if rect_contains(hit_map.timeline, mouse.column, mouse.row) {
+                return app
+                    .timeline
+                    .selected_text()
+                    .map_or(RoutedEvent::Handled, RoutedEvent::Copy);
+            }
+            RoutedEvent::Handled
         }
         MouseEventKind::Moved => {
             mouse_state.reset_gesture();
@@ -3085,6 +3105,19 @@ fn copy_to_clipboard(app: &mut AppModel, text: String) {
         app.apply_runtime(RuntimeUpdate::Warning(format!(
             "clipboard copy unavailable: {error}"
         )));
+    }
+}
+
+fn paste_text_from_clipboard(app: &mut AppModel, editor_width: u16) {
+    let text = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
+    if let Ok(text) = text {
+        apply_clipboard_text(app, editor_width, text);
+    }
+}
+
+fn apply_clipboard_text(app: &mut AppModel, editor_width: u16, text: String) {
+    if !text.is_empty() {
+        let _ = app.handle_input(InputAction::Paste(text), editor_width);
     }
 }
 
@@ -4259,6 +4292,85 @@ mod tests {
             ),
             RoutedEvent::Copy("copy".to_string())
         );
+    }
+
+    #[test]
+    fn right_click_routes_timeline_copy_composer_paste_and_empty_timeline_inert() {
+        let mut app = app();
+        let _ = app.timeline.push(ItemKind::Assistant, "copy explicitly");
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let hit = hit_map
+            .timeline_rows
+            .iter()
+            .find(|hit| hit.row.kind == ItemKind::Assistant)
+            .expect("assistant row hit");
+        let mut mouse_state = MouseState::default();
+        app.timeline
+            .start_selection(hit.point_for_column(hit.content_x, false));
+        app.timeline
+            .extend_selection(hit.point_for_column(hit.content_x + 4, false));
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    hit.content_x,
+                    hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Copy("copy".to_string())
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    hit_map.composer.x,
+                    hit_map.composer.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::PasteClipboard
+        );
+
+        app.timeline.clear_selection();
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    hit.content_x,
+                    hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+    }
+
+    #[test]
+    fn right_click_clipboard_text_uses_the_atomic_idle_and_busy_paste_path() {
+        let text = (1..=12)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for busy in [false, true] {
+            let mut app = app();
+            if busy {
+                app.begin_work();
+            }
+            apply_clipboard_text(&mut app, 80, text.clone());
+            assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
+            assert!(app.timeline.items().is_empty());
+
+            apply_clipboard_text(&mut app, 80, String::new());
+            assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
+        }
     }
 
     #[test]

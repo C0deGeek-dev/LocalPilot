@@ -43,12 +43,15 @@ a sanitized timeline warning and falls back to `default`. The default uses a
 stable true-color palette so large frames and active chrome do not inherit a
 terminal profile's potentially saturated ANSI colors. `NO_COLOR` disables the
 palette while retaining non-color focus, selection, success, and error cues.
-Mouse selection remains highlighted after release so Ctrl+C or right-click can
-copy it explicitly. Set `LOCALPILOT_CHAT_COPY_ON_SELECT=true` (or `1`) to copy
-immediately on release; `false` and `0` retain the default behavior. These
-environment-only controls do not extend the stable TOML schema. Mouse reporting
-is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or `0`) before launch
-for a keyboard-only fallback that leaves pointer handling to the terminal.
+Mouse selection remains highlighted after release so Ctrl+C or a right-click in
+the timeline can copy it explicitly. A right-click inside the composer pastes
+clipboard text through the same atomic path as other paste input, so multiline
+content never submits line by line. Set `LOCALPILOT_CHAT_COPY_ON_SELECT=true`
+(or `1`) to copy immediately on release; `false` and `0` retain the default
+behavior. These environment-only controls do not extend the stable TOML schema.
+Mouse reporting is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or
+`0`) before launch for a keyboard-only fallback that leaves pointer handling to
+the terminal.
 Set `LOCALPILOT_CHAT_SCREEN_READER=true` (or `1`) for the target-shaped
 full-screen accessible projection: tabs become a wrapped current-tab sentence,
 conversation rows use explicit textual roles and states, decorative banner and
