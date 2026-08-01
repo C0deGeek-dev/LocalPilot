@@ -326,6 +326,18 @@ fn previous_char_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
+fn previous_grapheme_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    if index == text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(start, _)| start)
+        .take_while(|start| *start <= index)
+        .last()
+        .unwrap_or(0)
+}
+
 fn next_char_boundary(text: &str, mut index: usize) -> usize {
     index = index.min(text.len());
     while index < text.len() && !text.is_char_boundary(index) {
@@ -1904,7 +1916,7 @@ impl AppModel {
         let Some(DialogState::Trust(trust)) = &mut self.dialog else {
             return;
         };
-        let byte = previous_char_boundary(&source, byte.min(source.len()));
+        let byte = previous_grapheme_boundary(&source, byte);
         trust.path_selection = Some(TrustPathSelection {
             source,
             anchor: byte,
@@ -1923,7 +1935,7 @@ impl AppModel {
             trust.path_selection = None;
             return;
         }
-        selection.focus = previous_char_boundary(source, byte.min(source.len()));
+        selection.focus = previous_grapheme_boundary(source, byte);
     }
 
     #[must_use]
@@ -4400,6 +4412,20 @@ mod tests {
         assert_eq!(
             app.handle_trust_input(InputAction::Escape),
             TrustAction::Deny
+        );
+    }
+
+    #[test]
+    fn trust_path_selection_never_splits_a_grapheme() {
+        let mut app = model();
+        app.require_workspace_trust("fixture");
+        let shown = "a\u{301}界".to_string();
+        app.start_trust_path_selection(shown.clone(), 1);
+        app.extend_trust_path_selection(&shown, "a\u{301}".len());
+
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::Copy("a\u{301}".to_string())
         );
     }
 

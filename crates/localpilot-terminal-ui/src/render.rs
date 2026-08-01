@@ -1764,9 +1764,19 @@ fn render_dialog(
     };
     if let DialogState::Trust(_) = dialog {
         return app.trust().map_or_else(DialogHits::default, |trust| {
+            let minimum_height = if app.capabilities.screen_reader {
+                8
+            } else {
+                10
+            };
+            let trust_area = if timeline_area.height >= minimum_height {
+                timeline_area
+            } else {
+                frame_area
+            };
             let hits = render_trust_dialog(
                 frame,
-                timeline_area,
+                trust_area,
                 app,
                 trust,
                 app.capabilities.screen_reader,
@@ -1945,12 +1955,20 @@ fn render_trust_dialog(
         Paragraph::new("Trust this workspace?").style(theme.ui(UiRole::Prompt)),
         Rect::new(content_x, inner.y, content_width, 1),
     );
-    frame.render_widget(
-        Paragraph::new("Choose how LocalPilot may use this workspace.")
-            .style(theme.ui(UiRole::Muted)),
-        Rect::new(content_x, inner.y.saturating_add(1), content_width, 1),
+    let compact = area.height < requested_height;
+    if !compact {
+        frame.render_widget(
+            Paragraph::new("Choose how LocalPilot may use this workspace.")
+                .style(theme.ui(UiRole::Muted)),
+            Rect::new(content_x, inner.y.saturating_add(1), content_width, 1),
+        );
+    }
+    let path_area = Rect::new(
+        content_x,
+        inner.y.saturating_add(if compact { 1 } else { 2 }),
+        content_width,
+        3,
     );
-    let path_area = Rect::new(content_x, inner.y.saturating_add(2), content_width, 3);
     let path_block = Block::bordered()
         .border_type(ratatui::widgets::BorderType::Rounded)
         .style(theme.ui(UiRole::Surface))
@@ -2845,6 +2863,34 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("Permission required"));
         assert!(rendered.contains("Y allow once · N deny"));
+    }
+
+    #[test]
+    fn trust_dialog_keeps_all_choices_at_the_minimum_supported_frame() {
+        for screen_reader in [false, true] {
+            let mut app = model();
+            app.capabilities.screen_reader = screen_reader;
+            app.require_workspace_trust("D:\\a-very-long-workspace-name\\fixture");
+            let mut terminal = Terminal::new(TestBackend::new(30, 10)).expect("terminal");
+            let mut hits = None;
+            terminal
+                .draw(|frame| hits = Some(render(frame, &app)))
+                .expect("draw compact trust dialog");
+            let rendered = terminal.backend().to_string();
+            let hits = hits.expect("compact hit map");
+
+            assert_eq!(hits.trust_rows.len(), 3);
+            assert!(hits.trust_path.is_some());
+            assert!(rendered.contains("1. Yes"));
+            assert!(rendered.contains("3. No, exit"));
+            assert!(!rendered.contains("resize to at least"));
+            if screen_reader {
+                assert!(rendered.contains("Current selection: 1. Yes"));
+                assert!(!rendered.contains('╭'));
+            } else {
+                assert!(rendered.contains('╭'));
+            }
+        }
     }
 
     #[test]
