@@ -14,11 +14,42 @@ process-boundary mirror.
 There is also groundwork for a third, **opt-in local-IPC server transport** (the
 `localpilot-server` crate): a framed transport over a Unix domain socket or a
 Windows named pipe, plus daemon lifecycle (detached spawn, a retry-connect ready
-handshake, single-owner exclusivity). It is still local-only — not an HTTP
-server and not a product SDK — and reuses the same LF-delimited JSON framing as
-the stdio path. Only the transport and lifecycle exist today; there is no
-`serve`/`connect` command and no session hosting over it yet, and the stdio
-drive below is unchanged and remains the supported process-boundary surface.
+handshake, single-owner exclusivity), a registry that hosts many sessions in one
+process, and a per-session host layer for multi-client fanout and out-of-band
+control (below). It is still local-only — not an HTTP server and not a product
+SDK — and reuses the same LF-delimited JSON framing as the stdio path. There is
+no `serve`/`connect` command yet, and the stdio drive below is unchanged and
+remains the supported process-boundary surface.
+
+### Multi-client fanout and out-of-band control (server crate)
+
+When several client connections attach to one session, the `localpilot-server`
+`host` module (`SessionHost`) gives them a shared view and lets control reach a
+running turn without waiting for it:
+
+- **Fanout.** A `SessionHost` owns a *session-lifetime* `broadcast` sender (not
+  one per turn). `subscribe()` hands each connection its own receiver; a driven
+  turn streams every `RuntimeEvent` into that one sender, so all attached
+  clients — including one that attaches mid-turn — see the same stream.
+  `broadcast` tracks its own receivers: a dropped client prunes itself and never
+  errors the driver, and a client that falls more than the channel capacity
+  behind observes `RecvError::Lagged` and resynchronises instead of stalling the
+  turn. `subscriber_count()` reports the live attach count.
+- **Out-of-band control.** `drive(input)` locks the session for the turn and
+  publishes that turn's `CancellationToken` into a short slot *before* awaiting
+  it. `cancel()` reads that slot and cancels the token; `steer(text)` pushes onto
+  the runtime's steer queue (extracted once at construction). Neither takes the
+  session's async mutex, so both land while `drive` holds it — cancel stops the
+  in-flight turn at its next cancellation check (a safe boundary or an executing
+  tool, both raced against the token), and a steer is admitted at the next safe
+  provider-turn boundary as a user message. `is_busy()` / `status()` read the
+  same slot, so a status snapshot never blocks on a running turn. A small
+  `control(Control::{Cancel, Steer, Status})` dispatch maps a decoded control
+  request onto these methods, ready for a transport to route control frames
+  through.
+
+This is a library surface on top of the registry handle; there is still no wire
+protocol or `serve`/`connect` command exposing it.
 
 ## In-process embedding
 

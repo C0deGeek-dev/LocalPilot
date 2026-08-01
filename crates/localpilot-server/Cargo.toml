@@ -26,16 +26,26 @@ tracing = { workspace = true }
 # macros/rt for tests) are already enabled by the workspace default and unify
 # in.
 tokio = { workspace = true, features = ["net"] }
+# The per-session host publishes each turn's `CancellationToken` (from
+# `tokio-util`, an existing pinned workspace dep) so out-of-band cancel reaches an
+# in-flight turn without the runtime mutex. Kept internal — not in any public
+# signature.
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 # A test session factory mirrors how the harness tests build a `SessionRuntime`:
 # a `FakeProvider` (llm), builtin tools, a bypass permission engine + sandbox
-# workspace, a recovery engine, over a `tempfile` temp-dir store. `tokio-util`
-# supplies the `CancellationToken` a driven turn needs.
+# workspace, a recovery engine, over a `tempfile` temp-dir store.
+# (`localpilot-core`, `localpilot-store`, `serde_json`, and `tokio-util` are
+# already normal dependencies, which integration tests can use as-is.)
 localpilot-llm = { path = "../localpilot-llm" }
 localpilot-recovery = { path = "../localpilot-recovery" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
 localpilot-tools = { path = "../localpilot-tools" }
+# The host tests register a first-party test tool that blocks inside `invoke` to
+# open a deterministic mid-turn window; implementing the `Tool` trait needs the
+# same `#[async_trait]` the trait is declared with — an existing pinned
+# workspace dep, added here for tests only.
+async-trait = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread", "time"] }
-tokio-util = { workspace = true }

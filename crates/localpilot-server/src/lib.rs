@@ -17,6 +17,10 @@
 //! - [`registry`] — a process-local map of live sessions, each owned by one
 //!   task and driven through a per-session async lock, with a caller-supplied
 //!   factory that keeps session construction out of this crate.
+//! - [`host`] — a per-session layer over one registry handle giving multi-client
+//!   event fanout (a session-lifetime broadcast) and lock-free out-of-band
+//!   cancel/steer that reach an in-flight turn without taking the runtime mutex
+//!   the turn holds.
 //!
 //! Every lifecycle primitive is built from safe `std` + `tokio` only: no
 //! `unsafe`, no `libc`/`nix`, no `flock`/`setsid`/`kill`. Exclusivity uses an
@@ -27,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 pub mod daemon;
+pub mod host;
 pub mod registry;
 pub mod transport;
 pub mod wire;
@@ -35,6 +40,7 @@ pub use daemon::{
     acquire, build_serve_command, ensure_running, spawn_detached, spawn_detached_argv,
     wait_for_ready, Acquired, DaemonError, Singleton, SERVE_ARGV,
 };
+pub use host::{Control, ControlOutcome, HostStatus, SessionHost};
 pub use registry::{RegistryError, SessionFactory, SessionHandle, SessionRegistry};
 pub use transport::{connect, Conn, Endpoint, Listener, TransportError};
 pub use wire::serve_echo;

@@ -6,6 +6,22 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Internal/Added: per-session multi-client fanout and lock-free out-of-band
+  control.** The `localpilot-server` crate gains a `host` module (`SessionHost`)
+  layered over a registry session handle. Several client connections can attach
+  to one session and all receive its `RuntimeEvent` stream through a
+  session-lifetime `broadcast` channel (a client attaching mid-turn still sees
+  subsequent events; a dropped client prunes itself without erroring the driver).
+  Cancel and steer reach an in-flight turn *without* taking the session's async
+  mutex that the running turn holds: `drive` publishes the turn's
+  `CancellationToken` into a short slot before awaiting it, so `cancel()`,
+  `steer()`, and `is_busy()`/`status()` operate on that slot and the steer queue
+  alone. A small `control(Control::{Cancel, Steer, Status})` dispatch maps a
+  decoded control request onto these methods. Built from safe `std` + `tokio`
+  only. No user-facing change: there is still no `serve`/`connect` command and no
+  wire protocol over the transport — this is the host-side substrate. See
+  [docs/embedding.md](docs/embedding.md).
+
 - **Internal/Added: opt-in local-IPC server transport groundwork.** A new
   `localpilot-server` crate provides a cross-platform framed local transport
   (Unix domain socket / Windows named pipe, reusing the existing LF-delimited
