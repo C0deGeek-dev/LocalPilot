@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Internal: the provider layer is split into isolated crates.**
+  `localpilot-llm` is now a thin umbrella over `localpilot-llm-core` (the shared
+  provider trait, stream events, errors, auth, headers, request shapes) and one
+  crate per adapter (`localpilot-llm-openai`, `localpilot-llm-anthropic`). Editing
+  an adapter re-checks only its ~1.5k-line crate instead of the whole provider
+  layer. No user-facing change — the public API, CLI, config, and provider
+  behaviour are byte-for-byte identical.
+
 - **Improved: `harness wait-resume` now actually waits and escalates.** On a
   provider quota/rate limit the paused-run marker now records the real provider
   id and a pause-attempt count that grows the backoff window across repeated

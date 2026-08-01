@@ -81,9 +81,22 @@ Config precedence:
 4. user config
 5. built-in defaults
 
-### `localpilot-llm`
+### `localpilot-llm` (+ `-core`, `-openai`, `-anthropic`)
 
-Owns:
+The provider layer is split across four crates so editing one adapter recompiles
+only that adapter, not the whole layer or its downstream dependents:
+
+- **`localpilot-llm-core`** — the shared contract: the provider trait, the stream
+  event model, request/response shapes, the error taxonomy, auth, and header
+  parsing. Depends on no adapter, so there is no dependency cycle.
+- **`localpilot-llm-openai`** / **`localpilot-llm-anthropic`** — one hand-written
+  adapter each, depending only on `-core`.
+- **`localpilot-llm`** — the umbrella: the provider registry (the seam that wires
+  the adapters), model discovery, vision resolution, and the test `FakeProvider`.
+  It re-exports the whole public surface, so `harness`/`cli`/`rpc`/`quota` import
+  everything as `localpilot_llm::…` unchanged.
+
+Owns (across the four crates):
 
 - provider trait
 - stream event model
@@ -91,7 +104,10 @@ Owns:
 - official provider implementations
 - local provider implementations
 
-Provider implementations must live behind the same trait.
+Provider implementations must live behind the same trait, each in its own adapter
+crate depending on `-core`. Editing an adapter re-checks its ~1.5k-line crate in
+isolation (the sibling adapter and `-core` are untouched); a full `--workspace`
+build still recompiles the downstream spine through the umbrella.
 
 Provider implementations also expose quota metadata when available:
 
