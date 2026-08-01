@@ -4,8 +4,8 @@
 //! This is the **manual** self-dev surface: a developer or a CI job drives the
 //! build → gauntlet → publish flow explicitly. It is deliberately *not* the
 //! autonomous in-session loop where the model builds and reloads itself — that
-//! stays an opt-in product decision, off by default (D002 / ADR-0128). Every
-//! command here composes the `localpilot-selfdev` primitives and nothing more.
+//! stays an opt-in product decision, off by default (ADR-0128). Every command
+//! here composes the `localpilot-selfdev` primitives and nothing more.
 //!
 //! The functions take the workspace root and the self-dev data root explicitly so
 //! they are testable against a scratch directory; the CLI wires the current
@@ -21,7 +21,7 @@ use localpilot_selfdev::{
 };
 
 /// How many failed auto-reloads the breaker tolerates. Reported by `status`; the
-/// autonomous loop that would consume it is deferred (D002).
+/// autonomous loop that would consume it is deferred (ADR-0128).
 const AUTO_RELOAD_LIMIT: u32 = 3;
 
 /// `selfdev build`: fingerprint the working tree and build it, reporting the

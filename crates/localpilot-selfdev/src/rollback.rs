@@ -5,7 +5,7 @@
 //! then deleted it in favour of exactly these three plain mechanisms — a token
 //! that restores the previous channel pointer, a no-downgrade comparison, and a
 //! bounded attempt counter — because the fancy loop was the source of the
-//! infinite-reload bug family, not the cure (D002).
+//! infinite-reload bug family, not the cure (see ADR-0128).
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -121,8 +121,9 @@ impl ActivationGuard {
     /// Returns `true` if a token was present and rolled back, `false` if there was
     /// nothing to roll back. When the previous target was unset, the channel is
     /// left pointing at the new (failed) version rather than being deleted — a
-    /// dangling channel already resolves to nothing (subject 02), which is the
-    /// same safe outcome, and clearing it is a separate operation this does not own.
+    /// dangling channel already resolves to nothing (the version store treats an
+    /// unresolvable label as absent), which is the same safe outcome, and clearing
+    /// it is a separate operation this does not own.
     ///
     /// # Errors
     /// Returns [`SelfDevError::Io`] when the channel cannot be repointed.

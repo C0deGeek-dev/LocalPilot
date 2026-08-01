@@ -18,7 +18,7 @@
 //! The relaunch itself is the one genuinely OS-divergent step. Its *plan* — the
 //! program, the arguments, and whether the current process is replaced — is
 //! computed by a pure function and unit-tested on every platform; only the final
-//! syscall differs (`exec` vs spawn-then-exit, D003).
+//! syscall differs (`exec` on Unix vs spawn-then-exit on Windows).
 
 use std::path::{Path, PathBuf};
 
@@ -95,7 +95,8 @@ impl ReloadIntent {
     }
 
     /// The hidden continuation prompt injected into the resumed session so it
-    /// carries on without waiting for the user. Original text (D001).
+    /// carries on without waiting for the user. Prompt text authored for this
+    /// repository.
     #[must_use]
     pub fn continuation_prompt(&self) -> String {
         let mut prompt = format!(
@@ -232,7 +233,7 @@ pub struct RelaunchPlan {
     pub args: Vec<String>,
     /// Whether the current process is *replaced* (Unix `exec`, same pid) rather
     /// than the successor being spawned alongside a parent that then exits
-    /// (Windows, which has no `exec`). D003.
+    /// (Windows, which has no `exec`).
     pub replaces_current_process: bool,
 }
 
@@ -296,7 +297,7 @@ pub struct ReloadRequest<'a> {
     pub channels: &'a Channels,
     /// Per-session reload state.
     pub reload: &'a ReloadStore,
-    /// The vetted candidate executable (subject 03 already passed).
+    /// The candidate executable, already through the publish gauntlet.
     pub executable: &'a Path,
     /// The marker recording the candidate's identity.
     pub marker: &'a BuildMarker,
@@ -319,8 +320,8 @@ pub struct ReloadRequest<'a> {
 ///
 /// The returned path is the concrete immutable version directory's executable,
 /// not the channel — the successor is launched from a path a later build can
-/// never overwrite (subject 02), with no chance of the channel resolving to a
-/// different version between this call and the launch.
+/// never overwrite (the immutable version store), with no chance of the channel
+/// resolving to a different version between this call and the launch.
 ///
 /// # Errors
 /// Returns [`SelfDevError`] if the install, the channel swap, or the intent write

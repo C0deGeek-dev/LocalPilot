@@ -9,13 +9,13 @@
 //! that dies mid-continuation leaves the intent pending, so the next resume tries
 //! again; a restart that completes marks it delivered, so it is never replayed.
 //!
-//! **Disclosed library-only for now.** These functions are the *consumer* half of
-//! the reload. Its *producer* — the command that builds, vets, and swaps onto a
-//! new binary, writing the intent this module reads — is the opt-in self-dev
-//! surface, off by default (D002). The interactive/rpc resume call that invokes
-//! `continue_if_pending` lands with that surface so the whole loop turns on
-//! together, rather than wiring a consumer that nothing can yet produce for.
-//! Fully unit-tested here against a real session runtime.
+//! **Not yet wired for now.** These functions are the *consumer* half of the
+//! reload. Its *producer* — the in-session command that builds, vets, and swaps
+//! onto a new binary, writing the intent this module reads — is the opt-in
+//! autonomous self-dev loop, off by default (ADR-0128). The interactive/rpc resume
+//! call that invokes `continue_if_pending` lands with that surface so the whole
+//! loop turns on together, rather than wiring a consumer that nothing can yet
+//! produce for. Fully unit-tested here against a real session runtime.
 #![allow(dead_code)]
 
 use localpilot_harness::{RuntimeEvent, SessionRuntime, StopReason};

@@ -28,7 +28,8 @@ against a more tempting alternative that does not hold up:
    unreadable timestamp read as "newer forever". The comparison reads the
    concrete immutable binary a channel resolves to, never the channel marker, so
    a wrapper's timestamp can never stand in for the payload's (structural here,
-   because a channel is a separate file — ADR-0128 relies on the subject-02 store).
+   because a channel is a separate marker file resolving to an immutable version
+   directory, not a symlink).
 
 3. **A durable circuit breaker.** A persisted counter bounds auto-reload attempts
    and is incremented *before* each relaunch, so a relaunch that never returns is

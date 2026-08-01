@@ -25,7 +25,7 @@ pub struct BuildMarker {
     pub label: String,
     /// The commit the source tree was at, or `unknown`.
     pub git_hash: String,
-    /// The source fingerprint the binary was built with (subject 01).
+    /// The source fingerprint the binary was built with.
     pub fingerprint: String,
     /// Whether the source tree was dirty at build time.
     pub dirty: bool,
