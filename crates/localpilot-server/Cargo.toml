@@ -21,6 +21,9 @@ localpilot-taskgraph = { path = "../localpilot-taskgraph" }
 # The tool-facing swarm view implements `localpilot-tools`' `SwarmPeers`, which
 # is where the messaging tool reaches the registry from.
 localpilot-tools = { path = "../localpilot-tools" }
+# `FuturesUnordered`, so the plan driver can refill on each worker completion
+# rather than waiting for a whole wave. An existing pinned workspace dep.
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

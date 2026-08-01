@@ -262,6 +262,19 @@ impl SwarmHost {
             .await
             .ok_or_else(|| SpawnError::Registry(RegistryError::NotFound.to_string()))?;
         self.swarms.join_as_root(swarm, session, name).await?;
+        // A session that has just joined a swarm needs orchestration guidance it
+        // did not need a moment ago. Appended rather than replacing, so whatever
+        // else the host put in the prompt survives.
+        {
+            let depth = match self.swarms.plan(swarm).await.map(|plan| plan.mode()) {
+                Some(localpilot_taskgraph::PlanMode::Deep) => localpilot_harness::SwarmDepth::Deep,
+                _ => localpilot_harness::SwarmDepth::Light,
+            };
+            handle
+                .lock()
+                .await
+                .append_system_prompt(localpilot_harness::swarm_coordinator_directive(depth));
+        }
         let host = self.host_for(session, handle).await;
         self.bind_peers(swarm, session).await;
         self.watch_touches(swarm, session, &host);

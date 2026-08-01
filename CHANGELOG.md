@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: `run_plan` — the swarm plan driver, and the prompts that go with it.**
+  A coordinator can now hand a whole task graph to the driver: it dispatches what
+  is ready, spawns a worker per task, and refills on each completion rather than
+  waiting for a whole wave. Each task carries an assignment contract in front of
+  its input, because a worker inherits none of the coordinator's prompt — so
+  "do this task and nothing else", "report what you established rather than what
+  you did", and, in depth mode, "say what you did not check" have to travel with
+  the work. A session that joins a swarm gets orchestration guidance appended to
+  its own prompt at that moment and not before. A worker that returns nothing or
+  times out is treated as gone and its task salvaged, rather than marked done on
+  the strength of silence. The run report says how much of the concurrency the
+  plan actually used, and explains it when the answer is "hardly any" — a chain
+  runs one worker at a time however large the budget, which is not a fault but is
+  worth saying out loud.
+
 - **Added: the swarm failure lifecycle.** A worker that dies holding an
   assignment no longer strands the plan. Members heartbeat, and staleness is
   measured from the last beat rather than from admission — a member that has

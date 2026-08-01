@@ -223,6 +223,24 @@ Rules:
   Nothing else from the child crosses over — its tool calls and stream output
   belong to its transcript, not the caller's
 
+### Swarm prompts
+
+Two pieces of first-party prompt text exist for multi-agent runs, and they are
+separate because they reach different readers:
+
+- The **coordinator directive** is appended to a session's prompt when it joins a
+  swarm, and only then — guidance a session cannot act on is context it pays for
+  and nothing else. It fights the three failure modes of a model given workers:
+  decomposing into pieces too small to be worth a worker, spawning before it
+  knows what the pieces are, and treating a worker's confident report as fact.
+- The **assignment contract** travels with each dispatched task, because a worker
+  has none of the coordinator's prompt. It is the entire behavioural contract a
+  worker sees.
+
+Both have a depth variant. In depth mode the coordinator is told about gates, and
+the worker is told that its report must state what it did *not* check — the field
+that is the point of the mode, and the one a confident model omits.
+
 ### File-touch reporting
 
 Every file-mutating builtin — `write_file`, `append_file`, `edit_file`,

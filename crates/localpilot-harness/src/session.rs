@@ -1935,6 +1935,53 @@ impl SessionRuntime {
     /// Used when a runtime is built for a subagent: the registry-derived prompt
     /// the constructor produces is the *host* half, and the agent's own
     /// instructions have to be appended before the first turn runs.
+    /// The current system prompt, as text.
+    ///
+    /// Read back rather than remembered by the host: the prompt is composed from
+    /// several sources over a session's life, and a host that tracked its own
+    /// copy would be describing what it contributed, not what is in effect.
+    #[must_use]
+    pub fn system_prompt_text(&self) -> String {
+        self.messages
+            .first()
+            .filter(|message| message.role == Role::System)
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Add to the system prompt rather than replacing it.
+    ///
+    /// Used for guidance that becomes true partway through a session's life — a
+    /// session that joins a swarm needs the orchestration directives it did not
+    /// need a moment earlier, and rebuilding the whole prompt to add a paragraph
+    /// would discard whatever else the host had put there.
+    pub fn append_system_prompt(&mut self, addition: impl AsRef<str>) {
+        let addition = addition.as_ref().trim();
+        if addition.is_empty() {
+            return;
+        }
+        let existing = self.system_prompt_text();
+        let existing = existing.trim_end();
+        self.replace_system_prompt(format!(
+            "{existing}
+
+{addition}"
+        ));
+    }
+
     pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
         let message = Message::text(Role::System, prompt.into());
         match self.messages.first_mut() {

@@ -1958,6 +1958,7 @@ name = "localpilot-server"
 version = "2.6.0"
 dependencies = [
  "async-trait",
+ "futures",
  "localpilot-core",
  "localpilot-harness",
  "localpilot-llm",

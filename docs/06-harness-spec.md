@@ -864,3 +864,35 @@ keep the previous good file as a backup, and **refuse to go backwards**: a write
 whose revision is not newer than what is on disk is dropped, so a slow writer
 cannot restore an older plan over a newer one. A torn primary falls back to the
 backup, costing the newest revision rather than the plan.
+
+### Running a swarm plan
+
+The driver dispatches what is ready, spawns a fresh worker per task, and refills
+**on each completion** rather than on each round — waiting for a whole wave costs
+the difference between its fastest and slowest worker, every wave. When nothing
+is in flight and nothing is ready, the run ends: a plan that cannot move is over,
+settled or not, and saying so beats waiting on a worker that was never
+dispatched.
+
+Each dispatched task carries an **assignment contract** in front of its input. A
+worker does not inherit the coordinator's system prompt, so anything expected of
+it — do this task and nothing else, report what you established rather than what
+you did, cite where it came from, and in depth mode say what you did not check —
+has to travel with the work or it is not in effect.
+
+A worker that returns nothing, times out, or produces a report the graph refuses
+is treated as gone: the task is salvaged back into the plan rather than marked
+done on the strength of silence.
+
+A free-text answer becomes a handoff that does not overstate itself: everything
+said is the finding, nothing is claimed as verified, and the coverage gap says
+outright that it is unknown. For a **review gate** the driver additionally
+records what the gate reviewed, because that is a fact about the dispatch — the
+graph says what the gate waited on — rather than a claim about the model. Without
+it a gate could never close, and depth mode would fail on a formality.
+
+The report ends with a **starvation hint** when the plan never came close to
+using its concurrency. A chain runs one worker at a time no matter how large the
+budget; that is not a fault, but a run four times slower than the budget
+suggested with nothing anywhere saying why is the most disappointing possible
+outcome.
