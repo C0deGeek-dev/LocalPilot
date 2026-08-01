@@ -21,6 +21,7 @@ mod git;
 mod marker;
 mod paths;
 mod reload;
+mod rollback;
 mod source;
 mod store;
 
@@ -39,6 +40,9 @@ pub use paths::default_root;
 pub use reload::{
     perform_reload, relaunch, relaunch_plan, stage_reload, RelaunchPlan, ReloadIntent,
     ReloadRequest, ReloadStore, RELOAD_INTENT_VERSION,
+};
+pub use rollback::{
+    compare_payload, ActivationGuard, AutoReloadBreaker, Freshness, PendingActivation,
 };
 pub use source::SourceState;
 pub use store::{StoredVersion, VersionStore};

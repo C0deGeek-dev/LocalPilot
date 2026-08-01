@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: reload is safe to fail — a rollback token, a no-phantom version
+  comparison, and a circuit breaker.** Before a channel is pointed at a new build,
+  what it pointed at before is recorded; if the new build does not come up, the
+  channel is rolled back to the previous version. An auto-reload triggers only when
+  the candidate is *provably* newer — both timestamps readable and the candidate
+  strictly newer — so an unreadable timestamp is treated as "no update", never as
+  "newer forever". And a durable counter bounds how many times auto-reload may be
+  attempted, incremented before each relaunch so a relaunch that never returns
+  still counts and a looping process cannot reset it by restarting. There is
+  deliberately no crash-detect-and-revert loop (see ADR-0128).
+
 - **Added: the in-place reload primitives — swap onto a freshly built binary and
   continue the session on the other side.** Before the swap, everything durable is
   written first — the new binary is installed immutably, the channel is pointed at

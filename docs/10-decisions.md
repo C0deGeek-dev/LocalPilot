@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0128: Self-Dev Reload Ships Primitives, Not A Crash-Detect-And-Revert Loop
+
+Status: accepted.
+
+LocalPilot can build a binary from its own source and swap onto it while a
+session is live (`localpilot-selfdev`). The obvious next thing — a loop that
+watches the new build, notices it crashing, and automatically reverts — is
+deliberately **not** built. It is the one piece a working reference implemented
+and then *deleted*, because it was the source of an infinite-reload bug family
+rather than the cure. Three plainer mechanisms replace it, and each is chosen
+against a more tempting alternative that does not hold up:
+
+1. **A rollback token, not crash detection.** Before a channel is repointed at a
+   new build, the previous target is written to a `PendingActivation` token. The
+   new build is confirmed only by a successful post-reload handshake; anything
+   else rolls the channel pointer back to the recorded previous version. There is
+   no heuristic deciding whether a crash "counts" — either the new build
+   handshook or it did not.
+
+2. **A no-downgrade, no-phantom comparison.** An auto-reload may trigger only when
+   the candidate payload is *provably* newer than the running one: both
+   modification times readable and the candidate strictly newer. An unreadable
+   mtime is "no update", never "newer" — the reference's loops began with an
+   unreadable timestamp read as "newer forever". The comparison reads the
+   concrete immutable binary a channel resolves to, never the channel marker, so
+   a wrapper's timestamp can never stand in for the payload's (structural here,
+   because a channel is a separate file — ADR-0128 relies on the subject-02 store).
+
+3. **A durable circuit breaker.** A persisted counter bounds auto-reload attempts
+   and is incremented *before* each relaunch, so a relaunch that never returns is
+   still counted and a looping process cannot reset the bound by restarting. Once
+   tripped, auto-reload halts with a clear error until a *successful* reload
+   resets it.
+
+The autonomous self-editing loop these primitives make possible stays opt-in and
+off by default; enabling it is a separate product decision, not a consequence of
+shipping the primitives.
+
 ## ADR-0127: A Failing Task Fails Loudly, And A Plan Survives A Restart
 
 Status: accepted. The failure half of ADR-0125.
