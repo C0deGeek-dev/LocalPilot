@@ -610,6 +610,17 @@ fn role_prefix(
                 theme.ui(role),
             )]
         }
+        ItemKind::Shell => {
+            let (glyph, role) = match activity {
+                Some(ActivityState::Error) => ("✗ ", UiRole::Error),
+                Some(ActivityState::Success) => ("$ ", UiRole::Success),
+                Some(ActivityState::Running) | None => ("◉ ", UiRole::Code),
+            };
+            vec![Span::styled(
+                if first { glyph } else { "│ " },
+                theme.ui(role),
+            )]
+        }
         ItemKind::Notice => vec![Span::styled(
             if first { "! " } else { "  " },
             theme.ui(UiRole::Warning),
@@ -716,9 +727,19 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
     render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
+    let placeholder = app.editor.text().is_empty() && app.shell_mode();
+    let composer_text = if placeholder {
+        "Run a shell command"
+    } else {
+        app.editor.text()
+    };
     frame.render_widget(
-        Paragraph::new(app.editor.text().to_string())
-            .style(surface)
+        Paragraph::new(composer_text.to_string())
+            .style(if placeholder {
+                surface.patch(theme.ui(UiRole::Muted))
+            } else {
+                surface
+            })
             .wrap(Wrap { trim: false })
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         inner,
@@ -946,6 +967,9 @@ fn footer_state(app: &AppModel) -> String {
             .get(completion.selected)
             .map_or(fallback, |item| item.description.as_str());
         return format!("{detail} · ↑↓ navigate · Enter/Tab accept · Esc close");
+    }
+    if app.shell_mode() {
+        return "shell mode · Esc exit shell mode".to_string();
     }
     match (app.work, app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
@@ -1782,5 +1806,79 @@ mod tests {
             .expect("draw held stream");
         assert_eq!(app.timeline.viewport, crate::ViewportAnchor::Held(anchor));
         assert!(terminal.backend().to_string().contains("new output"));
+    }
+
+    #[test]
+    fn leading_bang_owns_the_shell_mode_footer_until_escape() {
+        let mut app = model();
+        let _ = app.handle_input(crate::InputAction::Insert("!echo marker".to_string()), 76);
+        assert_eq!(app.editor.text(), "echo marker");
+        assert_eq!(footer_state(&app), "shell mode · Esc exit shell mode");
+        let _ = app.handle_input(crate::InputAction::Escape, 76);
+        assert_eq!(app.editor.text(), "echo marker");
+        assert_eq!(footer_state(&app), "idle · Ctrl+C copy / twice to exit");
+    }
+
+    #[test]
+    fn lone_bang_is_consumed_into_shell_mode_and_renders_its_placeholder() {
+        let mut app = model();
+        let _ = app.handle_input(crate::InputAction::Insert("!".to_string()), 76);
+        assert!(app.shell_mode());
+        assert!(app.editor.text().is_empty());
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render shell placeholder");
+        assert!(terminal
+            .backend()
+            .to_string()
+            .contains("Run a shell command"));
+    }
+
+    #[test]
+    fn shell_results_render_target_status_glyphs_line_counts_and_output_gutters() {
+        let mut app = model();
+        let _ = app.handle_input(crate::InputAction::Insert("!echo marker".to_string()), 76);
+        let crate::AppCommand::RunShell(success_command) =
+            app.handle_input(crate::InputAction::Submit, 76)
+        else {
+            panic!("success shell command");
+        };
+        let success = app
+            .append_shell(&success_command, false)
+            .expect("success item");
+        let success_output = crate::UserShellOutput::captured(0, "one\ntwo\n", "");
+        assert!(app.finish_shell(success, &success_command, &success_output));
+
+        let _ = app.handle_input(crate::InputAction::Insert("!bad-command".to_string()), 76);
+        let crate::AppCommand::RunShell(failure_command) =
+            app.handle_input(crate::InputAction::Submit, 76)
+        else {
+            panic!("failure shell command");
+        };
+        let failure = app
+            .append_shell(&failure_command, false)
+            .expect("failure item");
+        let failure_output = crate::UserShellOutput::captured(5, "", "diagnostic\n");
+        assert!(app.finish_shell(failure, &failure_command, &failure_output));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("render shell results");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("$ Shell echo marker 2 lines"));
+        assert!(rendered.contains("│ one"));
+        assert!(rendered.contains("│ two"));
+        assert!(rendered.contains("✗ Shell bad-command 1 line"));
+        assert!(rendered.contains("│ diagnostic"));
+        assert!(!rendered.contains("exit 5"));
     }
 }

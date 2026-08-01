@@ -28,7 +28,8 @@ use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
 use localpilot_terminal_ui::{
     render, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint, Header, HitMap,
     InputAction, ItemId, KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState,
-    SubmittedInput, TerminalCapabilities, Theme, TimelineNavigation,
+    SubmittedInput, TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand,
+    UserShellOutput,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -67,6 +68,62 @@ struct QueuedPrompt {
     text: String,
     attachments: Vec<ContentBlock>,
     item_id: ItemId,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct QueuedShell {
+    command: UserShellCommand,
+    item_id: ItemId,
+}
+
+impl std::fmt::Debug for QueuedShell {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueuedShell")
+            .field("command", &self.command)
+            .field("item_id", &self.item_id)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum QueuedOperation {
+    Prompt(QueuedPrompt),
+    Shell(QueuedShell),
+}
+
+impl QueuedOperation {
+    fn item_id(&self) -> ItemId {
+        match self {
+            Self::Prompt(prompt) => prompt.item_id,
+            Self::Shell(shell) => shell.item_id,
+        }
+    }
+
+    #[cfg(test)]
+    fn prompt(&self) -> &QueuedPrompt {
+        match self {
+            Self::Prompt(prompt) => prompt,
+            Self::Shell(_) => panic!("expected queued prompt"),
+        }
+    }
+
+    #[cfg(test)]
+    fn shell(&self) -> &QueuedShell {
+        match self {
+            Self::Shell(shell) => shell,
+            Self::Prompt(_) => panic!("expected queued shell"),
+        }
+    }
+}
+
+impl std::fmt::Debug for QueuedOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prompt(prompt) => formatter.debug_tuple("Prompt").field(prompt).finish(),
+            Self::Shell(shell) => formatter.debug_tuple("Shell").field(shell).finish(),
+        }
+    }
 }
 
 impl std::fmt::Debug for QueuedPrompt {
@@ -251,6 +308,12 @@ async fn attach_clipboard_image_idle(
     if app.has_input_overlay() {
         return;
     }
+    if app.shell_mode() {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "images are not available in shell mode".to_string(),
+        ));
+        return;
+    }
     let provider_id = runtime.active_provider_id().to_string();
     if !runtime.active_accepts_images() {
         let resolved = crate::repl::resolved_image_support(config, Some(&provider_id)).await;
@@ -269,6 +332,12 @@ fn attach_clipboard_image_with_capability(
     quiet_when_absent: bool,
 ) {
     if app.has_input_overlay() {
+        return;
+    }
+    if app.shell_mode() {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "images are not available in shell mode".to_string(),
+        ));
         return;
     }
     if !capability.vision_capable {
@@ -529,6 +598,42 @@ async fn edit_composer_externally(
     Ok(())
 }
 
+fn prepare_prompt_operation(
+    app: &mut AppModel,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    submitted: SubmittedInput,
+    pending: bool,
+) -> Option<QueuedOperation> {
+    let item_id = app.append_prompt(
+        submitted.display.clone(),
+        Some(local_prompt_time()),
+        pending,
+    )?;
+    persist_prompt(app, history, cwd, &submitted);
+    let attachments = image_content_blocks(submitted.images);
+    if !attachments.is_empty() {
+        app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "sending {} image(s) with this prompt",
+            attachments.len()
+        )));
+    }
+    Some(QueuedOperation::Prompt(QueuedPrompt {
+        text: submitted.prompt,
+        attachments,
+        item_id,
+    }))
+}
+
+fn prepare_shell_operation(
+    app: &mut AppModel,
+    command: UserShellCommand,
+    pending: bool,
+) -> Option<QueuedOperation> {
+    let item_id = app.append_shell(&command, pending)?;
+    Some(QueuedOperation::Shell(QueuedShell { command, item_id }))
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     modes: &mut TerminalModes,
@@ -585,31 +690,38 @@ async fn run_event_loop(
                         edit_composer_externally(terminal, modes, app).await?;
                     }
                     AppCommand::Submit(submitted) => {
-                        let Some(item_id) = app.append_prompt(
-                            submitted.display.clone(),
-                            Some(local_prompt_time()),
-                            false,
-                        ) else {
+                        let Some(operation) =
+                            prepare_prompt_operation(app, history, cwd, submitted, false)
+                        else {
                             continue;
                         };
-                        persist_prompt(app, history, cwd, &submitted);
-                        let attachments = image_content_blocks(submitted.images);
-                        if !attachments.is_empty() {
-                            app.apply_runtime(RuntimeUpdate::Warning(format!(
-                                "sending {} image(s) with this prompt",
-                                attachments.len()
-                            )));
-                        }
-                        if drive_prompt_chain(
+                        if drive_operation_chain(
                             terminal,
                             app,
                             runtime,
                             approval_rx,
-                            QueuedPrompt {
-                                text: submitted.prompt,
-                                attachments,
-                                item_id,
-                            },
+                            operation,
+                            &mut queue,
+                            history,
+                            cwd,
+                            &mut mouse_state,
+                            workspace_index,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
+                    }
+                    AppCommand::RunShell(command) => {
+                        let Some(operation) = prepare_shell_operation(app, command, false) else {
+                            continue;
+                        };
+                        if drive_operation_chain(
+                            terminal,
+                            app,
+                            runtime,
+                            approval_rx,
+                            operation,
                             &mut queue,
                             history,
                             cwd,
@@ -643,42 +755,176 @@ async fn run_event_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn drive_prompt_chain(
+async fn drive_operation_chain(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    first: QueuedPrompt,
-    queue: &mut VecDeque<QueuedPrompt>,
+    first: QueuedOperation,
+    queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
     workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let mut current = Some(first);
-    while let Some(prompt) = current {
-        let _ = app.activate_prompt(prompt.item_id);
-        app.begin_work_before(queue.front().map(|queued| queued.item_id));
-        if drive_turn(
-            terminal,
-            app,
-            runtime,
-            approval_rx,
-            &prompt.text,
-            &prompt.attachments,
-            queue,
-            history,
-            cwd,
-            mouse_state,
-            workspace_index,
-        )
-        .await?
-        {
-            return Ok(true);
+    while let Some(operation) = current {
+        let next_item = queue.front().map(QueuedOperation::item_id);
+        match operation {
+            QueuedOperation::Prompt(prompt) => {
+                let _ = app.activate_prompt(prompt.item_id);
+                app.begin_work_before(next_item);
+                if drive_turn(
+                    terminal,
+                    app,
+                    runtime,
+                    approval_rx,
+                    &prompt.text,
+                    &prompt.attachments,
+                    queue,
+                    history,
+                    cwd,
+                    mouse_state,
+                    workspace_index,
+                )
+                .await?
+                {
+                    return Ok(true);
+                }
+            }
+            QueuedOperation::Shell(shell) => {
+                app.begin_work_before(next_item);
+                let _ = app.activate_shell(shell.item_id);
+                if drive_shell(
+                    terminal,
+                    app,
+                    runtime,
+                    approval_rx,
+                    shell,
+                    queue,
+                    history,
+                    cwd,
+                    mouse_state,
+                    workspace_index,
+                )
+                .await?
+                {
+                    return Ok(true);
+                }
+            }
         }
         current = queue.pop_front();
     }
     Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
+async fn drive_shell(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    shell: QueuedShell,
+    queue: &mut VecDeque<QueuedOperation>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    mouse_state: &mut MouseState,
+    workspace_index: &mut WorkspaceFileIndex,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let mut pending: Option<oneshot::Sender<bool>> = None;
+    let outcome = {
+        let operation =
+            runtime.run_user_shell_command_detailed(shell.command.as_str(), &cancel, false);
+        tokio::pin!(operation);
+        let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        async {
+            loop {
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                workspace_index.refresh(app);
+                let mut hit_map = draw_synchronized(terminal, app)?;
+                for _ in 0..64 {
+                    if !event::poll(Duration::ZERO).context("poll full-screen shell input")? {
+                        break;
+                    }
+                    let next = event::read().context("read full-screen shell input")?;
+                    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
+                    let exit = if pending.is_some() {
+                        handle_approval_event(app, next, &mut pending, &cancel)
+                    } else {
+                        match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
+                            RoutedEvent::Handled => false,
+                            RoutedEvent::Copy(text) => {
+                                copy_to_clipboard(app, text);
+                                false
+                            }
+                            RoutedEvent::Unhandled => handle_turn_event(
+                                app,
+                                next,
+                                &cancel,
+                                hit_map.editor_width,
+                                queue,
+                                history,
+                                cwd,
+                                &image_capability,
+                            ),
+                        }
+                    };
+                    if exit {
+                        cancel.cancel();
+                        return Ok(true);
+                    }
+                    if geometry_event {
+                        hit_map = draw_synchronized(terminal, app)?;
+                    }
+                }
+                let _ = draw_synchronized(terminal, app)?;
+            }
+            result = &mut operation => {
+                let output = result.shell.map_or_else(
+                    || {
+                        UserShellOutput::diagnostic(
+                            result.result.is_error,
+                            present_shell_diagnostic(&result.result.output),
+                        )
+                    },
+                    |captured| {
+                        UserShellOutput::captured(
+                            captured.exit_code,
+                            &captured.stdout,
+                            &captured.stderr,
+                        )
+                    },
+                );
+                let _ = app.finish_shell(shell.item_id, &shell.command, &output);
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+                let _ = draw_synchronized(terminal, app)?;
+                return Ok(false);
+            }
+            Some(call) = approval_rx.recv(), if pending.is_none() => {
+                mouse_state.reset_gesture();
+                app.request_approval(
+                    call.request.tool,
+                    call.request.target,
+                    call.request.risk_class,
+                );
+                pending = Some(call.reply);
+            }
+        }
+            }
+        }
+        .await
+    };
+    deny_pending(app, &mut pending);
+    deny_buffered_approvals(approval_rx);
+    outcome
 }
 
 fn handle_trust_event(
@@ -723,7 +969,7 @@ async fn drive_turn(
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
     prompt: &str,
     attachments: &[ContentBlock],
-    queue: &mut VecDeque<QueuedPrompt>,
+    queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     mouse_state: &mut MouseState,
@@ -738,13 +984,14 @@ async fn drive_turn(
         provider_id: runtime.active_provider_id().to_string(),
         vision_capable: runtime.active_accepts_images(),
     };
-    let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
-    tokio::pin!(operation);
     let mut pending: Option<oneshot::Sender<bool>> = None;
-    let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
+    let outcome = {
+        let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
+        tokio::pin!(operation);
+        let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        async {
+            loop {
         tokio::select! {
             biased;
             _ = tick.tick() => {
@@ -779,7 +1026,6 @@ async fn drive_turn(
                     };
                     if exit {
                         cancel.cancel();
-                        deny_pending(app, &mut pending);
                         return Ok(true);
                     }
                     if geometry_event {
@@ -791,7 +1037,6 @@ async fn drive_turn(
             reason = &mut operation => {
                 drain_runtime_events(app, &mut rx);
                 app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
-                deny_pending(app, &mut pending);
                 let _ = draw_synchronized(terminal, app)?;
                 return Ok(false);
             }
@@ -812,7 +1057,13 @@ async fn drive_turn(
                 }
             }
         }
-    }
+            }
+        }
+        .await
+    };
+    deny_pending(app, &mut pending);
+    deny_buffered_approvals(approval_rx);
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)] // the live input router threads each state owner explicitly
@@ -821,7 +1072,7 @@ fn handle_turn_event(
     event: Event,
     cancel: &CancellationToken,
     editor_width: u16,
-    queue: &mut VecDeque<QueuedPrompt>,
+    queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     image_capability: &ImageCapabilitySnapshot,
@@ -849,24 +1100,16 @@ fn handle_turn_event(
                     false
                 }
                 AppCommand::Submit(submitted) => {
-                    if let Some(item_id) = app.append_prompt(
-                        submitted.display.clone(),
-                        Some(local_prompt_time()),
-                        true,
-                    ) {
-                        persist_prompt(app, history, cwd, &submitted);
-                        let attachments = image_content_blocks(submitted.images);
-                        if !attachments.is_empty() {
-                            app.apply_runtime(RuntimeUpdate::Warning(format!(
-                                "sending {} image(s) with this prompt",
-                                attachments.len()
-                            )));
-                        }
-                        queue.push_back(QueuedPrompt {
-                            text: submitted.prompt,
-                            attachments,
-                            item_id,
-                        });
+                    if let Some(operation) =
+                        prepare_prompt_operation(app, history, cwd, submitted, true)
+                    {
+                        queue.push_back(operation);
+                    }
+                    false
+                }
+                AppCommand::RunShell(command) => {
+                    if let Some(operation) = prepare_shell_operation(app, command, true) {
+                        queue.push_back(operation);
                     }
                     false
                 }
@@ -1213,6 +1456,19 @@ fn deny_pending(app: &mut AppModel, pending: &mut Option<oneshot::Sender<bool>>)
         let _ = reply.send(false);
     }
     app.clear_dialog();
+}
+
+fn deny_buffered_approvals(approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>) {
+    while let Ok(call) = approval_rx.try_recv() {
+        let _ = call.reply.send(false);
+    }
+}
+
+fn present_shell_diagnostic(output: &str) -> &str {
+    output
+        .split_once("\noutput:\n")
+        .map_or(output, |(_, body)| body)
+        .trim()
 }
 
 fn drain_runtime_events(app: &mut AppModel, rx: &mut broadcast::Receiver<RuntimeEvent>) {
@@ -2060,10 +2316,10 @@ mod tests {
         ));
         assert!(app.editor.text().is_empty());
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue.front().expect("queued").text, "next prompt");
+        assert_eq!(queue.front().expect("queued").prompt().text, "next prompt");
         assert!(
             app.timeline
-                .item(queue.front().expect("queued").item_id)
+                .item(queue.front().expect("queued").item_id())
                 .expect("queued item")
                 .pending
         );
@@ -2083,7 +2339,7 @@ mod tests {
         assert_eq!(
             queue
                 .iter()
-                .map(|queued| queued.text.as_str())
+                .map(|queued| queued.prompt().text.as_str())
                 .collect::<Vec<_>>(),
             vec!["next prompt", "third prompt"]
         );
@@ -2105,6 +2361,115 @@ mod tests {
                 cancellation_requested: true
             }
         );
+    }
+
+    #[test]
+    fn active_turn_queues_shell_then_prompt_in_one_serial_order() {
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(Some(
+            temp.path().join("prompt-history.jsonl"),
+        ));
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+
+        let _ = app.handle_input(
+            InputAction::Insert("!echo SHELL_QUEUE_SECRET".to_string()),
+            80,
+        );
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+        ));
+        app.editor.insert("ordinary queued prompt");
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+        ));
+
+        assert_eq!(queue.len(), 2);
+        let shell = queue.front().expect("queued shell").shell();
+        let prompt = queue.back().expect("queued prompt").prompt();
+        assert_eq!(shell.command.as_str(), "echo SHELL_QUEUE_SECRET");
+        assert_eq!(prompt.text, "ordinary queued prompt");
+        assert!(!format!("{queue:?}").contains("SHELL_QUEUE_SECRET"));
+        let ordered_ids = app
+            .timeline
+            .items()
+            .iter()
+            .filter(|item| item.id == shell.item_id || item.id == prompt.item_id)
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_ids, vec![shell.item_id, prompt.item_id]);
+        assert_eq!(
+            app.timeline.item(shell.item_id).expect("shell row").kind,
+            ItemKind::Shell
+        );
+        assert!(
+            app.timeline
+                .item(prompt.item_id)
+                .expect("prompt row")
+                .pending
+        );
+        let stored = history.load();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "ordinary queued prompt");
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn shell_diagnostic_strips_only_the_registry_envelope() {
+        assert_eq!(
+            present_shell_diagnostic(
+                "tool: run_shell\nstatus: error\noutput:\npermission denied for run_shell"
+            ),
+            "permission denied for run_shell"
+        );
+        assert_eq!(
+            present_shell_diagnostic("cancelled by user"),
+            "cancelled by user"
+        );
+    }
+
+    #[test]
+    fn buffered_approvals_are_all_denied_at_a_driver_boundary() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut replies = Vec::new();
+        for number in 0..3 {
+            let (reply, answer) = oneshot::channel();
+            sender
+                .send(ApprovalCall {
+                    request: localpilot_tui::ApprovalRequest {
+                        tool: format!("tool-{number}"),
+                        target: "fixture".to_string(),
+                        risk_class: "test".to_string(),
+                    },
+                    reply,
+                })
+                .expect("queue approval");
+            replies.push(answer);
+        }
+        deny_buffered_approvals(&mut receiver);
+        assert!(replies
+            .iter_mut()
+            .all(|answer| answer.try_recv() == Ok(false)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -2145,7 +2510,7 @@ mod tests {
             temp.path(),
             &image_capability(false),
         ));
-        assert_eq!(queue.front().expect("queued paste").text, payload);
+        assert_eq!(queue.front().expect("queued paste").prompt().text, payload);
         let entry = history.load().pop().expect("stored paste");
         assert_eq!(entry.text, "[Paste #1 - 12 lines]");
         assert_eq!(entry.pastes.len(), 1);
@@ -2180,6 +2545,7 @@ mod tests {
                 &image_capability(true),
             ));
             let queued = queue.back().expect("queued image prompt");
+            let queued = queued.prompt();
             assert_eq!(queued.text, format!("inspect {number}"));
             assert_eq!(queued.attachments.len(), 1);
             let ContentBlock::Image { data, .. } = &queued.attachments[0] else {

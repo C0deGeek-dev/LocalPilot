@@ -27,7 +27,9 @@ use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
 };
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
-use localpilot_tools::{Broker, ToolContext, ToolRegistry};
+use localpilot_tools::{
+    Broker, ShellOutput, ToolContext, ToolDispatchResult, ToolOutputPresentation, ToolRegistry,
+};
 use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +70,13 @@ pub enum StopReason {
     /// unbounded hang. The per-turn handoff (`last_turn_handoff`) summarizes what
     /// the turn had done when it was cut off.
     TimedOut,
+}
+
+/// A user-authored shell result with the ordinary audited/model-facing tool
+/// result plus typed, redacted streams for an interactive host.
+pub struct UserShellResult {
+    pub result: ToolResult,
+    pub shell: Option<ShellOutput>,
 }
 
 /// A bounded, parseable summary of what a turn accomplished, surfaced at the
@@ -1088,7 +1097,20 @@ impl SessionRuntime {
         cancel: &CancellationToken,
         exclude_from_context: bool,
     ) -> localpilot_core::ToolResult {
-        self.run_user_shell_input(
+        self.run_user_shell_command_detailed(command, cancel, exclude_from_context)
+            .await
+            .result
+    }
+
+    /// The cancellable user-shell path with typed redacted streams for a host
+    /// that needs to present process status without parsing tool copy.
+    pub async fn run_user_shell_command_detailed(
+        &mut self,
+        command: &str,
+        cancel: &CancellationToken,
+        exclude_from_context: bool,
+    ) -> UserShellResult {
+        self.run_user_shell_input_detailed(
             serde_json::json!({ "command": command }),
             command.to_string(),
             exclude_from_context,
@@ -1104,6 +1126,18 @@ impl SessionRuntime {
         exclude_from_context: bool,
         cancel: Option<&CancellationToken>,
     ) -> localpilot_core::ToolResult {
+        self.run_user_shell_input_detailed(input, shown, exclude_from_context, cancel)
+            .await
+            .result
+    }
+
+    async fn run_user_shell_input_detailed(
+        &mut self,
+        input: serde_json::Value,
+        shown: String,
+        exclude_from_context: bool,
+        cancel: Option<&CancellationToken>,
+    ) -> UserShellResult {
         let call_id = format!("user-shell-{}", EventId::new());
         let call = ToolCall::new(ToolUseId::from(call_id.as_str()), "run_shell", input);
         self.record_event(SessionEventKind::ToolStarted {
@@ -1120,27 +1154,30 @@ impl SessionRuntime {
             agents: None,
         };
         let engine = self.engine.snapshot();
-        let (result, cancelled) = if let Some(cancel) = cancel {
+        let (dispatch, cancelled) = if let Some(cancel) = cancel {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => (
-                    localpilot_core::ToolResult::error(
-                        call.id.clone(),
-                        "cancelled by the user; execution aborted",
-                    ),
+                    ToolDispatchResult {
+                        result: localpilot_core::ToolResult::error(
+                            call.id.clone(),
+                            "cancelled by the user; execution aborted",
+                        ),
+                        presentation: None,
+                    },
                     true,
                 ),
-                result = self.tools.dispatch(
+                dispatch = self.tools.dispatch_user_shell_detailed(
                     &call,
                     &ctx,
                     &engine,
                     self.approver.as_ref(),
-                ) => (result, false),
+                ) => (dispatch, false),
             }
         } else {
             (
                 self.tools
-                    .dispatch(&call, &ctx, &engine, self.approver.as_ref())
+                    .dispatch_user_shell_detailed(&call, &ctx, &engine, self.approver.as_ref())
                     .await,
                 false,
             )
@@ -1151,13 +1188,21 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
             name: "run_shell".to_string(),
-            is_error: result.is_error,
+            is_error: dispatch.result.is_error,
         });
         if !exclude_from_context {
-            let rendered = format!("$ {shown}\n{}", result.output);
+            let rendered = format!("$ {shown}\n{}", dispatch.result.output);
             self.append(Message::text(Role::UserShell, rendered));
         }
-        result
+        let shell = dispatch
+            .presentation
+            .map(|presentation| match presentation {
+                ToolOutputPresentation::Shell(shell) => shell,
+            });
+        UserShellResult {
+            result: dispatch.result,
+            shell,
+        }
     }
 
     /// The session id (transcripts are stored under it).

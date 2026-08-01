@@ -18,7 +18,7 @@ mod timeline;
 pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, Focus, Header, InputAction,
     KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, StopState, TabId,
-    TerminalCapabilities, TimelineNavigation, WorkState,
+    TerminalCapabilities, TimelineNavigation, UserShellCommand, UserShellOutput, WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};

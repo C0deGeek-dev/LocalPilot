@@ -2,7 +2,9 @@
 
 use localpilot_config::redact::redact;
 use localpilot_core::{ToolCall, ToolResult};
-use localpilot_sandbox::{Approver, Decision, PermissionEngine, PermissionRequest, Profile};
+use localpilot_sandbox::{
+    Approver, Decision, Effect, PermissionEngine, PermissionRequest, Profile,
+};
 use serde_json::Value;
 
 use crate::contract::{Confirmation, Reversibility};
@@ -15,7 +17,7 @@ use crate::builtins::{
 use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
 use crate::catalog::{Catalog, ToolSource};
-use crate::tool::{GateVerdict, Tool, ToolContext, ToolGate};
+use crate::tool::{GateVerdict, ShellOutput, Tool, ToolContext, ToolGate, ToolOutputPresentation};
 
 /// Context-size bound on a tool result. Output beyond this is kept as head +
 /// tail in context, with the full text spilled to the retention store under
@@ -32,6 +34,29 @@ pub struct ToolRegistry {
     /// Provenance of each tool, kept in lockstep with `tools`, so the catalog
     /// projection can discriminate a builtin from a specific MCP server's tool.
     sources: Vec<ToolSource>,
+}
+
+/// One authorized tool dispatch with both its model-facing result and an
+/// optional typed host presentation. Both projections have crossed the same
+/// registry redaction boundary.
+pub struct ToolDispatchResult {
+    pub result: ToolResult,
+    pub presentation: Option<ToolOutputPresentation>,
+}
+
+impl ToolDispatchResult {
+    fn plain(result: ToolResult) -> Self {
+        Self {
+            result,
+            presentation: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchIntent {
+    Model,
+    UserShell,
 }
 
 impl ToolRegistry {
@@ -173,7 +198,54 @@ impl ToolRegistry {
         engine: &PermissionEngine,
         approver: &dyn Approver,
     ) -> ToolResult {
-        self.dispatch_gated(call, ctx, engine, approver, &[]).await
+        self.dispatch_detailed(call, ctx, engine, approver)
+            .await
+            .result
+    }
+
+    /// Dispatch through the ordinary permission/redaction pipeline while also
+    /// retaining typed host presentation data when the tool supplies it.
+    pub async fn dispatch_detailed(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+    ) -> ToolDispatchResult {
+        self.dispatch_gated_detailed(call, ctx, engine, approver, &[])
+            .await
+    }
+
+    /// Dispatch a shell action the user explicitly authored. The submitted
+    /// command-risk effect is already confirmed; the permission engine still
+    /// decides every effect, retains denial, and can ask for separate protected
+    /// access such as network or out-of-workspace reads.
+    pub async fn dispatch_user_shell_detailed(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+    ) -> ToolDispatchResult {
+        if call.name != "run_shell" {
+            return ToolDispatchResult::plain(ToolResult::error(
+                call.id.clone(),
+                format_tool_output(
+                    &call.name,
+                    "the explicit user-shell dispatch accepts only run_shell",
+                    true,
+                ),
+            ));
+        }
+        self.dispatch_gated_detailed_with_intent(
+            call,
+            ctx,
+            engine,
+            approver,
+            &[],
+            DispatchIntent::UserShell,
+        )
+        .await
     }
 
     /// [`ToolRegistry::dispatch`] with additional tighten-only gates consulted
@@ -188,20 +260,53 @@ impl ToolRegistry {
         approver: &dyn Approver,
         gates: &[&dyn ToolGate],
     ) -> ToolResult {
+        self.dispatch_gated_detailed(call, ctx, engine, approver, gates)
+            .await
+            .result
+    }
+
+    async fn dispatch_gated_detailed(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+        gates: &[&dyn ToolGate],
+    ) -> ToolDispatchResult {
+        self.dispatch_gated_detailed_with_intent(
+            call,
+            ctx,
+            engine,
+            approver,
+            gates,
+            DispatchIntent::Model,
+        )
+        .await
+    }
+
+    async fn dispatch_gated_detailed_with_intent(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+        gates: &[&dyn ToolGate],
+        intent: DispatchIntent,
+    ) -> ToolDispatchResult {
         let Some(tool) = self.get(&call.name) else {
-            return ToolResult::error(
+            return ToolDispatchResult::plain(ToolResult::error(
                 call.id.clone(),
                 format_tool_output(&call.name, &format!("unknown tool: {}", call.name), true),
-            );
+            ));
         };
 
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
             Err(err) => {
-                return ToolResult::error(
+                return ToolDispatchResult::plain(ToolResult::error(
                     call.id.clone(),
                     format_tool_output(tool.name(), &err.to_string(), true),
-                )
+                ))
             }
         };
 
@@ -212,7 +317,8 @@ impl ToolRegistry {
         // does not touch `bypass` or `unrestricted`, whose whole point is no
         // prompts.
         let contract = tool.contract();
-        let force_confirm = !matches!(engine.profile(), Profile::Bypass | Profile::Unrestricted)
+        let force_confirm = intent == DispatchIntent::Model
+            && !matches!(engine.profile(), Profile::Bypass | Profile::Unrestricted)
             && (matches!(contract.reversibility, Reversibility::Irreversible)
                 || matches!(contract.confirmation, Confirmation::Always));
 
@@ -230,27 +336,33 @@ impl ToolRegistry {
             let allowed = match engine.decide(&request) {
                 Decision::Allow if force_confirm => approver.approve(&request).await,
                 Decision::Allow => true,
+                Decision::Ask
+                    if intent == DispatchIntent::UserShell
+                        && matches!(effect, Effect::RunCommand(_)) =>
+                {
+                    true
+                }
                 Decision::Ask => approver.approve(&request).await,
                 Decision::Deny => false,
             };
             if !allowed {
-                return ToolResult::error(
+                return ToolDispatchResult::plain(ToolResult::error(
                     call.id.clone(),
                     format_tool_output(tool.name(), &denial_message(tool.name(), &request), true),
-                );
+                ));
             }
         }
 
         for gate in gates {
             if let GateVerdict::Block { reason } = gate.check(call, &effects) {
-                return ToolResult::error(
+                return ToolDispatchResult::plain(ToolResult::error(
                     call.id.clone(),
                     format_tool_output(
                         tool.name(),
                         &format!("blocked by {}: {reason}", gate.name()),
                         true,
                     ),
-                );
+                ));
             }
         }
 
@@ -259,17 +371,30 @@ impl ToolRegistry {
             Ok(output) => {
                 let redacted = redact(&output.text);
                 let bounded = bound_output(tool.name(), &call.id, &redacted, ctx);
-                ToolResult {
-                    id: call.id.clone(),
-                    output: format_tool_output(tool.name(), &bounded, output.is_error),
-                    is_error: output.is_error,
+                ToolDispatchResult {
+                    result: ToolResult {
+                        id: call.id.clone(),
+                        output: format_tool_output(tool.name(), &bounded, output.is_error),
+                        is_error: output.is_error,
+                    },
+                    presentation: output.presentation.map(redact_presentation),
                 }
             }
-            Err(err) => ToolResult::error(
+            Err(err) => ToolDispatchResult::plain(ToolResult::error(
                 call.id.clone(),
                 format_tool_output(tool.name(), &err.to_string(), true),
-            ),
+            )),
         }
+    }
+}
+
+fn redact_presentation(presentation: ToolOutputPresentation) -> ToolOutputPresentation {
+    match presentation {
+        ToolOutputPresentation::Shell(shell) => ToolOutputPresentation::Shell(ShellOutput {
+            exit_code: shell.exit_code,
+            stdout: redact(&shell.stdout),
+            stderr: redact(&shell.stderr),
+        }),
     }
 }
 
@@ -367,6 +492,22 @@ mod catalog_tests {
     use async_trait::async_trait;
     use localpilot_sandbox::Effect;
     use serde_json::json;
+
+    #[test]
+    fn typed_shell_presentation_crosses_the_same_redaction_boundary() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+        let redacted = redact_presentation(ToolOutputPresentation::Shell(ShellOutput {
+            exit_code: 9,
+            stdout: format!("stdout {secret}"),
+            stderr: format!("stderr {secret}"),
+        }));
+        let ToolOutputPresentation::Shell(shell) = redacted;
+        assert_eq!(shell.exit_code, 9);
+        assert!(!shell.stdout.contains(secret));
+        assert!(!shell.stderr.contains(secret));
+        assert!(shell.stdout.contains(localpilot_config::redact::REDACTED));
+        assert!(shell.stderr.contains(localpilot_config::redact::REDACTED));
+    }
 
     /// A minimal tool used to drive catalog projection without a live workspace.
     struct FakeTool {

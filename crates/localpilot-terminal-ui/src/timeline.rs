@@ -24,6 +24,7 @@ pub enum ItemKind {
     Assistant,
     Reasoning,
     Tool,
+    Shell,
     Notice,
 }
 
@@ -57,6 +58,7 @@ impl From<ItemKind> for SemanticRole {
             ItemKind::Assistant => Self::Assistant,
             ItemKind::Reasoning => Self::Reasoning,
             ItemKind::Tool => Self::Tool,
+            ItemKind::Shell => Self::Tool,
             ItemKind::Notice => Self::Notice,
         }
     }
@@ -334,6 +336,21 @@ impl Timeline {
                 style: base,
             });
         }
+        self.wrap_cache.borrow_mut().remove(&id);
+        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
+            self.new_content.set(true);
+        }
+        self.invalidate_layout();
+        true
+    }
+
+    pub fn replace_text(&mut self, id: ItemId, text: impl Into<String>) -> bool {
+        let Some(index) = self.item_positions.get(&id).copied() else {
+            return false;
+        };
+        let item = &mut self.items[index];
+        item.text = sanitize_text(&text.into());
+        item.styles = full_range_style(&item.text, TextStyle::new(item.kind.into()));
         self.wrap_cache.borrow_mut().remove(&id);
         if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
             self.new_content.set(true);
@@ -822,7 +839,11 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
                 .saturating_add(if item.pending { 10 } else { 0 })
                 .saturating_add(1),
         ),
-        ItemKind::Assistant | ItemKind::Reasoning | ItemKind::Tool | ItemKind::Notice => 2,
+        ItemKind::Assistant
+        | ItemKind::Reasoning
+        | ItemKind::Tool
+        | ItemKind::Shell
+        | ItemKind::Notice => 2,
     };
     width.saturating_sub(decoration).max(1)
 }
@@ -954,7 +975,11 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
         part,
         content_column: match item.kind {
             ItemKind::User => 3,
-            ItemKind::Assistant | ItemKind::Reasoning | ItemKind::Tool | ItemKind::Notice => 2,
+            ItemKind::Assistant
+            | ItemKind::Reasoning
+            | ItemKind::Tool
+            | ItemKind::Shell
+            | ItemKind::Notice => 2,
         },
         trailing: matches!(part, VisualRowPart::Content { first: true, .. })
             .then(|| item.trailing.clone())

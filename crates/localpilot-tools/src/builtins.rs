@@ -74,7 +74,7 @@ fn paths_detail(input: &Value, prefix: &str) -> String {
 }
 
 /// Cap on a tool's textual output before truncation.
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Soft cap on a single `write_file` payload. A write larger than this risks
 /// being truncated in transit (an oversized tool call can arrive as malformed

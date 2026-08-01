@@ -256,6 +256,10 @@ Rules:
 - approve writes, deletes, network, package installs, and privileged commands
 - set timeout
 - capture stdout/stderr separately
+- an explicit full-screen `!` submission is already user-confirmed: command-risk
+  effects do not ask the user to confirm the exact text a second time. The
+  permission engine still classifies every effect, retains `deny`, and separately
+  asks for protected access such as network, secret-like, or out-of-workspace reads
 - never chain destructive commands generated from untrusted path lists
 - a recognized long-running command (dev server or watcher — `npm run dev`,
   `bun serve`, `vite`, `*--watch*`, …) is not run here: it would only block until

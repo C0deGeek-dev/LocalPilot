@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
@@ -201,7 +202,70 @@ pub enum AppCommand {
     Exit,
     NavigateTimeline(TimelineNavigation),
     OpenExternalEditor,
+    RunShell(UserShellCommand),
     Submit(SubmittedInput),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserShellCommand {
+    command: String,
+}
+
+impl UserShellCommand {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.command
+    }
+}
+
+impl fmt::Debug for UserShellCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserShellCommand")
+            .field(
+                "command",
+                &format_args!("<{} bytes redacted>", self.command.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserShellOutput {
+    success: bool,
+    lines: Vec<String>,
+}
+
+impl UserShellOutput {
+    #[must_use]
+    pub fn captured(exit_code: i32, stdout: &str, stderr: &str) -> Self {
+        Self {
+            success: exit_code == 0,
+            lines: stdout
+                .lines()
+                .chain(stderr.lines())
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic(is_error: bool, text: &str) -> Self {
+        Self {
+            success: !is_error,
+            lines: text.lines().map(str::to_string).collect(),
+        }
+    }
+}
+
+impl fmt::Debug for UserShellOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserShellOutput")
+            .field("success", &self.success)
+            .field("line_count", &self.lines.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,16 +446,33 @@ impl AppModel {
         if self.input_overlay.is_some() {
             return self.handle_overlay_input(action);
         }
+        if matches!(action, InputAction::Escape) && self.editor.is_shell_mode() {
+            self.editor.exit_shell_mode();
+            return AppCommand::None;
+        }
         match action {
             InputAction::CancelOrExit => AppCommand::None,
             InputAction::Escape => self.interrupt_work(),
-            InputAction::OpenReverseHistory if self.focus == Focus::Composer => {
+            InputAction::OpenReverseHistory
+                if self.focus == Focus::Composer && !self.editor.is_shell_mode() =>
+            {
                 self.open_reverse_history();
                 AppCommand::None
             }
             InputAction::NavigateTimeline(navigation) => AppCommand::NavigateTimeline(navigation),
             InputAction::Insert(text) if self.focus == Focus::Composer => {
-                self.editor.insert(&text);
+                let text = if self.editor.text().is_empty()
+                    && !self.editor.is_shell_mode()
+                    && text.starts_with('!')
+                {
+                    self.editor.enter_shell_mode();
+                    &text[1..]
+                } else {
+                    &text
+                };
+                if !text.is_empty() {
+                    self.editor.insert(text);
+                }
                 self.refresh_or_open_completion();
                 AppCommand::None
             }
@@ -416,7 +497,7 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::ForwardCharOrSearch if self.focus == Focus::Composer => {
-                if self.editor.text().is_empty() {
+                if self.editor.text().is_empty() && !self.editor.is_shell_mode() {
                     self.open_timeline_search(String::new());
                 } else {
                     self.editor.move_right();
@@ -483,7 +564,21 @@ impl AppModel {
             }
             InputAction::AcceptCompletion => AppCommand::None,
             InputAction::Submit if self.focus == Focus::Composer => {
-                if let Some(query) = timeline_search_command(self.editor.text()) {
+                if self.editor.is_shell_mode() {
+                    if self.editor.has_images() {
+                        let _ = self.push_runtime_item(
+                            ItemKind::Notice,
+                            "remove image attachments before running a shell command",
+                        );
+                        AppCommand::None
+                    } else {
+                        self.editor
+                            .submit_shell()
+                            .map_or(AppCommand::None, |command| {
+                                AppCommand::RunShell(UserShellCommand { command })
+                            })
+                    }
+                } else if let Some(query) = timeline_search_command(self.editor.text()) {
                     // The slash command is an invocation, not a draft to restore
                     // when search closes.
                     self.editor.replace_draft(String::new());
@@ -668,6 +763,11 @@ impl AppModel {
     }
 
     #[must_use]
+    pub fn shell_mode(&self) -> bool {
+        self.editor.is_shell_mode()
+    }
+
+    #[must_use]
     pub(crate) fn completion(&self) -> Option<CompletionView<'_>> {
         let Some(InputOverlay::Completion(state)) = &self.input_overlay else {
             return None;
@@ -728,7 +828,11 @@ impl AppModel {
         data: impl Into<String>,
         byte_len: usize,
     ) -> Option<String> {
-        if self.focus != Focus::Composer || self.dialog.is_some() || self.input_overlay.is_some() {
+        if self.focus != Focus::Composer
+            || self.dialog.is_some()
+            || self.input_overlay.is_some()
+            || self.shell_mode()
+        {
             return None;
         }
         self.exit_armed = false;
@@ -765,7 +869,11 @@ impl AppModel {
         if edited == snapshot.text() {
             self.editor.restore_snapshot(snapshot);
         } else {
+            let shell_mode = snapshot.shell_mode();
             self.editor.replace_draft(edited);
+            if shell_mode {
+                self.editor.enter_shell_mode();
+            }
         }
     }
 
@@ -793,6 +901,54 @@ impl AppModel {
     pub fn activate_prompt(&mut self, id: ItemId) -> bool {
         self.timeline.follow_bottom();
         self.timeline.set_pending(id, false)
+    }
+
+    /// Insert a stable compact user-shell row. Pending rows intentionally carry
+    /// no running activity until their ordered queue position activates.
+    pub fn append_shell(&mut self, command: &UserShellCommand, pending: bool) -> Option<ItemId> {
+        self.timeline.follow_bottom();
+        let id = self
+            .timeline
+            .push(ItemKind::Shell, format!("Shell {}", command.as_str()))?;
+        if pending
+            && matches!(self.work, WorkState::Busy { .. })
+            && self.active_insert_before.is_none()
+        {
+            self.active_insert_before = Some(id);
+        }
+        Some(id)
+    }
+
+    pub fn activate_shell(&mut self, id: ItemId) -> bool {
+        self.timeline.follow_bottom();
+        self.timeline.set_activity(id, Some(ActivityState::Running))
+    }
+
+    pub fn finish_shell(
+        &mut self,
+        id: ItemId,
+        command: &UserShellCommand,
+        output: &UserShellOutput,
+    ) -> bool {
+        let line_count = output.lines.len();
+        let unit = if line_count == 1 { "line" } else { "lines" };
+        let command = command.as_str().replace(['\r', '\n'], " ");
+        let mut text = format!("Shell {command} {line_count} {unit}");
+        for line in &output.lines {
+            text.push('\n');
+            text.push_str(line);
+        }
+        if !self.timeline.replace_text(id, text) {
+            return false;
+        }
+        self.timeline.set_activity(
+            id,
+            Some(if output.success {
+                ActivityState::Success
+            } else {
+                ActivityState::Error
+            }),
+        )
     }
 
     pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
@@ -1092,6 +1248,12 @@ impl AppModel {
     }
 
     fn refresh_or_open_completion(&mut self) {
+        if self.editor.is_shell_mode() {
+            if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
+                self.dismiss_input_overlay();
+            }
+            return;
+        }
         let completion = self
             .editor
             .slash_token()
@@ -1891,6 +2053,19 @@ mod tests {
             panic!("failed editor launch should restore the draft");
         };
         assert_eq!(submitted.images.len(), 1);
+
+        let mut shell = model();
+        let _ = shell.handle_input(InputAction::Insert("!echo before".to_string()), 80);
+        assert_eq!(
+            shell.handle_input(InputAction::OpenExternalEditor, 80),
+            AppCommand::OpenExternalEditor
+        );
+        shell.finish_external_edit(Some("echo after".to_string()));
+        assert!(shell.shell_mode());
+        let AppCommand::RunShell(command) = shell.handle_input(InputAction::Submit, 80) else {
+            panic!("external shell edit should stay in shell mode");
+        };
+        assert_eq!(command.as_str(), "echo after");
     }
 
     #[test]
@@ -1918,6 +2093,155 @@ mod tests {
             AppCommand::None
         );
         assert!(busy.external_edit_text().is_none());
+    }
+
+    #[test]
+    fn shell_mode_exits_before_work_interrupt_and_never_enters_prompt_history() {
+        let mut app = model();
+        app.seed_history(vec!["ordinary prompt".to_string()]);
+        app.set_command_catalog([command("model", "Switch model")]);
+        let _ = app.handle_input(
+            InputAction::Insert("!echo @sample SHELL_SECRET".to_string()),
+            80,
+        );
+        assert!(app.shell_mode());
+        assert!(app.completion().is_none());
+
+        app.begin_work();
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert_eq!(app.editor.text(), "echo @sample SHELL_SECRET");
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(
+            app.handle_input(InputAction::Escape, 80),
+            AppCommand::CancelWork
+        );
+
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        app.editor.replace_draft("");
+        let _ = app.handle_input(InputAction::Insert("!echo SHELL_SECRET".to_string()), 80);
+        let AppCommand::RunShell(command) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("a leading bang should submit one shell command");
+        };
+        assert_eq!(command.as_str(), "echo SHELL_SECRET");
+        assert!(!format!("{command:?}").contains("SHELL_SECRET"));
+        assert!(app.editor.text().is_empty());
+
+        let _ = app.handle_input(InputAction::Insert("!".to_string()), 80);
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "echo SHELL_SECRET");
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.editor.text(), "");
+        let _ = app.handle_input(InputAction::Escape, 80);
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "ordinary prompt");
+    }
+
+    #[test]
+    fn shell_submit_expands_text_paste_but_rejects_images() {
+        let mut pasted = model();
+        let _ = pasted.handle_input(InputAction::Insert("!echo ".to_string()), 80);
+        let secret = format!("{}\nline 2\nline 3\nline 4", "PASTED_SHELL_SECRET");
+        let _ = pasted.handle_input(InputAction::Paste(secret.clone()), 80);
+        let AppCommand::RunShell(command) = pasted.handle_input(InputAction::Submit, 80) else {
+            panic!("shell paste should submit");
+        };
+        assert_eq!(command.as_str(), format!("echo {secret}"));
+        assert!(!format!("{command:?}").contains("PASTED_SHELL_SECRET"));
+
+        let mut image = model();
+        let _ = image.handle_input(InputAction::Insert("!echo image".to_string()), 80);
+        assert!(image
+            .attach_image("image/png", "IMAGE_SECRET", 128)
+            .is_none());
+    }
+
+    #[test]
+    fn shell_timeline_item_activates_and_finishes_in_place() {
+        let mut app = model();
+        let _ = app.handle_input(InputAction::Insert("!echo marker".to_string()), 80);
+        let AppCommand::RunShell(command) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("shell command");
+        };
+        let item = app
+            .append_shell(&command, false)
+            .expect("shell timeline item");
+        assert!(app.activate_shell(item));
+        assert_eq!(
+            app.timeline.item(item).expect("running shell").activity,
+            Some(ActivityState::Running)
+        );
+        let output = UserShellOutput::captured(0, "marker\n", "");
+        assert!(app.finish_shell(item, &command, &output));
+        let item = app.timeline.item(item).expect("finished shell");
+        assert_eq!(item.kind, ItemKind::Shell);
+        assert_eq!(item.text, "Shell echo marker 1 line\nmarker");
+        assert_eq!(item.activity, Some(ActivityState::Success));
+    }
+
+    #[test]
+    fn shell_timeline_summary_counts_stream_lines_and_encodes_failure_without_exit_copy() {
+        let mut app = model();
+        let _ = app.handle_input(InputAction::Insert("!failing-command".to_string()), 80);
+        let AppCommand::RunShell(command) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("shell command");
+        };
+        let item = app.append_shell(&command, false).expect("shell item");
+        let output = UserShellOutput::captured(5, "first\nsecond\n", "stderr only\n");
+        assert!(app.finish_shell(item, &command, &output));
+        let item = app.timeline.item(item).expect("finished shell");
+        assert_eq!(item.kind, ItemKind::Shell);
+        assert_eq!(
+            item.text,
+            "Shell failing-command 3 lines\nfirst\nsecond\nstderr only"
+        );
+        assert!(!item.text.contains("exit 5"));
+        assert_eq!(item.activity, Some(ActivityState::Error));
+
+        let mut empty = model();
+        let _ = empty.handle_input(InputAction::Insert("!true".to_string()), 80);
+        let AppCommand::RunShell(command) = empty.handle_input(InputAction::Submit, 80) else {
+            panic!("empty shell command");
+        };
+        let item = empty
+            .append_shell(&command, false)
+            .expect("empty shell item");
+        assert!(empty.finish_shell(item, &command, &UserShellOutput::captured(0, "", "")));
+        assert_eq!(
+            empty.timeline.item(item).expect("empty result").text,
+            "Shell true 0 lines"
+        );
+    }
+
+    #[test]
+    fn shell_mode_owns_up_down_history_and_blocks_prompt_reverse_search() {
+        let mut app = model();
+        app.seed_history(vec!["ordinary prompt".to_string()]);
+        for command in ["!echo first", "!echo second"] {
+            let _ = app.handle_input(InputAction::Insert(command.to_string()), 80);
+            assert!(matches!(
+                app.handle_input(InputAction::Submit, 80),
+                AppCommand::RunShell(_)
+            ));
+        }
+        let _ = app.handle_input(InputAction::Insert("!".to_string()), 80);
+        assert_eq!(
+            app.handle_input(InputAction::OpenReverseHistory, 80),
+            AppCommand::None
+        );
+        assert!(!app.has_input_overlay());
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "echo second");
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "echo first");
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.editor.text(), "echo second");
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.editor.text(), "");
     }
 
     #[test]

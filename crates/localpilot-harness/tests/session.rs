@@ -1250,9 +1250,32 @@ async fn cancelled_user_shell_command_records_an_explicit_error_and_one_audit_pa
 }
 
 #[tokio::test]
+async fn detailed_user_shell_result_carries_typed_stdout_stderr_and_exit_status() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let mut h = build_from_arc(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let cancel = CancellationToken::new();
+    #[cfg(windows)]
+    let command = "Write-Output stdout-marker; [Console]::Error.WriteLine('stderr-marker'); exit 5";
+    #[cfg(not(windows))]
+    let command = "printf 'stdout-marker\\n'; printf 'stderr-marker\\n' >&2; exit 5";
+
+    let detailed = h
+        .runtime
+        .run_user_shell_command_detailed(command, &cancel, true)
+        .await;
+    assert!(detailed.result.is_error);
+    let shell = detailed.shell.expect("typed shell output");
+    assert_eq!(shell.exit_code, 5);
+    assert!(shell.stdout.contains("stdout-marker"));
+    assert!(shell.stderr.contains("stderr-marker"));
+}
+
+#[tokio::test]
 async fn cancelling_user_shell_during_approval_starts_no_process() {
     let dir = tempfile::tempdir().unwrap();
-    let marker = dir.path().join("must-not-exist.txt");
+    let outside = tempfile::tempdir().unwrap();
+    let protected = outside.path().join("protected.txt");
+    std::fs::write(&protected, "PROTECTED_SENTINEL").unwrap();
     let store = Store::open(dir.path());
     let called = Arc::new(AtomicBool::new(false));
     let mut runtime = SessionRuntime::new(
@@ -1285,18 +1308,18 @@ async fn cancelling_user_shell_during_approval_starts_no_process() {
 
     #[cfg(windows)]
     let command = format!(
-        "Set-Content -LiteralPath '{}' -Value spawned",
-        marker.display().to_string().replace('\'', "''")
+        "type '{}'",
+        protected.display().to_string().replace('\'', "''")
     );
     #[cfg(not(windows))]
-    let command = format!("touch '{}'", marker.display());
+    let command = format!("cat '{}'", protected.display());
     let result = runtime
         .run_user_shell_command(&command, &cancel, false)
         .await;
     assert!(called.load(Ordering::SeqCst));
     assert!(result.is_error);
     assert!(result.output.contains("cancelled"), "{}", result.output);
-    assert!(!marker.exists(), "approval cancellation must spawn nothing");
+    assert!(!result.output.contains("PROTECTED_SENTINEL"));
 
     let transcript = store.read_transcript(session).unwrap();
     assert_eq!(transcript.len(), 1);

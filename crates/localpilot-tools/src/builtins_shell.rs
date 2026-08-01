@@ -16,12 +16,15 @@ use serde_json::Value;
 
 #[cfg(windows)]
 use crate::builtins::CREATE_NO_WINDOW;
-use crate::builtins::{binary_placeholder, cap, looks_binary};
+use crate::builtins::{binary_placeholder, looks_binary, MAX_OUTPUT_BYTES};
 use crate::contract::{
     Idempotency, Postcondition, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
 };
 use crate::error::ToolError;
-use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use crate::tool::{
+    detail_preview, parse_input, schema_for, ShellOutput, Tool, ToolContext, ToolOutput,
+    ToolOutputPresentation,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RunShellInput {
@@ -244,6 +247,33 @@ fn command_path_args(execution: &RunShellExecution) -> Vec<String> {
 
 fn command_output(code: i32, stdout: &str, stderr: &str) -> String {
     format!("exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}")
+}
+
+fn cap_shell_streams(code: i32, stdout: String, stderr: String) -> (String, String, bool) {
+    let overhead = command_output(code, "", "").len();
+    let budget = MAX_OUTPUT_BYTES.saturating_sub(overhead);
+    if stdout.len().saturating_add(stderr.len()) <= budget {
+        return (stdout, stderr, false);
+    }
+
+    const MARKER: &str = "\n... [output truncated]";
+    let payload_budget = budget.saturating_sub(MARKER.len());
+    if stdout.len() > payload_budget {
+        let end = floor_char_boundary(&stdout, payload_budget);
+        return (format!("{}{}", &stdout[..end], MARKER), String::new(), true);
+    }
+
+    let remaining = payload_budget.saturating_sub(stdout.len());
+    let end = floor_char_boundary(&stderr, remaining);
+    (stdout, format!("{}{}", &stderr[..end], MARKER), true)
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// Render a captured stream as text, substituting a placeholder when the bytes
@@ -550,10 +580,18 @@ impl Tool for RunShell {
         let stdout = render_stream(&output.stdout);
         let stderr = render_stream(&output.stderr);
         let code = output.status.code().unwrap_or(-1);
+        let (stdout, stderr, truncated) = cap_shell_streams(code, stdout, stderr);
         let text = command_output(code, &stdout, &stderr);
-        let mut result = cap(text);
-        result.is_error = !output.status.success();
-        Ok(result)
+        Ok(ToolOutput {
+            text,
+            is_error: !output.status.success(),
+            truncated,
+            presentation: Some(ToolOutputPresentation::Shell(ShellOutput {
+                exit_code: code,
+                stdout,
+                stderr,
+            })),
+        })
     }
 }
 
@@ -695,6 +733,23 @@ mod tests {
             "sort on a null stdin should exit cleanly: {}",
             output.text
         );
+        let Some(ToolOutputPresentation::Shell(shell)) = output.presentation else {
+            panic!("run_shell must retain typed captured streams");
+        };
+        assert_eq!(shell.exit_code, 0);
+        assert!(shell.stdout.is_empty());
+        assert!(shell.stderr.is_empty());
+    }
+
+    #[test]
+    fn structured_shell_stream_cap_preserves_utf8_and_the_typed_exit_code() {
+        let stdout = "界".repeat(MAX_OUTPUT_BYTES);
+        let (stdout, stderr, truncated) = cap_shell_streams(7, stdout, "late stderr".to_string());
+        let rendered = command_output(7, &stdout, &stderr);
+        assert!(truncated);
+        assert!(rendered.len() <= MAX_OUTPUT_BYTES);
+        assert!(stdout.ends_with("... [output truncated]"));
+        assert!(stderr.is_empty());
     }
 
     #[tokio::test]

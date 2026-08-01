@@ -116,11 +116,16 @@ pub(crate) struct EditorSnapshot {
     text: String,
     cursor: usize,
     units: Vec<ActiveUnit>,
+    shell_mode: bool,
 }
 
 impl EditorSnapshot {
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) const fn shell_mode(&self) -> bool {
+        self.shell_mode
     }
 }
 
@@ -137,6 +142,9 @@ pub struct Editor {
     preferred_column: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
+    shell_history: Vec<String>,
+    shell_history_index: Option<usize>,
+    shell_mode: bool,
     history_draft: String,
     history_draft_cursor: usize,
     history_draft_units: Vec<ActiveUnit>,
@@ -169,6 +177,7 @@ impl Editor {
     pub fn seed_history(&mut self, history: Vec<String>) {
         self.history = history;
         self.history_index = None;
+        self.shell_history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.preferred_column = None;
@@ -180,6 +189,7 @@ impl Editor {
             text: self.text.clone(),
             cursor: self.cursor,
             units: self.units.clone(),
+            shell_mode: self.shell_mode,
         }
     }
 
@@ -187,9 +197,11 @@ impl Editor {
         self.text = snapshot.text;
         self.cursor = snapshot.cursor.min(self.text.len());
         self.units = snapshot.units;
+        self.shell_mode = snapshot.shell_mode;
         self.normalize_cursor();
         self.preferred_column = None;
         self.history_index = None;
+        self.shell_history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_units.clear();
@@ -293,8 +305,10 @@ impl Editor {
         self.cursor = cursor.min(self.text.len());
         self.normalize_cursor();
         self.units.clear();
+        self.shell_mode = false;
         self.preferred_column = None;
         self.history_index = None;
+        self.shell_history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_units.clear();
@@ -518,6 +532,7 @@ impl Editor {
         self.cursor = 0;
         self.preferred_column = None;
         self.history_index = None;
+        self.shell_history_index = None;
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_units.clear();
@@ -531,6 +546,64 @@ impl Editor {
             pastes,
             images,
         })
+    }
+
+    #[must_use]
+    pub(crate) fn is_shell_mode(&self) -> bool {
+        self.shell_mode
+    }
+
+    #[must_use]
+    pub(crate) fn has_images(&self) -> bool {
+        self.units
+            .iter()
+            .any(|unit| matches!(&unit.payload, AtomicPayload::Image(_)))
+    }
+
+    pub(crate) fn exit_shell_mode(&mut self) {
+        if !self.is_shell_mode() {
+            return;
+        }
+        self.fork_recall_on_edit();
+        self.shell_mode = false;
+        self.preferred_column = None;
+    }
+
+    pub(crate) fn enter_shell_mode(&mut self) {
+        self.fork_recall_on_edit();
+        self.shell_mode = true;
+        self.preferred_column = None;
+    }
+
+    /// Take the bare draft from explicit shell mode without adding it to prompt
+    /// history. Compact text paste expands to its original bytes; images are
+    /// omitted and must be rejected by the app before this method is called.
+    pub(crate) fn submit_shell(&mut self) -> Option<String> {
+        if !self.shell_mode {
+            return None;
+        }
+        let command = self.projected_text(true).trim().to_string();
+        if command.is_empty() {
+            return None;
+        }
+        self.text.clear();
+        self.units.clear();
+        self.shell_mode = false;
+        self.cursor = 0;
+        self.preferred_column = None;
+        self.history_index = None;
+        self.shell_history_index = None;
+        self.history_draft.clear();
+        self.history_draft_cursor = 0;
+        self.history_draft_units.clear();
+        if self.shell_history.last() != Some(&command) {
+            self.shell_history.push(command.clone());
+            const SHELL_HISTORY_LIMIT: usize = 100;
+            if self.shell_history.len() > SHELL_HISTORY_LIMIT {
+                self.shell_history.remove(0);
+            }
+        }
+        Some(command)
     }
 
     pub fn move_visual_start(&mut self, width: u16) {
@@ -641,6 +714,10 @@ impl Editor {
 
     fn recall_previous(&mut self) {
         self.preferred_column = None;
+        if self.is_shell_mode() || self.shell_history_index.is_some() {
+            self.recall_previous_shell();
+            return;
+        }
         if self.history.is_empty() {
             return;
         }
@@ -661,6 +738,10 @@ impl Editor {
 
     fn recall_next(&mut self) {
         self.preferred_column = None;
+        if self.shell_history_index.is_some() {
+            self.recall_next_shell();
+            return;
+        }
         let Some(index) = self.history_index else {
             return;
         };
@@ -679,10 +760,47 @@ impl Editor {
     }
 
     fn fork_recall_on_edit(&mut self) {
-        if self.history_index.take().is_some() {
+        if self.history_index.take().is_some() || self.shell_history_index.take().is_some() {
             self.history_draft.clear();
             self.history_draft_cursor = 0;
             self.history_draft_units.clear();
+        }
+    }
+
+    fn recall_previous_shell(&mut self) {
+        if self.shell_history.is_empty() {
+            return;
+        }
+        let index = match self.shell_history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = self.text.clone();
+                self.history_draft_cursor = self.cursor;
+                self.history_draft_units = std::mem::take(&mut self.units);
+                self.shell_history.len() - 1
+            }
+        };
+        self.text = self.shell_history[index].clone();
+        self.units.clear();
+        self.cursor = self.text.len();
+        self.shell_history_index = Some(index);
+    }
+
+    fn recall_next_shell(&mut self) {
+        let Some(index) = self.shell_history_index else {
+            return;
+        };
+        if index + 1 < self.shell_history.len() {
+            self.text = self.shell_history[index + 1].clone();
+            self.units.clear();
+            self.cursor = self.text.len();
+            self.shell_history_index = Some(index + 1);
+        } else {
+            self.text = std::mem::take(&mut self.history_draft);
+            self.cursor = self.history_draft_cursor.min(self.text.len());
+            self.units = std::mem::take(&mut self.history_draft_units);
+            self.history_draft_cursor = 0;
+            self.shell_history_index = None;
         }
     }
 

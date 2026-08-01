@@ -93,6 +93,22 @@ pub struct ToolOutput {
     pub text: String,
     pub is_error: bool,
     pub truncated: bool,
+    pub presentation: Option<ToolOutputPresentation>,
+}
+
+/// Typed host-facing output retained alongside the ordinary model-facing text.
+/// The registry applies the same redaction boundary to both projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOutputPresentation {
+    Shell(ShellOutput),
+}
+
+/// Captured shell streams and process status before any UI formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl ToolOutput {
@@ -103,6 +119,7 @@ impl ToolOutput {
             text: text.into(),
             is_error: false,
             truncated: false,
+            presentation: None,
         }
     }
 
@@ -113,6 +130,7 @@ impl ToolOutput {
             text: text.into(),
             is_error: false,
             truncated: true,
+            presentation: None,
         }
     }
 }

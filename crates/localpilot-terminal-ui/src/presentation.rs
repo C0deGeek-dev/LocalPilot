@@ -6,7 +6,7 @@ pub(crate) fn semantic_ranges(kind: ItemKind, text: &str) -> Vec<StyledRange> {
     if text.is_empty() {
         return Vec::new();
     }
-    if kind == ItemKind::Tool {
+    if matches!(kind, ItemKind::Tool | ItemKind::Shell) {
         return vec![range(0, text.len(), TextStyle::new(SemanticRole::Code))];
     }
 

@@ -1252,6 +1252,91 @@ async fn run_shell_approval_prompt_shows_the_full_command_line() {
 }
 
 #[tokio::test]
+async fn explicit_user_shell_skips_only_redundant_contract_confirmation() {
+    let (dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::Interactive, true);
+
+    let safe_approver = RecordingApprover::new();
+    let safe = ToolCall::new(
+        ToolUseId::from("safe"),
+        "run_shell",
+        json!({ "program": "git", "args": ["status"] }),
+    );
+    let _ = registry
+        .dispatch_user_shell_detailed(&safe, &c, &default_engine(), &safe_approver)
+        .await;
+    assert!(
+        safe_approver.seen().is_empty(),
+        "an explicitly submitted safe command must not ask twice"
+    );
+    let sequenced = ToolCall::new(
+        ToolUseId::from("sequenced"),
+        "run_shell",
+        json!({ "command": "echo first; echo second" }),
+    );
+    let _ = registry
+        .dispatch_user_shell_detailed(&sequenced, &c, &default_engine(), &safe_approver)
+        .await;
+    assert!(
+        safe_approver.seen().is_empty(),
+        "a user-authored shell sequence must not raise a redundant command approval"
+    );
+
+    let wrong_tool = ToolCall::new(
+        ToolUseId::from("wrong-tool"),
+        "write_file",
+        json!({ "path": "must-not-exist.txt", "content": "blocked" }),
+    );
+    let wrong_result = registry
+        .dispatch_user_shell_detailed(&wrong_tool, &c, &default_engine(), &safe_approver)
+        .await;
+    assert!(wrong_result.result.is_error);
+    assert!(!dir.path().join("must-not-exist.txt").exists());
+
+    let dangerous_approver = RecordingApprover::new();
+    let dangerous = ToolCall::new(
+        ToolUseId::from("dangerous"),
+        "run_shell",
+        json!({ "program": "rm", "args": ["-rf", "build"] }),
+    );
+    let _ = registry
+        .dispatch_user_shell_detailed(&dangerous, &c, &default_engine(), &dangerous_approver)
+        .await;
+    assert!(
+        dangerous_approver.seen().is_empty(),
+        "the exact user-authored command is already confirmed"
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("protected.txt");
+    std::fs::write(&outside_file, "protected").unwrap();
+    #[cfg(windows)]
+    let read_program = "type";
+    #[cfg(not(windows))]
+    let read_program = "cat";
+    let protected_approver = RecordingApprover::new();
+    let protected = ToolCall::new(
+        ToolUseId::from("protected"),
+        "run_shell",
+        json!({
+            "program": read_program,
+            "args": [outside_file.to_string_lossy().into_owned()]
+        }),
+    );
+    let _ = registry
+        .dispatch_user_shell_detailed(&protected, &c, &default_engine(), &protected_approver)
+        .await;
+    assert!(protected_approver.seen().iter().any(|request| matches!(
+        request.effect,
+        Effect::ReadPath {
+            inside_workspace: false,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn write_file_approval_prompt_shows_the_path() {
     let (_dir, ws) = workspace_with(&[("existing.txt", "old")]);
     let registry = ToolRegistry::with_builtins();
