@@ -1149,69 +1149,95 @@ async fn switch_model(
     provider_id: &str,
     model: Option<String>,
 ) {
+    let report = switch_model_target(runtime, config, provider_id, model).await;
+    state.header.provider = report.provider;
+    state.header.model = report.model;
+    for notice in report.notices {
+        state.apply(UiEvent::Notice(notice));
+    }
+}
+
+pub(crate) struct ModelSwitchReport {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) notices: Vec<String>,
+}
+
+/// Re-point the shared session runtime and report UI-neutral outcomes so both
+/// interactive terminal hosts use one provider/model switching authority.
+pub(crate) async fn switch_model_target(
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    provider_id: &str,
+    model: Option<String>,
+) -> ModelSwitchReport {
+    let mut notices = Vec::new();
     let outcome = match runtime.set_active_provider(provider_id) {
         Ok(outcome) => outcome,
         Err(SwitchError::UnknownProvider(id)) => {
-            state.apply(UiEvent::Notice(format!(
+            notices.push(format!(
                 "/model: provider '{id}' is not configured — try /model to list"
-            )));
-            return;
+            ));
+            return model_switch_report(runtime, notices);
         }
         Err(SwitchError::TurnInFlight) => {
-            state.apply(UiEvent::Notice(
-                "/model: a turn is in progress; switch once it finishes".to_string(),
-            ));
-            return;
+            notices.push("/model: a turn is in progress; switch once it finishes".to_string());
+            return model_switch_report(runtime, notices);
         }
     };
     // The provider's no-default-model warning surfaces before any model override.
     if let Some(warning) = &outcome.warning {
-        state.apply(UiEvent::Notice(format!("/model: {warning}")));
+        notices.push(format!("/model: {warning}"));
     }
     // An explicit model overrides the provider default; validate it best-effort.
     if let Some(model) = model {
         if let Err(error) = runtime.set_active_model(&model) {
-            state.apply(UiEvent::Notice(format!("/model: {error}")));
-            return;
+            notices.push(format!("/model: {error}"));
+            return model_switch_report(runtime, notices);
         }
-        warn_unknown_model(state, config, provider_id, &model).await;
+        if let Some(warning) = unknown_model_warning(config, provider_id, &model).await {
+            notices.push(warning);
+        }
     }
-    state.header.provider = runtime.active_provider_id().to_string();
-    state.header.model = runtime.active_model().to_string();
     // The active provider changed, so re-resolve its image-input capability for the
     // attach preflight (config wins, else a best-effort probe of the new server).
     runtime.set_image_support_override(resolved_image_support(config, Some(provider_id)).await);
-    state.apply(UiEvent::Notice(format!(
+    notices.push(format!(
         "switched to provider '{}' · model '{}'",
         runtime.active_provider_id(),
         runtime.active_model()
-    )));
+    ));
+    model_switch_report(runtime, notices)
+}
+
+fn model_switch_report(runtime: &SessionRuntime, notices: Vec<String>) -> ModelSwitchReport {
+    ModelSwitchReport {
+        provider: runtime.active_provider_id().to_string(),
+        model: runtime.active_model().to_string(),
+        notices,
+    }
 }
 
 /// Best-effort model-id check: when the provider exposes a model listing and the
 /// requested model is absent, warn (never fail — the id may be valid but unlisted,
 /// or discovery may be offline).
-async fn warn_unknown_model(
-    state: &mut AppState,
+async fn unknown_model_warning(
     config: &localpilot_config::Config,
     provider_id: &str,
     model: &str,
-) {
-    let Some(entry) = config.providers.get(provider_id) else {
-        return;
-    };
-    let Some(base_url) = crate::models_cmd::listing_base_url(entry) else {
-        return;
-    };
+) -> Option<String> {
+    let entry = config.providers.get(provider_id)?;
+    let base_url = crate::models_cmd::listing_base_url(entry)?;
     if let Ok(models) =
         crate::models_cmd::discover_models_for_provider(config, provider_id, &base_url).await
     {
         if !models.is_empty() && !models.iter().any(|m| m.id == model) {
-            state.apply(UiEvent::Notice(format!(
+            return Some(format!(
                 "/model: '{model}' is not in {provider_id}'s model list; using it anyway"
-            )));
+            ));
         }
     }
+    None
 }
 
 /// List or stop the session's background processes, posting the result as

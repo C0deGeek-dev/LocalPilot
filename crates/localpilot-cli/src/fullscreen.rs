@@ -31,13 +31,14 @@ use localpilot_terminal_ui::{
     SubmittedInput, TerminalCapabilities, Theme, TimelineNavigation, UserShellCommand,
     UserShellOutput,
 };
+use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::key_input::{is_cancel, is_clipboard_image_key, is_key_action};
-use crate::repl::{ApprovalCall, ClipboardImageRead};
+use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
@@ -226,6 +227,10 @@ pub(crate) async fn run(
     terminal.clear().context("clear full-screen terminal")?;
     let mut app = AppModel::new(header, capabilities);
     app.set_command_catalog(fullscreen_command_catalog());
+    app.set_command_values(
+        "model",
+        fullscreen_model_values(context.config, context.runtime.active_provider_id()),
+    );
     apply_host_preferences(&mut app);
     for event in startup_events {
         app.apply_runtime(map_runtime_event(event));
@@ -262,8 +267,10 @@ pub(crate) async fn run(
 }
 
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
+    const SUPPORTED: &[&str] = &["model", "new", "fork", "clone", "clear", "quit"];
     let mut command_catalog = localpilot_tui::AppState::slash_commands()
         .iter()
+        .filter(|(name, _)| SUPPORTED.contains(name))
         .map(|(name, description)| CompletionCommand {
             name: (*name).to_string(),
             description: (*description).to_string(),
@@ -274,6 +281,28 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         description: "Search messages in this session".to_string(),
     });
     command_catalog
+}
+
+fn fullscreen_model_values(
+    config: &localpilot_config::Config,
+    active_provider: &str,
+) -> Vec<CompletionCommand> {
+    config
+        .providers
+        .iter()
+        .map(|(id, provider)| {
+            let active = if id == active_provider {
+                "current · "
+            } else {
+                ""
+            };
+            let model = provider.model.as_deref().unwrap_or("provider default");
+            CompletionCommand {
+                name: id.clone(),
+                description: format!("{active}{} · {model}", provider.kind),
+            }
+        })
+        .collect()
 }
 
 fn image_content_blocks(images: Vec<localpilot_terminal_ui::ImageAttachment>) -> Vec<ContentBlock> {
@@ -634,6 +663,105 @@ fn prepare_shell_operation(
     Some(QueuedOperation::Shell(QueuedShell { command, item_id }))
 }
 
+async fn execute_fullscreen_slash(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    submitted: SubmittedInput,
+) -> bool {
+    if !submitted.images.is_empty() {
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "image attachments were ignored for the slash command".to_string(),
+        ));
+    }
+    let Some(action) = parse_slash(&submitted.prompt) else {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "invalid slash command input".to_string(),
+        ));
+        return false;
+    };
+    match action {
+        SlashAction::Model {
+            provider: Some(provider),
+            model,
+        } => {
+            let report = switch_model_target(runtime, config, &provider, model).await;
+            app.header.provider = report.provider;
+            app.header.model = report.model;
+            for notice in report.notices {
+                app.apply_runtime(RuntimeUpdate::Notice(notice));
+            }
+        }
+        SlashAction::Model { provider: None, .. } => {
+            let values = fullscreen_model_values(config, runtime.active_provider_id());
+            if values.is_empty() {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "no providers are configured".to_string(),
+                ));
+            } else {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "choose a provider from the /model picker".to_string(),
+                ));
+            }
+        }
+        SlashAction::Clear => {
+            runtime.clear_conversation();
+            app.clear_conversation();
+            let (used, limit) = runtime.context_usage();
+            app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
+            app.apply_runtime(RuntimeUpdate::Notice("conversation cleared".to_string()));
+        }
+        SlashAction::NewSession => {
+            runtime.start_new_session();
+            app.clear_conversation();
+            app.header.session_id = runtime.session_id().to_string();
+            app.header.session_name = None;
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "started new session {}",
+                runtime.session_id()
+            )));
+        }
+        action @ (SlashAction::Fork | SlashAction::CloneSession) => {
+            let mark_fork = matches!(action, SlashAction::Fork);
+            match runtime.fork_session(mark_fork) {
+                Ok(id) => {
+                    app.header.session_id = id.to_string();
+                    app.header.session_name = None;
+                    let verb = if mark_fork { "forked" } else { "cloned" };
+                    app.apply_runtime(RuntimeUpdate::Notice(format!("{verb} into session {id}")));
+                }
+                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                    "session branch failed: {error}"
+                ))),
+            }
+        }
+        SlashAction::Quit => return true,
+        SlashAction::Invalid { command, reason } => {
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "invalid /{command}: {reason}"
+            )));
+        }
+        SlashAction::Unknown(command) => {
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "unknown slash command: /{command}"
+            )));
+        }
+        _ => {
+            let command = submitted
+                .prompt
+                .trim()
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("command");
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "/{command} is not available in full-screen chat yet"
+            )));
+        }
+    }
+    false
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     modes: &mut TerminalModes,
@@ -688,6 +816,11 @@ async fn run_event_loop(
                     AppCommand::Copy(text) => copy_to_clipboard(app, text),
                     AppCommand::OpenExternalEditor => {
                         edit_composer_externally(terminal, modes, app).await?;
+                    }
+                    AppCommand::RunSlash(submitted) => {
+                        if execute_fullscreen_slash(app, runtime, config, submitted).await {
+                            break;
+                        }
                     }
                     AppCommand::Submit(submitted) => {
                         let Some(operation) =
@@ -1098,6 +1231,17 @@ fn handle_turn_event(
                 AppCommand::Copy(text) => {
                     copy_to_clipboard(app, text);
                     false
+                }
+                AppCommand::RunSlash(submitted) => {
+                    if matches!(parse_slash(&submitted.prompt), Some(SlashAction::Quit)) {
+                        cancel.cancel();
+                        true
+                    } else {
+                        app.apply_runtime(RuntimeUpdate::Notice(
+                            "slash commands run when the current operation is idle".to_string(),
+                        ));
+                        false
+                    }
                 }
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
@@ -2015,7 +2159,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_catalog_adds_search_without_changing_the_rollback_catalog() {
+    fn fullscreen_catalog_exposes_only_commands_with_a_real_fullscreen_path() {
         assert!(!localpilot_tui::AppState::slash_commands()
             .iter()
             .any(|(name, _)| *name == "search"));
@@ -2026,6 +2170,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
+        for supported in ["model", "new", "fork", "clone", "clear", "quit"] {
+            assert!(catalog.iter().any(|command| command.name == supported));
+        }
+        for deferred in ["compact", "research", "skills", "sessions"] {
+            assert!(!catalog.iter().any(|command| command.name == deferred));
+        }
     }
 
     #[test]
@@ -2428,6 +2578,71 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].text, "ordinary queued prompt");
         assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn active_turn_never_queues_a_slash_command_as_provider_input() {
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(Some(
+            temp.path().join("prompt-history.jsonl"),
+        ));
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+
+        let _ = app.handle_input(InputAction::Insert("/clear".to_string()), 80);
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            80,
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+        ));
+
+        assert!(queue.is_empty());
+        assert!(!cancel.is_cancelled());
+        assert!(history.load().is_empty());
+        assert!(app.timeline.items().iter().any(|item| {
+            item.kind == ItemKind::Notice
+                && item.text.contains("when the current operation is idle")
+        }));
+    }
+
+    #[test]
+    fn configured_providers_become_truthful_model_picker_values() {
+        let mut config = localpilot_config::Config::default();
+        config.providers.insert(
+            "local".to_string(),
+            localpilot_config::ProviderConfig {
+                kind: "openai_compatible".to_string(),
+                model: Some("fixture-model".to_string()),
+                ..Default::default()
+            },
+        );
+        config.providers.insert(
+            "remote".to_string(),
+            localpilot_config::ProviderConfig {
+                kind: "anthropic".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let values = fullscreen_model_values(&config, "local");
+        assert_eq!(
+            values
+                .iter()
+                .map(|value| value.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local", "remote"]
+        );
+        assert!(values[0].description.contains("current"));
+        assert!(values[0].description.contains("fixture-model"));
+        assert!(!values[1].description.contains("current"));
+        assert!(values[1].description.contains("provider default"));
     }
 
     #[test]

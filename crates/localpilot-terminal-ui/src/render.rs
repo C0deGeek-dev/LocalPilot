@@ -229,6 +229,7 @@ fn render_completion(
             (CompletionKind::File, true) => "  Indexing workspace files…",
             (CompletionKind::File, false) => "  No matching files",
             (CompletionKind::Command, _) => "  No matching commands",
+            (CompletionKind::CommandValue, _) => "  No matching values",
         };
         frame.render_widget(
             Paragraph::new(message).style(theme(app).ui(UiRole::Muted)),
@@ -262,6 +263,7 @@ fn render_completion(
         let prefix = if selected { "❯ " } else { "  " };
         let label = match completion.kind {
             CompletionKind::Command => format!("/{name}", name = item.name),
+            CompletionKind::CommandValue => item.name.clone(),
             CompletionKind::File => format!("@{name}", name = item.name),
         };
         let fixed =
@@ -961,6 +963,7 @@ fn footer_state(app: &AppModel) -> String {
             (CompletionKind::File, true) => "indexing workspace files",
             (CompletionKind::File, false) => "file completion",
             (CompletionKind::Command, _) => "command completion",
+            (CompletionKind::CommandValue, _) => "command value",
         };
         let detail = completion
             .items
@@ -1646,6 +1649,39 @@ mod tests {
         );
         assert!(selected.contains("❯ /model"));
         assert!(selected.contains("Switch provider or model"));
+    }
+
+    #[test]
+    fn command_value_picker_reuses_completion_geometry_without_a_slash_prefix() {
+        let mut app = model();
+        app.set_command_catalog([crate::CompletionCommand {
+            name: "model".to_string(),
+            description: "Switch provider or model".to_string(),
+        }]);
+        app.set_command_values(
+            "model",
+            [crate::CompletionCommand {
+                name: "local".to_string(),
+                description: "current provider".to_string(),
+            }],
+        );
+        let _ = app.handle_input(crate::InputAction::Insert("/mo".to_string()), 76);
+        let _ = app.handle_input(crate::InputAction::AcceptCompletion, 76);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw value picker");
+        let hit_map = hit_map.expect("hit map");
+        assert_eq!(hit_map.completion_rows.len(), 1);
+        let selected = buffer_line(
+            terminal.backend().buffer(),
+            hit_map.completion_rows[0].area.y,
+        );
+        assert!(selected.contains("❯ local"));
+        assert!(!selected.contains("/local"));
+        assert!(selected.contains("current provider"));
     }
 
     #[test]

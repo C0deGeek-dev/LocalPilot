@@ -59,6 +59,15 @@ temporary draft before it is removed. The temporary file contains visible
 placeholder text only—not compact-paste or image payload bytes—and edited input
 is capped at 8 MiB.
 
+The full-screen slash picker lists only commands that have a real replacement-
+host path: `/model`, `/new`, `/fork`, `/clone`, `/clear`, `/quit`, and the local
+`/search` overlay. `/model` opens a second-level picker built from configured
+providers; an exact `/model <provider>` also executes directly. Slash invocations
+never enter prompt history or the provider prompt queue. A manually typed
+unsupported command produces an in-app notice instead of being sent to a model,
+and state-changing commands entered during active work are refused with an
+idle-retry notice.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

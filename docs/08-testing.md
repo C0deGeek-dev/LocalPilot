@@ -49,7 +49,10 @@ not need a real console:
   pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
   timestamps, async workspace-file completion, reverse/timeline search routing,
   mouse selection/scrollbar gestures, isolated clipboard-image attachments, and
-  external-editor command resolution plus terminal leave/re-entry ordering.
+  external-editor command resolution plus terminal leave/re-entry ordering. The
+  same host tests pin the truthful slash catalog, configured-provider `/model`
+  values, local refusal during active work, and the invariant that slash input
+  never enters the provider FIFO or prompt-history store.
 - PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.

@@ -132,11 +132,13 @@ struct CompletionState {
     token: EditorToken,
     items: Vec<CompletionItem>,
     selected: usize,
+    parent_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionKind {
     Command,
+    CommandValue,
     File,
 }
 
@@ -203,6 +205,7 @@ pub enum AppCommand {
     NavigateTimeline(TimelineNavigation),
     OpenExternalEditor,
     RunShell(UserShellCommand),
+    RunSlash(SubmittedInput),
     Submit(SubmittedInput),
 }
 
@@ -326,6 +329,7 @@ pub enum RuntimeUpdate {
         used: usize,
         limit: usize,
     },
+    Notice(String),
     Warning(String),
     Plan(Vec<PlanEntry>),
     QuotaPaused(String),
@@ -358,6 +362,7 @@ pub struct AppModel {
     input_overlay: Option<InputOverlay>,
     external_edit_snapshot: Option<EditorSnapshot>,
     command_catalog: Vec<CompletionCommand>,
+    command_values: BTreeMap<String, Vec<CompletionItem>>,
     workspace_files: Vec<String>,
     workspace_files_ready: bool,
     active_assistant: Option<ItemId>,
@@ -401,6 +406,7 @@ impl AppModel {
             input_overlay: None,
             external_edit_snapshot: None,
             command_catalog: Vec::new(),
+            command_values: BTreeMap::new(),
             workspace_files: Vec::new(),
             workspace_files_ready: false,
             active_assistant: None,
@@ -578,6 +584,8 @@ impl AppModel {
                                 AppCommand::RunShell(UserShellCommand { command })
                             })
                     }
+                } else if self.open_command_values_for_draft() {
+                    AppCommand::None
                 } else if let Some(query) = timeline_search_command(self.editor.text()) {
                     // The slash command is an invocation, not a draft to restore
                     // when search closes.
@@ -585,9 +593,7 @@ impl AppModel {
                     self.open_timeline_search(query);
                     AppCommand::None
                 } else {
-                    self.editor
-                        .submit()
-                        .map_or(AppCommand::None, AppCommand::Submit)
+                    self.submit_editor()
                 }
             }
             InputAction::Insert(_)
@@ -678,7 +684,9 @@ impl AppModel {
             RuntimeUpdate::ContextUsage { used, limit } => {
                 self.context_usage = Some((used, limit));
             }
-            RuntimeUpdate::Warning(message) | RuntimeUpdate::QuotaPaused(message) => {
+            RuntimeUpdate::Notice(message)
+            | RuntimeUpdate::Warning(message)
+            | RuntimeUpdate::QuotaPaused(message) => {
                 let _ = self.push_runtime_item(ItemKind::Notice, message);
             }
             RuntimeUpdate::Plan(plan) => {
@@ -794,6 +802,23 @@ impl AppModel {
         self.editor.seed_history(history);
     }
 
+    /// Clear the current conversation projection while retaining host/session
+    /// configuration, completion catalogs and durable prompt history.
+    pub fn clear_conversation(&mut self) {
+        self.timeline = Timeline::new();
+        self.work = WorkState::Idle;
+        self.stream_bytes = 0;
+        self.usage = None;
+        self.context_usage = None;
+        self.plan.clear();
+        self.input_overlay = None;
+        self.external_edit_snapshot = None;
+        self.active_assistant = None;
+        self.active_reasoning = None;
+        self.active_tools.clear();
+        self.active_insert_before = None;
+    }
+
     pub fn set_command_catalog(&mut self, commands: impl IntoIterator<Item = CompletionCommand>) {
         self.command_catalog = commands
             .into_iter()
@@ -803,6 +828,26 @@ impl AppModel {
             })
             .filter(|command| !command.name.is_empty())
             .collect();
+    }
+
+    /// Install the truthful values for one command-specific second-level
+    /// picker. Execution remains a host responsibility after the completed
+    /// slash line is submitted.
+    pub fn set_command_values(
+        &mut self,
+        command: impl Into<String>,
+        values: impl IntoIterator<Item = CompletionCommand>,
+    ) {
+        let command = sanitize_text(&command.into());
+        let values = values
+            .into_iter()
+            .map(|value| CompletionItem {
+                name: sanitize_text(&value.name),
+                description: sanitize_text(&value.description),
+            })
+            .filter(|value| !value.name.is_empty())
+            .collect();
+        self.command_values.insert(command, values);
     }
 
     pub fn set_workspace_files(&mut self, files: impl IntoIterator<Item = String>) {
@@ -1015,10 +1060,7 @@ impl AppModel {
             InputAction::Escape => self.dismiss_input_overlay(),
             InputAction::Submit => {
                 self.dismiss_input_overlay();
-                return self
-                    .editor
-                    .submit()
-                    .map_or(AppCommand::None, AppCommand::Submit);
+                return self.submit_editor();
             }
             InputAction::OpenReverseHistory | InputAction::MoveUp => {
                 let before = self.reverse_history_index();
@@ -1068,11 +1110,23 @@ impl AppModel {
     fn handle_completion_input(&mut self, action: InputAction) -> AppCommand {
         match action {
             InputAction::Escape => self.dismiss_input_overlay(),
-            InputAction::Submit | InputAction::AcceptCompletion => self.accept_completion(),
+            InputAction::Submit | InputAction::AcceptCompletion => {
+                return self.accept_completion();
+            }
             InputAction::MoveUp => self.move_completion(-1),
             InputAction::MoveDown => self.move_completion(1),
             InputAction::Insert(text) => {
+                let enters_command_values = matches!(
+                    self.input_overlay,
+                    Some(InputOverlay::Completion(CompletionState {
+                        kind: CompletionKind::Command,
+                        ..
+                    }))
+                ) && text.contains(char::is_whitespace);
                 self.editor.insert(&text);
+                if enters_command_values && self.open_command_values_for_draft() {
+                    return AppCommand::None;
+                }
                 self.refresh_or_open_completion();
             }
             InputAction::Paste(text) => {
@@ -1254,6 +1308,16 @@ impl AppModel {
             }
             return;
         }
+        if matches!(
+            self.input_overlay,
+            Some(InputOverlay::Completion(CompletionState {
+                kind: CompletionKind::CommandValue,
+                ..
+            }))
+        ) {
+            self.refresh_command_value_completion();
+            return;
+        }
         let completion = self
             .editor
             .slash_token()
@@ -1274,6 +1338,7 @@ impl AppModel {
         }
         let items = match kind {
             CompletionKind::Command => completion_items(&self.command_catalog, &token.query),
+            CompletionKind::CommandValue => Vec::new(),
             CompletionKind::File => file_completion_items(&self.workspace_files, &token.query),
         };
         self.input_overlay = Some(InputOverlay::Completion(CompletionState {
@@ -1281,6 +1346,7 @@ impl AppModel {
             token,
             items,
             selected: 0,
+            parent_command: None,
         }));
     }
 
@@ -1299,21 +1365,139 @@ impl AppModel {
         };
     }
 
-    fn accept_completion(&mut self) {
+    fn open_command_values_for_draft(&mut self) -> bool {
+        let text = self.editor.text();
+        let Some((command, query)) = self.command_values.iter().find_map(|(command, values)| {
+            let bare = format!("/{command}");
+            if text == bare {
+                return Some((command.clone(), String::new()));
+            }
+            let prefix = format!("{bare} ");
+            let query = text.strip_prefix(&prefix)?;
+            if query.contains(char::is_whitespace) || values.iter().any(|value| value.name == query)
+            {
+                return None;
+            }
+            Some((command.clone(), query.to_string()))
+        }) else {
+            return false;
+        };
+        self.open_command_values_with_query(&command, &query)
+    }
+
+    fn submit_editor(&mut self) -> AppCommand {
+        if self.editor.text().trim_start().starts_with('/') {
+            if self.editor.has_images() {
+                let _ = self.push_runtime_item(
+                    ItemKind::Notice,
+                    "remove image attachments before running a slash command",
+                );
+                return AppCommand::None;
+            }
+            self.editor
+                .submit_command()
+                .map_or(AppCommand::None, AppCommand::RunSlash)
+        } else {
+            self.editor
+                .submit()
+                .map_or(AppCommand::None, AppCommand::Submit)
+        }
+    }
+
+    fn open_command_values(&mut self, command: &str) -> bool {
+        self.open_command_values_with_query(command, "")
+    }
+
+    fn open_command_values_with_query(&mut self, command: &str, query: &str) -> bool {
+        let Some(values) = self.command_values.get(command).cloned() else {
+            return false;
+        };
+        if values.is_empty() {
+            return false;
+        }
+        let prefix = format!("/{command} ");
+        self.editor.replace_draft(format!("{prefix}{query}"));
+        let start = prefix.len();
+        let end = start.saturating_add(query.len());
+        self.input_overlay = Some(InputOverlay::Completion(CompletionState {
+            kind: CompletionKind::CommandValue,
+            token: EditorToken {
+                range: start..end,
+                query: query.to_string(),
+            },
+            items: value_completion_items(&values, query),
+            selected: 0,
+            parent_command: Some(command.to_string()),
+        }));
+        true
+    }
+
+    fn refresh_command_value_completion(&mut self) {
         let Some(InputOverlay::Completion(state)) = &self.input_overlay else {
             return;
         };
-        let Some(item) = state.items.get(state.selected).cloned() else {
+        let Some(parent) = state.parent_command.clone() else {
+            self.input_overlay = None;
             return;
+        };
+        let start = state.token.range.start;
+        let prefix = format!("/{parent} ");
+        let text = self.editor.text();
+        let cursor = self.editor.cursor();
+        if !text.starts_with(&prefix) || cursor < start {
+            self.input_overlay = None;
+            self.refresh_or_open_completion();
+            return;
+        }
+        let before = &text[start..cursor];
+        if before.contains(char::is_whitespace) {
+            self.input_overlay = None;
+            return;
+        }
+        let end = text[cursor..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |offset| cursor + offset);
+        let query = before.to_string();
+        let values = self
+            .command_values
+            .get(&parent)
+            .map_or_else(Vec::new, |values| value_completion_items(values, &query));
+        self.input_overlay = Some(InputOverlay::Completion(CompletionState {
+            kind: CompletionKind::CommandValue,
+            token: EditorToken {
+                range: start..end,
+                query,
+            },
+            items: values,
+            selected: 0,
+            parent_command: Some(parent),
+        }));
+    }
+
+    fn accept_completion(&mut self) -> AppCommand {
+        let Some(InputOverlay::Completion(state)) = &self.input_overlay else {
+            return AppCommand::None;
+        };
+        let Some(item) = state.items.get(state.selected).cloned() else {
+            return AppCommand::None;
         };
         let kind = state.kind;
         let range = state.token.range.clone();
         self.input_overlay = None;
         let replacement = match kind {
             CompletionKind::Command => format!("/{}", item.name),
+            CompletionKind::CommandValue => item.name.clone(),
             CompletionKind::File => format!("@{} ", item.name),
         };
         self.editor.replace_range(range, &replacement);
+        match kind {
+            CompletionKind::Command if self.open_command_values(&item.name) => AppCommand::None,
+            CompletionKind::CommandValue => self
+                .editor
+                .submit_command()
+                .map_or(AppCommand::None, AppCommand::RunSlash),
+            CompletionKind::Command | CompletionKind::File => AppCommand::None,
+        }
     }
 
     fn reverse_history_index(&self) -> Option<usize> {
@@ -1467,6 +1651,21 @@ fn completion_items(catalog: &[CompletionCommand], query: &str) -> Vec<Completio
             name: command.name.clone(),
             description: command.description.clone(),
         })
+        .collect()
+}
+
+fn value_completion_items(catalog: &[CompletionItem], query: &str) -> Vec<CompletionItem> {
+    let mut matches = catalog
+        .iter()
+        .enumerate()
+        .filter_map(|(order, value)| {
+            fuzzy_score(&value.name, query).map(|score| (score, order, value))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(score, order, _)| (*score, *order));
+    matches
+        .into_iter()
+        .map(|(_, _, value)| value.clone())
         .collect()
 }
 
@@ -1874,8 +2073,8 @@ mod tests {
         assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
         assert_eq!(app.editor.text(), "/knowledge");
         assert!(!app.has_input_overlay());
-        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
-            panic!("closed-picker Enter should submit");
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("closed-picker Enter should execute the slash command");
         };
         assert_eq!(submitted.prompt, "/knowledge");
     }
@@ -1900,6 +2099,96 @@ mod tests {
         let _ = app.handle_input(InputAction::Escape, 80);
         assert_eq!(app.editor.text(), "/mo");
         assert!(!app.has_input_overlay());
+    }
+
+    #[test]
+    fn model_command_acceptance_opens_one_contained_value_picker() {
+        let mut app = model();
+        app.set_command_catalog([command("model", "Switch model")]);
+        app.set_command_values(
+            "model",
+            [
+                command("local", "Local provider"),
+                command("remote", "Remote provider"),
+            ],
+        );
+
+        let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+        assert_eq!(
+            app.handle_input(InputAction::AcceptCompletion, 80),
+            AppCommand::None
+        );
+        let picker = app.completion().expect("model value picker");
+        assert_eq!(picker.kind, CompletionKind::CommandValue);
+        assert_eq!(picker.items.len(), 2);
+        assert_eq!(app.editor.text(), "/model ");
+
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("a selected model value should execute as a slash command");
+        };
+        assert_eq!(submitted.prompt, "/model remote");
+        assert!(app.completion().is_none());
+
+        app.editor.replace_draft("/model");
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.completion().is_some());
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert_eq!(app.editor.text(), "/model ");
+        assert!(app.completion().is_none());
+
+        app.editor.replace_draft("/model rem");
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        let picker = app.completion().expect("filtered value picker");
+        assert_eq!(picker.items.len(), 1);
+        assert_eq!(picker.items[0].name, "remote");
+
+        let _ = app.handle_input(InputAction::Escape, 80);
+        app.editor.replace_draft("/model local");
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("an exact provider should execute directly");
+        };
+        assert_eq!(submitted.prompt, "/model local");
+
+        app.editor.replace_draft("");
+        let _ = app.handle_input(InputAction::Insert("/model".to_string()), 80);
+        assert_eq!(
+            app.completion().expect("command picker").kind,
+            CompletionKind::Command
+        );
+        let _ = app.handle_input(InputAction::Insert(" ".to_string()), 80);
+        assert_eq!(
+            app.completion().expect("space boundary value picker").kind,
+            CompletionKind::CommandValue
+        );
+    }
+
+    #[test]
+    fn slash_submission_is_distinct_from_a_model_prompt() {
+        let mut app = model();
+        app.seed_history(vec!["ordinary prompt".to_string()]);
+        let _ = app.handle_input(InputAction::Insert("/clear".to_string()), 80);
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("slash input must not become a provider prompt");
+        };
+        assert_eq!(submitted.prompt, "/clear");
+        assert!(!format!("{submitted:?}").contains("/clear"));
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "ordinary prompt");
+
+        let mut image = model();
+        let _ = image.handle_input(InputAction::Insert("/clear".to_string()), 80);
+        assert!(image
+            .attach_image("image/png", "IMAGE_SECRET", 128)
+            .is_some());
+        assert_eq!(
+            image.handle_input(InputAction::Submit, 80),
+            AppCommand::None
+        );
+        assert_eq!(image.editor.text(), "/clear[image #1 · PNG 128 B]");
+        assert!(image.timeline.items().iter().any(|item| {
+            item.kind == ItemKind::Notice && item.text.contains("remove image attachments")
+        }));
     }
 
     #[test]
@@ -2422,8 +2711,8 @@ mod tests {
     fn timeline_search_rejects_command_prefixes_and_no_match_navigation_is_inert() {
         let mut app = model();
         let _ = app.handle_input(InputAction::Insert("/searching".to_string()), 80);
-        let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 80) else {
-            panic!("non-command prefix should submit normally");
+        let AppCommand::RunSlash(submitted) = app.handle_input(InputAction::Submit, 80) else {
+            panic!("non-search slash prefix should remain a slash command");
         };
         assert_eq!(submitted.prompt, "/searching");
 

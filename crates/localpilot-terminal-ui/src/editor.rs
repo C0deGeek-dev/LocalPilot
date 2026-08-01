@@ -515,6 +515,15 @@ impl Editor {
     }
 
     pub fn submit(&mut self) -> Option<SubmittedInput> {
+        self.take_submission(true)
+    }
+
+    /// Take a non-prompt invocation without adding it to prompt history.
+    pub(crate) fn submit_command(&mut self) -> Option<SubmittedInput> {
+        self.take_submission(false)
+    }
+
+    fn take_submission(&mut self, record_history: bool) -> Option<SubmittedInput> {
         if self.text.trim().is_empty() {
             return None;
         }
@@ -536,7 +545,7 @@ impl Editor {
         self.history_draft.clear();
         self.history_draft_cursor = 0;
         self.history_draft_units.clear();
-        if self.history.last() != Some(&display) {
+        if record_history && self.history.last() != Some(&display) {
             self.history.push(display.clone());
         }
         Some(SubmittedInput {
