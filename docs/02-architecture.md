@@ -371,6 +371,48 @@ Must not own: any HTTP server, permission decisions, or a product SDK — the
 supported embedding surface stays the in-process session runtime
 ([`docs/embedding.md`](embedding.md)).
 
+### `localpilot-taskgraph`
+
+A pure task-graph engine: the plan several workers agree on, plus every rule that
+keeps that plan coherent while they mutate it concurrently. It is a **leaf crate
+with no LocalPilot dependencies** — no I/O, no sessions, no models, no tools — so
+a whole plan can be driven from seed to settled by a deterministic simulator with
+no live agents attached. Wiring it to real workers is the server's job, never
+this crate's.
+
+Owns:
+
+- the graph: tasks and review gates, edges stored only as "what this waits on"
+  (dependents are derived, so the two directions cannot disagree), and a plan
+  `version` that increments on every accepted mutation
+- validated mutations — `seed` (idempotent under a caller-supplied key),
+  `expand_node` (a task becomes a *join* over its children rather than being
+  replaced, so nothing downstream is rewired), `complete_node`, and
+  `inject_from_gate` (a review raises findings by adding work and then
+  re-reviews) — plus the supervisor operations `fail_node`, `abandon_node`, and
+  `salvage_assignment`
+- the four invariants every mutation satisfies: ownership (only a task's owner
+  or its current assignee may change it), acyclicity (checked before an edge is
+  written, and for a batch of new tasks before any of them is created),
+  terminality (a finished task never changes; rework enters as new tasks), and
+  honest completion (a completion carries a typed `HandoffArtifact`; in deep mode
+  it must also state what was *not* checked, and a gate must say how it reviewed
+  and cite something)
+- derived scheduling: `ready_nodes` (deterministic, id-ordered — the same plan
+  yields the same frontier everywhere), the third state `Blocked` for a task
+  whose upstream ended badly, `cascade_blocked` to settle a stranded tail rather
+  than hang on it, and `assemble_input`, which hydrates a task's upstream
+  handoffs into its prompt so a worker reads what earlier tasks found instead of
+  re-deriving it
+- a deterministic simulator (`sim`): no clock, no randomness, no task scheduling
+  — each round takes the ready frontier in id order and resolves it in dispatch
+  order, so a plan that misbehaves here is the engine's fault and a plan that
+  only misbehaves live is not
+
+Must not own: spawning, transport, persistence, prompts, or anything that knows
+what a worker *is*. `PlanMode::Deep` decides how strict the rules are; it does
+not decide who runs them.
+
 ### `localpilot-server`
 
 The opt-in, single-machine local server behind `serve`/`connect`: a

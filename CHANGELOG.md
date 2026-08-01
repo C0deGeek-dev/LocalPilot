@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: `localpilot-taskgraph`, a pure task-graph engine.** A new leaf crate
+  holding the plan several workers can share and the rules that keep it coherent
+  while they mutate it: validated `seed` / `expand` / `complete` /
+  `inject-from-gate` mutations, ownership and acyclicity checks, typed handoff
+  artifacts with a lenient confidence parser, derived (never stored) readiness,
+  and a deterministic simulator that runs a whole plan to completion with no live
+  agents. The crate has no LocalPilot dependencies and does no I/O, so it is
+  useful on its own — a single agent can decompose work into a graph, hydrate
+  each step with what earlier steps established, and have gates refuse a
+  completion that does not say what it left unchecked. Nothing is wired into the
+  session runtime yet.
+
 - **Added: multi-session resource pooling + session reaping for the opt-in
   server.** A `serve` process now shares one provider stack and one MCP
   connection pool across every hosted session — the MCP server subprocesses are

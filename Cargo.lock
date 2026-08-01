@@ -2006,6 +2006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-taskgraph"
+version = "2.6.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.9",
+]
+
+[[package]]
 name = "localpilot-tools"
 version = "2.6.0"
 dependencies = [
