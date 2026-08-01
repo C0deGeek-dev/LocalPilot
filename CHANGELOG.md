@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Added: the in-place reload primitives — swap onto a freshly built binary and
+  continue the session on the other side.** Before the swap, everything durable is
+  written first — the new binary is installed immutably, the channel is pointed at
+  it, and a continuation intent naming the session and its in-flight task is
+  recorded — because a process replacement runs no destructors. The swap itself is
+  one small step that differs by platform (replace the process in place on Unix,
+  spawn the successor and exit on Windows) behind a single seam, launching the
+  concrete immutable binary so a later build can never overwrite what is running.
+  On the far side, the resumed session reads the intent and continues on its own
+  with a hidden "reload succeeded; carry on" prompt. The intent is durable, read
+  without being consumed, and marked delivered only once the continuation
+  completes, so a restart that dies mid-continuation retries and one that succeeds
+  is never replayed. These are the building blocks; the command that drives them
+  is an opt-in developer surface, off by default.
+
 - **Added: graceful shutdown for a running turn.** A host can now ask a turn to
   *wind down* instead of cancelling it. Where cancelling discards — aborting the
   in-flight tool and throwing the turn away — a graceful shutdown finishes safely:

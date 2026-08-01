@@ -35,6 +35,7 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod self_review_cmd;
+mod selfdev_reload;
 mod server_cmd;
 mod session_cmd;
 mod skill_discovery;

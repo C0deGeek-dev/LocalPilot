@@ -1636,6 +1636,7 @@ dependencies = [
  "localpilot-research",
  "localpilot-rpc",
  "localpilot-sandbox",
+ "localpilot-selfdev",
  "localpilot-selfreview",
  "localpilot-server",
  "localpilot-skills",

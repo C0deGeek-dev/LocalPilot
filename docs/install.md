@@ -186,6 +186,7 @@ rather than a release version:
 | `selfdev/versions/<label>/` | one immutable build; `<label>` is `<short-hash>` for a clean tree, `<short-hash>-dirty-<fingerprint>` for a modified one |
 | `selfdev/versions/<label>/.selfdev.json` | the build's marker (source hash, fingerprint, embedded version); its presence is what makes the build resolvable |
 | `selfdev/channels/<name>.json` | a *channel pointer* — a small file naming the label that `<name>` (e.g. `current`, `stable`, `slow`) currently resolves to |
+| `selfdev/reload/<session>.json` | a *continuation intent* — written before a reload so the session on the far side continues itself; kept until delivered, then reclaimed |
 
 A version directory is written once and never modified; switching which build
 runs only rewrites a channel pointer, so a running process is never exec'd from a

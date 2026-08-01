@@ -317,9 +317,18 @@ onto the result:
 - an isolated build (own cargo profile, own target directory, a job count that
   leaves a core for the running session) that passes the source identity to the
   build script as environment rather than making it watch `.git`
+- an immutable version store (`versions/<label>/`, copy-in, never overwritten)
+  and marker-file channel pointers, so a running process is never launched from a
+  path a later build can overwrite
+- a publish gauntlet that refuses to promote a stale or broken build (identity +
+  freshness + a real RPC handshake)
+- the reload primitives: a durable, idempotent, non-consuming continuation intent,
+  and a one-seam relaunch (`exec` on Unix, spawn-then-exit on Windows) that swaps
+  onto the new binary and lets the session continue itself on the far side
 
 Must not own: the decision to reload. This crate makes each step safe to take;
-whether to take it is the caller's policy.
+whether to take it is the caller's policy (the opt-in self-dev surface, off by
+default).
 
 ### `localpilot-selfreview`
 

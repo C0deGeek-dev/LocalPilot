@@ -277,6 +277,13 @@ pub fn default_target_dir(root: &Path) -> PathBuf {
     root.join("build-target")
 }
 
+/// The file name the self-dev binary is stored and launched under on this
+/// platform (`localpilot` or `localpilot.exe`).
+#[must_use]
+pub fn executable_name() -> String {
+    localpilot_dist::executable_name(TOOL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

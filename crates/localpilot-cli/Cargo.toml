@@ -95,6 +95,10 @@ localpilot-render = { path = "../localpilot-render", optional = true }
 localpilot-research = { path = "../localpilot-research" }
 localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
+# Self-dev build/reload primitives (source fingerprint, immutable version store,
+# publish gauntlet, reload continuation). Used by the reload-continuation seam on
+# resume and, later, the self-dev build/release surface.
+localpilot-selfdev = { path = "../localpilot-selfdev" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }
 # The opt-in local-IPC server (`serve`/`connect`): transport, daemon lifecycle,
 # session registry, per-session host, and attach dispatch. Strictly opt-in — the

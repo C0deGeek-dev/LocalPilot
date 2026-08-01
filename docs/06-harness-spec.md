@@ -592,6 +592,17 @@ The turn stops with reason `Quiesced`, which is distinct from `Cancelled`
 precisely because it is not a discard. Enforced by the `localpilot-harness`
 `quiesce` test suite (`cargo test -p localpilot-harness --test quiesce`).
 
+This is what an in-place reload builds on. Before swapping onto a new binary, the
+reload persists the session, quiesces the running turn, and writes a *continuation
+intent* naming the session and its in-flight task. On the far side of the swap the
+resumed session reads that intent and runs a hidden continuation prompt as its
+opening turn — "a reload succeeded; continue from where you left off; do not ask
+the user what to do next" — so the session picks up on its own. The intent is
+durable, read without being consumed, and marked delivered only once the
+continuation turn completes, so a restart that dies mid-continuation retries and
+one that succeeds is never replayed. The reload machinery itself lives in
+`localpilot-selfdev`; it is an opt-in developer surface, off by default.
+
 ## Bad-Output Recovery
 
 A turn can end badly without a provider error: degenerate text (a punctuation
