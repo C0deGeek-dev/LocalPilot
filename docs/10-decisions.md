@@ -2,6 +2,102 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0117: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
+
+Status: accepted. Builds on ADR-0116 (the opt-in server) and reuses ADR-0111 (the
+soft-interrupt substrate); the crate map is in
+[`docs/02-architecture.md`](02-architecture.md).
+
+How the daemon hosts sessions, given that the in-process `SessionRuntime` stays the
+one execution engine.
+
+1. **Actor-per-session.** A turn drives `run_turn(&mut self, …)`, so a session is
+   owned by exactly one task and never shared `&mut` across clients; the registry
+   holds `Arc<tokio::Mutex<SessionRuntime>>` behind a short-held structural
+   `RwLock<HashMap>` — a turn on one session never blocks structural access to
+   another. `SessionRuntime` is compile-time-asserted `Send` so it can live in a
+   task.
+
+2. **The registry is generic over a `SessionFactory`.** The heavy construction
+   recipe (provider registry, tools, MCP, broker, hooks, permission engine) lives in
+   the CLI, not the server crate; the server takes a caller-supplied factory, so the
+   crate dependency direction stays sane and the registry is unit-testable with a
+   fake. The CLI factors the recipe into one builder that both the existing `rpc`
+   command and the server share — one construction, not two.
+
+3. **Fanout is a session-lifetime broadcast; control is lock-free.** Each session
+   holds one `broadcast::Sender<RuntimeEvent>` (not the per-turn channel), so many
+   clients `subscribe()` and a mid-turn joiner still sees subsequent events. Cancel
+   and steer reach an in-flight turn **without** the session mutex: the turn's
+   `CancellationToken` clone and the `SteerQueue` clone are extracted into control
+   slots at construction, so a client cancels/steers while the turn holds the mutex
+   (proven by a test that holds the mutex unacquirable while control still lands).
+   Steer arrives as a `SoftInterrupt` at the next turn safe point (ADR-0111).
+
+4. **Connection-scoped attach, not per-message multiplexing.** A connection names
+   its session once — an additive `Attach { OpenNew | ResumeId | ResumeName }`
+   command answered by `Attached { session_id, server_version }` — rather than every
+   message carrying a `session_id`. Resume-by-id is guarded against minting a ghost
+   session for an unseen id (the store index is the source of truth). Existing stdio
+   clients that never send `Attach` are unaffected; new optional fields are
+   `#[serde(default)]`/`skip_serializing_if`, and the coarse `RPC_PROTOCOL_VERSION`
+   fence stays for structural breaks.
+
+5. **One shared pool; per-session cost is only mutable state.** The provider stack
+   and the MCP server connections are captured once at `serve` startup (`Arc`s) and
+   cloned into each session; only the mutable `SessionRuntime` is per-session. A soak
+   measured **~11 KiB of resident memory per added session** at N=32 — three orders
+   of magnitude below a fresh-stack-per-session — while per-session state stays
+   isolated.
+
+6. **Sessions are reaped, busy-safe and persist-first.** A periodic reaper removes a
+   session after its last client disconnects (a grace) or after an idle timeout,
+   calling `close()` (which records `SessionClosed`) **before** removal and refusing
+   to reap a session whose turn holds the mutex (`try_lock`, taken under the same
+   host-map lock as attach, so there is no attach/reap race). Clean shutdown stops
+   the reaper and persists every remaining session.
+
+**Deferred, disclosed:** multi-client permission-ask fanout — today the wire
+approver is single-owner (only the connection that created a session answers its
+asks; a second client's reply fails closed with a clear error). Broadening it to
+per-client ask routing is a follow-up, not silently dropped.
+
+## ADR-0116: An Opt-In Persistent Server Over A Local-IPC Transport, With A Safe-Only Daemon Lifecycle
+
+Status: accepted, opt-in. Extends the embedding surface in
+[`docs/embedding.md`](embedding.md); bound by ADR-0007 (tri-platform tier-1),
+ADR-0004/ADR-0042 (local/official endpoints only — the socket is local, never a
+vendor client), and the `#![forbid(unsafe_code)]` workspace rule.
+
+`localpilot serve` runs an **optional** persistent daemon hosting many sessions in
+one process; `localpilot connect` is a thin client attaching over a local
+transport. The default in-process path (`chat`/`ask`/`print`/`harness`) keeps
+working with **no daemon** and identical behaviour — the server is additive and
+never a silent default; a broken or absent daemon cannot degrade the single-process
+product.
+
+1. **One cross-platform local transport, reusing the framing.** A Unix domain
+   socket (Unix) / named pipe (Windows) carries the existing `localpilot-rpc` NDJSON
+   record framing — the framing and the `serve<R, W>` loop were already generic over
+   the byte stream, so there is no second codec. The endpoint lives under the OS
+   runtime dir, keyed by a stable hash of the workspace root, overridable by
+   `LOCALPILOT_SERVER_SOCKET`.
+
+2. **The lifecycle uses only safe std primitives.** No `unsafe`/`libc`/`flock`/
+   `setsid`: the singleton is the Windows named pipe's `first_pipe_instance(true)`
+   (auto-released on process death) plus a Unix `create_new` (O_EXCL) lock file;
+   detached spawn is `CommandExt::process_group(0)` (Unix) / `creation_flags(
+   DETACHED_PROCESS)` (Windows) with null stdio; the ready handshake is retry-connect
+   (distinguishing down from busy). The tradeoff — the O_EXCL lock has no
+   crash-auto-release a `flock` would — is covered by a bounded stale-endpoint reap.
+   tokio's `net` feature is enabled per-crate (as `localpilot-render` already does),
+   keeping it out of every other crate's build.
+
+3. **Tier-1 with an honest gap.** Both OS paths are implemented and the Windows path
+   is tested live; the Unix path is compile-verified but its live run is deferred on
+   a Windows-only build box per the workspace offline-evidence policy — the first
+   real Unix run is where a socket-perms/path-length/reap edge could still surface.
+
 ## ADR-0115: Harness Correctness And Safety Fixes — Phase-Cadence Firing, Full Tool-Output Retention, And Secret-Path Write Gating
 
 Status: accepted. Refines ADR-0009 (discovered quality gate), the tool-output
