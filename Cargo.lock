@@ -1955,10 +1955,19 @@ dependencies = [
 name = "localpilot-server"
 version = "2.6.0"
 dependencies = [
+ "localpilot-core",
+ "localpilot-harness",
+ "localpilot-llm",
+ "localpilot-recovery",
  "localpilot-rpc",
+ "localpilot-sandbox",
+ "localpilot-store",
+ "localpilot-tools",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.9",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

@@ -10,6 +10,11 @@ workspace = true
 
 [dependencies]
 localpilot-rpc = { path = "../localpilot-rpc" }
+# The session registry hosts `SessionRuntime`s (harness), keys them by
+# `SessionId` (core), and resumes them from the durable event log (store).
+localpilot-core = { path = "../localpilot-core" }
+localpilot-harness = { path = "../localpilot-harness" }
+localpilot-store = { path = "../localpilot-store" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -17,9 +22,20 @@ tracing = { workspace = true }
 # transport: `tokio::net::UnixListener` on Unix and
 # `tokio::net::windows::named_pipe` on Windows. The rest of the tokio features
 # this crate uses (io-util for AsyncRead/AsyncWrite, time for retry backoff,
-# sync for the accept-side mutex, macros/rt for tests) are already enabled by
-# the workspace default and unify in.
+# sync for the accept-side mutex and the registry's RwLock/per-session Mutex,
+# macros/rt for tests) are already enabled by the workspace default and unify
+# in.
 tokio = { workspace = true, features = ["net"] }
 
 [dev-dependencies]
+# A test session factory mirrors how the harness tests build a `SessionRuntime`:
+# a `FakeProvider` (llm), builtin tools, a bypass permission engine + sandbox
+# workspace, a recovery engine, over a `tempfile` temp-dir store. `tokio-util`
+# supplies the `CancellationToken` a driven turn needs.
+localpilot-llm = { path = "../localpilot-llm" }
+localpilot-recovery = { path = "../localpilot-recovery" }
+localpilot-sandbox = { path = "../localpilot-sandbox" }
+localpilot-tools = { path = "../localpilot-tools" }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread", "time"] }
+tokio-util = { workspace = true }
