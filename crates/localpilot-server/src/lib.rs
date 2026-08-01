@@ -21,6 +21,10 @@
 //!   event fanout (a session-lifetime broadcast) and lock-free out-of-band
 //!   cancel/steer that reach an in-flight turn without taking the runtime mutex
 //!   the turn holds.
+//! - [`swarm`] — the opt-in multi-agent layer that sits *beside* the session
+//!   registry: which repository a swarm belongs to (worktree-aware, so every
+//!   worktree of one repo is one swarm), who is in it, who spawned whom, and the
+//!   caps that keep fan-out bounded.
 //! - [`attach`] — the connection-scoped bind seam: one decoded
 //!   [`AttachTarget`](localpilot_rpc::AttachTarget) (open-new / resume-by-id /
 //!   resume-by-name) routed to the registry, returning the bound session id
@@ -38,6 +42,7 @@ pub mod attach;
 pub mod daemon;
 pub mod host;
 pub mod registry;
+pub mod swarm;
 pub mod transport;
 pub mod wire;
 
@@ -48,5 +53,9 @@ pub use daemon::{
 };
 pub use host::{Control, ControlOutcome, HostStatus, SessionHost};
 pub use registry::{RegistryError, SessionFactory, SessionHandle, SessionRegistry};
+pub use swarm::{
+    swarm_id_for_dir, Admission, MemberRole, MemberStatus, SwarmError, SwarmId, SwarmLimits,
+    SwarmMember, SwarmRegistry,
+};
 pub use transport::{connect, Conn, Endpoint, Listener, TransportError};
 pub use wire::serve_echo;

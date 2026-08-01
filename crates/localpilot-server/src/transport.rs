@@ -301,7 +301,7 @@ fn workspace_key(workspace_root: &Path) -> String {
     format!("{:016x}", fnv1a_64(bytes.as_bytes()))
 }
 
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a_64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET_BASIS;

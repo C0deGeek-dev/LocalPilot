@@ -15,6 +15,10 @@ localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-harness = { path = "../localpilot-harness" }
 localpilot-store = { path = "../localpilot-store" }
+# The swarm layer holds the shared task graph and mutates it under the swarm
+# registry's own write lock.
+localpilot-taskgraph = { path = "../localpilot-taskgraph" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -444,6 +444,40 @@ Owns:
   plus lock-free out-of-band cancel/steer), and the connection-scoped attach seam
   (open-new / resume-by-id / resume-by-name → the bound session id)
 
+#### Swarm state (opt-in)
+
+Beside the session registry — never inside it — sits the swarm layer. A session
+is a session whether or not it is collaborating, so nothing here is on the path a
+single-agent turn takes.
+
+- **Scoping.** A swarm is identified by the *repository*, not the path: every
+  git worktree of one repo resolves to one swarm, so a worker spawned into a
+  worktree joins the coordinator's swarm rather than founding an invisible second
+  one. Resolved by reading git's own on-disk contract — `.git` as a directory, or
+  as a `gitdir:` pointer file whose target names its `commondir` — with no `git`
+  subprocess, since a swarm id is needed on every spawn. Outside a repository the
+  canonical directory path is used, so non-git workspaces work rather than
+  erroring. `LOCALPILOT_SWARM_ID` overrides the whole resolution.
+- **Membership.** Members keyed by `SessionId`, each with a role
+  (coordinator/worker), a status, and **one** structural edge: who it reports
+  back to. Children, ancestry, and subtrees are all derived by walking that edge
+  — a stored child list would be a second copy of the same fact and would
+  disagree the first time a member departed. A reverse index maps a session back
+  to its swarm, because a tool call knows only its own session id.
+- **Caps and admission.** Two bounds: a *lifetime* member cap (which counts
+  departed members, so a coordinator that keeps replacing failed work is still
+  stopped) and a *concurrency* budget on running members. Both are checked and
+  the slot taken under one write lock, as a **reservation**: a spawn reserves,
+  builds the worker, then confirms or releases. Checking a cap and inserting
+  afterwards would let a burst of concurrent spawns all read the same count and
+  all proceed. Idempotency keys are answered from the reservation table as well
+  as the member table, so a retry whose first attempt is still building is told
+  so rather than starting a second worker.
+- **The plan.** A swarm's `TaskPlan` (see `localpilot-taskgraph`) is read,
+  mutated, and stored under one write lock rather than by
+  read → change → write-back, which would leave a gap in the middle of exactly
+  the state that cannot afford one.
+
 Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
 `libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`
 (`process_group`, `creation_flags`, `create_new`, `PermissionsExt`). The
