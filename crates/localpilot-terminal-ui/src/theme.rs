@@ -16,6 +16,13 @@ pub enum Theme {
 }
 
 impl Theme {
+    pub const ALL: [Self; 4] = [
+        Self::Default,
+        Self::Dim,
+        Self::HighContrast,
+        Self::Colorblind,
+    ];
+
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -23,6 +30,16 @@ impl Theme {
             Self::Dim => "dim",
             Self::HighContrast => "high-contrast",
             Self::Colorblind => "colorblind",
+        }
+    }
+
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Dim => "Dim",
+            Self::HighContrast => "High contrast",
+            Self::Colorblind => "Colorblind",
         }
     }
 }

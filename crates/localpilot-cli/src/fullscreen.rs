@@ -284,6 +284,10 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         name: "help".to_string(),
         description: "Open keyboard and command help".to_string(),
     });
+    command_catalog.push(CompletionCommand {
+        name: "theme".to_string(),
+        description: "Preview terminal color modes".to_string(),
+    });
     command_catalog
 }
 
@@ -338,7 +342,7 @@ async fn attach_clipboard_image_idle(
     config: &localpilot_config::Config,
     quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() || app.has_takeover() {
+    if app.has_input_overlay() || app.has_takeover() || app.has_theme_picker() {
         return;
     }
     if app.shell_mode() {
@@ -364,7 +368,7 @@ fn attach_clipboard_image_with_capability(
     capability: &ImageCapabilitySnapshot,
     quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() || app.has_takeover() {
+    if app.has_input_overlay() || app.has_takeover() || app.has_theme_picker() {
         return;
     }
     if app.shell_mode() {
@@ -1334,6 +1338,33 @@ fn handle_mouse_event(
     hit_map: &HitMap,
     mouse_state: &mut MouseState,
 ) -> RoutedEvent {
+    if app.has_theme_picker() {
+        app.disarm_exit();
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                let _ = app.handle_input(InputAction::MoveUp, hit_map.editor_width);
+            }
+            MouseEventKind::ScrollDown => {
+                let _ = app.handle_input(InputAction::MoveDown, hit_map.editor_width);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(hit) = hit_map
+                    .theme_rows
+                    .iter()
+                    .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                {
+                    app.select_theme(hit.index);
+                }
+            }
+            MouseEventKind::Down(_)
+            | MouseEventKind::Up(_)
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Moved
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {}
+        }
+        return RoutedEvent::Handled;
+    }
     if !matches!(mouse.kind, MouseEventKind::Moved) && app.dismiss_quick_help() {
         app.disarm_exit();
         mouse_state.reset_gesture();
@@ -2271,7 +2302,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].description, "Search messages in this session");
-        for supported in ["model", "new", "fork", "clone", "clear", "quit", "help"] {
+        for supported in [
+            "model", "new", "fork", "clone", "clear", "quit", "help", "theme",
+        ] {
             assert!(catalog.iter().any(|command| command.name == supported));
         }
         for deferred in ["compact", "research", "skills", "sessions"] {
@@ -2612,6 +2645,40 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
+    }
+
+    #[test]
+    fn theme_picker_mouse_focus_previews_without_touching_the_timeline() {
+        let mut app = app();
+        let timeline_item = app
+            .timeline
+            .push(ItemKind::Assistant, "underlying conversation")
+            .expect("timeline item");
+        app.open_theme_picker();
+        let hit_map = draw_hit_map(&app, 80, 24);
+        assert_eq!(hit_map.theme_rows.len(), Theme::ALL.len());
+        let dim = hit_map.theme_rows[1];
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    dim.area.x,
+                    dim.area.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.theme, Theme::Dim);
+        assert!(app.timeline.item(timeline_item).is_some());
+        assert!(app.has_theme_picker());
+        let _ = app.handle_input(InputAction::Escape, hit_map.editor_width);
+        assert_eq!(app.theme, Theme::Default);
+        assert!(!app.has_theme_picker());
     }
 
     #[test]

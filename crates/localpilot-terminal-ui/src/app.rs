@@ -144,6 +144,18 @@ pub(crate) struct TakeoverView<'a> {
     pub commands: &'a [CompletionCommand],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThemePickerState {
+    original: Theme,
+    selected: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ThemePickerView {
+    pub original: Theme,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompletionState {
     kind: CompletionKind,
@@ -387,6 +399,7 @@ pub struct AppModel {
     pub stream_bytes: usize,
     pub dialog: Option<DialogState>,
     takeover: Option<TakeoverState>,
+    theme_picker: Option<ThemePickerState>,
     quick_help: bool,
     input_overlay: Option<InputOverlay>,
     external_edit_snapshot: Option<EditorSnapshot>,
@@ -433,6 +446,7 @@ impl AppModel {
             stream_bytes: 0,
             dialog: None,
             takeover: None,
+            theme_picker: None,
             quick_help: false,
             input_overlay: None,
             external_edit_snapshot: None,
@@ -466,6 +480,11 @@ impl AppModel {
     }
 
     pub fn handle_input(&mut self, action: InputAction, editor_width: u16) -> AppCommand {
+        if matches!(action, InputAction::CancelOrExit) && self.theme_picker.is_some() {
+            self.exit_armed = false;
+            self.close_theme_picker(true);
+            return AppCommand::None;
+        }
         if matches!(action, InputAction::CancelOrExit)
             && self.quick_help
             && self.timeline.selected_text().is_none()
@@ -492,6 +511,9 @@ impl AppModel {
         }
         if self.dialog.is_some() {
             return AppCommand::None;
+        }
+        if self.theme_picker.is_some() {
+            return self.handle_theme_picker_input(action);
         }
         if self.takeover.is_some() {
             return self.handle_takeover_input(action);
@@ -653,7 +675,10 @@ impl AppModel {
                                 AppCommand::RunShell(UserShellCommand { command })
                             })
                     }
-                } else if self.open_help_for_draft() || self.open_command_values_for_draft() {
+                } else if self.open_theme_for_draft()
+                    || self.open_help_for_draft()
+                    || self.open_command_values_for_draft()
+                {
                     AppCommand::None
                 } else if let Some(query) = timeline_search_command(self.editor.text()) {
                     // The slash command is an invocation, not a draft to restore
@@ -845,6 +870,11 @@ impl AppModel {
     }
 
     #[must_use]
+    pub const fn has_theme_picker(&self) -> bool {
+        self.theme_picker.is_some()
+    }
+
+    #[must_use]
     pub(crate) const fn quick_help(&self) -> bool {
         self.quick_help
     }
@@ -862,9 +892,47 @@ impl AppModel {
         })
     }
 
+    #[must_use]
+    pub(crate) const fn theme_picker(&self) -> Option<ThemePickerView> {
+        match self.theme_picker {
+            Some(state) => Some(ThemePickerView {
+                original: state.original,
+                selected: state.selected,
+            }),
+            None => None,
+        }
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.input_overlay = None;
+        self.takeover = None;
+        let selected = Theme::ALL
+            .iter()
+            .position(|theme| *theme == self.theme)
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePickerState {
+            original: self.theme,
+            selected,
+        });
+    }
+
+    pub fn select_theme(&mut self, selected: usize) {
+        let Some(theme) = Theme::ALL.get(selected).copied() else {
+            return;
+        };
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return;
+        };
+        picker.selected = selected;
+        self.theme = theme;
+    }
+
     pub fn open_help(&mut self) {
         self.exit_armed = false;
         self.quick_help = false;
+        self.close_theme_picker(true);
         self.input_overlay = None;
         self.takeover = Some(TakeoverState {
             kind: TakeoverKind::Help,
@@ -922,6 +990,7 @@ impl AppModel {
     /// Clear the current conversation projection while retaining host/session
     /// configuration, completion catalogs and durable prompt history.
     pub fn clear_conversation(&mut self) {
+        self.close_theme_picker(true);
         self.timeline = Timeline::new();
         self.work = WorkState::Idle;
         self.stream_bytes = 0;
@@ -995,6 +1064,7 @@ impl AppModel {
         if self.focus != Focus::Composer
             || self.dialog.is_some()
             || self.takeover.is_some()
+            || self.theme_picker.is_some()
             || self.input_overlay.is_some()
             || self.shell_mode()
         {
@@ -1267,6 +1337,60 @@ impl AppModel {
             | InputAction::OpenExternalEditor
             | InputAction::AcceptCompletion
             | InputAction::Submit => AppCommand::None,
+        }
+    }
+
+    fn handle_theme_picker_input(&mut self, action: InputAction) -> AppCommand {
+        match action {
+            InputAction::Escape => self.close_theme_picker(true),
+            InputAction::MoveUp => self.move_theme_picker(-1),
+            InputAction::MoveDown => self.move_theme_picker(1),
+            InputAction::Submit | InputAction::AcceptCompletion => self.close_theme_picker(false),
+            InputAction::CancelOrExit
+            | InputAction::OpenReverseHistory
+            | InputAction::NavigateTimeline(_)
+            | InputAction::Insert(_)
+            | InputAction::Paste(_)
+            | InputAction::Backspace
+            | InputAction::Delete
+            | InputAction::MoveLeft
+            | InputAction::MoveRight
+            | InputAction::ForwardCharOrSearch
+            | InputAction::MoveWordLeft
+            | InputAction::MoveWordRight
+            | InputAction::MoveVisualStart
+            | InputAction::MoveVisualEnd
+            | InputAction::MoveLineStart
+            | InputAction::MoveLineEnd
+            | InputAction::MoveTextStart
+            | InputAction::MoveTextEnd
+            | InputAction::DeleteWordLeft
+            | InputAction::DeleteToLineStart
+            | InputAction::DeleteToLineEnd
+            | InputAction::OpenExternalEditor => {}
+        }
+        AppCommand::None
+    }
+
+    fn move_theme_picker(&mut self, delta: isize) {
+        let Some(picker) = self.theme_picker else {
+            return;
+        };
+        let len = Theme::ALL.len();
+        let selected = if delta < 0 {
+            picker.selected.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (picker.selected + 1) % len
+        };
+        self.select_theme(selected);
+    }
+
+    fn close_theme_picker(&mut self, restore: bool) {
+        let Some(picker) = self.theme_picker.take() else {
+            return;
+        };
+        if restore {
+            self.theme = picker.original;
         }
     }
 
@@ -1561,6 +1685,22 @@ impl AppModel {
         }
         let _ = self.editor.submit_command();
         self.open_help();
+        true
+    }
+
+    fn open_theme_for_draft(&mut self) -> bool {
+        if self.editor.text().trim() != "/theme" {
+            return false;
+        }
+        if self.editor.has_images() {
+            let _ = self.push_runtime_item(
+                ItemKind::Notice,
+                "remove image attachments before choosing a theme",
+            );
+            return true;
+        }
+        let _ = self.editor.submit_command();
+        self.open_theme_picker();
         true
     }
 
@@ -2483,6 +2623,55 @@ mod tests {
         );
         assert!(app.quick_help());
         assert!(app.exit_armed);
+    }
+
+    #[test]
+    fn theme_picker_previews_cancels_or_accepts_without_history_or_work_leakage() {
+        let mut app = model();
+        app.seed_history(vec!["ordinary prompt".to_string()]);
+        app.begin_work();
+        app.editor.replace_draft("/theme");
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(app.has_theme_picker());
+        assert_eq!(app.theme, Theme::Default);
+        assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_none());
+
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.theme, Theme::Dim);
+        assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
+        assert!(!app.has_theme_picker());
+        assert_eq!(app.theme, Theme::Default);
+        assert_eq!(
+            app.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        app.open_theme_picker();
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        let _ = app.handle_input(InputAction::Submit, 80);
+        assert!(!app.has_theme_picker());
+        assert_eq!(app.theme, Theme::Dim);
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(app.editor.text(), "ordinary prompt");
+    }
+
+    #[test]
+    fn ctrl_c_cancels_theme_preview_without_arming_exit() {
+        let mut app = model();
+        app.open_theme_picker();
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        assert_eq!(app.theme, Theme::Dim);
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert_eq!(app.theme, Theme::Default);
+        assert!(!app.has_theme_picker());
+        assert!(!app.exit_armed);
+        assert!(!app.exit_requested);
     }
 
     #[test]

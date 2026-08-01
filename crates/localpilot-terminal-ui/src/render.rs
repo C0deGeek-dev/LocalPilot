@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{CompletionKind, TakeoverView};
 use crate::{
     ActivityState, AppModel, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt, TabId,
-    TakeoverKind, TextStyle, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
+    TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart, APP_NAME,
     MINIMUM_HEIGHT, MINIMUM_WIDTH,
 };
 
@@ -23,6 +23,12 @@ pub struct TabHit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompletionHit {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeHit {
     pub index: usize,
     pub area: Rect,
 }
@@ -123,6 +129,7 @@ pub struct HitMap {
     pub timeline: Rect,
     pub timeline_rows: Vec<TimelineRowHit>,
     pub completion_rows: Vec<CompletionHit>,
+    pub theme_rows: Vec<ThemeHit>,
     pub scrollbar: ScrollbarGeometry,
     pub composer: Rect,
     pub editor_width: u16,
@@ -170,6 +177,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             timeline: Rect::default(),
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
+            theme_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -187,6 +195,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
+    let theme_rows = render_theme_picker(frame, area, app);
     render_dialog(frame, area, app);
     HitMap {
         takeover: false,
@@ -195,6 +204,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         timeline: layout.timeline_content,
         timeline_rows,
         completion_rows,
+        theme_rows,
         scrollbar,
         composer: layout.composer_content,
         editor_width,
@@ -295,6 +305,7 @@ fn render_takeover(
             timeline: Rect::default(),
             timeline_rows: Vec::new(),
             completion_rows: Vec::new(),
+            theme_rows: Vec::new(),
             scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
@@ -368,10 +379,115 @@ fn render_takeover(
         timeline: content,
         timeline_rows: Vec::new(),
         completion_rows: Vec::new(),
+        theme_rows: Vec::new(),
         scrollbar,
         composer: Rect::default(),
         editor_width: 1,
         composer_scroll: 0,
+    }
+}
+
+fn render_theme_picker(frame: &mut Frame<'_>, frame_area: Rect, app: &AppModel) -> Vec<ThemeHit> {
+    let Some(picker) = app.theme_picker() else {
+        return Vec::new();
+    };
+    let width = 62.min(frame_area.width.saturating_sub(4)).max(30);
+    let height = 13.min(frame_area.height.saturating_sub(2)).max(10);
+    let area = Rect::new(
+        frame_area
+            .x
+            .saturating_add(frame_area.width.saturating_sub(width) / 2),
+        frame_area
+            .y
+            .saturating_add(frame_area.height.saturating_sub(height) / 2),
+        width.min(frame_area.width),
+        height.min(frame_area.height),
+    );
+    let theme = theme(app);
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(" Select a color mode ")
+        .style(theme.ui(UiRole::Surface))
+        .border_style(theme.ui(UiRole::Border));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return Vec::new();
+    }
+    frame.render_widget(
+        Paragraph::new("Choose LocalPilot's semantic terminal colors.")
+            .style(theme.ui(UiRole::Foreground)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let option_width = 22.min(inner.width);
+    let mut hits = Vec::new();
+    for (index, option) in Theme::ALL.iter().enumerate() {
+        let row = u16::try_from(index).unwrap_or(u16::MAX);
+        let y = inner.y.saturating_add(2).saturating_add(row);
+        if y >= inner.bottom().saturating_sub(2) {
+            break;
+        }
+        let selected = index == picker.selected;
+        let current = *option == picker.original;
+        let marker = if selected { "❯" } else { " " };
+        let check = if current { " ✓" } else { "" };
+        let text = format!("{marker}{}. {}{check}", index + 1, option.display_name());
+        let style = if selected {
+            theme.ui(UiRole::Focus)
+        } else {
+            theme.ui(UiRole::Foreground)
+        };
+        let hit = Rect::new(inner.x, y, option_width, 1);
+        frame.render_widget(Paragraph::new(text).style(style), hit);
+        hits.push(ThemeHit { index, area: hit });
+    }
+
+    let preview_x = inner.x.saturating_add(option_width).saturating_add(1);
+    let preview_width = inner.right().saturating_sub(preview_x);
+    if preview_width > 0 {
+        for (offset, (text, role)) in [
+            ("1 - fn previous()", UiRole::Error),
+            ("1 + fn improved()", UiRole::Success),
+            ("2   return result", UiRole::Code),
+            ("3   // selected", UiRole::Focus),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let row = u16::try_from(offset).unwrap_or(u16::MAX);
+            let y = inner.y.saturating_add(2).saturating_add(row);
+            if y >= inner.bottom().saturating_sub(2) {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(text).style(theme.ui(role)),
+                Rect::new(preview_x, y, preview_width, 1),
+            );
+        }
+    }
+
+    let selected = Theme::ALL
+        .get(picker.selected)
+        .copied()
+        .unwrap_or(Theme::Default);
+    frame.render_widget(
+        Paragraph::new(theme_description(selected)).style(theme.ui(UiRole::Muted)),
+        Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ preview · Enter select · Esc cancel").style(theme.ui(UiRole::Muted)),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+    hits
+}
+
+fn theme_description(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Default => "Balanced colors for dark terminal backgrounds",
+        Theme::Dim => "Lower-intensity chrome and conversation colors",
+        Theme::HighContrast => "Strong non-color separation and bright focus",
+        Theme::Colorblind => "Blue and amber status cues without red/green dependence",
     }
 }
 
@@ -1528,6 +1644,28 @@ mod tests {
         assert!(rendered.contains("Page Up/Down scroll timeline"));
         assert!(footer_state(&app).contains("? or Esc close"));
         assert!(hit_map.timeline_rows.len() < usize::from(hit_map.timeline.height));
+    }
+
+    #[test]
+    fn theme_picker_is_centered_numbered_and_exposes_mouse_hits() {
+        let mut app = model();
+        app.open_theme_picker();
+        let _ = app.handle_input(crate::InputAction::MoveDown, 76);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw theme picker");
+
+        let rendered = terminal.backend().to_string();
+        let hit_map = hit_map.expect("hit map");
+        assert_eq!(hit_map.theme_rows.len(), Theme::ALL.len());
+        assert!(rendered.contains("Select a color mode"));
+        assert!(rendered.contains("1. Default ✓"));
+        assert!(rendered.contains("❯2. Dim"));
+        assert!(rendered.contains("1 - fn previous()"));
+        assert!(rendered.contains("Enter select · Esc cancel"));
+        assert_eq!(app.theme, Theme::Dim);
     }
 
     #[test]
