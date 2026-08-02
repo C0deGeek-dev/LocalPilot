@@ -61,7 +61,11 @@ struct Cli {
 enum LocalBoxCommand {
     /// Adopt a running LocalBox server into `.localpilot.toml`.
     Adopt {
-        /// Approve the config write without prompting.
+        /// Start a LocalBox server for this model first if none is running
+        /// (`localbox serve <model>`; see `localbox info` for model ids).
+        #[arg(long, value_name = "MODEL")]
+        serve: Option<String>,
+        /// Approve the (server start and) config write without prompting.
         #[arg(long)]
         yes: bool,
     },
@@ -1412,9 +1416,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             }
         }
         Command::LocalBox { command } => match command {
-            LocalBoxCommand::Adopt { yes } => {
+            LocalBoxCommand::Adopt { serve, yes } => {
                 let stdin_is_tty = io::stdin().is_terminal();
-                localbox::run_adopt(yes, stdin_is_tty).await?;
+                localbox::run_adopt(serve, yes, stdin_is_tty).await?;
             }
         },
         Command::Login {

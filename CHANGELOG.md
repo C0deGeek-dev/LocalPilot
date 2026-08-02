@@ -13,8 +13,9 @@ is SemVer-stable; the configuration schema stability policy is in
   present the messages are unchanged. The new `localpilot localbox adopt` (and the
   in-session `/localbox adopt`) write a `[providers.local]` block for a running
   LocalBox — a permission-gated config write that upserts only the local
-  provider, preserving your other providers, MCP tables, and comments. See
-  [docs/providers.md](docs/providers.md).
+  provider, preserving your other providers, MCP tables, and comments.
+  `localbox adopt --serve <model>` also starts a server first (gated) if none is
+  running. See [docs/providers.md](docs/providers.md).
 
 ## v2.7.0 - 2026-08-02
 

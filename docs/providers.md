@@ -57,6 +57,9 @@ block.
   ```sh
   localbox serve <model>        # start a local server (run in LocalBox)
   localpilot localbox adopt     # write [providers.local] pointing at it
+
+  # …or start the server and adopt in one step (see `localbox info` for models):
+  localpilot localbox adopt --serve <model>
   ```
 
   `adopt` detects the running server, asks before writing (or pass `--yes` to

@@ -191,75 +191,121 @@ pub(crate) fn merge_local_provider(
 /// # Errors
 /// Fails when no running LocalBox is found, the write is declined or needs
 /// approval non-interactively, or the config file cannot be read/written.
-pub(crate) async fn run_adopt(assume_yes: bool, stdin_is_tty: bool) -> anyhow::Result<()> {
+pub(crate) async fn run_adopt(
+    serve: Option<String>,
+    assume_yes: bool,
+    stdin_is_tty: bool,
+) -> anyhow::Result<()> {
     use localpilot_config::{CliOverrides, ConfigPaths};
-    use localpilot_sandbox::{Decision, Effect, Interactivity, PermissionEngine, PermissionRequest};
+    use localpilot_sandbox::{
+        CommandClass, Decision, Effect, Interactivity, PermissionEngine, PermissionRequest,
+    };
 
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
-
-    let (endpoint, model) = match detect().await {
-        LocalBoxState::Running { endpoint, model } => (endpoint, model),
-        LocalBoxState::InstalledNotRunning => anyhow::bail!(
-            "no running LocalBox server found at {DEFAULT_PROXY_BASE_URL} — run `localbox serve <model>` first, then retry"
-        ),
-        LocalBoxState::NotInstalled => {
-            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
-        }
-    };
-
-    let path = localpilot_config::project_config_path(&cwd);
-    let overwrite = path.exists();
-
-    // Writing `.localpilot.toml` in the project is a workspace file write; gate
-    // it through the same engine the rest of the CLI uses — no silent write.
     let engine = PermissionEngine::new(crate::models_cmd::profile(&config), Vec::new());
     let interactivity = if stdin_is_tty && !assume_yes {
         Interactivity::Interactive
     } else {
         Interactivity::NonInteractive
     };
+    // One consent step for every gated side effect (start the server, write config).
+    let consent = |request: &PermissionRequest, question: &str| -> anyhow::Result<bool> {
+        if assume_yes {
+            return Ok(true);
+        }
+        Ok(match engine.decide(request) {
+            Decision::Allow => true,
+            Decision::Ask if stdin_is_tty => crate::models_cmd::confirm(question)?,
+            Decision::Ask => {
+                anyhow::bail!("this needs approval — re-run with --yes to proceed non-interactively")
+            }
+            Decision::Deny => false,
+        })
+    };
+
+    // Resolve a running server, starting one first when asked and none is up.
+    let mut state = detect().await;
+    if !matches!(state, LocalBoxState::Running { .. }) {
+        match (&state, serve.as_deref()) {
+            (LocalBoxState::NotInstalled, _) => {
+                anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
+            }
+            (LocalBoxState::InstalledNotRunning, None) => anyhow::bail!(
+                "no running LocalBox server found — pass --serve <model> to start one, or run `localbox serve <model>` first (see `localbox info`)"
+            ),
+            (LocalBoxState::InstalledNotRunning, Some(model)) => {
+                // Starting a server loads a model and binds a port — a real side
+                // effect, gated like any other.
+                let request = PermissionRequest {
+                    tool: "localbox serve".to_string(),
+                    effect: Effect::RunCommand(CommandClass::ExternalWrite),
+                    interactivity,
+                    trusted: true,
+                    detail: format!("localbox serve {model}"),
+                };
+                if !consent(
+                    &request,
+                    &format!("start LocalBox serving {model} (loads a model, can take minutes)?"),
+                )? {
+                    anyhow::bail!("declined — LocalBox not started");
+                }
+                start_localbox_serve(model)?;
+                state = detect().await;
+            }
+            (LocalBoxState::Running { .. }, _) => {}
+        }
+    }
+
+    let (endpoint, model) = match state {
+        LocalBoxState::Running { endpoint, model } => (endpoint, model),
+        _ => anyhow::bail!(
+            "LocalBox did not come up at {DEFAULT_PROXY_BASE_URL} after starting — check `localbox status`"
+        ),
+    };
+
+    // Writing `.localpilot.toml` is a workspace file write; gate it too.
+    let path = localpilot_config::project_config_path(&cwd);
     let request = PermissionRequest {
         tool: "localbox adopt".to_string(),
         effect: Effect::WritePath {
             inside_workspace: true,
-            overwrite,
+            overwrite: path.exists(),
             secret_like: false,
         },
         interactivity,
         trusted: true,
         detail: path.display().to_string(),
     };
-    let approved = if assume_yes {
-        true
-    } else {
-        match engine.decide(&request) {
-            Decision::Allow => true,
-            Decision::Ask => {
-                if stdin_is_tty {
-                    crate::models_cmd::confirm(&format!(
-                        "add [providers.local] for {endpoint} to {}?",
-                        path.display()
-                    ))?
-                } else {
-                    anyhow::bail!(
-                        "writing {} needs approval — re-run with --yes to adopt non-interactively",
-                        path.display()
-                    );
-                }
-            }
-            Decision::Deny => false,
-        }
-    };
-    if !approved {
+    if !consent(
+        &request,
+        &format!("add [providers.local] for {endpoint} to {}?", path.display()),
+    )? {
         anyhow::bail!("declined — no config written");
     }
-
     write_local_provider(&path, &endpoint, model.as_deref())?;
     println!(
         "adopted LocalBox — wrote [providers.local] for {endpoint} to {}",
         path.display()
     );
+    Ok(())
+}
+
+/// Start a LocalBox server headless with `localbox serve <model>`, inheriting its
+/// output so the user sees the model-load progress. `localbox serve` blocks until
+/// the model is ready (it runs its own reply check) and then returns, leaving the
+/// server running as its own detached process — LocalPilot does not own or reap
+/// it; `localbox stop` is LocalBox's teardown (D003 leave-running).
+fn start_localbox_serve(model: &str) -> anyhow::Result<()> {
+    println!("starting LocalBox serving {model} (loading a model can take a few minutes)…");
+    let status = std::process::Command::new("localbox")
+        .arg("serve")
+        .arg(model)
+        .status()
+        .map_err(|error| anyhow::anyhow!("could not run `localbox serve {model}`: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("`localbox serve {model}` exited with {status}");
+    }
     Ok(())
 }
 
