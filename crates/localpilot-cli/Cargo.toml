@@ -85,6 +85,10 @@ thiserror.workspace = true
 time = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
+# Format-preserving TOML edits: merge [providers.local] into an existing
+# .localpilot.toml without dropping the user's other tables or comments. Already
+# in the tree transitively via toml 0.8; pinned to that resolved version.
+toml_edit = "=0.22.27"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 localpilot-config = { path = "../localpilot-config" }

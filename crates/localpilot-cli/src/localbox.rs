@@ -129,11 +129,182 @@ pub(crate) fn offer_message(offer: &ModelOffer) -> Option<String> {
     }
 }
 
+/// Merge a `[providers.local]` block for a detected LocalBox proxy endpoint into
+/// existing `.localpilot.toml` text, preserving every other table, provider,
+/// key, and comment. Unlike LocalBox's own emitter — which owns and
+/// wholesale-replaces the `providers` table — this **upserts only
+/// `[providers.local]`**, so a user's other `[providers.*]`, `[mcp.servers.*]`,
+/// and comments survive. `[provider] default` is pointed at `local` so the
+/// adopted server is used. The `kind`/`api_key_env` mirror LocalBox's
+/// proxied-route contract (the no-think proxy speaks the Anthropic wire); they
+/// are mirrored from LocalBox's public contract, never imported.
+///
+/// # Errors
+/// Returns an error when `existing` is not valid TOML — the caller must fail
+/// rather than overwrite content it could not safely merge.
+pub(crate) fn merge_local_provider(
+    existing: &str,
+    endpoint: &str,
+    model: Option<&str>,
+) -> anyhow::Result<String> {
+    use toml_edit::{value, DocumentMut, Item};
+
+    let mut doc: DocumentMut = existing.parse()?;
+    doc["provider"]["default"] = value("local");
+    doc["providers"]["local"]["kind"] = value("anthropic");
+    doc["providers"]["local"]["base_url"] = value(endpoint);
+    doc["providers"]["local"]["api_key_env"] = value("ANTHROPIC_AUTH_TOKEN");
+    if let Some(model) = model {
+        doc["providers"]["local"]["model"] = value(model);
+    }
+    // `[providers]` holds only sub-tables, so suppress its bare header and let
+    // `[providers.local]` (and any siblings) render their own.
+    if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_mut) {
+        providers.set_implicit(true);
+    }
+    Ok(doc.to_string())
+}
+
+/// Adopt a running LocalBox server into the project's `.localpilot.toml` so
+/// LocalPilot uses it. Detects a running server, gates the config write through
+/// the permission engine (reusing the `models`-style Allow / confirm / report
+/// flow), then merges `[providers.local]`. Writes nothing unless a running
+/// server is found and the write is approved.
+///
+/// # Errors
+/// Fails when no running LocalBox is found, the write is declined or needs
+/// approval non-interactively, or the config file cannot be read/written.
+pub(crate) async fn run_adopt(assume_yes: bool, stdin_is_tty: bool) -> anyhow::Result<()> {
+    use localpilot_config::{CliOverrides, ConfigPaths};
+    use localpilot_sandbox::{Decision, Effect, Interactivity, PermissionEngine, PermissionRequest};
+
+    let cwd = std::env::current_dir()?;
+    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+
+    let (endpoint, model) = match detect().await {
+        LocalBoxState::Running { endpoint, model } => (endpoint, model),
+        LocalBoxState::InstalledNotRunning => anyhow::bail!(
+            "no running LocalBox server found at {DEFAULT_PROXY_BASE_URL} — run `localbox serve <model>` first, then retry"
+        ),
+        LocalBoxState::NotInstalled => {
+            anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
+        }
+    };
+
+    let path = localpilot_config::project_config_path(&cwd);
+    let overwrite = path.exists();
+
+    // Writing `.localpilot.toml` in the project is a workspace file write; gate
+    // it through the same engine the rest of the CLI uses — no silent write.
+    let engine = PermissionEngine::new(crate::models_cmd::profile(&config), Vec::new());
+    let interactivity = if stdin_is_tty && !assume_yes {
+        Interactivity::Interactive
+    } else {
+        Interactivity::NonInteractive
+    };
+    let request = PermissionRequest {
+        tool: "localbox adopt".to_string(),
+        effect: Effect::WritePath {
+            inside_workspace: true,
+            overwrite,
+            secret_like: false,
+        },
+        interactivity,
+        trusted: true,
+        detail: path.display().to_string(),
+    };
+    let approved = if assume_yes {
+        true
+    } else {
+        match engine.decide(&request) {
+            Decision::Allow => true,
+            Decision::Ask => {
+                if stdin_is_tty {
+                    crate::models_cmd::confirm(&format!(
+                        "add [providers.local] for {endpoint} to {}?",
+                        path.display()
+                    ))?
+                } else {
+                    anyhow::bail!(
+                        "writing {} needs approval — re-run with --yes to adopt non-interactively",
+                        path.display()
+                    );
+                }
+            }
+            Decision::Deny => false,
+        }
+    };
+    if !approved {
+        anyhow::bail!("declined — no config written");
+    }
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let merged = merge_local_provider(&existing, &endpoint, model.as_deref())?;
+    std::fs::write(&path, merged)?;
+    println!(
+        "adopted LocalBox — wrote [providers.local] for {endpoint} to {}",
+        path.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn adopt_merge_upserts_only_providers_local_and_preserves_siblings() {
+        let existing = "\
+[provider]
+default = \"openai\"
+
+[providers.openai]
+kind = \"openai\"
+api_key_env = \"OPENAI_API_KEY\"
+
+# a hand-added MCP server
+[mcp.servers.playwright]
+command = \"npx\"
+";
+        let merged =
+            merge_local_provider(existing, "http://127.0.0.1:11435/v1", Some("qwen-coder")).unwrap();
+        let doc: toml_edit::DocumentMut = merged.parse().unwrap();
+        // The sibling provider and the MCP table survive untouched.
+        assert_eq!(doc["providers"]["openai"]["kind"].as_str(), Some("openai"));
+        assert_eq!(
+            doc["mcp"]["servers"]["playwright"]["command"].as_str(),
+            Some("npx")
+        );
+        assert!(merged.contains("# a hand-added MCP server"));
+        // The LocalBox proxy contract is written, and default points at local.
+        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(
+            doc["providers"]["local"]["base_url"].as_str(),
+            Some("http://127.0.0.1:11435/v1")
+        );
+        assert_eq!(
+            doc["providers"]["local"]["api_key_env"].as_str(),
+            Some("ANTHROPIC_AUTH_TOKEN")
+        );
+        assert_eq!(doc["providers"]["local"]["model"].as_str(), Some("qwen-coder"));
+        assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
+    }
+
+    #[test]
+    fn adopt_merge_into_empty_config_creates_local_provider_without_a_model() {
+        let merged = merge_local_provider("", "http://127.0.0.1:11435/v1", None).unwrap();
+        let doc: toml_edit::DocumentMut = merged.parse().unwrap();
+        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
+        assert!(doc["providers"]["local"].get("model").is_none());
+    }
+
+    #[test]
+    fn adopt_merge_rejects_a_malformed_existing_file() {
+        assert!(merge_local_provider("not [ valid", "http://x/v1", None).is_err());
+    }
 
     #[test]
     fn offer_message_is_actionable_and_none_when_nothing_to_offer() {

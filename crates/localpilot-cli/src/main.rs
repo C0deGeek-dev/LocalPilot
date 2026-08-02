@@ -56,6 +56,17 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// Subcommands for `localpilot localbox`.
+#[derive(Debug, Subcommand)]
+enum LocalBoxCommand {
+    /// Adopt a running LocalBox server into `.localpilot.toml`.
+    Adopt {
+        /// Approve the config write without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Report version, platform, config, providers, tools, and trust state.
@@ -108,6 +119,12 @@ enum Command {
         /// silently skips.
         #[arg(long)]
         yes: bool,
+    },
+    /// Manage the LocalBox local-model integration.
+    #[command(name = "localbox")]
+    LocalBox {
+        #[command(subcommand)]
+        command: LocalBoxCommand,
     },
     /// Check the project repository for a newer release and optionally update.
     Update {
@@ -1394,6 +1411,12 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 exit_code = std::process::ExitCode::FAILURE;
             }
         }
+        Command::LocalBox { command } => match command {
+            LocalBoxCommand::Adopt { yes } => {
+                let stdin_is_tty = io::stdin().is_terminal();
+                localbox::run_adopt(yes, stdin_is_tty).await?;
+            }
+        },
         Command::Login {
             provider,
             no_browser,

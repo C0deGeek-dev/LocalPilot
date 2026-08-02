@@ -213,10 +213,11 @@ pub async fn run(
             // and stays silent (and probe-free) when LocalBox is not installed.
             let nothing_usable = !results.iter().any(|r| matches!(r.status, Status::Ok));
             if nothing_usable {
-                if let crate::localbox::LocalBoxState::Running { endpoint, .. } =
-                    crate::localbox::detect().await
-                {
-                    writeln!(&mut stdout, "A LocalBox server is serving at {endpoint}.")?;
+                // Surface a detected LocalBox with the same actionable pointer the
+                // chat surfaces show, so `models` guidance matches everywhere.
+                let offer = crate::localbox::offer_for(false, crate::localbox::detect().await);
+                if let Some(pointer) = crate::localbox::offer_message(&offer) {
+                    writeln!(&mut stdout, "{pointer}")?;
                 }
             }
         }
@@ -404,7 +405,7 @@ pub(crate) async fn discover_models_for_provider(
     }
 }
 
-fn profile(config: &Config) -> localpilot_sandbox::Profile {
+pub(crate) fn profile(config: &Config) -> localpilot_sandbox::Profile {
     match config.permissions.profile {
         localpilot_config::PermissionProfile::Default => localpilot_sandbox::Profile::Default,
         localpilot_config::PermissionProfile::Relaxed => localpilot_sandbox::Profile::Relaxed,
@@ -415,7 +416,7 @@ fn profile(config: &Config) -> localpilot_sandbox::Profile {
     }
 }
 
-fn confirm(question: &str) -> anyhow::Result<bool> {
+pub(crate) fn confirm(question: &str) -> anyhow::Result<bool> {
     let mut stdout = std::io::stdout();
     write!(stdout, "{question} [y/N] ")?;
     stdout.flush()?;
