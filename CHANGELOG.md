@@ -6,11 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.7.0 - 2026-08-02
+
+Coordinated LocalX release.
+
 - **The full-screen terminal-chat shell and timeline are now the interactive default.**
   Bare `localpilot chat` selects the alternate-buffer host backed by the
   backend-neutral `localpilot-terminal-ui` crate. `LOCALPILOT_CHAT_UI=inline`
-  remains only as a temporary legacy rollback while the remaining physical and
-  cross-terminal acceptance matrix closes. The foundation
+  remains only as a temporary legacy rollback while the deferred physical and
+  cross-terminal acceptance matrix remains open. The foundation
   carries stable content IDs, virtualized content-anchored history, framed
   prompts, compact activity, semantic themes, responsive status/composer/footer
   regions, a screenshot-measured true-color palette with a dark application
@@ -48,10 +52,10 @@ is SemVer-stable; the configuration schema stability policy is in
   Ctrl+G temporarily restores
   the ordinary terminal, opens the
   draft in a foreground external editor, then rebuilds the full-screen frame
-  without losing its timeline or opaque attachment identity. Detailed pickers/
-  conversation surfaces, accessibility and the remaining terminal matrix remain
-  branch work; the temporary selector is removed when feature parity is
-  accepted.
+  without losing its timeline or opaque attachment identity. Detailed
+  conversation surfaces, accessibility hardening and the remaining terminal
+  matrix remain follow-up work; the temporary selector is removed only after
+  feature parity is accepted.
 - **Added: `localpilot selfdev` — build, vet, publish, and reload LocalPilot from
   its own source.** `selfdev build` fingerprints the working tree and builds it;
   `selfdev publish` runs the build through the publish gauntlet and, only if it
