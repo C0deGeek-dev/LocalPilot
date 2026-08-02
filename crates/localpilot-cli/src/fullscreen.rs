@@ -2537,6 +2537,7 @@ fn handle_turn_event_impl(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the non-steering adapter preserves the shared router inputs
 fn handle_turn_event(
     app: &mut AppModel,
     event: Event,

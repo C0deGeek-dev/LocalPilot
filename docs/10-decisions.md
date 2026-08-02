@@ -833,8 +833,11 @@ who are not Rust developers, that is the barrier that matters. Five decisions.
    truncated; on its own it does not prove origin, because a party able to alter
    the release can alter the digest. Origin therefore comes from **Sigstore-backed
    build attestations** (`actions/attest-build-provenance`), which bind each
-   archive to the workflow, repository, and commit that produced it and record it
-   in a public transparency log. Verification is `gh attestation verify`.
+   archive to the workflow, repository, and commit that produced it.
+   LocalPilot's public-repository visibility selects Sigstore's public-good
+   instance and the public Rekor transparency log; GitHub's private/internal
+   instance has no transparency log, so this claim must be revisited if the
+   repository visibility changes. Verification is `gh attestation verify`.
 
    Keyless was chosen over a self-managed signing key deliberately: the workflow's
    OIDC identity is the signer, so there is no key to hold, rotate, or leak, and
