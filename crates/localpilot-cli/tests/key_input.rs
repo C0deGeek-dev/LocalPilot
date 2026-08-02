@@ -232,6 +232,18 @@ fn an_absorbed_burst_is_committed_only_after_it_goes_idle() {
 }
 
 #[test]
+fn a_pending_burst_can_be_committed_when_input_focus_changes() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+
+    burst.observe(plain('a'), true, now);
+    burst.observe(plain('b'), true, now + Duration::from_millis(1));
+    assert_eq!(burst.flush_pending(), Some("ab".to_string()));
+    assert!(!burst.has_pending());
+    assert_eq!(burst.flush_pending(), None);
+}
+
+#[test]
 fn a_non_text_key_flushes_a_pending_burst_then_passes() {
     let now = Instant::now();
     let mut burst = key_input::PasteBurst::default();

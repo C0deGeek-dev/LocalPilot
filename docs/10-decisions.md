@@ -2,6 +2,93 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0129: Full-Screen Chat Is The Interactive Default
+
+Status: accepted. Advances ADR-0107's transition without yet removing its
+temporary rollback host.
+
+Bare interactive `localpilot chat` now launches the authoritative full-screen
+alternate-buffer host. `LOCALPILOT_CHAT_UI=fullscreen` remains an accepted
+explicit spelling; `LOCALPILOT_CHAT_UI=inline` selects the legacy inline host
+only as a temporary recovery path. Invalid values remain errors. This selector
+does not affect non-interactive/plain output.
+
+The inline host is not a second product direction. Its removal is gated on the
+remaining physical Windows, cross-terminal, and screen-reader checks plus a
+small extraction: full-screen code still consumes shared slash-command and
+approval types currently housed in `localpilot-tui`. Keeping that tested escape
+hatch until the matrix closes limits terminal-specific rollout risk; making the
+accepted full-screen experience the default prevents the rollback from defining
+normal product behavior.
+
+## ADR-0108: A Scoped Owner Exception Allows Observable Terminal-Chat Parity
+
+Status: accepted. Amends ADR-0005 and `docs/00-clean-room.md` for one surface;
+the rest of the clean-room policy is unchanged.
+
+The project owner explicitly authorizes LocalPilot's interactive terminal chat
+to match the observable layout, geometry, interactions, and behavior of the
+normally used public GitHub Copilot CLI 1.0.75 distribution. Normal-use
+observation, public documentation, and its public versioned changelog may define
+that behavioral contract. This is a deliberate product requirement, not an
+accidental weakening of provenance review.
+
+The boundary remains strict: no proprietary/leaked source or source maps,
+hidden prompts, private endpoints, credentials, non-UI internals, copied
+implementation structure, or vendor-specific service integration. The shipped
+interface retains LocalPilot identity and original copy—no GitHub/Copilot name,
+logo, wordmark, mascot, brand theme, or brand-identifying verbatim strings.
+Implementation and tests are authored in this repository from the observable
+contract. Any broader exception requires another explicit owner decision.
+
+## ADR-0107: Interactive Chat Is A Full-Screen Application With Stable Content Coordinates
+
+Status: accepted. Retains ADR-0006's Ratatui/Crossterm choice; supersedes
+ADR-0021 and ADR-0039 for the new interactive-chat host and narrows ADR-0064's
+LocalPilot reference. The old inline host remains a temporary rollback only.
+
+Interactive chat is rebuilt as an alternate-buffer, full-frame application. It
+captures mouse reporting and therefore owns timeline scrolling, scrollbar
+interaction, text selection, clipboard copy, and click hit-testing. Timeline
+items receive monotonic stable IDs; viewport anchors and selection endpoints are
+content coordinates (item ID plus a grapheme-safe UTF-8 byte boundary), never
+screen-row offsets. Editor movement, wrapping, cursor placement, and hit-testing
+share one extended-grapheme/display-width layout calculation.
+
+The implementation boundary is intentionally narrow:
+
+1. `localpilot-terminal-ui` is backend-neutral. It owns authoritative app,
+   timeline, editor, focus/lifecycle, frame, hit-map, and semantic capability
+   state and renders with Ratatui's backend-neutral `Frame`/`TestBackend` APIs.
+   It has no Crossterm, provider, store, or harness dependency.
+2. `localpilot-cli` owns Crossterm mode entry/restore, raw terminal events,
+   clipboard access, and the mapping from the existing provider-neutral
+   `RuntimeEvent`, approval, steering, and cancellation channels into semantic
+   UI actions. `run_chat` remains the single provider/session initializer; a UI
+   choice may select a host but must not create a second runtime.
+3. The exact-pinned Ratatui 0.29 and Crossterm 0.28 stack stays on MSRV 1.82.
+   A physical Windows Terminal coexistence run proved alternate screen, captured
+   mouse, application selection/copy, timeline scrolling, and wrapped-grapheme
+   editing together. No observed requirement justifies Ratatui 0.30 or a custom
+   damage/composition engine.
+4. Ctrl+C is contextual application input. With selected text, the first press
+   copies it; otherwise active work receives cancellation and idle state arms
+   exit. Only a consecutive second Ctrl+C exits, including while cancellation
+   acknowledgement is pending; any other input disarms the exit. A process-
+   global Ctrl+C handler must not preempt selection copy or terminal cleanup.
+   The driver owns key-event routing and terminal cleanup.
+
+The foundation initially kept the inline UI as the default rollback while
+`fullscreen` selected the new host. ADR-0129 advances that transition:
+full-screen is now the default and explicit `inline` is the temporary rollback.
+Both compile against the same runtime contracts. The compatibility host and
+selector are removed after their remaining physical gates and shared-type
+extraction close; they are not two permanent UIs.
+
+The historical alternate-screen renderer, current inline state/widgets, and the
+abandoned custom terminal surface are evidence about failure modes, not source
+architectures. Only bounded content-coordinate, grapheme-editor, terminal-mode
+accounting, and regression-test ideas are adapted into the new foundation.
 ## ADR-0128: Self-Dev Reload Ships Primitives, Not A Crash-Detect-And-Revert Loop
 
 Status: accepted.
@@ -314,7 +401,7 @@ product.
    a Windows-only build box per the workspace offline-evidence policy — the first
    real Unix run is where a socket-perms/path-length/reap edge could still surface.
 
-## ADR-0121: The Agent Can Ask The User, Through A Host Capability And One Shared Widget
+## ADR-0121: The Agent Can Ask The User Through A Shared Host Capability
 
 Status: accepted. Supersedes ADR-0081 §4's "no multiple-choice UI machinery
 exists", which was the standing reason the intake gate asks over stdin. Issue
@@ -340,15 +427,13 @@ was just hardcoded to `bool`.
    to choose and state its assumption, exactly as `delegate` does when no agents
    are loaded — so a piped run, a CI run, and a subagent never stall.
 
-3. **The widget lives in `localpilot-tui`, where it is testable.** It reuses the
-   pickers' window and reverse-video highlight, renders inline in the top section
-   (no modal, no alternate screen), and joins the priority chain after the
-   approval gate. `blocking_prompt_height` includes it, or the fixed band would
-   truncate the option list and its confirm hint. Unlike the approval branch —
-   which discards its decision in `app.rs` and is answered in the REPL — the
-   question branch mutates its own selection state, so the deterministic loop can
-   drive the whole widget without the REPL. The REPL still owns the *answer*,
-   because it has to be read out before the widget clears.
+3. **Hosts project one typed question contract.** The default full-screen host
+   renders ordered single- and multi-select questions in its timeline/dialog
+   model, including the screen-reader projection. During the rollback window,
+   `localpilot-tui` adapts the same `UserQuestion`/`UserAnswer` contract to its
+   inline top section. The REPL owns the channel and reads each answer before a
+   host clears its widget; neither presentation defines a second tool or result
+   path.
 
 4. **A closed channel is a dismissal, never an invented answer** — the same rule
    the approver follows for a denial. Ctrl-C cancels the turn *and* answers the
@@ -673,16 +758,16 @@ Status: accepted. Extends the turn loop in
 [`docs/06-harness-spec.md`](06-harness-spec.md); the non-user producers are
 library-only for now (D007).
 
-Steering, cancellation, and (later) background/system signals reach an in-flight
-turn through one typed `SoftInterrupt { source }` queue admitted only at labelled
-safe points in the turn loop (between tool dispatch and the next model call), never
-mid-tool. The substrate ships with `push_interrupt` and the `SoftInterruptSource`
-variants public, but **only User steering has a producer today**; the `System` and
-`BackgroundTask` sources are disclosed library-only substrate whose real producers
-belong to the deferred platform track (server control callbacks, swarm messaging).
-Building the substrate now — foundational and hard to retrofit — without inventing
-a background-callback producer that belongs to a plan not yet started satisfies the
-wire-or-disclose rule by explicit disclosure.
+Steering, cancellation, and background/system signals reach an in-flight turn
+through one typed `SoftInterrupt { source }` queue admitted only at labelled safe
+points, never mid-tool. Non-urgent interrupts are admitted between tool dispatch
+and the next model call. An urgent interrupt may also preempt an open provider
+stream: the incomplete assistant response is discarded from history, queued
+interrupts are admitted in FIFO order, and the same turn starts a fresh provider
+call. The queue is the durable source of truth; notification is only a wakeup
+mechanism. `User` steering is produced by interactive and hosted clients, while
+the server/swarm path may inject labelled `System` or `BackgroundTask` messages
+without making them read as user-authored input.
 
 ## ADR-0110: Memory Retrieval Fuses Keyword And Dense Ranks With Reciprocal Rank Fusion
 
@@ -720,6 +805,9 @@ block-array expansion of collapsed turns and ≤4-breakpoint management —
 disproportionate request-path risk against a marginal gain over the prefix already
 cached. A follow-on can add it.
 
+Cache counters are also stored as defaulted additive fields on usage events, so
+resumed sessions and offline scorecards retain effective-input truth while event
+logs written before prompt caching continue to deserialize with zero cache use.
 ## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
 
 Status: accepted. Extends the release process in
@@ -745,8 +833,11 @@ who are not Rust developers, that is the barrier that matters. Five decisions.
    truncated; on its own it does not prove origin, because a party able to alter
    the release can alter the digest. Origin therefore comes from **Sigstore-backed
    build attestations** (`actions/attest-build-provenance`), which bind each
-   archive to the workflow, repository, and commit that produced it and record it
-   in a public transparency log. Verification is `gh attestation verify`.
+   archive to the workflow, repository, and commit that produced it.
+   LocalPilot's public-repository visibility selects Sigstore's public-good
+   instance and the public Rekor transparency log; GitHub's private/internal
+   instance has no transparency log, so this claim must be revisited if the
+   repository visibility changes. Verification is `gh attestation verify`.
 
    Keyless was chosen over a self-managed signing key deliberately: the workflow's
    OIDC identity is the signer, so there is no key to hold, rotate, or leak, and
@@ -2376,9 +2467,9 @@ injection path.
 
 ## ADR-0064: The Non-Developer TUI Is Native ratatui, With The Guided-Launcher Doctrine Enforced By Tests
 
-Status: accepted. Applies to LocalBox (which ships the TUI) and records the
-ecosystem doctrine; LocalPilot's own inline-TUI rules (ADR-0021, ADR-0039) are
-unchanged and this decision follows their scrollback-safety lineage.
+Status: accepted for LocalBox (which ships the TUI) and the ecosystem doctrine.
+ADR-0107 supersedes this record's former statement that LocalPilot's inline-TUI
+rules remain unchanged; LocalPilot now owns a separate full-screen chat model.
 
 The launcher TUI for non-developers is a native **ratatui** flow inside the
 product binary. The previous stack — a .NET/Terminal.Gui TUI talking to an
@@ -3516,8 +3607,10 @@ Reason:
 
 ## ADR-0039: The Inline Live Region Is A Fixed-Height Band, Re-initialised Only On Terminal Resize
 
-Status: accepted. Refines ADR-0021 (inline rendering); the committed ratatui +
-crossterm stack is unchanged.
+Status: superseded for the new interactive-chat host by ADR-0107. It continues
+to govern only the temporary inline rollback path until that path is removed.
+Refines ADR-0021 (inline rendering); the committed ratatui + crossterm stack is
+unchanged.
 
 The interactive REPL's inline live region reserves a constant height and is held
 there for the life of the session. It is re-initialised only when the terminal's
@@ -4465,8 +4558,10 @@ Reason:
 
 ## ADR-0021: Inline Terminal Rendering, No Alternate Screen Or Mouse Capture
 
-Status: accepted. Refines ADR-0006; the committed ratatui + crossterm stack is
-unchanged and this record fixes how that stack is driven.
+Status: superseded for the new interactive-chat host by ADR-0107. It continues
+to govern only the temporary inline rollback path until that path is removed.
+Refines ADR-0006; the committed ratatui + crossterm stack is unchanged and this
+record fixes how the rollback stack is driven.
 
 The interactive REPL renders inline in the terminal's main screen buffer rather
 than taking over an alternate screen. Finished transcript items — user messages,
@@ -4961,10 +5056,12 @@ Reason:
 
 ## ADR-0006: Ratatui as the TUI Framework
 
-Status: accepted
+Status: accepted; refined by ADR-0107.
 
-The terminal UI is built on `ratatui` with the `crossterm` backend and
-`tui-textarea` for input. This is a committed choice, not a recommendation.
+The terminal UI is built on `ratatui` with the `crossterm` backend. The original
+input-widget choice has since been replaced by a hand-rolled editor so wrapping,
+grapheme movement, history, and hit-testing share one owned layout model. This
+is a committed framework choice, not a recommendation.
 
 Reason:
 

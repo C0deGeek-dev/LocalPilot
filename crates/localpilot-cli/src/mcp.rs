@@ -56,6 +56,11 @@ impl McpTools {
     #[must_use]
     pub fn registry(&self) -> ToolRegistry {
         let mut registry = ToolRegistry::with_builtins();
+        self.extend_registry(&mut registry);
+        registry
+    }
+
+    fn extend_registry(&self, registry: &mut ToolRegistry) {
         // The project knowledge base is reachable on demand as a read-only tool,
         // so ingested knowledge is pulled when relevant instead of seeded into
         // every turn. Harmless when no project is ingested (it returns an empty
@@ -116,7 +121,6 @@ impl McpTools {
             }
             registry.register_from(Box::new(tool), ToolSource::Mcp(server.clone()));
         }
-        registry
     }
 }
 
@@ -259,6 +263,21 @@ mod tests {
         assert!(!registry.is_mcp("fetch"));
         assert!(registry.get("duckduckgo_fetch").is_some());
         assert!(registry.is_mcp("duckduckgo_fetch"));
+        assert_unique_spec_names(&registry);
+    }
+
+    #[test]
+    fn host_builtin_is_registered_before_mcp_collision_resolution() {
+        let registry = McpTools {
+            entries: vec![mcp_entry("remote", "ask_user")],
+            skills_autonomous: false,
+        }
+        .registry();
+
+        assert!(registry.get("ask_user").is_some());
+        assert!(!registry.is_mcp("ask_user"));
+        assert!(registry.get("remote_ask_user").is_some());
+        assert!(registry.is_mcp("remote_ask_user"));
         assert_unique_spec_names(&registry);
     }
 

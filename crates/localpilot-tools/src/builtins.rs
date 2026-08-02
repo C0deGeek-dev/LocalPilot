@@ -75,6 +75,9 @@ fn paths_detail(input: &Value, prefix: &str) -> String {
     detail_preview(&format!("{prefix} {joined}"))
 }
 
+/// Cap on a typed host presentation before truncation. Model-facing text is
+/// retained and bounded only at the registry seam.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Bound on the slice a single `read_tool_output` call returns. The full output
 /// is already retained, so this is a non-lossy display bound, not a data cap.
 const MAX_READBACK_BYTES: usize = 64 * 1024;

@@ -108,9 +108,11 @@ The checksum proves the archive is byte-for-byte what CI produced — not corrup
 or truncated. On its own it does not prove *origin*: anyone able to alter the
 release could alter the checksum beside it.
 
-Releases also carry **build provenance**, signed keylessly through Sigstore and
-recorded in its public transparency log. That binds each archive to the workflow,
-repository, and commit that built it:
+Releases also carry **build provenance**, signed keylessly through Sigstore. As
+long as LocalPilot remains a public repository, GitHub uses Sigstore's
+public-good instance and records the attestation in the public Rekor
+transparency log. That binds each archive to the workflow, repository, and
+commit that built it:
 
 ```sh
 gh attestation verify localpilot-x86_64-unknown-linux-gnu.tar.gz   --repo C0deGeek-dev/LocalPilot

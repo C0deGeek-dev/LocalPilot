@@ -1,8 +1,10 @@
 //! Per-folder trust.
 //!
-//! The interactive REPL asks once, on first entry into a workspace folder,
-//! whether the folder is trusted. The answer is remembered in a small list under
-//! the user config directory so the prompt does not reappear for that folder.
+//! The interactive hosts ask once, on first entry into a workspace folder,
+//! whether the folder is trusted. The inline rollback remembers an affirmative
+//! answer; the full-screen host also offers a session-only affirmative choice.
+//! Persistent answers live in a small list under the user config directory so
+//! the prompt does not reappear for that folder.
 //! Trust is a convenience gate, not a security boundary — the permission engine
 //! still governs every effect — so a failure to persist is logged at warn level
 //! (it would otherwise silently re-prompt every session) rather than treated as
@@ -34,7 +36,11 @@ pub fn is_trusted(cwd: &Path) -> bool {
     let Some(path) = store_path() else {
         return false;
     };
-    let Ok(contents) = std::fs::read_to_string(&path) else {
+    is_trusted_in(cwd, &path)
+}
+
+fn is_trusted_in(cwd: &Path, path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
         return false;
     };
     let target = key(cwd);
@@ -49,7 +55,11 @@ pub fn remember(cwd: &Path) {
     let Some(path) = store_path() else {
         return;
     };
-    if is_trusted(cwd) {
+    remember_in(cwd, &path);
+}
+
+fn remember_in(cwd: &Path, path: &Path) {
+    if is_trusted_in(cwd, path) {
         return;
     }
     if let Some(parent) = path.parent() {
@@ -59,7 +69,7 @@ pub fn remember(cwd: &Path) {
     let result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .and_then(|mut file| file.write_all(entry.as_bytes()));
     if let Err(error) = result {
         // Not a security boundary, but a silent failure means the user is
@@ -71,4 +81,9 @@ pub fn remember(cwd: &Path) {
             "could not persist workspace trust; you may be asked to trust this folder again next session"
         );
     }
+}
+
+#[cfg(all(test, feature = "tui"))]
+pub(crate) fn remember_in_test_store(cwd: &Path, path: &Path) {
+    remember_in(cwd, path);
 }

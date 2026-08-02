@@ -375,6 +375,10 @@ Rules:
 - approve writes, deletes, network, package installs, and privileged commands
 - set timeout
 - capture stdout/stderr separately
+- an explicit full-screen `!` submission is already user-confirmed: command-risk
+  effects do not ask the user to confirm the exact text a second time. The
+  permission engine still classifies every effect, retains `deny`, and separately
+  asks for protected access such as network, secret-like, or out-of-workspace reads
 - never chain destructive commands generated from untrusted path lists
 - a recognized long-running command (dev server or watcher — `npm run dev`,
   `bun serve`, `vite`, `*--watch*`, …) is not run here: it would only block until
@@ -398,6 +402,12 @@ Shell and process behaviour:
   *entire* process tree is killed (`taskkill /T /F` on Windows; a process-group
   `kill` on Unix), so a shell-wrapped build's grandchildren (`make`→`cc1`,
   `gradle`→its daemon) never orphan and leak memory for the rest of the session.
+- **Whole-tree termination on cancellation.** Dropping an in-flight
+  `run_shell` future synchronously drops its capture readers, so late child
+  output cannot enter model context, and an armed process-tree guard then
+  best-effort signals the same Windows tree or Unix process group. The runtime
+  synthesizes an explicit cancelled error result and records the failed tool
+  completion rather than reporting success.
 
 ### `run_background`
 
@@ -690,5 +700,7 @@ the failure-driven seam / marker parse: [`docs/extending.md`](extending.md).
 - A failed tool call is represented as data, not a process crash.
 - A cancelled tool execution is aborted (child processes killed), answered
   with a synthesized error result, and recorded in the session event log.
+- A user-elicitation cancellation is returned to the model as data and never
+  interpreted as consent or as an implicit option selection.
 - Revealing a tool (pull-discovery broker) changes only what is advertised; it
   grants no authority, so a revealed tool still passes the full permission gate.

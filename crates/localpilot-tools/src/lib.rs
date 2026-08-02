@@ -46,7 +46,7 @@ pub use contract::{
 };
 pub use error::ToolError;
 pub use localpilot_core::ToolOutcome;
-pub use registry::ToolRegistry;
+pub use registry::{ToolDispatchResult, ToolRegistry};
 pub use repair::{
     evaluate as evaluate_tool_input, is_repair_eligible, parse_stringified_json,
     unwrap_markdown_autolink, wrap_bare_string_as_array, RepairOutcome, RepairRequest,
@@ -55,8 +55,8 @@ pub use repair::{
 pub use schema_intent::{field_intent, is_repair_exempt, INTENT_KEY};
 pub use tool::{
     AgentHost, Audience, Delivered, Delivery, GateVerdict, OutputRetention, PeerMessage,
-    PeerSummary, QuestionOption, SwarmIdentity, SwarmPeers, Tool, ToolContext, ToolGate,
-    ToolOutput, UserAnswer, UserPrompter, UserQuestion,
+    PeerSummary, QuestionOption, ShellOutput, SwarmIdentity, SwarmPeers, Tool, ToolContext,
+    ToolGate, ToolOutput, ToolOutputPresentation, UserAnswer, UserPrompter, UserQuestion,
 };
 pub use validate::{
     is_input_valid, readable_input_error, required_fields_present, tool_input_issues,

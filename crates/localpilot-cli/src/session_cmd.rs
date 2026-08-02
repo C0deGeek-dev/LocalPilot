@@ -261,15 +261,21 @@ fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harnes
 /// Returns an error if the reference is neither a parseable id nor a known name
 /// in this workspace, or if the index cannot be read.
 pub fn resolve_session_ref(reference: &str) -> anyhow::Result<localpilot_core::SessionId> {
+    let cwd = std::env::current_dir()?;
+    resolve_session_ref_in_store(&Store::open(&cwd), reference)
+}
+
+pub(crate) fn resolve_session_ref_in_store(
+    store: &Store,
+    reference: &str,
+) -> anyhow::Result<localpilot_core::SessionId> {
+    let reference = reference.trim();
     if let Ok(id) = reference.parse::<localpilot_core::SessionId>() {
         return Ok(id);
     }
-    let cwd = std::env::current_dir()?;
-    let entry = Store::open(&cwd)
-        .find_session_by_name(reference)?
-        .ok_or_else(|| {
-            anyhow::anyhow!("no session id or name matches {reference:?} in this workspace")
-        })?;
+    let entry = store.find_session_by_name(reference)?.ok_or_else(|| {
+        anyhow::anyhow!("no session id or name matches {reference:?} in this workspace")
+    })?;
     Ok(entry.id)
 }
 
@@ -598,7 +604,9 @@ mod tests {
             id: "c1".to_string(),
             name: "run_shell".to_string(),
             is_error: true,
+            cancelled: false,
             output: "exit: 1\n--- stdout ---\n\n--- stderr ---\nboom".to_string(),
+            duration_ms: 0,
         })
         .expect("a failing tool is diagnosed");
         assert!(line.starts_with("tool failed: run_shell:"));
@@ -609,7 +617,9 @@ mod tests {
             id: "c2".to_string(),
             name: "run_shell".to_string(),
             is_error: false,
+            cancelled: false,
             output: "exit: 0".to_string(),
+            duration_ms: 0,
         })
         .is_none());
 
@@ -624,7 +634,9 @@ mod tests {
             id: "c1".to_string(),
             name: "run_shell".to_string(),
             is_error: true,
+            cancelled: false,
             output: huge,
+            duration_ms: 0,
         })
         .expect("a failing tool is diagnosed");
         assert!(
@@ -694,6 +706,25 @@ mod tests {
         assert_eq!(resolve_profile_from_config(&config), Profile::Bypass);
         config.permissions.profile = localpilot_config::PermissionProfile::Unrestricted;
         assert_eq!(resolve_profile_from_config(&config), Profile::Unrestricted);
+    }
+
+    #[test]
+    fn store_resolver_accepts_trimmed_ids_and_case_insensitive_names() {
+        let root = tempfile::tempdir().expect("temp workspace");
+        let store = Store::open(root.path());
+        let session = localpilot_core::SessionId::new();
+        store
+            .set_session_name(session, "Named Conversation")
+            .expect("name session");
+
+        assert_eq!(
+            resolve_session_ref_in_store(&store, &format!("  {session}  ")).expect("id"),
+            session
+        );
+        assert_eq!(
+            resolve_session_ref_in_store(&store, "  named conversation  ").expect("name"),
+            session
+        );
     }
 
     #[test]

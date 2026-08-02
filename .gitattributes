@@ -7,3 +7,6 @@
 *.jpeg binary
 *.gif binary
 *.ico binary
+
+# Render snapshots preserve terminal-cell padding as observable geometry.
+*.snap -whitespace

@@ -153,17 +153,21 @@ impl PromptHistory {
         let path = self.path.as_ref().ok_or(StoreError::NoUserDir)?;
 
         let mut entries = read_entries(path);
-        // Match the in-session recall behaviour: never record a consecutive
-        // duplicate of the most recent prompt.
-        if entries.last().is_some_and(|last| last.text == text) {
-            return Ok(());
-        }
         let paste_bytes: usize = pastes.iter().map(|paste| paste.content.len()).sum();
         let kept_pastes = if paste_bytes <= PASTE_PERSIST_BUDGET {
             pastes.to_vec()
         } else {
             Vec::new()
         };
+        let current_cwd = cwd_key(cwd);
+        // Match the in-session recall behaviour: never record a consecutive
+        // duplicate of the most recent prompt. Compact paste placeholders can
+        // be identical while their payloads differ, so mappings are identity.
+        if entries.last().is_some_and(|last| {
+            last.text == text && last.pastes == kept_pastes && last.cwd == current_cwd
+        }) {
+            return Ok(());
+        }
         entries.push(HistoryEntry::new(text.to_string(), kept_pastes, cwd));
 
         let start = entries.len().saturating_sub(MAX_HISTORY_ENTRIES);
@@ -363,6 +367,28 @@ mod tests {
         let entries = store.load();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pastes, pastes);
+    }
+
+    #[test]
+    fn identical_compact_placeholders_with_different_payloads_are_not_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_at(&dir);
+        let cwd = Path::new("/work/p");
+        let first = vec![HistoryPaste {
+            placeholder: "[Paste #1 - 4 lines]".to_string(),
+            content: "a\nb\nc\nd".to_string(),
+        }];
+        let second = vec![HistoryPaste {
+            placeholder: "[Paste #1 - 4 lines]".to_string(),
+            content: "w\nx\ny\nz".to_string(),
+        }];
+
+        store.append("[Paste #1 - 4 lines]", &first, cwd).unwrap();
+        store.append("[Paste #1 - 4 lines]", &second, cwd).unwrap();
+        let entries = store.load();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].pastes, first);
+        assert_eq!(entries[1].pastes, second);
     }
 
     #[test]

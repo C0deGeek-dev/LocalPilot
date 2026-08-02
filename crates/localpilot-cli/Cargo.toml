@@ -29,10 +29,12 @@ tui = [
     "dep:parking_lot",
     "dep:ratatui",
     "dep:localpilot-tui",
+    "dep:localpilot-terminal-ui",
     "dep:ignore",
     "dep:arboard",
     "dep:base64",
     "dep:image",
+    "dep:time",
 ]
 # LocalMind is always linked; this feature remains as a compatibility alias for
 # existing build commands.
@@ -80,6 +82,7 @@ serde_json.workspace = true
 # is used on a non-test code path.
 tempfile.workspace = true
 thiserror.workspace = true
+time = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -112,6 +115,7 @@ localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-tui = { path = "../localpilot-tui", optional = true }
+localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

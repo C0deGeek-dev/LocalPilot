@@ -294,16 +294,28 @@ async fn gates_tighten_after_the_engine_and_never_grant() {
 #[tokio::test]
 async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
     // A long sleep through run_shell; cancellation must end the turn promptly
-    // with the pairing contract intact.
+    // with the pairing contract intact and reap the dropped tool's process tree.
     #[cfg(windows)]
-    let input = json!({ "program": "ping", "args": ["-n", "30", "127.0.0.1"] });
+    let input = json!({
+        "program": "powershell.exe",
+        "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "ping.exe -n 3 127.0.0.1 | Out-Null; Set-Content -LiteralPath agent-orphan.txt -Value leaked"
+        ]
+    });
     #[cfg(not(windows))]
-    let input = json!({ "program": "sleep", "args": ["30"] });
+    let input = json!({
+        "program": "sh",
+        "args": ["-c", "sleep 2; printf leaked > agent-orphan.txt"]
+    });
 
     let provider = FakeProvider::new()
         .tool_call("c1", "run_shell", input)
         .text("never reached");
     let mut h = build(provider, Profile::Bypass);
+    let mut runtime_events = h.events.subscribe();
 
     let cancel = h.cancel.clone();
     tokio::spawn(async move {
@@ -339,6 +351,24 @@ async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
     assert!(results[0].is_error());
     assert!(results[0].output.contains("cancelled"));
 
+    let mut saw_cancelled_finish = false;
+    while let Ok(event) = runtime_events.try_recv() {
+        if matches!(
+            event,
+            RuntimeEvent::ToolFinished {
+                cancelled: true,
+                is_error: true,
+                ..
+            }
+        ) {
+            saw_cancelled_finish = true;
+        }
+    }
+    assert!(
+        saw_cancelled_finish,
+        "runtime projection must distinguish cancellation from failure"
+    );
+
     let events = h.store.read_events(h.runtime.session_id()).unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
@@ -347,4 +377,9 @@ async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
     assert!(events
         .iter()
         .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !h._dir.path().join("agent-orphan.txt").exists(),
+        "cancelling an agent run_shell call must not leave a delayed child"
+    );
 }

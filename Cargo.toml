@@ -10,6 +10,7 @@ members = [
     "crates/localpilot-tools",
     "crates/localpilot-harness",
     "crates/localpilot-tui",
+    "crates/localpilot-terminal-ui",
     "crates/localpilot-store",
     "crates/localpilot-sandbox",
     "crates/localpilot-mcp",
@@ -112,6 +113,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 serde_yaml = "=0.9.34"
 thiserror = "=2.0.9"
+time = { version = "=0.3.37", features = ["local-offset"] }
 toml = "=0.8.23"
 tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "io-std", "time", "sync"] }
 tokio-util = { version = "=0.7.13", features = ["rt"] }
@@ -123,6 +125,8 @@ tokio-util = { version = "=0.7.13", features = ["rt"] }
 tokio-tungstenite = { version = "=0.24.0", default-features = false, features = ["connect"] }
 tracing = "=0.1.41"
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
+unicode-segmentation = "=1.12.0"
+unicode-width = "=0.2.0"
 uuid = { version = "=1.11.0", features = ["v4", "serde"] }
 wiremock = "=0.6.2"
 

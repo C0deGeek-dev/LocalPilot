@@ -1,16 +1,24 @@
 //! Agent-mode session runtime integration tests, driven by the fake provider.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use localpilot_core::{ContentBlock, Message};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
-use localpilot_llm::{FakeProvider, ModelEvent, ProviderError, QuotaInfo};
+use localpilot_llm::{
+    FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderDeclaration,
+    ProviderError, QuotaInfo,
+};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
+use localpilot_sandbox::{
+    Approver, Interactivity, PermissionEngine, PermissionRequest, Profile, ScriptedApprover,
+    Workspace,
+};
 use localpilot_store::Store;
-use localpilot_tools::ToolRegistry;
+use localpilot_tools::{ToolOutputPresentation, ToolRegistry};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +29,20 @@ struct Harness {
     events: broadcast::Sender<RuntimeEvent>,
     cancel: CancellationToken,
     store: Store,
+}
+
+struct PendingApprover {
+    called: Arc<AtomicBool>,
+}
+
+impl Approver for PendingApprover {
+    fn approve<'a>(
+        &'a self,
+        _request: &'a PermissionRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        self.called.store(true, Ordering::SeqCst);
+        Box::pin(std::future::pending())
+    }
 }
 
 fn build(provider: FakeProvider, files: &[(&str, &str)], config: SessionConfig) -> Harness {
@@ -82,6 +104,30 @@ fn build_from_arc(
         provider,
         ToolRegistry::with_builtins(),
         PermissionEngine::new(profile, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        config,
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(256);
+    Harness {
+        _dir: dir,
+        runtime,
+        events,
+        cancel: CancellationToken::new(),
+        store,
+    }
+}
+
+fn build_from_provider(provider: Arc<dyn ModelProvider>, config: SessionConfig) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path());
+    let runtime = SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
         Box::new(ScriptedApprover::always()),
         Store::open(dir.path()),
         Workspace::new(dir.path()).unwrap(),
@@ -256,6 +302,115 @@ async fn queued_soft_interrupts_are_admitted_labelled_and_recorded() {
         injected.iter().any(|(_, s)| s == "system"),
         "the system notice is recorded: {injected:?}"
     );
+}
+
+struct InterruptibleProvider {
+    declaration: ProviderDeclaration,
+    calls: AtomicUsize,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+impl InterruptibleProvider {
+    fn new() -> Self {
+        Self {
+            declaration: FakeProvider::new().declaration().clone(),
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for InterruptibleProvider {
+    fn declaration(&self) -> &ProviderDeclaration {
+        &self.declaration
+    }
+
+    async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            Ok(Box::pin(
+                futures::stream::iter([Ok(ModelEvent::TextDelta("partial".to_string()))])
+                    .chain(futures::stream::pending()),
+            ))
+        } else {
+            Ok(Box::pin(futures::stream::iter([
+                Ok(ModelEvent::TextDelta("after steering".to_string())),
+                Ok(ModelEvent::Done),
+            ])))
+        }
+    }
+}
+
+#[tokio::test]
+async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn() {
+    use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
+
+    let provider = Arc::new(InterruptibleProvider::new());
+    let mut h = build_from_provider(provider.clone(), SessionConfig::default());
+    let steer = h.runtime.steer_queue();
+    let mut rx = h.events.subscribe();
+
+    let mut observed = Vec::new();
+    let reason = {
+        let turn = h.runtime.run_turn("initial request", &h.events, &h.cancel);
+        tokio::pin!(turn);
+        loop {
+            let event = tokio::select! {
+                event = rx.recv() => event.expect("runtime event channel remains open"),
+                reason = &mut turn => panic!("turn stopped before steering: {reason:?}"),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
+                    panic!("the first stream should start")
+                }
+            };
+            let saw_partial = matches!(&event, RuntimeEvent::Text(text) if text == "partial");
+            observed.push(event);
+            if saw_partial {
+                break;
+            }
+        }
+
+        steer.push_interrupt(SoftInterrupt {
+            content: "STEERING_SECRET".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        tokio::time::timeout(Duration::from_secs(1), &mut turn)
+            .await
+            .expect("urgent steering must wake the pending stream")
+    };
+    assert_eq!(reason, StopReason::Done);
+    observed.extend(drain(&mut rx));
+
+    let injected = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                RuntimeEvent::SoftInterruptInjected { point, source }
+                    if point == "during_stream" && source == "user"
+            )
+        })
+        .expect("the UI receives a content-free steering boundary event");
+    let resumed = observed
+        .iter()
+        .position(|event| matches!(event, RuntimeEvent::Text(text) if text == "after steering"))
+        .expect("the restarted provider stream produces its final answer");
+    assert!(injected < resumed);
+    assert!(!format!("{:?}", observed[injected]).contains("STEERING_SECRET"));
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!message_text(&requests[0].messages).contains("STEERING_SECRET"));
+    assert!(message_text(&requests[1].messages).contains("STEERING_SECRET"));
+    drop(requests);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let text = message_text(&transcript);
+    assert!(!text.contains("partial"));
+    assert!(text.contains("STEERING_SECRET"));
+    assert!(text.contains("after steering"));
 }
 
 #[tokio::test]
@@ -1289,6 +1444,159 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
     let request = provider.requests().pop().unwrap();
     let roles: Vec<_> = request.messages.iter().map(|m| m.role).collect();
     assert!(roles.contains(&localpilot_core::Role::UserShell));
+}
+
+#[tokio::test]
+async fn cancelled_user_shell_command_records_an_explicit_error_and_one_audit_pair() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let mut h = build_from_arc(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let session = h.runtime.session_id();
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        trigger.cancel();
+    });
+
+    #[cfg(windows)]
+    let command = "ping.exe -n 3 127.0.0.1 | Out-Null; Write-Output LATE";
+    #[cfg(not(windows))]
+    let command = "sleep 2; printf LATE";
+    let result = h
+        .runtime
+        .run_user_shell_command(command, &cancel, false)
+        .await;
+    assert!(result.is_error());
+    assert!(result.output.contains("cancelled"), "{}", result.output);
+
+    let transcript = h.store.read_transcript(session).unwrap();
+    assert_eq!(transcript.len(), 1);
+    assert_eq!(transcript[0].role, localpilot_core::Role::UserShell);
+    assert!(message_text(&transcript).contains("cancelled"));
+
+    let events = h.store.read_events(session).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                localpilot_store::SessionEventKind::ToolStarted { name, .. }
+                    if name == "run_shell"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                localpilot_store::SessionEventKind::ToolFinished {
+                    name,
+                    is_error: true,
+                    ..
+                } if name == "run_shell"
+            ))
+            .count(),
+        1
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let transcript_text = message_text(&h.store.read_transcript(session).unwrap());
+    let result_text = transcript_text
+        .split_once('\n')
+        .map_or(transcript_text.as_str(), |(_, result)| result);
+    assert!(
+        !result_text.contains("LATE"),
+        "output produced after cancellation must never enter the transcript"
+    );
+}
+
+#[tokio::test]
+async fn detailed_user_shell_result_carries_typed_stdout_stderr_and_exit_status() {
+    let provider = Arc::new(FakeProvider::new().text("ok"));
+    let mut h = build_from_arc(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let cancel = CancellationToken::new();
+    #[cfg(windows)]
+    let command = "Write-Output stdout-marker; [Console]::Error.WriteLine('stderr-marker'); exit 5";
+    #[cfg(not(windows))]
+    let command = "printf 'stdout-marker\\n'; printf 'stderr-marker\\n' >&2; exit 5";
+
+    let detailed = h
+        .runtime
+        .run_user_shell_command_detailed(command, &cancel, true)
+        .await;
+    assert!(detailed.result.is_error());
+    let ToolOutputPresentation::Shell(shell) = detailed.presentation.expect("typed shell output");
+    assert_eq!(shell.exit_code, 5);
+    assert!(shell.stdout.contains("stdout-marker"));
+    assert!(shell.stderr.contains("stderr-marker"));
+}
+
+#[tokio::test]
+async fn cancelling_user_shell_during_approval_starts_no_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let protected = outside.path().join("protected.txt");
+    std::fs::write(&protected, "PROTECTED_SENTINEL").unwrap();
+    let store = Store::open(dir.path());
+    let called = Arc::new(AtomicBool::new(false));
+    let mut runtime = SessionRuntime::new(
+        Arc::new(FakeProvider::new().text("unused")),
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(PendingApprover {
+            called: Arc::clone(&called),
+        }),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    let session = runtime.session_id();
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let approval_called = Arc::clone(&called);
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !approval_called.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the permission engine should request approval");
+        trigger.cancel();
+    });
+
+    #[cfg(windows)]
+    let command = format!(
+        "type '{}'",
+        protected.display().to_string().replace('\'', "''")
+    );
+    #[cfg(not(windows))]
+    let command = format!("cat '{}'", protected.display());
+    let result = runtime
+        .run_user_shell_command(&command, &cancel, false)
+        .await;
+    assert!(called.load(Ordering::SeqCst));
+    assert!(result.is_error());
+    assert!(result.output.contains("cancelled"), "{}", result.output);
+    assert!(!result.output.contains("PROTECTED_SENTINEL"));
+
+    let transcript = store.read_transcript(session).unwrap();
+    assert_eq!(transcript.len(), 1);
+    assert!(message_text(&transcript).contains("cancelled"));
+    let events = store.read_events(session).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.kind, localpilot_store::SessionEventKind::Cancelled)));
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        localpilot_store::SessionEventKind::ToolFinished { is_error: true, .. }
+    )));
 }
 
 #[tokio::test]

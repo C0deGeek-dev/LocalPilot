@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use indexmap::IndexMap;
@@ -28,7 +28,7 @@ use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
 };
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
-use localpilot_tools::{Broker, ToolContext, ToolRegistry};
+use localpilot_tools::{Broker, ToolContext, ToolDispatchResult, ToolRegistry};
 use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -142,13 +142,19 @@ pub enum RuntimeEvent {
     /// A chunk of reasoning. Metadata, never the final answer.
     Reasoning(String),
     /// A tool call started.
-    ToolStarted { id: String, name: String },
+    ToolStarted {
+        id: String,
+        name: String,
+        detail: String,
+    },
     /// A tool call finished.
     ToolFinished {
         id: String,
         name: String,
         is_error: bool,
+        cancelled: bool,
         output: String,
+        duration_ms: u64,
     },
     /// Token usage.
     Usage(TokenUsage),
@@ -171,6 +177,10 @@ pub enum RuntimeEvent {
     /// subscribes rather than being wired into the tool path. A session nobody
     /// is watching for this simply has no subscriber.
     FilesTouched(Vec<localpilot_tools::touch::FileTouch>),
+    /// One queued soft interrupt was admitted into the model-visible history.
+    /// Hosts use this only to advance presentation state; content stays private
+    /// in the durable message/event path.
+    SoftInterruptInjected { point: String, source: String },
     /// The loop stopped.
     Stopped(StopReason),
 }
@@ -417,8 +427,14 @@ impl SoftInterrupt {
 /// running, admitted at a safe provider-turn boundary. User steering is the
 /// common case; the harness and background tasks use the same queue so every
 /// mid-turn injection rides one path.
+#[derive(Debug, Default)]
+struct SteerQueueInner {
+    queue: std::sync::Mutex<std::collections::VecDeque<SoftInterrupt>>,
+    urgent: tokio::sync::Notify,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct SteerQueue(Arc<std::sync::Mutex<std::collections::VecDeque<SoftInterrupt>>>);
+pub struct SteerQueue(Arc<SteerQueueInner>);
 
 impl SteerQueue {
     /// Queue user steering text for the running turn (a non-urgent user message).
@@ -428,21 +444,26 @@ impl SteerQueue {
 
     /// Queue an arbitrary soft interrupt (user, system, or background task).
     pub fn push_interrupt(&self, interrupt: SoftInterrupt) {
-        if let Ok(mut queue) = self.0.lock() {
+        let urgent = interrupt.urgent;
+        if let Ok(mut queue) = self.0.queue.lock() {
             queue.push_back(interrupt);
+        }
+        if urgent {
+            self.0.urgent.notify_one();
         }
     }
 
     /// Whether anything is queued.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.lock().map(|q| q.is_empty()).unwrap_or(true)
+        self.0.queue.lock().map(|q| q.is_empty()).unwrap_or(true)
     }
 
     /// Whether an *urgent* interrupt is queued (admitted between tool calls).
     #[must_use]
     fn has_urgent(&self) -> bool {
         self.0
+            .queue
             .lock()
             .map(|q| q.iter().any(|i| i.urgent))
             .unwrap_or(false)
@@ -450,9 +471,20 @@ impl SteerQueue {
 
     fn drain(&self) -> Vec<SoftInterrupt> {
         self.0
+            .queue
             .lock()
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    async fn urgent_notified(&self) {
+        loop {
+            let notified = self.0.urgent.notified();
+            if self.has_urgent() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -1299,12 +1331,69 @@ impl SessionRuntime {
         args: &[String],
         exclude_from_context: bool,
     ) -> localpilot_core::ToolResult {
+        let input = serde_json::json!({ "program": program, "args": args });
+        let shown = if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", args.join(" "))
+        };
+        self.run_user_shell_input(input, shown, exclude_from_context, None)
+            .await
+    }
+
+    /// Run a user-authored shell command through the ordinary tool registry and
+    /// permission path while allowing an interactive host to cancel approval or
+    /// execution. Cancellation produces an explicit error result and audit
+    /// event; dropping an active `run_shell` dispatch reaps its process tree.
+    pub async fn run_user_shell_command(
+        &mut self,
+        command: &str,
+        cancel: &CancellationToken,
+        exclude_from_context: bool,
+    ) -> localpilot_core::ToolResult {
+        self.run_user_shell_command_detailed(command, cancel, exclude_from_context)
+            .await
+            .result
+    }
+
+    /// The cancellable user-shell path with typed redacted streams for a host
+    /// that needs to present process status without parsing tool copy.
+    pub async fn run_user_shell_command_detailed(
+        &mut self,
+        command: &str,
+        cancel: &CancellationToken,
+        exclude_from_context: bool,
+    ) -> ToolDispatchResult {
+        self.run_user_shell_input_detailed(
+            serde_json::json!({ "command": command }),
+            command.to_string(),
+            exclude_from_context,
+            Some(cancel),
+        )
+        .await
+    }
+
+    async fn run_user_shell_input(
+        &mut self,
+        input: serde_json::Value,
+        shown: String,
+        exclude_from_context: bool,
+        cancel: Option<&CancellationToken>,
+    ) -> localpilot_core::ToolResult {
+        self.run_user_shell_input_detailed(input, shown, exclude_from_context, cancel)
+            .await
+            .result
+    }
+
+    async fn run_user_shell_input_detailed(
+        &mut self,
+        input: serde_json::Value,
+        shown: String,
+        exclude_from_context: bool,
+        cancel: Option<&CancellationToken>,
+    ) -> ToolDispatchResult {
         let call_id = format!("user-shell-{}", EventId::new());
-        let call = ToolCall::new(
-            ToolUseId::from(call_id.as_str()),
-            "run_shell",
-            serde_json::json!({ "program": program, "args": args }),
-        );
+        let call = ToolCall::new(ToolUseId::from(call_id.as_str()), "run_shell", input);
         self.record_event(SessionEventKind::ToolStarted {
             id: call_id.clone(),
             name: "run_shell".to_string(),
@@ -1321,25 +1410,49 @@ impl SessionRuntime {
             peers: None,
         };
         let engine = self.engine.snapshot();
-        let result = self
-            .tools
-            .dispatch(&call, &ctx, &engine, self.approver.as_ref())
-            .await;
+        let (dispatch, cancelled) = if let Some(cancel) = cancel {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => (
+                    ToolDispatchResult {
+                        result: localpilot_core::ToolResult::error(
+                            call.id.clone(),
+                            "cancelled by the user; execution aborted",
+                        ),
+                        presentation: None,
+                        touches: Vec::new(),
+                    },
+                    true,
+                ),
+                dispatch = self.tools.dispatch_user_shell_detailed(
+                    &call,
+                    &ctx,
+                    &engine,
+                    self.approver.as_ref(),
+                ) => (dispatch, false),
+            }
+        } else {
+            (
+                self.tools
+                    .dispatch_user_shell_detailed(&call, &ctx, &engine, self.approver.as_ref())
+                    .await,
+                false,
+            )
+        };
+        if cancelled {
+            self.record_event(SessionEventKind::Cancelled);
+        }
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
             name: "run_shell".to_string(),
-            is_error: result.is_error(),
-            outcome: Some(result.outcome),
+            is_error: dispatch.result.is_error(),
+            outcome: Some(dispatch.result.outcome),
         });
         if !exclude_from_context {
-            let rendered = if args.is_empty() {
-                format!("$ {program}\n{}", result.output)
-            } else {
-                format!("$ {program} {}\n{}", args.join(" "), result.output)
-            };
+            let rendered = format!("$ {shown}\n{}", dispatch.result.output);
             self.append(Message::text(Role::UserShell, rendered));
         }
-        result
+        dispatch
     }
 
     /// The session id (transcripts are stored under it).
@@ -1766,7 +1879,11 @@ impl SessionRuntime {
     /// user-typed input) and record a durable `SoftInterruptInjected` event.
     /// Returns whether any were admitted, so a would-be-final turn can decide to
     /// keep going instead of ending (Point B).
-    fn admit_soft_interrupts(&mut self, point: &str) -> bool {
+    fn admit_soft_interrupts(
+        &mut self,
+        point: &str,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> bool {
         let interrupts = self.steer.drain();
         let admitted = !interrupts.is_empty();
         for interrupt in interrupts {
@@ -1777,6 +1894,10 @@ impl SessionRuntime {
             };
             self.append(interrupt.into_message());
             self.record_event(SessionEventKind::SoftInterruptInjected {
+                point: point.to_string(),
+                source: source.to_string(),
+            });
+            let _ = events.send(RuntimeEvent::SoftInterruptInjected {
                 point: point.to_string(),
                 source: source.to_string(),
             });
@@ -2304,7 +2425,7 @@ impl SessionRuntime {
 
             // Admit queued soft interrupts at this safe boundary (Point D): after
             // the previous iteration's tool calls, before the next provider call.
-            self.admit_soft_interrupts("after_tools");
+            self.admit_soft_interrupts("after_tools", events);
 
             let compacted = self.compacted_history(context_reserve, cancel).await;
             let tools = if tools_enabled {
@@ -2383,8 +2504,13 @@ impl SessionRuntime {
 
             loop {
                 tokio::select! {
+                    biased;
                     () = cancel.cancelled() => {
                         return self.stop(events, StopReason::Cancelled);
+                    }
+                    () = self.steer.urgent_notified() => {
+                        self.admit_soft_interrupts("during_stream", events);
+                        continue 'turn;
                     }
                     // A graceful wind-down requested while streaming: no tool is
                     // running, so the partial response is discarded (like cancel)
@@ -2437,6 +2563,8 @@ impl SessionRuntime {
                             self.record_event(SessionEventKind::UsageReported {
                                 input_tokens: usage.input_tokens,
                                 output_tokens: usage.output_tokens,
+                                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                                cache_read_input_tokens: usage.cache_read_input_tokens,
                             });
                         }
                         Some(Ok(ModelEvent::ProviderWarning { message })) => {
@@ -2721,7 +2849,7 @@ impl SessionRuntime {
                 // (Point B): instead of ending, admit it and keep the turn going so
                 // the model sees the steer/notice before it finalizes.
                 if !self.steer.is_empty() {
-                    self.admit_soft_interrupts("turn_continued");
+                    self.admit_soft_interrupts("turn_continued", events);
                     continue;
                 }
                 // Verify-before-done gate (opt-in): before accepting a call-free
@@ -2781,7 +2909,7 @@ impl SessionRuntime {
                             "skipped: an urgent interrupt cut the tool batch short",
                         ));
                     }
-                    self.admit_soft_interrupts("between_tools");
+                    self.admit_soft_interrupts("between_tools", events);
                     continue 'turn;
                 }
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
@@ -2850,9 +2978,30 @@ impl SessionRuntime {
                     }
                 }
 
+                // Resolve the input shape before projecting the row so its target
+                // describes the arguments that permission and dispatch will see.
+                let tool_decision = self.tool_input_decision(name, input);
+                let repaired_input = tool_decision.as_ref().and_then(|d| {
+                    matches!(d.outcome, localpilot_tools::RepairOutcome::Repaired)
+                        .then(|| d.repaired_input.clone())
+                        .flatten()
+                });
+                let readable_error = tool_decision.as_ref().and_then(|d| {
+                    (matches!(d.outcome, localpilot_tools::RepairOutcome::Invalid)
+                        && self.config.enforce_readable_errors)
+                        .then(|| d.readable_message.clone())
+                        .flatten()
+                });
+                let projected_input = repaired_input.as_ref().unwrap_or(input);
+                let tool_started_at = Instant::now();
+                let detail = self
+                    .tools
+                    .get(name)
+                    .map_or_else(String::new, |tool| tool.approval_detail(projected_input));
                 let _ = events.send(RuntimeEvent::ToolStarted {
                     id: id.clone(),
                     name: name.clone(),
+                    detail,
                 });
                 self.record_event(SessionEventKind::ToolStarted {
                     id: id.clone(),
@@ -2893,18 +3042,6 @@ impl SessionRuntime {
                 // a schema-aware error when readable errors are on. A valid call
                 // dispatches byte-unchanged, exactly as before. Repaired and invalid
                 // are mutually exclusive outcomes of the one validate-or-repair pass.
-                let tool_decision = self.tool_input_decision(name, input);
-                let repaired_input = tool_decision.as_ref().and_then(|d| {
-                    matches!(d.outcome, localpilot_tools::RepairOutcome::Repaired)
-                        .then(|| d.repaired_input.clone())
-                        .flatten()
-                });
-                let readable_error = tool_decision.as_ref().and_then(|d| {
-                    (matches!(d.outcome, localpilot_tools::RepairOutcome::Invalid)
-                        && self.config.enforce_readable_errors)
-                        .then(|| d.readable_message.clone())
-                        .flatten()
-                });
                 let mut launch_warn: Option<String> = None;
                 let mut readable_error_sent = false;
                 let mut repaired_dispatched = false;
@@ -3100,6 +3237,15 @@ impl SessionRuntime {
                         ToolUseId::from(id.as_str()),
                         "cancelled by the user; execution aborted",
                     );
+                    let _ = events.send(RuntimeEvent::ToolFinished {
+                        id: id.clone(),
+                        name: name.clone(),
+                        is_error: true,
+                        cancelled: true,
+                        output: "cancelled by the user; execution aborted".to_string(),
+                        duration_ms: u64::try_from(tool_started_at.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    });
                     self.record_event(SessionEventKind::ToolFinished {
                         id: id.clone(),
                         name: name.clone(),
@@ -3325,7 +3471,10 @@ impl SessionRuntime {
                     id: result.id.to_string(),
                     name: name.clone(),
                     is_error: result.is_error(),
+                    cancelled: false,
                     output: result.output.clone(),
+                    duration_ms: u64::try_from(tool_started_at.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
                 });
                 self.record_event(SessionEventKind::ToolFinished {
                     id: result.id.to_string(),
@@ -3732,6 +3881,34 @@ mod tests {
         assert_eq!(drained[0].content, "first");
         assert!(drained[1].urgent);
         assert!(q.is_empty() && !q.has_urgent());
+    }
+
+    #[tokio::test]
+    async fn an_urgent_interrupt_wakes_a_stream_waiter_without_a_lost_signal() {
+        let queue = SteerQueue::default();
+        let waiter = queue.clone();
+        let waiting = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(1), waiter.urgent_notified()).await
+        });
+        tokio::task::yield_now().await;
+        queue.push_interrupt(SoftInterrupt {
+            content: "steer now".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        assert!(waiting.await.expect("wait task").is_ok());
+
+        let already_queued = SteerQueue::default();
+        already_queued.push_interrupt(SoftInterrupt {
+            content: "queued before poll".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), already_queued.urgent_notified())
+                .await
+                .is_ok()
+        );
     }
 
     fn message_plain_text(message: &Message) -> String {

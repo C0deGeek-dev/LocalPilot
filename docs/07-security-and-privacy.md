@@ -237,6 +237,14 @@ that resolves outside the workspace adds an explicit read effect, so it faces th
 same prompt the `read_file` tool would. The check is best-effort and
 conservative — ordinary in-workspace reads add no prompt.
 
+The full-screen `!` composer is an explicit user-authored execution surface.
+Submitting there confirms the command-risk effect, so LocalPilot does not ask
+the user to approve the exact command text a second time. This is narrow to
+`run_shell` and does not bypass the permission engine: `deny` remains denied,
+and separate protected effects (network, secret-like reads, and out-of-workspace
+paths) still raise the ordinary approval dialog. Model-authored `run_shell`
+calls keep the additional irreversible-operation confirmation.
+
 ## Discovered Tooling
 
 The harness quality gate discovers language-specific check commands from the

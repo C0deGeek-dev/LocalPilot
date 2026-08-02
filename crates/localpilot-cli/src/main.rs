@@ -14,6 +14,8 @@ mod context_inject;
 mod credential_cmd;
 mod doctor;
 mod eval_cmd;
+#[cfg(feature = "tui")]
+mod fullscreen;
 mod handoff_cmd;
 mod harness_cmd;
 mod import_cmd;
@@ -1321,6 +1323,8 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // worker thread with a generous stack so the binary behaves identically across
     // platforms (tier-1 parity, ADR-0007).
     const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+    #[cfg(feature = "tui")]
+    fullscreen::capture_local_utc_offset();
     let worker = std::thread::Builder::new()
         .name("localpilot-main".to_string())
         .stack_size(MAIN_STACK_SIZE)
@@ -1361,11 +1365,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
 
     let command = match cli.command {
         Some(command) => command,
-        None => {
-            return run_default()
-                .await
-                .map(|()| std::process::ExitCode::SUCCESS)
-        }
+        None => return run_default().await,
     };
 
     // The terminal exit code, raised only by a print run whose consumer went away.
@@ -1937,7 +1937,9 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         } => {
             let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
             let resume = session_cmd::resolve_resume(continue_latest, resume.as_deref())?;
-            repl::run_chat(model.as_deref(), provider.as_deref(), profile, resume).await?;
+            let outcome =
+                repl::run_chat(model.as_deref(), provider.as_deref(), profile, resume).await?;
+            exit_code = finish_chat(outcome)?;
         }
         Command::Print {
             prompt,
@@ -2168,7 +2170,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
 /// interactive REPL when a provider and model are resolvable; otherwise (and on
 /// the default build) it prints the doctor report so a misconfigured or headless
 /// environment still gets a useful, non-interactive result.
-async fn run_default() -> anyhow::Result<()> {
+async fn run_default() -> anyhow::Result<std::process::ExitCode> {
     #[cfg(feature = "tui")]
     {
         let cwd = std::env::current_dir()?;
@@ -2177,7 +2179,9 @@ async fn run_default() -> anyhow::Result<()> {
         {
             if config.resolve_model(None).is_some() {
                 let profile = session_cmd::resolve_profile_from_config(&config);
-                return repl::run_chat(None, None, profile, None).await;
+                return repl::run_chat(None, None, profile, None)
+                    .await
+                    .and_then(|outcome| finish_chat(outcome).map_err(Into::into));
             }
         }
     }
@@ -2191,7 +2195,36 @@ async fn run_default() -> anyhow::Result<()> {
     let mut stdout = io::stdout().lock();
     doctor::run(&mut stdout).await?;
     stdout.flush()?;
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+#[cfg(feature = "tui")]
+fn finish_chat(outcome: repl::ChatOutcome) -> io::Result<std::process::ExitCode> {
+    let mut stdout = io::stdout().lock();
+    finish_chat_to(outcome, &mut stdout)
+}
+
+#[cfg(feature = "tui")]
+fn finish_chat_to(
+    outcome: repl::ChatOutcome,
+    writer: &mut impl Write,
+) -> io::Result<std::process::ExitCode> {
+    if let Some(presentation) = outcome.presentation {
+        writer.write_all(presentation.as_bytes())?;
+        writer.flush()?;
+    }
+    Ok(std::process::ExitCode::from(chat_exit_status(
+        outcome.succeeded,
+    )))
+}
+
+#[cfg(feature = "tui")]
+const fn chat_exit_status(succeeded: bool) -> u8 {
+    if succeeded {
+        0
+    } else {
+        1
+    }
 }
 
 async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Result<()> {
@@ -2229,6 +2262,34 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
 mod tests {
     use super::*;
     use localpilot_localmind::StoreRoot;
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn chat_exit_code_and_restored_presentation_follow_the_typed_outcome() {
+        let mut output = Vec::new();
+        let _code = finish_chat_to(
+            repl::ChatOutcome {
+                succeeded: true,
+                presentation: Some("restored summary\n".to_string()),
+            },
+            &mut output,
+        )
+        .expect("finish successful chat");
+        assert_eq!(chat_exit_status(true), 0);
+        assert_eq!(output, b"restored summary\n");
+
+        output.clear();
+        let _code = finish_chat_to(
+            repl::ChatOutcome {
+                succeeded: false,
+                presentation: None,
+            },
+            &mut output,
+        )
+        .expect("finish declined trust");
+        assert_eq!(chat_exit_status(false), 1);
+        assert!(output.is_empty());
+    }
 
     #[test]
     fn workspace_override_pins_the_root_and_skips_the_walk_up() {

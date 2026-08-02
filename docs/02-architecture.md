@@ -181,15 +181,53 @@ The harness coordinates with the quota scheduler. If a step pauses due to a
 provider quota window, the current committed state and plan remain authoritative;
 the scheduler only resumes the next safe turn.
 
-### `localpilot-tui`
+### Terminal UI crates
 
-Owns:
+`localpilot-terminal-ui` is the new authoritative, backend-neutral full-screen
+chat model. It owns:
+
+- stable-ID timeline, content-coordinate viewport and selection state
+- width-indexed visible-row virtualization, pinned prompts, compact activity,
+  and held/new-output state
+- grapheme/display-width editor geometry and input routing
+- lifecycle/focus state, including cancel/exit intent
+- one responsive frame layout/hit map and one semantic theme resolver across
+  default, dim, high-contrast, colorblind, and no-color rendering
+
+The default resolver owns the application canvas, raised prompt/composer
+surface, prompt text, muted text, focus edge, scrollbar, and tab roles. Prompt
+and composer bands are filled surfaces assembled from terminal cells; they are
+not long accent-colored rules. Pinned prompts use the same three-row projection
+as prompts in the conversation flow so scrolling cannot change their visual
+identity.
+
+It depends on Ratatui's backend-neutral APIs but not Crossterm, the harness,
+providers, the store, or the CLI. `localpilot-cli` owns the Crossterm alternate-
+buffer lifecycle, raw event and clipboard adapters, and maps the existing
+provider-neutral runtime/approval/cancellation streams into terminal UI actions.
+Its async event pump mirrors the established inline runtime seam: each turn owns
+one broadcast receiver and cancellation token, approvals are deny-safe, and
+terminal input is drained in bounded batches. Prompts submitted during a turn
+are visible stable timeline items marked pending. Escape promotes the leading
+contiguous plain-text prompts into urgent soft interrupts, preserving FIFO order;
+the open provider stream is dropped and the same runtime turn restarts with the
+new user direction. Its incomplete assistant segment remains visible as
+interrupted feedback but is not persisted as model history. Shell operations and
+image prompts are ordering barriers: when one is at the queue head, Escape
+hard-cancels the current work and leaves every follow-up in its original order
+instead of steering a later prompt past it. Ctrl+C remains a distinct hard
+cancel. Runtime output is inserted before later pending operations, so visible
+and provider transcript order agree.
+
+`localpilot-tui` is the explicit legacy inline rollback while the remaining
+physical terminal matrix is completed. Full-screen chat is the interactive
+default (ADR-0129). The legacy crate owns:
 
 - terminal layout
 - message rendering
 - keyboard input
 - approval dialogs
-- the inline question widget `ask_user` and the intake guidance gate both drive
+- the inline question widget (`ask_user` and the intake guidance gate both drive it)
 - status lines
 - footer stats
 - optional thinking/reasoning panel
@@ -201,9 +239,13 @@ UI stack (chosen; see ADR-0006):
 - a hand-rolled multi-line composer (no third-party input widget), so cursor,
   wrapping, history, and paste behaviour are owned and testable
 
-Rendering is inline in the terminal's main screen buffer, not an alternate screen
-(ADR-0021): finished transcript blocks are written once into native scrollback, and
-a fixed-height bottom band holds the only redrawn surface (ADR-0039).
+That rollback renders inline in the terminal's main screen buffer (ADR-0021):
+finished transcript blocks are written once into native scrollback and a fixed-
+height bottom band holds the only redrawn surface (ADR-0039). The new host uses
+an alternate buffer, full-frame rendering, captured mouse input, and application-
+owned content selection (ADR-0107). The rollback and its selector are removed
+once the remaining terminal matrix is accepted and the slash-command/approval
+types shared with the full-screen host have moved to a neutral home.
 
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.

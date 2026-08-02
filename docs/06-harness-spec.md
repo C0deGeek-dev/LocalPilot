@@ -555,6 +555,14 @@ needs an ADR.
    messages are persisted today; full fidelity (including repair prompts)
    lands with the durable session store and is pinned by its
    transcript-equivalence test when it does.
+4. **Urgent steering is stream-preemptive, never mid-tool.** The steer queue is
+   the source of truth and its notification only wakes a pending provider
+   stream. An urgent interrupt admits every queued item in FIFO order, records a
+   content-free `SoftInterruptInjected` event, discards any incomplete assistant
+   response, and starts the next provider call inside the same turn. Tool calls
+   retain their existing safe boundaries; steering never interrupts a tool
+   halfway through its effect. Enforced by
+   `urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn`.
 
 The permission half of the contract lives in
 [`docs/07`](07-security-and-privacy.md) §Reliability Contract.

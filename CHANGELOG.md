@@ -6,6 +6,52 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The full-screen terminal-chat shell and timeline are now the interactive default.**
+  Bare `localpilot chat` selects the alternate-buffer host backed by the
+  backend-neutral `localpilot-terminal-ui` crate. `LOCALPILOT_CHAT_UI=inline`
+  remains only as a temporary legacy rollback while the remaining physical and
+  cross-terminal acceptance matrix closes. The foundation
+  carries stable content IDs, virtualized content-anchored history, framed
+  prompts, compact activity, semantic themes, responsive status/composer/footer
+  regions, a screenshot-measured true-color palette with a dark application
+  canvas and joined prompt/composer surfaces, restrained frame chrome,
+  grapheme/display-width editor geometry, a provider-neutral runtime-
+  event adapter, transactional terminal restore, and contextual Ctrl+C handling:
+  copy selected text, cancel active work when no text is selected, and exit only
+  on a consecutive second press. The full-screen host now draws before workspace
+  projections, restores the workspace-trust gate and durable prompt history,
+  submits through the existing `SessionRuntime`, streams stable timeline items,
+  shows a live response-byte counter, denies tool approvals safely, and keeps an
+  ordered visible pending-operation queue. During an active model turn, Escape
+  promotes the leading plain-text prompts into urgent, ordered steering: the
+  incomplete provider response remains visible but does not enter model history,
+  and the same turn restarts with the new direction. A queued shell or image is
+  an ordering barrier, so Escape hard-cancels the current turn and preserves the
+  original follow-up order instead of skipping ahead; Ctrl+C remains the direct
+  hard-cancel path. Collapsed tool rows now include a
+  truthful output-line count before their expandable detail, and the theme
+  picker uses a readable refactor sample for its semantic color preview. The
+  full-screen host also supports
+  application-owned drag selection/copy, wheel and page navigation, draggable
+  scrollbar navigation, precise composer clicks, contextual right-click copy in
+  the timeline and atomic text paste in the composer, boundary-aware history,
+  reverse and timeline search, fuzzy slash/file completion, atomic compact
+  multiline paste, and clipboard-image placeholders whose bytes stay out of
+  prompt history. The shared `ask_user` tool now pauses a model turn for up to
+  four ordered questions; the full-screen host presents numbered single- or
+  multi-select choices with descriptions and an automatic free-text Other row,
+  resolves each timeline row with the answer, and dismisses explicitly without
+  guessing when the user presses Escape or the host closes. Workspace trust now
+  uses the same full-width, numbered, keyboard/mouse-focusable timeline treatment, with
+  distinct session-only, remember, and deny choices plus explicit screen-reader
+  selection text; session-only trust does not write the trusted-folder list.
+  Ctrl+G temporarily restores
+  the ordinary terminal, opens the
+  draft in a foreground external editor, then rebuilds the full-screen frame
+  without losing its timeline or opaque attachment identity. Detailed pickers/
+  conversation surfaces, accessibility and the remaining terminal matrix remain
+  branch work; the temporary selector is removed when feature parity is
+  accepted.
 - **Added: `localpilot selfdev` — build, vet, publish, and reload LocalPilot from
   its own source.** `selfdev build` fingerprints the working tree and builds it;
   `selfdev publish` runs the build through the publish gauntlet and, only if it

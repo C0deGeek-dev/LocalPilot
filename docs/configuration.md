@@ -21,6 +21,119 @@ The configuration schema is **stable under semantic versioning** from v1.0:
 The configuration schema is SemVer-stable (LocalPilot has been ≥ 1.0.0 since
 2026-06-24); any change is noted in `CHANGELOG.md`.
 
+## Interactive chat host
+
+Interactive `localpilot chat` uses the full-screen terminal application by
+default:
+
+```powershell
+localpilot chat
+```
+
+`LOCALPILOT_CHAT_UI=fullscreen` is an accepted explicit spelling. Set
+`LOCALPILOT_CHAT_UI=inline` only to use the temporary legacy rollback while the
+remaining cross-terminal acceptance matrix is completed. Any other value is
+rejected with a configuration error. This environment-only recovery switch is
+not part of the stable TOML schema and does not affect non-interactive/plain
+output. The inline host and selector are removed after the gates in ADR-0129.
+
+For the full-screen host, `LOCALPILOT_CHAT_THEME` accepts
+`default`, `dim`, `high-contrast`, or `colorblind`. An invalid value is shown as
+a sanitized timeline warning and falls back to `default`. The default uses a
+stable true-color palette so large frames and active chrome do not inherit a
+terminal profile's potentially saturated ANSI colors. `NO_COLOR` disables the
+palette while retaining non-color focus, selection, success, and error cues.
+Mouse selection remains highlighted after release so Ctrl+C or a right-click in
+the timeline can copy it explicitly. A right-click inside the composer pastes
+clipboard text through the same atomic path as other paste input, so multiline
+content never submits line by line. Set `LOCALPILOT_CHAT_COPY_ON_SELECT=true`
+(or `1`) to copy immediately on release; `false` and `0` retain the default
+behavior. These environment-only controls do not extend the stable TOML schema.
+Mouse reporting is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or
+`0`) before launch for a keyboard-only fallback that leaves pointer handling to
+the terminal.
+
+Input submitted while the model is working appears immediately as a pending
+timeline row. Escape turns the leading run of plain-text pending prompts into
+ordered steering and restarts the current provider turn with that direction;
+Ctrl+C hard-cancels instead. A pending shell command or image prompt remains an
+ordering barrier, so Escape cancels the current work and then the queued
+operations continue in their original order rather than being reordered.
+
+Set `LOCALPILOT_CHAT_SCREEN_READER=true` (or `1`) for the target-shaped
+full-screen accessible projection: tabs become a wrapped current-tab sentence,
+conversation rows use explicit textual roles and states, decorative banner and
+prompt chrome is removed, dialogs expose their current selection in text, and
+in-app scrollbar glyphs are hidden. The composer and alternate-screen lifecycle
+remain unchanged, while non-TTY output continues to use LocalPilot's separate
+plain path. Terminal chrome is static; there is no animated spinner or motion
+effect to disable.
+
+Tool calls appear as one compact running/completed/failed/cancelled row. Clicking the
+status prefix expands the permission-safe target detail and captured output;
+finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
+with an explicit middle-omission marker, while the provider transcript and
+retained tool-output path keep their existing independent limits.
+
+Interactive chat also advertises the builtin `ask_user` tool through one shared
+host-capability contract. In the full-screen host, up to four questions appear
+in order as asking timeline rows and centered numbered-choice dialogs; each can
+be single- or multi-select, carries optional choice descriptions, and always
+offers a free-text Other row. The same state is projected as borderless
+role-labeled text in screen-reader mode. Arrows, Space, Enter, Escape and mouse
+focus stay inside the dialog as applicable, while wheel/Page navigation can
+continue to move the conversation behind it. Answered or dismissed questions
+resolve their existing timeline row in place. Headless hosts wire no prompter,
+so they report the capability unavailable instead of waiting forever.
+
+When workspace trust is required, the full-screen host presents it as a
+full-width timeline dialog. The first choice trusts the workspace for the
+current process only, the second also remembers it for later sessions, and the
+third exits without trusting. Arrow keys or the mouse move the focused choice;
+Enter confirms it and Escape exits. Screen-reader mode exposes the same three
+choices and current selection as text. Session-only trust starts the same
+trust-gated workspace services without writing the trusted-folder list.
+
+The full-screen host uses the same resolved provider vision capability as the
+inline host. On a vision-capable model, Ctrl+V can attach an image from the
+clipboard as an atomic placeholder; the encoded image is sent only with that
+submitted turn and is never written to prompt history. Provider declarations
+may set `supports_vision = true`, while `[discovery] vision_probe = true` enables the
+existing best-effort local-server capability probe.
+
+Ctrl+G edits the idle composer in a foreground external editor. The host checks
+`LOCALPILOT_EDITOR`, then `VISUAL`, then `EDITOR`; the value may contain a quoted
+executable path and arguments. If none is set, the fallback is Notepad on
+Windows and `vi` elsewhere. Editors that normally detach should be configured
+with their wait flag (for example, `code --wait`) so LocalPilot can read the
+temporary draft before it is removed. The temporary file contains visible
+placeholder text only—not compact-paste or image payload bytes—and edited input
+is capped at 8 MiB.
+
+The full-screen slash picker lists only commands that have a real replacement-
+host path: `/model`, `/new`, `/fork`, `/clone`, `/clear`, `/quit`, `/help`,
+`/theme`, `/settings`, `/diff`, and the local `/search` overlay. `/model` opens
+a second-level picker built from configured providers; an exact
+`/model <provider>` also executes directly.
+`/help` opens a scrollable full-screen keyboard and command reference; Escape
+returns to the untouched conversation, including while work continues behind
+the help view. Press `?` on an empty idle composer for transient two-column quick
+help. `/theme` opens a centered semantic-color preview: arrows or mouse selection
+preview the entire UI, Escape restores the prior theme, and Enter accepts the
+choice for the current process. Set `LOCALPILOT_CHAT_THEME` to make the launch
+choice explicit. `/settings` opens a contained read-only view of the effective
+terminal, appearance, provider, and session values; launch-time controls remain
+environment settings. Slash invocations never enter prompt history or the
+provider prompt queue. A manually typed unsupported command produces an in-app notice
+instead of being sent to a model, and state-changing commands entered during
+active work are refused with an idle-retry notice.
+
+`/diff` opens a contained two-pane review of tracked Git changes against `HEAD`
+(or the current index/worktree when no `HEAD` exists). Arrow keys navigate the
+active file or content pane, Left/Right switches panes, `t` hides or restores
+the file tree, and Escape returns to the untouched conversation. Diff capture
+does not run external diff drivers and is bounded to 8 MiB.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

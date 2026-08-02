@@ -263,6 +263,7 @@ pub struct ToolOutput {
     pub text: String,
     pub outcome: ToolOutcome,
     pub truncated: bool,
+    pub presentation: Option<ToolOutputPresentation>,
     /// What this call touched, reported by the tool itself.
     ///
     /// Empty for the overwhelming majority of tools, which touch no file. A
@@ -270,6 +271,21 @@ pub struct ToolOutput {
     /// range where it knows one. Nothing downstream infers or parses this — the
     /// tool is the only thing that knows what it did, and it knows exactly.
     pub touches: Vec<crate::touch::FileTouch>,
+}
+
+/// Typed host-facing output retained alongside the ordinary model-facing text.
+/// The registry applies the same redaction boundary to both projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOutputPresentation {
+    Shell(ShellOutput),
+}
+
+/// Captured shell streams and process status before any UI formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl ToolOutput {
@@ -280,6 +296,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: false,
+            presentation: None,
             touches: Vec::new(),
         }
     }
@@ -291,6 +308,7 @@ impl ToolOutput {
             text: text.into(),
             outcome: ToolOutcome::Ok,
             truncated: true,
+            presentation: None,
             touches: Vec::new(),
         }
     }

@@ -1,10 +1,11 @@
 //! `localpilot chat` — the interactive terminal REPL.
 //!
-//! This is the terminal driver: it maps real crossterm key events into the
-//! backend-agnostic `localpilot-tui` core, runs a session turn per submission,
-//! and forwards the runtime event stream into the UI. It is the un-testable
-//! terminal-I/O edge; the rendering and input logic it drives are unit-tested in
-//! `localpilot-tui`.
+//! [`run_chat`] is the one interactive-session initializer and selects its
+//! terminal host only after provider/runtime setup. Full-screen chat is the
+//! default; the established inline driver remains an explicit temporary
+//! rollback while its terminal matrix is completed. Its rendering and input
+//! logic remain unit-tested in `localpilot-tui`; the authoritative full-screen
+//! application lives in `localpilot-terminal-ui`.
 
 use std::future::Future;
 use std::io::{self, Stdout};
@@ -20,7 +21,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
-use localpilot_core::ContentBlock;
+use localpilot_core::{ContentBlock, TokenUsage};
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime, SwitchError};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -61,19 +62,72 @@ const LIVE_REGION_HEIGHT: u16 = 8;
 /// Blank rows between the launch banner and the composer at startup.
 const BANNER_GAP_ROWS: u16 = 2;
 
+const CHAT_UI_ENV: &str = "LOCALPILOT_CHAT_UI";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatUi {
+    Inline,
+    Fullscreen,
+}
+
+pub(crate) struct ChatOutcome {
+    pub(crate) succeeded: bool,
+    pub(crate) presentation: Option<String>,
+}
+
+impl ChatOutcome {
+    const fn success() -> Self {
+        Self {
+            succeeded: true,
+            presentation: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceGitStatus {
+    pub(crate) branch: String,
+    pub(crate) dirty: Option<bool>,
+}
+
+pub(crate) fn workspace_git_status(root: &std::path::Path) -> Option<WorkspaceGitStatus> {
+    let branch =
+        crate::harness_cmd::git_line(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .or_else(|| {
+                crate::harness_cmd::git_line(root, &["rev-parse", "--short", "HEAD"])
+                    .map(|commit| format!("detached@{commit}"))
+            })?;
+    let dirty = crate::harness_cmd::git_line(
+        root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )
+    .map(|status| !status.is_empty());
+    Some(WorkspaceGitStatus { branch, dirty })
+}
+
+fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None | Some("") | Some("fullscreen") => Ok(ChatUi::Fullscreen),
+        Some("inline") => Ok(ChatUi::Inline),
+        Some(value) => Err(anyhow::anyhow!(
+            "invalid {CHAT_UI_ENV} value `{value}`; expected `inline` or `fullscreen`"
+        )),
+    }
+}
+
 /// A pending approval handed from the [`TuiApprover`] (running inside the turn)
 /// to the event loop, which raises the modal and replies with the user's answer.
-struct ApprovalCall {
-    request: ApprovalRequest,
-    reply: oneshot::Sender<bool>,
+pub(crate) struct ApprovalCall {
+    pub(crate) request: ApprovalRequest,
+    pub(crate) reply: oneshot::Sender<bool>,
 }
 
 /// A pending set of questions handed from the [`TuiPrompter`] (running inside
 /// the turn) to the event loop, which asks them one at a time and replies with
 /// the user's answers.
-struct QuestionCall {
-    questions: Vec<UserQuestion>,
-    reply: oneshot::Sender<Vec<UserAnswer>>,
+pub(crate) struct QuestionCall {
+    pub(crate) questions: Vec<UserQuestion>,
+    pub(crate) reply: oneshot::Sender<Vec<UserAnswer>>,
 }
 
 /// A question set part-way through being answered.
@@ -244,6 +298,26 @@ struct StartupTimer {
     last: Instant,
 }
 
+pub(crate) fn start_session_knowledge_index(
+    cwd: &std::path::Path,
+    config: &localpilot_config::IngestConfig,
+) {
+    let Some(mode) = localpilot_localmind::session_open_mode(cwd, config) else {
+        return;
+    };
+    let ingest_root = cwd.to_path_buf();
+    let ingest_config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode) {
+            tracing::warn!(
+                target: "localpilot::ingest",
+                %error,
+                "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
+            );
+        }
+    });
+}
+
 impl StartupTimer {
     fn new() -> Self {
         let start = Instant::now();
@@ -273,9 +347,10 @@ pub async fn run_chat(
     provider_id: Option<&str>,
     profile: Profile,
     resume: Option<localpilot_core::SessionId>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ChatOutcome> {
     let mut timer = StartupTimer::new();
     let cwd = std::env::current_dir()?;
+    let chat_ui = selected_chat_ui(std::env::var_os(CHAT_UI_ENV).as_deref())?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
     timer.mark("config load");
 
@@ -322,14 +397,10 @@ pub async fn run_chat(
 
     // Ask-gated actions suspend the turn and prompt in the TUI; the user's
     // y/n answer flows back through this channel to the permission engine.
-    let (approval_tx, approvals) = mpsc::unbounded_channel::<ApprovalCall>();
+    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
     // `ask_user` suspends the turn the same way, and the user's choice flows
     // back through this one.
-    let (question_tx, questions) = mpsc::unbounded_channel::<QuestionCall>();
-    let mut prompts = UserChannels {
-        approvals,
-        questions,
-    };
+    let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
     let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     timer.mark("mcp servers + tools");
@@ -415,6 +486,26 @@ pub async fn run_chat(
     localpilot_localmind::register_context_hook(&cwd, &mut runtime);
     timer.mark("context hooks");
 
+    let fullscreen_startup = if chat_ui == ChatUi::Fullscreen {
+        resume
+            .map(|session| {
+                prepare_fullscreen_resume(&mut runtime, session)
+                    .unwrap_or_else(|notice| vec![crate::fullscreen::StartupItem::Notice(notice)])
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let resumed_session_name = runtime
+        .store()
+        .list_sessions()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .into_iter()
+                .find(|entry| entry.id == runtime.session_id())
+        })
+        .and_then(|entry| entry.name);
     let header = Header {
         version: env!("LOCALPILOT_VERSION").to_string(),
         provider: provider_id.unwrap_or(&config.provider.default).to_string(),
@@ -424,7 +515,7 @@ pub async fn run_chat(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string()),
         session_id: runtime.session_id().to_string(),
-        session_name: None,
+        session_name: resumed_session_name,
         // Remote-sourced (a release tag via the GitHub API) and rendered into
         // the banner without passing the state scrub — strip control bytes so
         // a garbled or hostile tag can never reach the terminal raw.
@@ -436,6 +527,57 @@ pub async fn run_chat(
         }),
     };
     timer.mark("update check");
+    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
+    // The full-screen model loads its bounded prompt history only after drawing
+    // a first frame and has no consumer yet for the inline host's eager
+    // `@`-mention file list or knowledge-index startup. Enter before those
+    // synchronous workspace walks;
+    // large directories (notably a user's home directory) must never look like
+    // a hung, blank launch. The shared provider/runtime initialization above is
+    // still authoritative for both hosts.
+    if chat_ui == ChatUi::Fullscreen {
+        timer.mark("READY — entering full-screen TUI");
+        let git = workspace_git_status(&cwd);
+        let trust_required = !matches!(profile, Profile::Bypass | Profile::Unrestricted)
+            && !crate::trust::is_trusted(&cwd);
+        let result = crate::fullscreen::run(
+            localpilot_terminal_ui::Header {
+                version: header.version.clone(),
+                provider: header.provider.clone(),
+                model: header.model.clone(),
+                workspace: cwd.display().to_string(),
+                branch: git.as_ref().map(|status| status.branch.clone()),
+                workspace_dirty: git.as_ref().and_then(|status| status.dirty),
+                mode: Mode::Agent.label().to_string(),
+                profile: ui_profile(profile).label().to_string(),
+                session_id: header.session_id.clone(),
+                session_name: header.session_name.clone(),
+            },
+            fullscreen_startup,
+            crate::fullscreen::HostContext {
+                runtime: &mut runtime,
+                approval_rx: &mut approval_rx,
+                question_rx: &mut question_rx,
+                cwd: &cwd,
+                history: &history,
+                ingest: &config.ingest,
+                config: &config,
+                trust_required,
+            },
+        )
+        .await;
+        crate::context_inject::close_out(&cwd, runtime.session_id());
+        return result.map(|exit| ChatOutcome {
+            succeeded: !exit.trust_denied,
+            presentation: exit.presentation,
+        });
+    }
+
+    let mut prompts = UserChannels {
+        approvals: approval_rx,
+        questions: question_rx,
+    };
+
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
     // sessions. Already-trusted folders (and bypass/unrestricted, which are
@@ -465,7 +607,6 @@ pub async fn run_chat(
     // restart, scoped to this project (Ctrl-T views all projects). The store
     // honours the `[history] persistence` opt-out; when off it loads nothing and
     // appends nothing. A read never fails the session — the load is tolerant.
-    let history = localpilot_store::PromptHistory::new(config.history.persistence.is_enabled());
     let history_entries = history.load();
     state.seed_input_history(
         recall_entries(localpilot_store::project_entries(&history_entries, &cwd)),
@@ -483,24 +624,7 @@ pub async fn run_chat(
     // staleness refresh when a completed index's sources changed — and returns
     // nothing when ingest is disabled or the index is already current.
     if state.trusted {
-        if let Some(mode) = localpilot_localmind::session_open_mode(&cwd, &config.ingest) {
-            let ingest_root = cwd.clone();
-            let ingest_config = config.ingest.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(error) =
-                    localpilot_localmind::ingest_run(&ingest_root, &ingest_config, mode)
-                {
-                    // A failed background index build makes knowledge_search return
-                    // nothing or stale results all session, indistinguishable from
-                    // "no matching knowledge" — surface it so it is diagnosable.
-                    tracing::warn!(
-                        target: "localpilot::ingest",
-                        %error,
-                        "background project-knowledge index build failed; knowledge_search may return no or stale results this session"
-                    );
-                }
-            });
-        }
+        start_session_knowledge_index(&cwd, &config.ingest);
     }
 
     timer.mark("knowledge index (mode check)");
@@ -538,7 +662,81 @@ pub async fn run_chat(
     // the abandoned (often empty) session for lessons instead of the one the
     // user actually worked in.
     crate::context_inject::close_out(&cwd, runtime.session_id());
-    result
+    result?;
+    Ok(ChatOutcome::success())
+}
+
+pub(crate) fn prepare_fullscreen_resume(
+    runtime: &mut SessionRuntime,
+    session: localpilot_core::SessionId,
+) -> Result<Vec<crate::fullscreen::StartupItem>, String> {
+    use crate::fullscreen::StartupItem;
+    use localpilot_core::Role;
+
+    let mut startup = Vec::new();
+    match runtime.load_session(session) {
+        Ok(report) => {
+            if report.skipped_lines > 0 {
+                startup.push(StartupItem::Notice(format!(
+                    "recovered session log: skipped {} damaged event line(s); the remaining events are intact",
+                    report.skipped_lines
+                )));
+            }
+            if let Ok(messages) = runtime.store().read_transcript(session) {
+                let (skipped, shown) = replay_selection(messages, RESUME_REPLAY_MESSAGES);
+                if skipped > 0 {
+                    startup.push(StartupItem::Notice(format!(
+                        "… {skipped} earlier message(s) not shown (context fully restored)"
+                    )));
+                }
+                startup.extend(shown.into_iter().map(|(role, text)| match role {
+                    Role::User => StartupItem::User(text),
+                    _ => StartupItem::Assistant(text),
+                }));
+            }
+            if let Some(usage) = stored_session_usage(runtime.store(), session) {
+                startup.push(StartupItem::Usage {
+                    input_tokens: usage.effective_input_tokens(),
+                    output_tokens: usage.output_tokens,
+                    cached_input_tokens: usage.cache_read_input_tokens,
+                });
+            }
+            let (used, limit) = runtime.context_usage();
+            startup.push(StartupItem::ContextUsage { used, limit });
+            startup.push(StartupItem::Notice(format!(
+                "resumed session {session}; current profile and trust apply"
+            )));
+        }
+        Err(error) => return Err(format!("resume failed: {error}")),
+    }
+    Ok(startup)
+}
+
+pub(crate) fn stored_session_usage(
+    store: &Store,
+    session: localpilot_core::SessionId,
+) -> Option<TokenUsage> {
+    let events = store.read_events(session).ok()?;
+    let mut usage = None::<TokenUsage>;
+    for event in events {
+        if let localpilot_store::SessionEventKind::UsageReported {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        } = event.kind
+        {
+            usage
+                .get_or_insert_with(TokenUsage::default)
+                .accumulate(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                });
+        }
+    }
+    usage
 }
 
 async fn event_loop(
@@ -1009,7 +1207,7 @@ async fn run_slash(
         SlashAction::Background(command) => {
             apply_background_command(state, runtime.background_registry(), command)
         }
-        SlashAction::Quit => state.should_quit = true,
+        SlashAction::Exit { .. } => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
         }
@@ -1182,69 +1380,95 @@ async fn switch_model(
     provider_id: &str,
     model: Option<String>,
 ) {
+    let report = switch_model_target(runtime, config, provider_id, model).await;
+    state.header.provider = report.provider;
+    state.header.model = report.model;
+    for notice in report.notices {
+        state.apply(UiEvent::Notice(notice));
+    }
+}
+
+pub(crate) struct ModelSwitchReport {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) notices: Vec<String>,
+}
+
+/// Re-point the shared session runtime and report UI-neutral outcomes so both
+/// interactive terminal hosts use one provider/model switching authority.
+pub(crate) async fn switch_model_target(
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    provider_id: &str,
+    model: Option<String>,
+) -> ModelSwitchReport {
+    let mut notices = Vec::new();
     let outcome = match runtime.set_active_provider(provider_id) {
         Ok(outcome) => outcome,
         Err(SwitchError::UnknownProvider(id)) => {
-            state.apply(UiEvent::Notice(format!(
+            notices.push(format!(
                 "/model: provider '{id}' is not configured — try /model to list"
-            )));
-            return;
+            ));
+            return model_switch_report(runtime, notices);
         }
         Err(SwitchError::TurnInFlight) => {
-            state.apply(UiEvent::Notice(
-                "/model: a turn is in progress; switch once it finishes".to_string(),
-            ));
-            return;
+            notices.push("/model: a turn is in progress; switch once it finishes".to_string());
+            return model_switch_report(runtime, notices);
         }
     };
     // The provider's no-default-model warning surfaces before any model override.
     if let Some(warning) = &outcome.warning {
-        state.apply(UiEvent::Notice(format!("/model: {warning}")));
+        notices.push(format!("/model: {warning}"));
     }
     // An explicit model overrides the provider default; validate it best-effort.
     if let Some(model) = model {
         if let Err(error) = runtime.set_active_model(&model) {
-            state.apply(UiEvent::Notice(format!("/model: {error}")));
-            return;
+            notices.push(format!("/model: {error}"));
+            return model_switch_report(runtime, notices);
         }
-        warn_unknown_model(state, config, provider_id, &model).await;
+        if let Some(warning) = unknown_model_warning(config, provider_id, &model).await {
+            notices.push(warning);
+        }
     }
-    state.header.provider = runtime.active_provider_id().to_string();
-    state.header.model = runtime.active_model().to_string();
     // The active provider changed, so re-resolve its image-input capability for the
     // attach preflight (config wins, else a best-effort probe of the new server).
     runtime.set_image_support_override(resolved_image_support(config, Some(provider_id)).await);
-    state.apply(UiEvent::Notice(format!(
+    notices.push(format!(
         "switched to provider '{}' · model '{}'",
         runtime.active_provider_id(),
         runtime.active_model()
-    )));
+    ));
+    model_switch_report(runtime, notices)
+}
+
+fn model_switch_report(runtime: &SessionRuntime, notices: Vec<String>) -> ModelSwitchReport {
+    ModelSwitchReport {
+        provider: runtime.active_provider_id().to_string(),
+        model: runtime.active_model().to_string(),
+        notices,
+    }
 }
 
 /// Best-effort model-id check: when the provider exposes a model listing and the
 /// requested model is absent, warn (never fail — the id may be valid but unlisted,
 /// or discovery may be offline).
-async fn warn_unknown_model(
-    state: &mut AppState,
+async fn unknown_model_warning(
     config: &localpilot_config::Config,
     provider_id: &str,
     model: &str,
-) {
-    let Some(entry) = config.providers.get(provider_id) else {
-        return;
-    };
-    let Some(base_url) = crate::models_cmd::listing_base_url(entry) else {
-        return;
-    };
+) -> Option<String> {
+    let entry = config.providers.get(provider_id)?;
+    let base_url = crate::models_cmd::listing_base_url(entry)?;
     if let Ok(models) =
         crate::models_cmd::discover_models_for_provider(config, provider_id, &base_url).await
     {
         if !models.is_empty() && !models.iter().any(|m| m.id == model) {
-            state.apply(UiEvent::Notice(format!(
+            return Some(format!(
                 "/model: '{model}' is not in {provider_id}'s model list; using it anyway"
-            )));
+            ));
         }
     }
+    None
 }
 
 /// List or stop the session's background processes, posting the result as
@@ -1385,11 +1609,9 @@ fn continue_session(state: &mut AppState, runtime: &mut SessionRuntime, id: Opti
 }
 
 fn load_session_from_input(state: &mut AppState, runtime: &mut SessionRuntime, id: &str) {
-    match id.parse::<localpilot_core::SessionId>() {
+    match crate::session_cmd::resolve_session_ref_in_store(runtime.store(), id) {
         Ok(session) => load_session_id(state, runtime, session),
-        Err(_) => {
-            state.apply(UiEvent::Notice(format!("not a session id: {id}")));
-        }
+        Err(error) => state.apply(UiEvent::Notice(error.to_string())),
     }
 }
 
@@ -2242,6 +2464,75 @@ fn insert_paste(state: &mut AppState, text: String) {
 /// provider request limits (~5 MB encoded ≈ ~3.7 MB of image bytes).
 const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
 
+pub(crate) struct CapturedClipboardImage {
+    pub(crate) media_type: &'static str,
+    pub(crate) data: String,
+    pub(crate) byte_len: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl std::fmt::Debug for CapturedClipboardImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CapturedClipboardImage")
+            .field("media_type", &self.media_type)
+            .field(
+                "data",
+                &format_args!("<{} bytes redacted>", self.data.len()),
+            )
+            .field("byte_len", &self.byte_len)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+pub(crate) enum ClipboardImageRead {
+    Missing,
+    Image(CapturedClipboardImage),
+}
+
+pub(crate) fn image_unsupported_notice(provider_id: &str) -> String {
+    format!(
+        "the current model is not known to accept images. To paste images, set \
+         `supports_vision = true` for provider '{provider_id}' in .localpilot.toml, or enable \
+         `[discovery] vision_probe = true` to auto-detect a local vision server."
+    )
+}
+
+pub(crate) fn read_clipboard_image() -> Result<ClipboardImageRead, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(error) if clipboard_error_is_missing_image(&error) => {
+            return Ok(ClipboardImageRead::Missing);
+        }
+        Err(error) => return Err(format!("couldn't read the clipboard image: {error}")),
+    };
+    let width = image.width;
+    let height = image.height;
+    let png = encode_png(&image)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    validate_image_base64_size(data.len())?;
+    Ok(ClipboardImageRead::Image(CapturedClipboardImage {
+        media_type: "image/png",
+        data,
+        byte_len: png.len(),
+        width,
+        height,
+    }))
+}
+
+fn validate_image_base64_size(encoded_len: usize) -> Result<(), String> {
+    if encoded_len > MAX_IMAGE_BASE64_BYTES {
+        Err("clipboard image is too large to attach".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Read an image from the OS clipboard and attach it to the next prompt as a
 /// placeholder. Best effort: an unsupported model, an absent image, or an
 /// encode/oversize failure surfaces as a notice and never disturbs the session.
@@ -2264,61 +2555,30 @@ async fn attach_clipboard_image(
     if !runtime.active_accepts_images() {
         // Still not known to accept images: refuse rather than send one blind to
         // a text-only model, and name both levers that enable it.
-        state.apply(UiEvent::Notice(format!(
-            "the current model is not known to accept images. To paste images, set \
-             `supports_vision = true` for provider '{}' in .localpilot.toml, or enable \
-             `[discovery] vision_probe = true` to auto-detect a local vision server.",
-            runtime.active_provider_id()
+        state.apply(UiEvent::Notice(image_unsupported_notice(
+            runtime.active_provider_id(),
         )));
         return;
     }
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(clipboard) => clipboard,
-        Err(error) => {
-            state.apply(UiEvent::Notice(format!("clipboard unavailable: {error}")));
-            return;
-        }
-    };
-    let image = match clipboard.get_image() {
-        Ok(image) => image,
-        Err(error) => {
-            if clipboard_error_is_missing_image(&error) {
-                // Genuinely nothing to paste (e.g. an empty text paste): stay
-                // quiet on the empty-paste probe path, but still tell a
-                // deliberate Ctrl+V there was no image.
-                if !quiet_when_absent {
-                    state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
-                }
-            } else {
-                // A real read failure is never swallowed — this is the "nothing
-                // happened, no message" case users hit when a paste-routed image
-                // fails to decode.
-                state.apply(UiEvent::Notice(format!(
-                    "couldn't read the clipboard image: {error}"
-                )));
+    let image = match read_clipboard_image() {
+        Ok(ClipboardImageRead::Missing) => {
+            if !quiet_when_absent {
+                state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
             }
             return;
         }
-    };
-    let width = image.width;
-    let height = image.height;
-    let png = match encode_png(&image) {
-        Ok(png) => png,
+        Ok(ClipboardImageRead::Image(image)) => image,
         Err(message) => {
             state.apply(UiEvent::Notice(message));
             return;
         }
     };
-    let data = base64::engine::general_purpose::STANDARD.encode(&png);
-    if data.len() > MAX_IMAGE_BASE64_BYTES {
-        state.apply(UiEvent::Notice(
-            "clipboard image is too large to attach".to_string(),
-        ));
-        return;
-    }
-    let placeholder = state.register_image("image/png", data, png.len());
+    let placeholder = state.register_image(image.media_type, image.data, image.byte_len);
     state.insert_input(&placeholder);
-    state.apply(UiEvent::Notice(format!("attached {width}×{height} image")));
+    state.apply(UiEvent::Notice(format!(
+        "attached {}×{} image",
+        image.width, image.height
+    )));
 }
 
 /// Whether a clipboard read error means "there is simply no image on the
@@ -2441,7 +2701,7 @@ fn file_picker_captures(state: &AppState, key: KeyEvent) -> bool {
 
 /// Enumerate workspace files for the `@`-mention picker: relative, forward-slash
 /// paths, respecting ignore files, sorted and capped.
-fn workspace_files(root: &std::path::Path) -> Vec<String> {
+pub(crate) fn workspace_files(root: &std::path::Path) -> Vec<String> {
     const MAX_FILES: usize = 10_000;
     let mut files = Vec::new();
     for entry in ignore::WalkBuilder::new(root)
@@ -2504,12 +2764,13 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
             debug_stream_log("reasoning", &text);
             Some(UiEvent::ReasoningDelta(text))
         }
-        RuntimeEvent::ToolStarted { id, name } => Some(UiEvent::ToolStarted { id, name }),
+        RuntimeEvent::ToolStarted { id, name, .. } => Some(UiEvent::ToolStarted { id, name }),
         RuntimeEvent::ToolFinished {
             id,
             name,
             is_error,
             output,
+            ..
         } => Some(UiEvent::ToolFinished {
             id,
             name,
@@ -2642,7 +2903,7 @@ fn sandbox_profile(profile: UiProfile) -> Profile {
 /// declaration as the sole gate) when no such provider is configured. The probe
 /// runs only when `[discovery] vision_probe` is on **and** config did not already
 /// declare the capability (a declaration wins, so no probe is needed).
-async fn resolved_image_support(
+pub(crate) async fn resolved_image_support(
     config: &localpilot_config::Config,
     provider_id: Option<&str>,
 ) -> Option<bool> {
@@ -2909,7 +3170,67 @@ mod tests {
 
     use super::*;
     use localpilot_tui::TranscriptLine;
+
+    #[test]
+    fn full_screen_git_status_is_best_effort_and_truthful() {
+        let directory = tempfile::tempdir().expect("temporary git workspace");
+        let init = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(directory.path())
+            .output()
+            .expect("run git init");
+        assert!(init.status.success());
+        std::fs::write(directory.path().join("draft.txt"), "draft")
+            .expect("write untracked fixture");
+
+        let status = workspace_git_status(directory.path()).expect("git status");
+        assert_eq!(status.branch, "main");
+        assert_eq!(status.dirty, Some(true));
+        assert_eq!(
+            workspace_git_status(directory.path().join("missing").as_path()),
+            None
+        );
+    }
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn full_screen_host_is_default_with_an_explicit_legacy_rollback() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            selected_chat_ui(None).expect("default host"),
+            ChatUi::Fullscreen
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new(""))).expect("empty host override"),
+            ChatUi::Fullscreen
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new("inline"))).expect("inline host"),
+            ChatUi::Inline
+        );
+        assert_eq!(
+            selected_chat_ui(Some(OsStr::new("fullscreen"))).expect("full-screen host"),
+            ChatUi::Fullscreen
+        );
+        assert!(selected_chat_ui(Some(OsStr::new("unknown"))).is_err());
+    }
+
+    #[test]
+    fn full_screen_first_frame_precedes_inline_workspace_enumeration() {
+        let source = include_str!("repl.rs");
+        let full_screen_entry = source
+            .find("if chat_ui == ChatUi::Fullscreen {")
+            .expect("full-screen branch");
+        let inline_file_walk = source
+            .find("state.set_workspace_files(workspace_files(&cwd));")
+            .expect("inline workspace file walk");
+
+        assert!(
+            full_screen_entry < inline_file_walk,
+            "the full-screen host must draw before the inline @-mention scan"
+        );
+    }
 
     #[test]
     fn a_missing_clipboard_image_is_benign_but_a_read_failure_is_surfaced() {
@@ -2925,6 +3246,29 @@ mod tests {
                 description: "decode failed".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn clipboard_image_base64_limit_accepts_boundary_and_rejects_oversize() {
+        assert_eq!(validate_image_base64_size(MAX_IMAGE_BASE64_BYTES), Ok(()));
+        assert_eq!(
+            validate_image_base64_size(MAX_IMAGE_BASE64_BYTES + 1),
+            Err("clipboard image is too large to attach".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_clipboard_debug_never_contains_base64() {
+        let image = CapturedClipboardImage {
+            media_type: "image/png",
+            data: "SECRET_CLIPBOARD_BASE64".to_string(),
+            byte_len: 12,
+            width: 2,
+            height: 3,
+        };
+        let debug = format!("{image:?}");
+        assert!(!debug.contains("SECRET_CLIPBOARD_BASE64"));
+        assert!(debug.contains("23 bytes redacted"));
     }
 
     fn test_header() -> Header {
@@ -3118,6 +3462,35 @@ mod tests {
         assert!(shown
             .iter()
             .all(|(role, _)| matches!(role, Role::User | Role::Assistant)));
+    }
+
+    #[test]
+    fn stored_session_usage_sums_every_reported_request() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(directory.path());
+        let session = localpilot_core::SessionId::new();
+        for (input_tokens, output_tokens) in [(100, 20), (7, 3)] {
+            store
+                .append_event(
+                    session,
+                    None,
+                    localpilot_store::SessionEventKind::UsageReported {
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    },
+                )
+                .expect("append usage");
+        }
+        assert_eq!(
+            stored_session_usage(&store, session),
+            Some(TokenUsage {
+                input_tokens: 107,
+                output_tokens: 23,
+                ..TokenUsage::default()
+            })
+        );
     }
 
     #[test]

@@ -158,10 +158,15 @@ jobs:
       - name: aggregate checksums
         shell: bash
         run: cd staged && cat localpilot-*.sha256 > SHA256SUMS && cat SHA256SUMS
-      # Build provenance, signed keylessly through Sigstore and recorded in its
-      # public transparency log. This is what a checksum cannot do: it binds an
-      # archive to the workflow, repository, and commit that produced it, so a
-      # user can verify *origin* and not merely that a download was intact.
+      # Build provenance, signed keylessly through Sigstore. Because LocalPilot
+      # is a public repository, GitHub uses Sigstore's public-good instance and
+      # records the attestation in the public Rekor transparency log. This is
+      # what a checksum cannot do: it binds an archive to the workflow,
+      # repository, and commit that produced it, so a user can verify *origin*
+      # and not merely that a download was intact. Private/internal GitHub
+      # repositories use a different instance without a transparency log, so
+      # this public-log statement must be revisited if repository visibility
+      # changes.
       #
       #   gh attestation verify <archive> --repo ${{ github.repository }}
       #

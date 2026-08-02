@@ -172,10 +172,15 @@ pub fn speed_from_events(events: &[SessionEvent], wall_ms: u64) -> SpeedBlock {
         if let SessionEventKind::UsageReported {
             input_tokens: input,
             output_tokens: output,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
         } = &event.kind
         {
-            input_tokens += input;
-            output_tokens += output;
+            input_tokens = input_tokens
+                .saturating_add(*input)
+                .saturating_add(*cache_creation_input_tokens)
+                .saturating_add(*cache_read_input_tokens);
+            output_tokens = output_tokens.saturating_add(*output);
         }
     }
     SpeedBlock {
@@ -403,6 +408,20 @@ mod tests {
     }
 
     #[test]
+    fn speed_counts_the_effective_cached_prompt_without_overflow() {
+        let events = vec![event(SessionEventKind::UsageReported {
+            input_tokens: 12,
+            output_tokens: 4,
+            cache_creation_input_tokens: 20,
+            cache_read_input_tokens: 30,
+        })];
+        let speed = speed_from_events(&events, 99);
+        assert_eq!(speed.input_tokens, 62);
+        assert_eq!(speed.output_tokens, 4);
+        assert_eq!(speed.wall_ms, 99);
+    }
+
+    #[test]
     fn process_extractor_sees_retrieval_and_recovery() {
         let events = vec![
             event(SessionEventKind::MemoriesUsed {
@@ -457,6 +476,8 @@ mod tests {
             event(SessionEventKind::UsageReported {
                 input_tokens: 12,
                 output_tokens: 4,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             }),
             event(SessionEventKind::TurnEnded {
                 stop: "Done".to_string(),

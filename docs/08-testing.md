@@ -26,6 +26,58 @@ Required for:
 - session persistence
 - cancellation during streaming/tool execution
 
+### Terminal UI Tests
+
+The full-screen UI is split at the terminal boundary so deterministic tests do
+not need a real console:
+
+- `cargo test -p localpilot-terminal-ui` covers stable content anchors,
+  mixed framed/collapsed/pinned projection equivalence, 10k-item visible-row
+  virtualization, grapheme/display-width editing, selection fidelity, lifecycle
+  routing, held/new-output state, atomic text/image editor units, completion and
+  search overlays, and 120x30/80x24/40x20 Ratatui `TestBackend` frames across
+  semantic themes and no-color mode.
+- Default-theme frame tests also lock the screenshot-measured application
+  canvas, filled prompt/composer surfaces, one-edge composer focus, neutral
+  scrollbar, outer margins, pending-prompt label, and identical in-flow/pinned
+  prompt geometry.
+- `cargo test -p localpilot --features tui,learning --bin localpilot` covers the
+  Crossterm host selector, provider-neutral runtime-event mapping, key mapping,
+  ANSI terminal-mode ordering, best-effort workspace Git metadata, and recorded
+  RuntimeEvent replay through FollowBottom and Held viewport states. Host-state
+  tests also cover plain-submit versus newline, Escape cancellation, ordered
+  pending typeahead, trust-gate Ctrl+C precedence, approval denial, local prompt
+  timestamps, async workspace-file completion, reverse/timeline search routing,
+  mouse selection/scrollbar gestures, contextual timeline-copy/composer-paste
+  right-click routing, opt-in copy-on-select, isolated clipboard-image
+  attachments, and
+  external-editor command resolution plus terminal leave/re-entry ordering. The
+  same host tests pin the truthful slash catalog, configured-provider `/model`
+  values, contained quick/full help, help wheel/thumb navigation, cancelable
+  whole-UI theme preview and mouse selection, contained settings and bounded
+  two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
+  bounded compact/expanded tool details with elapsed time, local refusal during
+  active work, and the full `ask_user` lifecycle: bounded typed schema, pending/
+  resolved row identity, numbered modal, automatic Other editor, keyboard/mouse
+  focus, Escape/closed-host cancellation, screen-reader projection and buffered
+  reply cleanup. Tests also preserve the
+  reply cleanup. Workspace-trust coverage separately pins full-width numbered
+  rendering, keyboard/mouse focus, session-only versus persistent outcomes,
+  deny-safe Escape, screen-reader current-selection text, selection-copy
+  precedence, and double-Ctrl+C exit without touching the real trust store.
+  Tests also preserve the invariant that slash input never enters the provider
+  FIFO or prompt-history store.
+- PTY checks support lifecycle diagnostics, but a physical Windows Terminal run
+  gates visible terminal behavior. A snapshot or PTY result alone is not proof
+  of mouse, clipboard, wide-glyph, or terminal-restore parity.
+
+Ctrl+C has an explicit state-matrix test: selected text copies on the first
+press; active work cancels on the first press; idle arms exit on the first
+press; and every state exits only on a consecutive second press. Any other input
+disarms the pending exit.
+Terminal restore tests must cover normal exit, partial setup, post-entry errors,
+panic, and the later signal/suspension paths as those paths are added.
+
 ### Golden-Task Evals
 
 The worker loop needs an eval suite before higher-level features are built. Unit

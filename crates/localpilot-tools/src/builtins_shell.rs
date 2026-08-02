@@ -16,12 +16,15 @@ use serde_json::Value;
 
 #[cfg(windows)]
 use crate::builtins::CREATE_NO_WINDOW;
-use crate::builtins::{binary_placeholder, cap, looks_binary};
+use crate::builtins::{binary_placeholder, looks_binary, MAX_OUTPUT_BYTES};
 use crate::contract::{
     Idempotency, Postcondition, Reversibility, SideEffectClass, ToolContract, VerificationMethod,
 };
 use crate::error::ToolError;
-use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use crate::tool::{
+    detail_preview, parse_input, schema_for, ShellOutput, Tool, ToolContext, ToolOutput,
+    ToolOutputPresentation,
+};
 use localpilot_core::ToolOutcome;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -52,6 +55,38 @@ pub(crate) enum RunShellExecution {
 struct NormalizedRunShellInput {
     execution: RunShellExecution,
     timeout_secs: Option<u64>,
+}
+
+/// Owns the spawned command's process tree until the child has been reaped.
+/// Dropping an in-flight `run_shell` future must not orphan a shell wrapper's
+/// grandchildren, so the fallback path signals the whole tree best-effort.
+struct ProcessTreeGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessTreeGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    async fn kill(&mut self) {
+        if let Some(pid) = self.pid {
+            kill_process_tree(pid).await;
+            self.pid = None;
+        }
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            kill_process_tree_detached(pid);
+        }
+    }
 }
 
 /// Resolve the `command` / `program` + `args` fields shared by `run_shell` and
@@ -213,6 +248,33 @@ fn command_path_args(execution: &RunShellExecution) -> Vec<String> {
 
 fn command_output(code: i32, stdout: &str, stderr: &str) -> String {
     format!("exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}")
+}
+
+fn cap_shell_streams(code: i32, stdout: String, stderr: String) -> (String, String, bool) {
+    let overhead = command_output(code, "", "").len();
+    let budget = MAX_OUTPUT_BYTES.saturating_sub(overhead);
+    if stdout.len().saturating_add(stderr.len()) <= budget {
+        return (stdout, stderr, false);
+    }
+
+    const MARKER: &str = "\n... [output truncated]";
+    let payload_budget = budget.saturating_sub(MARKER.len());
+    if stdout.len() > payload_budget {
+        let end = floor_char_boundary(&stdout, payload_budget);
+        return (format!("{}{}", &stdout[..end], MARKER), String::new(), true);
+    }
+
+    let remaining = payload_budget.saturating_sub(stdout.len());
+    let end = floor_char_boundary(&stderr, remaining);
+    (stdout, format!("{}{}", &stderr[..end], MARKER), true)
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// Render a captured stream as text, substituting a placeholder when the bytes
@@ -496,19 +558,18 @@ impl Tool for RunShell {
         let child = command
             .spawn()
             .map_err(|e| ToolError::Failed(format!("failed to start {program}: {e}")))?;
-        let pid = child.id();
+        let mut process_tree = ProcessTreeGuard::new(child.id());
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
+            Ok(Ok(output)) => {
+                process_tree.disarm();
+                output
+            }
             Ok(Err(e)) => {
-                if let Some(pid) = pid {
-                    kill_process_tree(pid).await;
-                }
+                process_tree.kill().await;
                 return Err(ToolError::Failed(e.to_string()));
             }
             Err(_) => {
-                if let Some(pid) = pid {
-                    kill_process_tree(pid).await;
-                }
+                process_tree.kill().await;
                 return Err(ToolError::Failed(format!(
                     "command timed out after {}s. If this is a long-running server or \
                      watcher, start it with the `run_background` tool instead.",
@@ -521,16 +582,26 @@ impl Tool for RunShell {
         let stderr = render_stream(&output.stderr);
         let code = output.status.code().unwrap_or(-1);
         let text = command_output(code, &stdout, &stderr);
-        let mut result = cap(text);
-        // A completed command that exited non-zero is the world saying no,
-        // not the tool breaking: the spawn, the wait, and the capture all
-        // worked. Spawn/wait/timeout failures return `Err` above instead.
-        result.outcome = if output.status.success() {
+        let (presentation_stdout, presentation_stderr, presentation_truncated) =
+            cap_shell_streams(code, stdout, stderr);
+        let outcome = if output.status.success() {
             ToolOutcome::Ok
         } else {
+            // A completed command that exited non-zero is the world saying no,
+            // not the tool breaking: spawn, wait and capture all worked.
             ToolOutcome::ReportedFailure
         };
-        Ok(result)
+        Ok(ToolOutput {
+            text,
+            outcome,
+            truncated: presentation_truncated,
+            presentation: Some(ToolOutputPresentation::Shell(ShellOutput {
+                exit_code: code,
+                stdout: presentation_stdout,
+                stderr: presentation_stderr,
+            })),
+            touches: Vec::new(),
+        })
     }
 }
 
@@ -677,6 +748,95 @@ mod tests {
             !output.is_error(),
             "sort on a null stdin should exit cleanly: {}",
             output.text
+        );
+        let Some(ToolOutputPresentation::Shell(shell)) = output.presentation else {
+            panic!("run_shell must retain typed captured streams");
+        };
+        assert_eq!(shell.exit_code, 0);
+        assert!(shell.stdout.is_empty());
+        assert!(shell.stderr.is_empty());
+    }
+
+    #[test]
+    fn structured_shell_stream_cap_preserves_utf8_and_the_typed_exit_code() {
+        let stdout = "界".repeat(MAX_OUTPUT_BYTES);
+        let (stdout, stderr, truncated) = cap_shell_streams(7, stdout, "late stderr".to_string());
+        let rendered = command_output(7, &stdout, &stderr);
+        assert!(truncated);
+        assert!(rendered.len() <= MAX_OUTPUT_BYTES);
+        assert!(stdout.ends_with("... [output truncated]"));
+        assert!(stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_run_shell_reaps_the_process_tree_before_a_grandchild_can_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+        let started = dir.path().join("started.txt");
+        let leaked = dir.path().join("leaked.txt");
+
+        #[cfg(windows)]
+        let input = json!({
+            "program": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                format!(
+                    "Set-Content -LiteralPath '{}' -Value ready; ping.exe -n 4 127.0.0.1 | Out-Null; Set-Content -LiteralPath '{}' -Value leaked",
+                    started.display().to_string().replace('\'', "''"),
+                    leaked.display().to_string().replace('\'', "''")
+                )
+            ],
+            "timeout_secs": 30
+        });
+        #[cfg(not(windows))]
+        let input = json!({
+            "program": "sh",
+            "args": [
+                "-c",
+                format!(
+                    "printf ready > '{}'; sleep 3; printf leaked > '{}'",
+                    started.display(),
+                    leaked.display()
+                )
+            ],
+            "timeout_secs": 30
+        });
+
+        let mut invocation = Box::pin(RunShell.invoke(input, &ctx));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut invocation => {
+                        panic!("fixture command exited before cancellation: {result:?}")
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if started.is_file() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("fixture command should publish its started marker");
+
+        drop(invocation);
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !leaked.exists(),
+            "a dropped run_shell future must reap the delayed process tree"
         );
     }
 

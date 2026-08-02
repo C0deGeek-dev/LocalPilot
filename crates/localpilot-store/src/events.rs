@@ -109,6 +109,13 @@ pub enum SessionEventKind {
     UsageReported {
         input_tokens: u64,
         output_tokens: u64,
+        /// Tokens written to a provider prompt cache. Additive and defaulted so
+        /// pre-cache event logs remain readable.
+        #[serde(default)]
+        cache_creation_input_tokens: u64,
+        /// Tokens served from a provider prompt cache.
+        #[serde(default)]
+        cache_read_input_tokens: u64,
     },
     /// A permission decision on one effect. Recorded by the permission hook;
     /// until the hook fabric routes decisions through the runtime, entries of
@@ -477,6 +484,8 @@ mod tests {
             SessionEventKind::UsageReported {
                 input_tokens: 3,
                 output_tokens: 5,
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 11,
             },
             SessionEventKind::PermissionDecided {
                 tool: "run_shell".to_string(),
@@ -595,6 +604,38 @@ mod tests {
             let back = SessionEvent::from_line(&line).unwrap();
             assert_eq!(original, back);
         }
+    }
+
+    #[test]
+    fn pre_cache_usage_event_defaults_new_counters_to_zero() {
+        let original = event(
+            SessionEventKind::UsageReported {
+                input_tokens: 3,
+                output_tokens: 5,
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 11,
+            },
+            None,
+        );
+        let mut value = serde_json::to_value(original).expect("serialize event");
+        let kind = value
+            .get_mut("kind")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("event kind object");
+        kind.remove("cache_creation_input_tokens");
+        kind.remove("cache_read_input_tokens");
+
+        let restored: SessionEvent = serde_json::from_value(value).expect("read old event");
+        let SessionEventKind::UsageReported {
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            ..
+        } = restored.kind
+        else {
+            panic!("expected usage event");
+        };
+        assert_eq!(cache_creation_input_tokens, 0);
+        assert_eq!(cache_read_input_tokens, 0);
     }
 
     #[test]

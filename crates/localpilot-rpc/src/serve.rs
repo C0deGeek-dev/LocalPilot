@@ -420,12 +420,13 @@ pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
     Some(match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },
-        RuntimeEvent::ToolStarted { id, name } => ServerEvent::ToolStarted { id, name },
+        RuntimeEvent::ToolStarted { id, name, .. } => ServerEvent::ToolStarted { id, name },
         RuntimeEvent::ToolFinished {
             id,
             name,
             is_error,
             output,
+            ..
         } => ServerEvent::ToolFinished {
             id,
             name,
@@ -456,7 +457,7 @@ pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
         },
         RuntimeEvent::ToolStuck { name, count } => ServerEvent::ToolStuck { name, count },
         // Handled above; the early return keeps every other arm a plain value.
-        RuntimeEvent::FilesTouched(_) => return None,
+        RuntimeEvent::FilesTouched(_) | RuntimeEvent::SoftInterruptInjected { .. } => return None,
     })
 }
 

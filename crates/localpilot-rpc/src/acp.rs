@@ -208,7 +208,7 @@ async fn forward_event<W: AsyncWrite + Unpin>(
             "sessionUpdate": "agent_thought_chunk",
             "content": { "type": "text", "text": text },
         }),
-        RuntimeEvent::ToolStarted { id, name } => json!({
+        RuntimeEvent::ToolStarted { id, name, .. } => json!({
             "sessionUpdate": "tool_call",
             "toolCallId": id,
             "title": name,

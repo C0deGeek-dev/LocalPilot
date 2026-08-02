@@ -224,7 +224,7 @@ Recommended skills to author (each maps to an existing spec):
 | `add-provider` | [04-provider-contract.md](04-provider-contract.md) | Where a provider impl lives (`localpilot-llm` module, behind the trait), quota metadata, stream-event model, required tests (text/tool/stream/malformed/quota), provenance note from public API docs. |
 | `add-mcp-integration` | [02-architecture.md](02-architecture.md) §`localpilot-mcp` | MCP is v1 scope. Forces MCP tools/resources through the *same* permission and redaction pipeline as builtin tools — not a side channel. |
 | `write-golden-eval` | [08-testing.md](08-testing.md) §Golden-Task Evals | Evals are required; this prevents ad hoc benchmark tasks and copied fixtures, and records the per-task scorecard fields. |
-| `add-tui-view` *(opt)* | ADR-0006, [02-architecture.md](02-architecture.md) §`localpilot-tui` | Ratatui/crossterm view with `TestBackend` snapshot expectations and cross-platform terminal constraints. |
+| `add-tui-view` *(opt)* | ADR-0006/0107, [02-architecture.md](02-architecture.md) §Terminal UI crates | Backend-neutral `localpilot-terminal-ui` state/rendering with `TestBackend` expectations; Crossterm lifecycle and clipboard adapters stay in `localpilot-cli`. |
 | `author-adr` *(opt)* | [10-decisions.md](10-decisions.md) | Append an ADR in the exact house format (newest on top, status, reason bullets). |
 | `plan-large-task` | §7 below | Tier the planning ceremony: in-session `EnterPlanMode` for small tasks; a bundled multi-slice plan template (`tasks/<Name>-Plan.md`) with decision log, resume-safe checkpoints, and Captain Hindsight for large ones. Present in the repo. |
 
