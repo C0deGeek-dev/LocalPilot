@@ -265,7 +265,7 @@ vendor CLI. It uses official APIs or local servers, keeps project state local,
 and requires explicit approval for risky actions. Windows, Linux, and macOS are
 first-class platforms.
 
-Maintained by C0deGeek.dev (David and Bram).
+Created Maintained by C0deGeek.dev (David Ben-Yishai and Bram Hammer).
 
 ## LocalX
 
