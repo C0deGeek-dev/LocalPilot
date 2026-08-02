@@ -32,10 +32,15 @@ use tempfile::TempDir;
 /// so it silently consumes the first entry and every worker afterwards gets the
 /// wrong script — which makes some assertions fail and, far worse, makes others
 /// pass for the wrong reason.
+/// Every spawn's (task name, requested model), so a test can prove the model a
+/// plan pinned on a node reached the request the factory was handed.
+type SeenModels = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
 struct Sessions {
     dir: Arc<TempDir>,
     answers: std::collections::HashMap<String, String>,
     seen: Arc<std::sync::Mutex<Vec<String>>>,
+    models: SeenModels,
 }
 
 impl Sessions {
@@ -47,14 +52,15 @@ impl Sessions {
                 .map(|(task, answer)| ((*task).to_string(), (*answer).to_string()))
                 .collect(),
             seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            models: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
     fn build(&self) -> Result<SessionRuntime, String> {
-        self.build_answering("done")
+        self.build_answering("done", None)
     }
 
-    fn build_answering(&self, text: &str) -> Result<SessionRuntime, String> {
+    fn build_answering(&self, text: &str, model: Option<&str>) -> Result<SessionRuntime, String> {
         let text = text.to_string();
         let root = self.dir.path();
         let workspace = Workspace::new(root).map_err(|err| err.to_string())?;
@@ -68,6 +74,10 @@ impl Sessions {
             workspace,
             RecoveryEngine::new(RecoveryBudget::default()),
             SessionConfig {
+                // Honour the requested model, so the spawn path's verify-and-refuse
+                // sees a worker on the model its node asked for. `None` leaves the
+                // session's default model in place.
+                model: model.map(str::to_string).unwrap_or_default(),
                 interactivity: Interactivity::NonInteractive,
                 trusted: true,
                 ..SessionConfig::default()
@@ -83,6 +93,10 @@ impl WorkerFactory for Sessions {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(request.name.clone());
+        self.models
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((request.name.clone(), request.model.clone()));
         // The worker's name is its task's title, so the answer can be looked up
         // rather than dealt off a queue whose order nothing guarantees.
         let answer = self
@@ -90,7 +104,7 @@ impl WorkerFactory for Sessions {
             .get(&request.name)
             .cloned()
             .unwrap_or_else(|| format!("{} done", request.name));
-        self.build_answering(&answer)
+        self.build_answering(&answer, request.model.as_deref())
     }
 }
 
@@ -347,4 +361,47 @@ async fn a_run_with_nothing_to_do_ends_immediately() {
     assert_eq!(report.dispatched, 0);
     assert!(report.settled);
     assert!(report.starvation.is_none());
+}
+
+#[tokio::test]
+async fn a_nodes_model_reaches_the_spawn_request_and_the_default_stays_model_less() {
+    let sessions = Sessions::new(&[("pinned", "pinned done"), ("default", "default done")]);
+    let (host, lead) = coordinated(&sessions).await;
+    plan_of(
+        &host,
+        lead,
+        PlanMode::Light,
+        &[
+            NodeSpec::task("pinned", "Run me on a specific model.").on_model("careful-model"),
+            NodeSpec::task("default", "Run me on whatever the session defaults to."),
+        ],
+    )
+    .await;
+
+    let report = run_plan(&host, &swarm(), lead, fast()).await;
+
+    // The plan settled, so the model-carrying spawn was not refused by the
+    // spawn path's verify-and-refuse: the worker really ran on the requested
+    // model rather than being rejected for a mismatch.
+    assert!(report.settled, "{report:?}");
+    assert_eq!(report.completed, 2, "both tasks completed: {report:?}");
+
+    let seen = sessions.models.lock().unwrap().clone();
+    let pinned = seen
+        .iter()
+        .find(|(name, _)| name == "pinned")
+        .expect("the pinned task was spawned");
+    let default = seen
+        .iter()
+        .find(|(name, _)| name == "default")
+        .expect("the default task was spawned");
+    assert_eq!(
+        pinned.1.as_deref(),
+        Some("careful-model"),
+        "a node's model travels through the driver into the spawn request"
+    );
+    assert_eq!(
+        default.1, None,
+        "a node with no model leaves the request model-less (session default)"
+    );
 }

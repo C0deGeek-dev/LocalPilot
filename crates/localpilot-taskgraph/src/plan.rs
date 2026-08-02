@@ -177,6 +177,13 @@ pub struct TaskNode {
     /// budget rather than a statistic.
     #[serde(default)]
     pub reclaims: u32,
+    /// The model this task should run on. `None` means "use the worker session's
+    /// default model". An opaque string on purpose: this crate is a leaf that
+    /// knows nothing about providers or models, only that a task may carry the
+    /// name of the one it wants. Whoever turns a node into a real worker resolves
+    /// it. Defaults so an older snapshot without the field still deserializes.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl TaskNode {
@@ -232,6 +239,10 @@ pub struct NodeSpec {
     /// Positions *within this batch* that this node waits on.
     #[serde(default)]
     pub depends_on_batch: Vec<usize>,
+    /// The model the created task should run on. `None` means the worker
+    /// session's default. Opaque to this crate — see [`TaskNode::model`].
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 fn default_kind() -> NodeKind {
@@ -247,6 +258,7 @@ impl NodeSpec {
             prompt: prompt.into(),
             kind: NodeKind::Task,
             depends_on_batch: Vec::new(),
+            model: None,
         }
     }
 
@@ -263,6 +275,13 @@ impl NodeSpec {
     #[must_use]
     pub fn after(mut self, index: usize) -> Self {
         self.depends_on_batch.push(index);
+        self
+    }
+
+    /// Run the created task on `model` instead of the worker session's default.
+    #[must_use]
+    pub fn on_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
         self
     }
 }
@@ -436,6 +455,7 @@ impl TaskPlan {
                 upstream,
                 artifact: None,
                 reclaims: 0,
+                model: spec.model.clone(),
             },
         );
         id
@@ -539,5 +559,59 @@ mod tests {
         assert_eq!(plan.version(), before);
         plan.set_coordinator("second".into());
         assert_eq!(plan.version(), before + 1);
+    }
+
+    #[test]
+    fn a_node_spec_carries_its_model_onto_the_created_node() {
+        let mut plan = plan();
+        let with = plan.insert(
+            &NodeSpec::task("a", "do a").on_model("fast-model"),
+            "lead".into(),
+            vec![],
+        );
+        let without = plan.insert(&NodeSpec::task("b", "do b"), "lead".into(), vec![]);
+        assert_eq!(
+            plan.node(with).unwrap().model.as_deref(),
+            Some("fast-model")
+        );
+        assert_eq!(
+            plan.node(without).unwrap().model,
+            None,
+            "no model requested means the worker session's default"
+        );
+    }
+
+    #[test]
+    fn an_old_snapshot_without_a_model_field_deserializes_to_none() {
+        // A node serialized before the model field existed: it has no `model`
+        // key. `#[serde(default)]` must fill it with `None` rather than fail, so
+        // a persisted plan restored after an upgrade still loads.
+        let legacy = serde_json::json!({
+            "id": 1,
+            "title": "a",
+            "prompt": "do a",
+            "kind": "task",
+            "owner": "lead",
+            "status": { "state": "pending" },
+            "upstream": [],
+            "artifact": null
+        });
+        let node: TaskNode =
+            serde_json::from_value(legacy).expect("legacy node still deserializes");
+        assert_eq!(node.model, None);
+        assert_eq!(node.reclaims, 0, "the other defaulted field is unaffected");
+    }
+
+    #[test]
+    fn a_node_with_a_model_round_trips_through_serde() {
+        let mut plan = plan();
+        let id = plan.insert(
+            &NodeSpec::task("a", "do a").on_model("careful-model"),
+            "lead".into(),
+            vec![],
+        );
+        let json = serde_json::to_string(plan.node(id).unwrap()).unwrap();
+        let back: TaskNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model.as_deref(), Some("careful-model"));
     }
 }

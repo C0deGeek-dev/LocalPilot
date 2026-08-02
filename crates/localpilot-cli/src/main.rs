@@ -44,6 +44,7 @@ mod server_cmd;
 mod session_cmd;
 mod skill_discovery;
 mod skills_cmd;
+mod swarm_cmd;
 mod trust;
 mod update;
 
@@ -54,6 +55,40 @@ mod update;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+/// Subcommands for `localpilot swarm`.
+#[derive(Debug, Subcommand)]
+enum SwarmCommand {
+    /// Run a task plan: seed it, dispatch a worker per ready task on the model
+    /// the task pinned (or the session default), refill as workers finish, and
+    /// print a short report.
+    Run {
+        /// Path to a JSON plan file: `{ "objective": "...", "mode": "light",
+        /// "nodes": [ { "title": "...", "prompt": "...", "model": "..." } ] }`.
+        plan: PathBuf,
+        /// Model for workers whose plan node names none; defaults to the
+        /// provider's configured model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass | unrestricted).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+        /// How many workers (and so how many models) may run at once — the RAM/VRAM
+        /// bound on the fan-out. Defaults to 4.
+        #[arg(long)]
+        concurrency: Option<usize>,
+        /// Lifetime cap on total workers this run may start (the runaway guard).
+        /// Defaults to 64.
+        #[arg(long)]
+        max_agents: Option<usize>,
+    },
 }
 
 /// Subcommands for `localpilot localbox`.
@@ -331,6 +366,12 @@ enum Command {
     /// path starts. Not for direct use — `localpilot serve` is the entry point.
     #[command(name = "__server-serve", hide = true)]
     ServerServe,
+    /// Run a task plan as a swarm of agents, each worker on the model its plan
+    /// node asked for. Strictly opt-in: nothing here runs unless invoked.
+    Swarm {
+        #[command(subcommand)]
+        command: SwarmCommand,
+    },
     /// Model Context Protocol surfaces.
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -1520,6 +1561,28 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             let profile = session_cmd::resolve_profile(None, false);
             server_cmd::serve(None, None, profile).await?;
         }
+        Command::Swarm { command } => match command {
+            SwarmCommand::Run {
+                plan,
+                model,
+                provider,
+                permission,
+                bypass,
+                concurrency,
+                max_agents,
+            } => {
+                let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+                swarm_cmd::run(
+                    &plan,
+                    model.as_deref(),
+                    provider.as_deref(),
+                    profile,
+                    concurrency,
+                    max_agents,
+                )
+                .await?;
+            }
+        },
         Command::Selfdev { command } => {
             let mut stdout = io::stdout().lock();
             let cwd = std::env::current_dir()?;

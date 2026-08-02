@@ -200,19 +200,29 @@ async fn start(
     sequence: usize,
     timeout: Duration,
 ) -> Option<impl std::future::Future<Output = Running>> {
-    let title = host
+    let (title, model) = host
         .swarms()
-        .with_plan(swarm, |plan| plan.node(node).map(|task| task.title.clone()))
+        .with_plan(swarm, |plan| {
+            plan.node(node)
+                .map(|task| (task.title.clone(), task.model.clone()))
+        })
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| node.to_string());
+        .unwrap_or_else(|| (node.to_string(), None));
 
     // An idempotency key per (plan position, attempt) so a retried spawn cannot
     // put two workers on one task — the failure that makes them edit the same
     // files and disagree.
-    let request = SpawnRequest::new(swarm.clone(), coordinator, title, String::new())
+    let mut request = SpawnRequest::new(swarm.clone(), coordinator, title, String::new())
         .with_key(format!("{node}#{sequence}"));
+    // A task may pin the model its worker runs on. `None` leaves the request
+    // model-less, so the worker is built on the session default; a named model
+    // is carried through and the spawn path verifies the worker really runs on
+    // it rather than trusting the factory.
+    if let Some(model) = model {
+        request = request.with_model(model);
+    }
     let worker = match host.spawn(&request).await {
         Ok(super::spawn::Spawned::Started { session }) => session,
         Ok(super::spawn::Spawned::Already { session }) => session,

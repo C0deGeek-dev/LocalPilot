@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Run a task plan as a swarm, each agent on a chosen model.** The new
+  `localpilot swarm run <plan>` reads a JSON plan (objective, mode, and nodes —
+  each with an optional per-node `model`) and runs it to completion: a worker per
+  ready task, refilling as workers finish, each built on the model its node asked
+  for (or the run default). A multi-provider config lets different nodes target
+  models served by different providers. A node whose model no configured provider
+  advertises is **refused before the worker is built** — the run fails that node
+  loudly rather than silently falling back to the default, and a worker that
+  would have been built on the wrong model is refused too. The fan-out is bounded
+  (`--concurrency`, `--max-agents`) so N agents on N models cannot exhaust the
+  machine. This turns the swarm substrate into a runnable capability. See
+  [docs/configuration.md](docs/configuration.md) §Swarm model selection and
+  [docs/02-architecture.md](docs/02-architecture.md).
 - **LocalBox integration: detect a local model server and adopt it.** When no
   usable model is configured, startup, the `/model` command, and
   `localpilot models` now point at a detected LocalBox server (or an

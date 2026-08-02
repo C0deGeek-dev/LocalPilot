@@ -2,6 +2,56 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0135: A Swarm Worker's Model Is Verified Before And After The Build; An Unserved Model Is Refused, Never Defaulted
+
+Status: accepted. Extends ADR-0124..0127 (the swarm substrate); complements the
+substrate's existing post-build `ModelMismatch` refusal.
+
+A swarm plan may pin the model each task's worker runs on. Two gates keep that
+honest, and both refuse rather than fall back — because a task that silently ran
+on a model it did not ask for produces work that reads normally and never says
+so, which is the worst available outcome.
+
+- **Before the build (availability).** When a spawn names a model, the host
+  checks a configured provider serves it and refuses with a typed
+  `SpawnError::ProviderUnavailable` otherwise, releasing the slot it reserved. A
+  model is "served" iff some configured provider advertises it
+  (`[providers.<id>].model`) or it is the session default; the configuration
+  advertises one model per provider, so this is the honest, offline-checkable
+  contract. To pin model X on a node, configure a provider with `model = "X"`.
+- **After the build (mismatch).** The substrate's existing check stays: if the
+  built session landed on a different model than asked, the spawn is refused
+  (`SpawnError::ModelMismatch`). A provider can advertise a model yet build a
+  different one, so both gates matter.
+
+The availability check is a defaulted `WorkerFactory::ensure_model_available`
+method (default: assume available), so the substrate's single-provider hosts and
+test factories are unchanged; the CLI's multi-provider factory overrides it.
+Multi-provider routing maps each advertised model to its provider, so different
+workers run on models served by different providers.
+
+## ADR-0134: The Swarm's Production Entrypoint Is A `swarm run` CLI Command, Not A Spawn-Capable Tool
+
+Status: accepted. Completes ADR-0124..0127, which shipped the swarm substrate
+library-only (no production entrypoint).
+
+`localpilot swarm run <plan>` is the surface that runs a swarm: it reads a JSON
+plan (objective, mode, and nodes with optional per-node models), constructs the
+`SwarmHost` over a production `WorkerFactory`, adopts a coordinator, and drives
+the plan to completion. The model-callable `swarm` tool stays messaging-only.
+
+The rejected alternative was a spawn-capable action on the `swarm` tool. The CLI
+command wins on four axes: **provider/model ownership** — the CLI is the layer
+that holds a provider and a model; a tool runs inside a session that may not, and
+would need a second session-construction path; **containment** — a tool action
+lets a mid-turn agent fan out workers on its own, which is autonomous-loop
+territory deliberately out of scope, whereas a user-invoked verb keeps "run this
+plan" a deliberate act; **discoverability** — a CLI verb is the obvious surface
+for running a plan; and **testability** — a command constructs the host directly
+and is driven offline with fake providers. The production factory is the CLI's,
+built on the same `SessionSetup` recipe `serve`/`rpc` use, so there is no second
+session builder.
+
 ## ADR-0130: LocalPilot Adopts a Running or Startable LocalBox Server
 
 Status: accepted.

@@ -485,7 +485,11 @@ Owns:
 
 - the graph: tasks and review gates, edges stored only as "what this waits on"
   (dependents are derived, so the two directions cannot disagree), and a plan
-  `version` that increments on every accepted mutation
+  `version` that increments on every accepted mutation. A task may carry an
+  optional **model** — an opaque `Option<String>` (`None` = the worker session's
+  default) the crate never interprets; whoever turns a node into a real worker
+  resolves it. It defaults on deserialize, so a plan snapshotted before the field
+  existed still loads.
 - validated mutations — `seed` (idempotent under a caller-supplied key),
   `expand_node` (a task becomes a *join* over its children rather than being
   replaced, so nothing downstream is rewired), `complete_node`, and
@@ -580,9 +584,20 @@ single-agent turn takes.
   reaper all work on it unchanged. Building the session is behind a
   `WorkerFactory` the host supplies, because narrowing tools to the spawner's,
   attributing permission asks to the spawner's approver, and resolving a provider
-  all need wiring this crate does not have. A spawn that names a model is
-  **refused** if the built session is on a different one: running anyway produces
-  work that reads normally and never says the wrong model produced it.
+  all need wiring the server crate does not have. The production factory lives in
+  the CLI (`swarm_cmd`), where a provider and a model actually exist: it builds
+  each worker through the same `SessionSetup` recipe `serve`/`rpc` use — an
+  ordinary headless session — on the model the spawn asked for.
+- **Per-worker model.** A spawn may name a model, and each worker runs on the one
+  its plan node asked for (`None` = the session default). Two gates keep this
+  honest, one cheap and early, one exact and late. *Before* the build, the host
+  checks a **configured provider serves that model**; a model none advertises is
+  refused (`ProviderUnavailable`) rather than quietly built on a default — the
+  slot it reserved is released. *After* the build, if the session landed on a
+  different model than asked, the spawn is **refused** (`ModelMismatch`): running
+  anyway produces work that reads normally and never says the wrong model
+  produced it. A multi-provider config routes each advertised model to its own
+  provider, so different workers can run on models served by different providers.
 - **Flow-back.** When a worker's turn ends, its final assistant text is bounded
   (the same 4 KiB the in-process delegation path uses), recorded on its
   membership, and injected into whoever it reports back to as a
@@ -594,6 +609,18 @@ single-agent turn takes.
   mutated, and stored under one write lock rather than by
   read → change → write-back, which would leave a gap in the middle of exactly
   the state that cannot afford one.
+- **Running a plan.** `localpilot swarm run <plan>` is the production entrypoint:
+  it resolves the workspace's providers once (the shared `SessionSetup` recipe),
+  builds the host over the CLI's production `WorkerFactory`, adopts a coordinator
+  as the swarm root, seeds a plan read from a JSON file (objective, mode, and
+  nodes — each with an optional per-node model), and runs it to completion. This
+  is the only user surface that spawns workers; the model-callable `swarm` tool
+  stays messaging-only, so a mid-turn agent cannot fan out on its own (that is
+  autonomous-loop territory, out of scope). A worker per ready task, each on the
+  model its node asked for, refilling as workers finish. The fan-out is bounded
+  at the admission seam — `--concurrency` caps how many workers (and so how many
+  models) run at once, the RAM/VRAM bound; `--max-agents` is the lifetime runaway
+  guard — resource containment (`SwarmLimits`), never a token or spend budget.
 
 Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
 `libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`

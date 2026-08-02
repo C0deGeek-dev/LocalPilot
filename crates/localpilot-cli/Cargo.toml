@@ -117,6 +117,9 @@ localpilot-selfreview = { path = "../localpilot-selfreview" }
 localpilot-server = { path = "../localpilot-server" }
 localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
+# The pure task-graph crate: the `swarm run` entrypoint seeds a plan from a file
+# (objective, mode, per-node model) and hands it to the swarm driver.
+localpilot-taskgraph = { path = "../localpilot-taskgraph" }
 localpilot-tools = { path = "../localpilot-tools" }
 localpilot-tui = { path = "../localpilot-tui", optional = true }
 localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }

@@ -118,6 +118,25 @@ pub trait WorkerFactory: Send + Sync {
     /// # Errors
     /// Any human-readable reason the session could not be built.
     fn create(&self, request: &SpawnRequest) -> Result<SessionRuntime, String>;
+
+    /// Confirm a configured provider can serve `model`, *before* the expensive
+    /// build. The spawn path calls this after reserving a slot and before
+    /// [`create`](Self::create) whenever a spawn names a model, so a model no
+    /// provider serves is refused loudly — the slot released — rather than the
+    /// factory quietly building it on a default provider that then dies on the
+    /// worker's first turn.
+    ///
+    /// The default assumes availability: a host with a single provider honours
+    /// whatever model it is asked and the post-build check
+    /// ([`SpawnError::ModelMismatch`]) catches a build that landed on the wrong
+    /// one. A host that routes several providers overrides this to refuse a model
+    /// none of them advertises.
+    ///
+    /// # Errors
+    /// A human-readable reason no configured provider serves `model`.
+    fn ensure_model_available(&self, _model: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// What a spawn resolved to.
@@ -147,6 +166,20 @@ pub enum SpawnError {
     /// The factory could not build a session.
     #[error("could not start a worker: {0}")]
     Factory(String),
+    /// A model was asked for that no configured provider serves. Refused *before*
+    /// the build, so a misconfigured model never quietly runs on a default the
+    /// plan did not ask for — the earlier, cheaper counterpart to
+    /// [`ModelMismatch`](Self::ModelMismatch).
+    #[error(
+        "the worker asked for model {model:?}, which no configured provider serves ({reason}) — \
+         refusing rather than falling back to a model the plan did not ask for"
+    )]
+    ProviderUnavailable {
+        /// The model that was asked for.
+        model: String,
+        /// Why it is unavailable, in the host's words.
+        reason: String,
+    },
     /// A model was asked for and a different one was built.
     #[error(
         "asked for model {requested:?} but the worker would run on {actual:?} — refusing rather \
@@ -289,14 +322,18 @@ impl SwarmHost {
     /// Start a worker. Does **not** run its turn — see [`run`](Self::run) and
     /// [`dispatch`](Self::dispatch).
     ///
-    /// The order matters and is not the obvious one: reserve a slot, build,
-    /// check the model, register the session, *then* confirm the member. Every
-    /// early exit after the reservation releases it, so a failed spawn does not
-    /// leak a slot for the life of the server.
+    /// The order matters and is not the obvious one: reserve a slot, check the
+    /// requested model is available, build, check the built model, register the
+    /// session, *then* confirm the member. Every early exit after the reservation
+    /// releases it, so a failed spawn does not leak a slot for the life of the
+    /// server. The availability check sits *before* the build so a misconfigured
+    /// model costs nothing, and the built-model check sits after so a build that
+    /// silently landed on the wrong model is still refused.
     ///
     /// # Errors
-    /// [`SpawnError::Admission`], [`SpawnError::Factory`],
-    /// [`SpawnError::ModelMismatch`], or [`SpawnError::Registry`].
+    /// [`SpawnError::Admission`], [`SpawnError::ProviderUnavailable`],
+    /// [`SpawnError::Factory`], [`SpawnError::ModelMismatch`], or
+    /// [`SpawnError::Registry`].
     pub async fn spawn(&self, request: &SpawnRequest) -> Result<Spawned, SpawnError> {
         let reservation = match self
             .swarms
@@ -307,6 +344,19 @@ impl SwarmHost {
             Admission::InFlight => return Ok(Spawned::AlreadyStarting),
             Admission::Existing(session) => return Ok(Spawned::Already { session }),
         };
+
+        // Refuse a model no provider serves before paying for the build, and give
+        // the slot back — a misconfigured node must not run on a default it never
+        // asked for, and must not hold a slot for the life of the server.
+        if let Some(model) = &request.model {
+            if let Err(reason) = self.factory.ensure_model_available(model) {
+                self.swarms.release(reservation).await;
+                return Err(SpawnError::ProviderUnavailable {
+                    model: model.clone(),
+                    reason,
+                });
+            }
+        }
 
         let runtime = match self.factory.create(request) {
             Ok(runtime) => runtime,
@@ -689,6 +739,73 @@ mod tests {
         assert!(host.spawn(&request).await.is_err());
         assert!(host.spawn(&request).await.is_err());
         assert_eq!(factory.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A factory that serves exactly one model, to drive the availability gate
+    /// the spawn path runs before it pays for a build.
+    struct PickyFactory {
+        served: String,
+        builds: AtomicUsize,
+    }
+
+    impl WorkerFactory for PickyFactory {
+        fn create(&self, _request: &SpawnRequest) -> Result<SessionRuntime, String> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            // Fails on purpose: a build here means the availability gate let an
+            // unserved model through, which the test asserts it does not.
+            Err("no provider in this test actually builds".into())
+        }
+
+        fn ensure_model_available(&self, model: &str) -> Result<(), String> {
+            if model == self.served {
+                Ok(())
+            } else {
+                Err(format!("only {:?} is served here", self.served))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_model_is_refused_before_the_build_and_frees_the_slot() {
+        let factory = Arc::new(PickyFactory {
+            served: "good-model".into(),
+            builds: AtomicUsize::new(0),
+        });
+        let host = SwarmHost::new(
+            SessionRegistry::new(),
+            SwarmRegistry::with_limits(SwarmLimits {
+                max_members: 8,
+                max_active: 1,
+            }),
+            Arc::clone(&factory) as Arc<dyn WorkerFactory>,
+        );
+
+        let missing =
+            SpawnRequest::new(swarm(), SessionId::new(), "w", "do it").with_model("missing-model");
+        assert!(
+            matches!(
+                host.spawn(&missing).await,
+                Err(SpawnError::ProviderUnavailable { .. })
+            ),
+            "a model no provider serves is refused loudly, not built on a default"
+        );
+        assert_eq!(
+            factory.builds.load(Ordering::SeqCst),
+            0,
+            "the refused spawn never paid for a build"
+        );
+
+        // The single concurrency slot was released by the refusal: a spawn for a
+        // served model now reaches the factory (which fails here) rather than
+        // being turned away by a slot the refusal leaked.
+        let served =
+            SpawnRequest::new(swarm(), SessionId::new(), "w", "do it").with_model("good-model");
+        assert!(matches!(
+            host.spawn(&served).await,
+            Err(SpawnError::Factory(_))
+        ));
+        assert_eq!(factory.builds.load(Ordering::SeqCst), 1);
+        assert!(host.swarms().members(&swarm()).await.is_empty());
     }
 
     #[test]

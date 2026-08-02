@@ -31,6 +31,13 @@ use tokio::sync::RwLock;
 use super::scope::SwarmId;
 
 /// How large a swarm may get.
+///
+/// These are **resource-containment** bounds — how many workers, and therefore
+/// how many concurrently loaded models, a swarm may hold — **not** a token or
+/// spend budget. `max_active` is the one that caps RAM/VRAM: each running worker
+/// holds one model, so N agents on N models is N model loads, and this is what
+/// stops a fan-out from exhausting the machine. Nothing here counts tokens;
+/// provider rate-limit windows are a separate concern (`localpilot-quota`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwarmLimits {
     /// The most members one swarm may ever admit, counting departed ones.

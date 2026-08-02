@@ -1641,6 +1641,7 @@ dependencies = [
  "localpilot-server",
  "localpilot-skills",
  "localpilot-store",
+ "localpilot-taskgraph",
  "localpilot-terminal-ui",
  "localpilot-tools",
  "localpilot-tui",

@@ -43,7 +43,7 @@ use localpilot_rpc::{
     JsonRecordReader, PendingAsk, RpcApprover, ServerEvent, ServerRecord, RPC_PROTOCOL_VERSION,
     SERVER_VERSION,
 };
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile};
+use localpilot_sandbox::{Approver, Interactivity, PermissionEngine, Profile, ScriptedApprover};
 use localpilot_server::{
     acquire, attach, ensure_running, Acquired, AttachError, Conn, Endpoint, Listener,
     RegistryError, SessionFactory, SessionHost, SessionRegistry, TransportError,
@@ -126,9 +126,54 @@ impl SessionSetup {
         })
     }
 
+    /// A setup over an already-built provider and model, for offline tests that
+    /// need the real session-construction recipe without config, credentials, or
+    /// MCP. Bypass profile so a headless worker's writes are permitted.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        provider: Arc<dyn ModelProvider>,
+        model: impl Into<String>,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            config: localpilot_config::Config::default(),
+            cwd,
+            provider,
+            model: model.into(),
+            profile: Profile::Bypass,
+            mcp: crate::mcp::McpTools::default(),
+            agents: None,
+        }
+    }
+
     /// The resolved model name.
     pub(crate) fn model(&self) -> &str {
         &self.model
+    }
+
+    /// The resolved default provider.
+    pub(crate) fn provider(&self) -> &Arc<dyn ModelProvider> {
+        &self.provider
+    }
+
+    /// Map each model a configured provider advertises to that provider, so a
+    /// swarm worker whose node names a non-default model is built on the provider
+    /// that serves it. Rebuilds the provider registry from the resolved config;
+    /// that is pure (no network, no MCP), so it is cheap to do once at startup.
+    /// Returns an empty map if the registry cannot be built — the caller still
+    /// has the default provider for the session's own model.
+    pub(crate) fn provider_routes(&self) -> HashMap<String, Arc<dyn ModelProvider>> {
+        let mut routes = HashMap::new();
+        let Ok(registry) = ProviderRegistry::from_config(&self.config) else {
+            return routes;
+        };
+        for id in registry.ids() {
+            if let (Some(model), Some(provider)) = (registry.default_model(&id), registry.get(&id))
+            {
+                routes.insert(model.to_string(), provider.clone());
+            }
+        }
+        routes
     }
 
     /// The workspace root.
@@ -148,30 +193,84 @@ impl SessionSetup {
     /// Returns an error if the workspace read-roots cannot be resolved.
     pub(crate) fn build(&self) -> anyhow::Result<BuiltSession> {
         let (approver, ask_rx, asks) = RpcApprover::new();
+        // The wire client answers asks; the engine treats the session as
+        // interactive so ask-class effects reach the client instead of being
+        // denied outright.
+        let runtime = self.build_session(
+            &self.provider,
+            &self.model,
+            Box::new(approver),
+            Interactivity::Interactive,
+        )?;
+        Ok(BuiltSession {
+            runtime,
+            ask_rx,
+            asks,
+        })
+    }
+
+    /// Build one headless worker session on an explicit provider and model,
+    /// sharing this setup's resolved config, tools, and MCP servers.
+    ///
+    /// The swarm's per-worker recipe: the *same* session-construction path as
+    /// [`build`](Self::build), but non-interactive with a deny-by-default approver
+    /// — a worker has no wire client to answer a permission ask — and free to
+    /// target any configured provider so different workers can run on different
+    /// models. Building the session is deliberately all this does; the spawn path
+    /// verifies afterwards that the worker really runs on the model asked for.
+    ///
+    /// # Errors
+    /// Returns an error if the workspace read-roots cannot be resolved.
+    pub(crate) fn build_worker(
+        &self,
+        provider: &Arc<dyn ModelProvider>,
+        model: &str,
+    ) -> anyhow::Result<SessionRuntime> {
+        self.build_session(
+            provider,
+            model,
+            Box::new(ScriptedApprover::new(Vec::new())),
+            Interactivity::NonInteractive,
+        )
+    }
+
+    /// The shared session-construction recipe, parameterised on which provider
+    /// and model to build on and how the session answers permission asks. Both
+    /// the wire [`build`](Self::build) and the headless
+    /// [`build_worker`](Self::build_worker) go through here so the two can never
+    /// drift.
+    ///
+    /// # Errors
+    /// Returns an error if the workspace read-roots cannot be resolved.
+    fn build_session(
+        &self,
+        provider: &Arc<dyn ModelProvider>,
+        model: &str,
+        approver: Box<dyn Approver>,
+        interactivity: Interactivity,
+    ) -> anyhow::Result<SessionRuntime> {
         let context_token_limit = effective_context_limit(
-            self.provider.declaration().max_context_tokens,
+            provider.declaration().max_context_tokens,
             self.config.harness.context_token_limit,
         );
         let mut registry = self.mcp.registry();
         let broker = crate::mcp::install_broker(&self.config.tools, &mut registry);
-        // The serve loop is driven by a client (interactive): apply the built-in
-        // safety rails with the interactive profile, exactly as the stdio `rpc`
-        // path does. Explicit `[harness]` values still win in `resolved_rails`.
-        let rails = self.config.harness.resolved_rails(true);
+        // Apply the built-in safety rails: interactive for the client-driven serve
+        // loop, headless for a worker with no client. Explicit `[harness]` values
+        // still win inside `resolved_rails`.
+        let interactive = matches!(interactivity, Interactivity::Interactive);
+        let rails = self.config.harness.resolved_rails(interactive);
         let mut runtime = SessionRuntime::new(
-            self.provider.clone(),
+            provider.clone(),
             registry,
             PermissionEngine::new(self.profile, Vec::new()),
-            Box::new(approver),
+            approver,
             Store::open(&self.cwd),
             crate::session_cmd::workspace_with_read_roots(&self.cwd, &self.config)?,
             RecoveryEngine::new(RecoveryBudget::default()),
             SessionConfig {
-                model: self.model.clone(),
-                // The wire client answers asks; the engine treats the session as
-                // interactive so ask-class effects reach the client instead of
-                // being denied outright.
-                interactivity: Interactivity::Interactive,
+                model: model.to_string(),
+                interactivity,
                 trusted: matches!(self.profile, Profile::Bypass | Profile::Unrestricted),
                 context_token_limit,
                 compaction_mode: compaction_mode(self.config.compaction.mode),
@@ -208,11 +307,7 @@ impl SessionSetup {
             self.config.context.instruction_char_budget,
             &mut runtime,
         );
-        Ok(BuiltSession {
-            runtime,
-            ask_rx,
-            asks,
-        })
+        Ok(runtime)
     }
 }
 
@@ -1785,6 +1880,52 @@ mod tests {
             "the idle rule reaps independently of grace"
         );
         assert!(registry.get(id).await.is_none());
+    }
+
+    /// A multi-provider config resolves a model→provider route for each
+    /// provider that advertises a model, so different swarm workers can be built
+    /// on models served by different providers.
+    #[test]
+    fn provider_routes_map_each_configured_models_provider() {
+        use localpilot_config::{Config, ProviderConfig};
+        use localpilot_llm::ProviderRegistry;
+
+        let mut config = Config::default();
+        config.providers.insert(
+            "fast".to_string(),
+            ProviderConfig {
+                kind: "openai-compatible".to_string(),
+                base_url: Some("http://localhost:1/v1".to_string()),
+                model: Some("fast-model".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.providers.insert(
+            "careful".to_string(),
+            ProviderConfig {
+                kind: "openai-compatible".to_string(),
+                base_url: Some("http://localhost:2/v1".to_string()),
+                model: Some("careful-model".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.provider.default = "fast".to_string();
+
+        let registry = ProviderRegistry::from_config(&config).unwrap();
+        let setup = SessionSetup {
+            config,
+            cwd: std::env::temp_dir(),
+            provider: registry.default_provider().unwrap().clone(),
+            model: "fast-model".to_string(),
+            profile: Profile::Bypass,
+            mcp: crate::mcp::McpTools::default(),
+            agents: None,
+        };
+
+        let routes = setup.provider_routes();
+        assert_eq!(routes.len(), 2, "one route per configured advertised model");
+        assert!(routes.contains_key("fast-model"));
+        assert!(routes.contains_key("careful-model"));
     }
 
     /// Clean shutdown (the subject-05 deferral): every remaining session is

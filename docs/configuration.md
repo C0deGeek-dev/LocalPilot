@@ -310,6 +310,45 @@ macOS/Linux use the fallback file for API-key credentials — ADR-0042). See
 [providers.md](providers.md) §Storing credentials and
 [07-security-and-privacy.md](07-security-and-privacy.md) §Stored API Credentials.
 
+### Swarm model selection
+
+`localpilot swarm run <plan>` runs a task plan as a swarm of agents, and each
+worker can run on its own model. A plan file is JSON:
+
+```json
+{
+  "objective": "make the suite green",
+  "mode": "light",
+  "nodes": [
+    { "title": "survey", "prompt": "Find every failing test." },
+    { "title": "fix", "prompt": "Fix them.", "model": "careful-model", "depends_on_batch": [0] }
+  ]
+}
+```
+
+- `objective` (required) travels into every worker's assignment; `mode` is
+  `light` (default) or `deep`; each `nodes` entry is a task with a `title`,
+  `prompt`, optional `kind` (`task` or `gate`), optional `depends_on_batch`
+  (indices of earlier nodes it waits on), and an optional **`model`**.
+- A node's `model` selects the model that task's worker runs on. Omit it to use
+  the run's default (from `--model`, or the default provider's configured
+  `model`).
+- **A node's model must be advertised by a configured provider** — i.e. some
+  `[providers.<id>]` sets `model = "<that model>"`. Configure one provider per
+  model you intend to pin. Different nodes may then target models served by
+  different providers, and each worker is built on the provider that serves its
+  model.
+- **A model no configured provider advertises is refused before the worker is
+  built** — the run fails that node loudly rather than silently falling back to
+  the default. This is deliberate: a pinned model that quietly ran on something
+  else would produce work that reads normally and never says so.
+
+**Bounding the fan-out.** `--concurrency N` (default 4) caps how many workers —
+and so how many models — run at once; that is the RAM/VRAM bound, since each
+running worker holds one model. `--max-agents M` (default 64) is a lifetime cap
+on how many workers one run may start (a runaway guard that counts finished
+workers too). These bound resources, not tokens or spend.
+
 ### `[discovery]`
 
 Best-effort, read-only metadata LocalPilot reads from a configured server at
