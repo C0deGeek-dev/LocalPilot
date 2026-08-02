@@ -848,6 +848,10 @@ impl AppState {
             "model",
             "Switch provider/model, or list them (/model [provider [model]])",
         ),
+        (
+            "localbox",
+            "Adopt a running LocalBox server into your config (/localbox adopt)",
+        ),
         ("new", "Start a fresh session"),
         ("fork", "Branch the conversation into a new session"),
         ("clone", "Copy the conversation into a new session"),

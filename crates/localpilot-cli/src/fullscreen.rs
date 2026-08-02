@@ -553,8 +553,8 @@ fn format_count(value: u64) -> String {
 
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
     const SUPPORTED: &[&str] = &[
-        "model", "new", "fork", "clone", "clear", "sessions", "session", "resume", "continue",
-        "name", "rename", "exit", "quit",
+        "model", "localbox", "new", "fork", "clone", "clear", "sessions", "session", "resume",
+        "continue", "name", "rename", "exit", "quit",
     ];
     let mut command_catalog = localpilot_tui::AppState::slash_commands()
         .iter()

@@ -65,6 +65,8 @@ block.
   key env) into `.localpilot.toml` and sets it as the default provider. The
   merge **upserts only `[providers.local]`** — any other providers,
   `[mcp.servers.*]` tables, and comments already in the file are preserved.
+- **Inside a running chat session**, `/localbox adopt` does the same, with an
+  in-session approval prompt; the adopted provider applies on the next launch.
 
 After adopting, `localpilot` uses the local model, and `/model` switches to it
 like any other provider.

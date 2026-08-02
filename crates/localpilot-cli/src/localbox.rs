@@ -147,20 +147,37 @@ pub(crate) fn merge_local_provider(
     endpoint: &str,
     model: Option<&str>,
 ) -> anyhow::Result<String> {
-    use toml_edit::{value, DocumentMut, Item};
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     let mut doc: DocumentMut = existing.parse()?;
-    doc["provider"]["default"] = value("local");
-    doc["providers"]["local"]["kind"] = value("anthropic");
-    doc["providers"]["local"]["base_url"] = value(endpoint);
-    doc["providers"]["local"]["api_key_env"] = value("ANTHROPIC_AUTH_TOKEN");
+
+    // `[provider] default = "local"`. Insert as a real table (not an inline
+    // `provider = { .. }`) so a fresh file reads with section headers and a user
+    // can later hand-add sibling sections — extending an inline table with a
+    // `[..]` section is a TOML parse error.
+    let provider = doc.entry("provider").or_insert(Item::Table(Table::new()));
+    provider["default"] = value("local");
+
+    // `[providers]` holds only sub-tables — mark it implicit so only
+    // `[providers.local]` (and any existing siblings) render their own header.
+    let providers = doc.entry("providers").or_insert(Item::Table(Table::new()));
+    let providers = providers
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`providers` in .localpilot.toml is not a table"))?;
+    providers.set_implicit(true);
+
+    // Upsert only `[providers.local]`, preserving any other providers.
+    let local = providers
+        .entry("local")
+        .or_insert(Item::Table(Table::new()));
+    let local = local
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`providers.local` in .localpilot.toml is not a table"))?;
+    local["kind"] = value("anthropic");
+    local["base_url"] = value(endpoint);
+    local["api_key_env"] = value("ANTHROPIC_AUTH_TOKEN");
     if let Some(model) = model {
-        doc["providers"]["local"]["model"] = value(model);
-    }
-    // `[providers]` holds only sub-tables, so suppress its bare header and let
-    // `[providers.local]` (and any siblings) render their own.
-    if let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_mut) {
-        providers.set_implicit(true);
+        local["model"] = value(model);
     }
     Ok(doc.to_string())
 }
@@ -314,6 +331,12 @@ command = \"npx\"
     #[test]
     fn adopt_merge_into_empty_config_creates_local_provider_without_a_model() {
         let merged = merge_local_provider("", "http://127.0.0.1:11435/v1", None).unwrap();
+        // A fresh file uses section headers, not inline tables — so a user can
+        // later hand-add a sibling `[providers.<id>]` without a TOML parse error.
+        assert!(
+            merged.contains("[providers.local]"),
+            "fresh config should use section headers, got: {merged}"
+        );
         let doc: toml_edit::DocumentMut = merged.parse().unwrap();
         assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
         assert_eq!(doc["provider"]["default"].as_str(), Some("local"));

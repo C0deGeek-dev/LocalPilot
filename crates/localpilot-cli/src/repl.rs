@@ -1148,11 +1148,10 @@ async fn run_slash(
             run_harness_command(terminal, state, prompts, host, true).await?;
         }
         SlashAction::Model { provider, model } => {
-            if provider.as_deref() == Some("adopt") {
-                run_localbox_adopt(terminal, state, prompts, host).await?;
-            } else {
-                run_model_command(state, runtime, host.cwd, provider, model).await;
-            }
+            run_model_command(state, runtime, host.cwd, provider, model).await;
+        }
+        SlashAction::LocalBoxAdopt => {
+            run_localbox_adopt(terminal, state, prompts, host).await?;
         }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
@@ -1363,7 +1362,7 @@ async fn list_models(
         }
         if matches!(detected, crate::localbox::LocalBoxState::Running { .. }) {
             state.apply(UiEvent::Notice(
-                "run `/model adopt` to add it and use it on the next launch".to_string(),
+                "run `/localbox adopt` to add it and use it on the next launch".to_string(),
             ));
         }
         return;

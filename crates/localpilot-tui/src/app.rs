@@ -79,6 +79,9 @@ pub enum SlashAction {
         provider: Option<String>,
         model: Option<String>,
     },
+    /// Adopt a running LocalBox server into `.localpilot.toml` from inside the
+    /// session (`/localbox` or `/localbox adopt`).
+    LocalBoxAdopt,
     Ingest(IngestAction),
     Knowledge(String),
     /// Research a topic. `Some(topic)` runs a one-shot research pass; `None`
@@ -203,6 +206,14 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
                 model: (!model.is_empty()).then(|| model.to_string()),
             }
         }
+        _ if name == "localbox" && (args.is_empty() || args == "adopt") => {
+            SlashAction::LocalBoxAdopt
+        }
+        _ if name == "localbox" => SlashAction::Invalid {
+            command: "localbox".to_string(),
+            reason: "usage: /localbox adopt — add a running LocalBox server to your config"
+                .to_string(),
+        },
         _ if name == "harness-resume" && args.is_empty() => SlashAction::HarnessResume,
         _ if matches!(name, "wait-resume" | "wait_resume") && args.is_empty() => {
             SlashAction::WaitResume
@@ -586,6 +597,9 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         )),
         SlashAction::Model { .. } => state.apply(UiEvent::Notice(
             "/model is handled by the interactive host".to_string(),
+        )),
+        SlashAction::LocalBoxAdopt => state.apply(UiEvent::Notice(
+            "/localbox is handled by the interactive host".to_string(),
         )),
         SlashAction::Exit { .. } => state.should_quit = true,
         SlashAction::Invalid { command, reason } => {
@@ -984,6 +998,16 @@ mod tests {
             parse_slash("/agents show reviewer"),
             Some(SlashAction::Agents("show reviewer".to_string()))
         );
+    }
+
+    #[test]
+    fn localbox_slash_command_parses() {
+        assert_eq!(parse_slash("/localbox"), Some(SlashAction::LocalBoxAdopt));
+        assert_eq!(parse_slash("/localbox adopt"), Some(SlashAction::LocalBoxAdopt));
+        assert!(matches!(
+            parse_slash("/localbox wat"),
+            Some(SlashAction::Invalid { .. })
+        ));
     }
 
     #[test]

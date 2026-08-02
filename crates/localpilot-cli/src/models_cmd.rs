@@ -211,7 +211,17 @@ pub async fn run(
             // detected local model server so the user knows a local endpoint
             // exists. Read-only: detection never starts or configures anything,
             // and stays silent (and probe-free) when LocalBox is not installed.
-            let nothing_usable = !results.iter().any(|r| matches!(r.status, Status::Ok));
+            // Nag about LocalBox only when nothing is actually usable. A provider
+            // that responded (Ok), is reachable-but-empty (NoModels), or is a
+            // no-listing kind like a local `anthropic` proxy (NoListingEndpoint —
+            // exactly what `localbox adopt` writes) all count as "configured and
+            // usable", so the hint does not fire after adopting.
+            let nothing_usable = !results.iter().any(|r| {
+                matches!(
+                    r.status,
+                    Status::Ok | Status::NoModels | Status::NoListingEndpoint
+                )
+            });
             if nothing_usable {
                 // Surface a detected LocalBox with the same actionable pointer the
                 // chat surfaces show, so `models` guidance matches everywhere.
