@@ -41,6 +41,34 @@ provider and model it prints the doctor report instead, so a fresh or headless
 checkout still gives a useful result. (The REPL is in release builds; the
 default-feature build prints the doctor report.)
 
+## Using a LocalBox local model
+
+If you use LocalBox to serve local models, LocalPilot detects it and can adopt a
+running server into your config, so you do not have to hand-write the provider
+block.
+
+- **When no usable model is configured**, `localpilot` at startup, the `/model`
+  command, and `localpilot models` point you at a detected LocalBox: a running
+  server names its endpoint; an installed-but-stopped one suggests
+  `localbox serve <model>`. When no LocalBox is present, these surfaces behave
+  exactly as before.
+- **Adopt a running server** with one permission-gated command:
+
+  ```sh
+  localbox serve <model>        # start a local server (run in LocalBox)
+  localpilot localbox adopt     # write [providers.local] pointing at it
+  ```
+
+  `adopt` detects the running server, asks before writing (or pass `--yes` to
+  approve non-interactively), then merges a `[providers.local]` block for
+  LocalBox's no-think proxy (`kind = "anthropic"`, the `ANTHROPIC_AUTH_TOKEN`
+  key env) into `.localpilot.toml` and sets it as the default provider. The
+  merge **upserts only `[providers.local]`** — any other providers,
+  `[mcp.servers.*]` tables, and comments already in the file are preserved.
+
+After adopting, `localpilot` uses the local model, and `/model` switches to it
+like any other provider.
+
 ## The official OpenAI API
 
 Uses the documented OpenAI API and its API-key authentication.
