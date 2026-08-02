@@ -238,13 +238,32 @@ pub(crate) async fn run_adopt(assume_yes: bool, stdin_is_tty: bool) -> anyhow::R
         anyhow::bail!("declined — no config written");
     }
 
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let merged = merge_local_provider(&existing, &endpoint, model.as_deref())?;
-    std::fs::write(&path, merged)?;
+    write_local_provider(&path, &endpoint, model.as_deref())?;
     println!(
         "adopted LocalBox — wrote [providers.local] for {endpoint} to {}",
         path.display()
     );
+    Ok(())
+}
+
+/// Merge a `[providers.local]` block for `endpoint`/`model` into the config file
+/// at `path` (creating it if absent), preserving other content. The **surface-
+/// agnostic write half of adopt**: the CLI (`run_adopt`) and the in-TUI `/model`
+/// adopt both reach here only after consent — CLI confirm or an in-session
+/// permission approval — so gating is the caller's responsibility, never this
+/// function's. Reached only on approval, so a denied grant writes nothing.
+///
+/// # Errors
+/// Propagates a malformed existing file (never overwrites unparseable content)
+/// or an I/O error writing the file.
+pub(crate) fn write_local_provider(
+    path: &std::path::Path,
+    endpoint: &str,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let merged = merge_local_provider(&existing, endpoint, model)?;
+    std::fs::write(path, merged)?;
     Ok(())
 }
 
@@ -304,6 +323,31 @@ command = \"npx\"
     #[test]
     fn adopt_merge_rejects_a_malformed_existing_file() {
         assert!(merge_local_provider("not [ valid", "http://x/v1", None).is_err());
+    }
+
+    #[test]
+    fn write_local_provider_merges_into_the_project_config_preserving_siblings() {
+        // The shared write half (06.1): reached only after consent, it writes the
+        // merged config to disk and preserves the user's other providers.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".localpilot.toml");
+        std::fs::write(&path, "[providers.openai]\nkind = \"openai\"\n").unwrap();
+        write_local_provider(&path, "http://127.0.0.1:11435/v1", Some("m")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(doc["providers"]["openai"]["kind"].as_str(), Some("openai"));
+        assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
+    }
+
+    #[test]
+    fn write_local_provider_creates_the_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".localpilot.toml");
+        write_local_provider(&path, "http://127.0.0.1:11435/v1", None).unwrap();
+        assert!(path.is_file());
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["providers"]["local"]["base_url"].as_str(), Some("http://127.0.0.1:11435/v1"));
     }
 
     #[test]
