@@ -10,8 +10,8 @@
 
 use localpilot_tui::{
     banner_text, handle_input, history_block_text, live_region_height, parse_slash, render, run,
-    ActiveTool, AppInput, AppState, ApprovalRequest, Header, Key, Mode, Profile, SlashAction,
-    TranscriptLine, TrustPrompt, UiEvent,
+    ActiveTool, AppInput, AppState, ApprovalRequest, Header, Key, Mode, Profile, QuestionPrompt,
+    SlashAction, TranscriptLine, TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
@@ -388,4 +388,147 @@ fn settling_without_a_plan_is_a_no_op() {
     state.apply(UiEvent::PlanSettled);
     assert!(!state.plan_settled);
     assert!(!render_natural(&state, 90).contains("turn ended"));
+}
+
+// --- ask_user question widget ------------------------------------------------
+
+fn question(multi_select: bool) -> QuestionPrompt {
+    QuestionPrompt {
+        header: Some("Storage".to_string()),
+        question: "Which store should this use?".to_string(),
+        options: vec![
+            (
+                "SQLite".to_string(),
+                Some("one file, no server".to_string()),
+            ),
+            ("Postgres".to_string(), None),
+        ],
+        selected: 0,
+        checked: vec![false; 2],
+        multi_select,
+        other: None,
+        index: 1,
+        total: 1,
+    }
+}
+
+#[test]
+fn question_single_select_snapshot() {
+    let mut state = base();
+    state.question = Some(question(false));
+    insta::assert_snapshot!(render_natural(&state, 90));
+}
+
+#[test]
+fn question_multi_select_snapshot() {
+    let mut state = base();
+    let mut prompt = question(true);
+    prompt.checked = vec![true, false];
+    prompt.selected = 1;
+    state.question = Some(prompt);
+    insta::assert_snapshot!(render_natural(&state, 90));
+}
+
+#[test]
+fn question_free_text_snapshot() {
+    let mut state = base();
+    let mut prompt = question(false);
+    prompt.selected = prompt.other_row();
+    prompt.other = Some("DuckDB".to_string());
+    state.question = Some(prompt);
+    insta::assert_snapshot!(render_natural(&state, 90));
+}
+
+#[test]
+fn arrows_move_the_selection_and_stop_at_the_ends() {
+    let mut state = base();
+    state.question = Some(question(false));
+
+    handle_input(&mut state, AppInput::Key(Key::Up));
+    assert_eq!(
+        state.question.as_ref().unwrap().selected,
+        0,
+        "clamped at the top"
+    );
+
+    // Two options plus the always-offered free-text row.
+    for expected in [1, 2, 2] {
+        handle_input(&mut state, AppInput::Key(Key::Down));
+        assert_eq!(state.question.as_ref().unwrap().selected, expected);
+    }
+}
+
+#[test]
+fn space_toggles_only_on_a_multi_select_question() {
+    let mut state = base();
+    state.question = Some(question(false));
+    handle_input(&mut state, AppInput::Key(Key::Char(' ')));
+    assert_eq!(
+        state.question.as_ref().unwrap().checked,
+        vec![false, false],
+        "a single-select question has nothing to tick"
+    );
+
+    state.question = Some(question(true));
+    handle_input(&mut state, AppInput::Key(Key::Char(' ')));
+    assert_eq!(state.question.as_ref().unwrap().checked, vec![true, false]);
+    assert_eq!(
+        state.question.as_ref().unwrap().chosen(),
+        vec!["SQLite".to_string()]
+    );
+}
+
+#[test]
+fn enter_opens_text_entry_on_the_free_text_row_and_esc_returns_to_the_list() {
+    let mut state = base();
+    let mut prompt = question(false);
+    prompt.selected = prompt.other_row();
+    state.question = Some(prompt);
+
+    handle_input(&mut state, AppInput::Key(Key::Enter));
+    assert_eq!(
+        state.question.as_ref().unwrap().other.as_deref(),
+        Some(""),
+        "the first Enter opens text entry rather than answering"
+    );
+
+    for c in "duck".chars() {
+        handle_input(&mut state, AppInput::Key(Key::Char(c)));
+    }
+    handle_input(&mut state, AppInput::Key(Key::Backspace));
+    assert_eq!(
+        state.question.as_ref().unwrap().other.as_deref(),
+        Some("duc")
+    );
+
+    // Esc in text entry backs out to the list; the question stays open.
+    handle_input(&mut state, AppInput::Key(Key::Esc));
+    let prompt = state.question.as_ref().expect("the question is still open");
+    assert!(prompt.other.is_none());
+
+    // Esc on the list dismisses it.
+    handle_input(&mut state, AppInput::Key(Key::Esc));
+    assert!(state.question.is_none());
+}
+
+#[test]
+fn enter_on_an_option_confirms_and_closes_the_question() {
+    let mut state = base();
+    state.question = Some(question(false));
+    handle_input(&mut state, AppInput::Key(Key::Enter));
+    assert!(state.question.is_none());
+}
+
+#[test]
+fn an_open_question_grows_the_blocking_band() {
+    let mut state = base();
+    assert!(
+        localpilot_tui::blocking_prompt_height(&state, 90).is_none(),
+        "an idle state keeps the fixed streaming band"
+    );
+    state.question = Some(question(false));
+    assert!(
+        localpilot_tui::blocking_prompt_height(&state, 90).is_some(),
+        "the option list and its confirm hint must never be truncated"
+    );
 }

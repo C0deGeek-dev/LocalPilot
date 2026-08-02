@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use localpilot_core::TokenUsage;
 
-use crate::error::ProviderError;
-use crate::event::{ModelEvent, ModelEventStream};
-use crate::provider::{
+use localpilot_llm_core::error::ProviderError;
+use localpilot_llm_core::event::{ModelEvent, ModelEventStream};
+use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-use crate::request::ModelRequest;
+use localpilot_llm_core::request::ModelRequest;
 
 type Script = Vec<Result<ModelEvent, ProviderError>>;
 
@@ -76,6 +76,7 @@ impl FakeProvider {
             Ok(ModelEvent::Usage(TokenUsage {
                 input_tokens: 1,
                 output_tokens: 1,
+                ..Default::default()
             })),
             Ok(ModelEvent::Done),
         ])

@@ -280,7 +280,7 @@ async fn gates_tighten_after_the_engine_and_never_grant() {
             _ => None,
         })
         .expect("a tool result was persisted");
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result.output.contains("blocked by no-reads"),
         "{}",
@@ -348,7 +348,7 @@ async fn cancellation_aborts_a_running_tool_without_waiting_for_its_timeout() {
         })
         .collect();
     assert_eq!(calls, results.len());
-    assert!(results[0].is_error);
+    assert!(results[0].is_error());
     assert!(results[0].output.contains("cancelled"));
 
     let mut saw_cancelled_finish = false;

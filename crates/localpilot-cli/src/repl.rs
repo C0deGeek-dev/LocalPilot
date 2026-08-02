@@ -21,7 +21,7 @@ use crossterm::event::{
 };
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
-use localpilot_core::ContentBlock;
+use localpilot_core::{ContentBlock, TokenUsage};
 use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime, SwitchError};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
@@ -30,14 +30,12 @@ use localpilot_sandbox::{
     Profile,
 };
 use localpilot_store::Store;
-use localpilot_tools::{
-    AskUser, BackgroundProcesses, ElicitationOutcome, ElicitationRequest, UserElicitor,
-};
+use localpilot_tools::{BackgroundProcesses, UserAnswer, UserPrompter, UserQuestion};
 use localpilot_tui::{
     banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
     AppInput, AppState, ApprovalRequest, BackgroundCommand, BackgroundProcess, Header,
-    ImageAttachment, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, SlashAction,
-    TrustPrompt, UiEvent,
+    ImageAttachment, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, QuestionPrompt,
+    SlashAction, TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
@@ -124,12 +122,77 @@ pub(crate) struct ApprovalCall {
     pub(crate) reply: oneshot::Sender<bool>,
 }
 
-/// A pending model question handed to the full-screen event loop. Elicitation
-/// is registered only for that host, so the rollback inline renderer never
-/// advertises an interaction it cannot present.
-pub(crate) struct ElicitationCall {
-    pub(crate) request: ElicitationRequest,
-    pub(crate) reply: oneshot::Sender<ElicitationOutcome>,
+/// A pending set of questions handed from the [`TuiPrompter`] (running inside
+/// the turn) to the event loop, which asks them one at a time and replies with
+/// the user's answers.
+pub(crate) struct QuestionCall {
+    pub(crate) questions: Vec<UserQuestion>,
+    pub(crate) reply: oneshot::Sender<Vec<UserAnswer>>,
+}
+
+/// A question set part-way through being answered.
+struct PendingQuestions {
+    questions: Vec<UserQuestion>,
+    /// Which question is on screen.
+    index: usize,
+    /// Answers collected so far, one per question already resolved.
+    answers: Vec<UserAnswer>,
+    reply: oneshot::Sender<Vec<UserAnswer>>,
+}
+
+impl PendingQuestions {
+    /// The view model for the question currently on screen.
+    fn view(&self) -> QuestionPrompt {
+        let question = &self.questions[self.index];
+        QuestionPrompt {
+            header: question.header.clone(),
+            question: question.question.clone(),
+            options: question
+                .options
+                .iter()
+                .map(|option| (option.label.clone(), option.description.clone()))
+                .collect(),
+            selected: 0,
+            checked: vec![false; question.options.len()],
+            multi_select: question.multi_select,
+            other: None,
+            index: self.index + 1,
+            total: self.questions.len(),
+        }
+    }
+
+    /// Record `answer` and advance. Returns the next question's view model, or
+    /// `None` once every question has been answered.
+    fn advance(&mut self, answer: UserAnswer) -> Option<QuestionPrompt> {
+        self.answers.push(answer);
+        self.index += 1;
+        (self.index < self.questions.len()).then(|| self.view())
+    }
+
+    /// Answer whatever is left as dismissed and send the result.
+    fn finish(mut self) {
+        while self.answers.len() < self.questions.len() {
+            self.answers.push(UserAnswer::Dismissed);
+        }
+        let _ = self.reply.send(self.answers);
+    }
+}
+
+/// The channels the turn uses to reach the user: approvals and questions. They
+/// travel together because every helper that can run a turn has to be able to
+/// service both while it waits.
+struct UserChannels {
+    approvals: mpsc::UnboundedReceiver<ApprovalCall>,
+    questions: mpsc::UnboundedReceiver<QuestionCall>,
+}
+
+/// What the event loop is waiting for the user to answer. Named to avoid the
+/// `Poll::Pending` the `select!` expansion brings into scope.
+enum PendingAsk {
+    /// A tool-approval decision.
+    Approval(oneshot::Sender<bool>),
+    /// A set of `ask_user` questions.
+    Questions(PendingQuestions),
 }
 
 /// Host context needed by slash commands that leave pure UI state and run CLI
@@ -151,26 +214,6 @@ struct TuiApprover {
     tx: mpsc::UnboundedSender<ApprovalCall>,
 }
 
-struct TuiElicitor {
-    tx: mpsc::UnboundedSender<ElicitationCall>,
-}
-
-impl UserElicitor for TuiElicitor {
-    fn ask(
-        &self,
-        request: ElicitationRequest,
-    ) -> Pin<Box<dyn Future<Output = ElicitationOutcome> + Send + '_>> {
-        let (reply, answer) = oneshot::channel();
-        let sent = self.tx.send(ElicitationCall { request, reply });
-        Box::pin(async move {
-            if sent.is_err() {
-                return ElicitationOutcome::Cancelled;
-            }
-            answer.await.unwrap_or(ElicitationOutcome::Cancelled)
-        })
-    }
-}
-
 impl Approver for TuiApprover {
     fn approve<'a>(
         &'a self,
@@ -187,6 +230,35 @@ impl Approver for TuiApprover {
                 return false;
             }
             answer.await.unwrap_or(false)
+        })
+    }
+}
+
+/// A [`UserPrompter`] that suspends the turn and asks the user through the TUI.
+struct TuiPrompter {
+    tx: mpsc::UnboundedSender<QuestionCall>,
+}
+
+impl UserPrompter for TuiPrompter {
+    fn ask<'a>(
+        &'a self,
+        questions: &'a [UserQuestion],
+    ) -> Pin<Box<dyn Future<Output = Vec<UserAnswer>> + Send + 'a>> {
+        let (reply, answer) = oneshot::channel();
+        let sent = self.tx.send(QuestionCall {
+            questions: questions.to_vec(),
+            reply,
+        });
+        let count = questions.len();
+        Box::pin(async move {
+            // A closed channel (UI gone) is a dismissal, never an invented
+            // answer — the same rule the approver follows for a denial.
+            if sent.is_err() {
+                return vec![UserAnswer::Dismissed; count];
+            }
+            answer
+                .await
+                .unwrap_or_else(|_| vec![UserAnswer::Dismissed; count])
         })
     }
 }
@@ -326,15 +398,10 @@ pub async fn run_chat(
     // Ask-gated actions suspend the turn and prompt in the TUI; the user's
     // y/n answer flows back through this channel to the permission engine.
     let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-    let (elicitation_tx, mut elicitation_rx) = mpsc::unbounded_channel::<ElicitationCall>();
-    let mcp_tools = crate::mcp::McpTools::load(&config).await;
-    let mut registry = if chat_ui == ChatUi::Fullscreen {
-        mcp_tools.registry_with_builtin(Box::new(AskUser::new(Arc::new(TuiElicitor {
-            tx: elicitation_tx,
-        }))))
-    } else {
-        mcp_tools.registry()
-    };
+    // `ask_user` suspends the turn the same way, and the user's choice flows
+    // back through this one.
+    let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
     let broker = crate::mcp::install_broker(&config.tools, &mut registry);
     timer.mark("mcp servers + tools");
     // Interactive session: apply the built-in safety rails so an unconfigured
@@ -343,6 +410,9 @@ pub async fn run_chat(
     // interactive turn is legitimate and the user can cancel it. Explicit
     // `[harness]` values win inside `resolved_rails`.
     let rails = config.harness.resolved_rails(true);
+    let prompter = Arc::new(TuiPrompter {
+        tx: question_tx.clone(),
+    });
     let mut runtime = SessionRuntime::new(
         provider,
         registry,
@@ -373,6 +443,7 @@ pub async fn run_chat(
             tool_marker_enabled: config.tools.marker,
             enforce_readable_errors: config.tools.readable_errors,
             repair_mode: config.tools.repair,
+            elide_seen_reads: config.tools.elide_seen_reads,
             turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
             verify_before_done: config.harness.verify_before_done,
             verify_command: config.harness.verify_command.clone(),
@@ -382,6 +453,10 @@ pub async fn run_chat(
     );
     timer.mark("runtime (store + workspace)");
     runtime.set_broker(broker);
+    // The REPL is the one surface with a human on it, so it is the one that
+    // wires the prompter. Every headless caller leaves it unset and `ask_user`
+    // reports itself unavailable instead of waiting.
+    runtime.set_prompter(prompter);
     if let Some(agents) = crate::agents_cmd::session_agents(&cwd) {
         runtime.set_agents(agents);
     }
@@ -482,7 +557,7 @@ pub async fn run_chat(
             crate::fullscreen::HostContext {
                 runtime: &mut runtime,
                 approval_rx: &mut approval_rx,
-                elicitation_rx: &mut elicitation_rx,
+                question_rx: &mut question_rx,
                 cwd: &cwd,
                 history: &history,
                 ingest: &config.ingest,
@@ -497,6 +572,11 @@ pub async fn run_chat(
             presentation: exit.presentation,
         });
     }
+
+    let mut prompts = UserChannels {
+        approvals: approval_rx,
+        questions: question_rx,
+    };
 
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
@@ -560,7 +640,7 @@ pub async fn run_chat(
                 &mut terminal,
                 &mut state,
                 &mut runtime,
-                &mut approval_rx,
+                &mut prompts,
                 CommandHost {
                     approval_tx,
                     cwd: &cwd,
@@ -614,12 +694,11 @@ pub(crate) fn prepare_fullscreen_resume(
                     _ => StartupItem::Assistant(text),
                 }));
             }
-            if let Some((input_tokens, output_tokens)) =
-                stored_session_usage(runtime.store(), session)
-            {
+            if let Some(usage) = stored_session_usage(runtime.store(), session) {
                 startup.push(StartupItem::Usage {
-                    input_tokens,
-                    output_tokens,
+                    input_tokens: usage.effective_input_tokens(),
+                    output_tokens: usage.output_tokens,
+                    cached_input_tokens: usage.cache_read_input_tokens,
                 });
             }
             let (used, limit) = runtime.context_usage();
@@ -636,18 +715,25 @@ pub(crate) fn prepare_fullscreen_resume(
 pub(crate) fn stored_session_usage(
     store: &Store,
     session: localpilot_core::SessionId,
-) -> Option<(u64, u64)> {
+) -> Option<TokenUsage> {
     let events = store.read_events(session).ok()?;
-    let mut usage = None::<(u64, u64)>;
+    let mut usage = None::<TokenUsage>;
     for event in events {
         if let localpilot_store::SessionEventKind::UsageReported {
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
         } = event.kind
         {
-            let (input, output) = usage.get_or_insert((0, 0));
-            *input = input.saturating_add(input_tokens);
-            *output = output.saturating_add(output_tokens);
+            usage
+                .get_or_insert_with(TokenUsage::default)
+                .accumulate(TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                });
         }
     }
     usage
@@ -657,7 +743,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     host: CommandHost<'_>,
 ) -> anyhow::Result<()> {
     let mut paste_burst = PasteBurst::default();
@@ -704,7 +790,7 @@ async fn event_loop(
                     } else if handle_paste_burst(state, &mut paste_burst, key, buffered_after) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
-                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submit_current_input(terminal, state, runtime, prompts, &host).await?;
                         submitted = true;
                     } else if slash_picker_captures(state, key) || file_picker_captures(state, key)
                     {
@@ -714,7 +800,7 @@ async fn event_loop(
                     } else if is_newline(key, &state.input) {
                         state.insert_input_newline();
                     } else if is_submit(key, &state.input) {
-                        submit_current_input(terminal, state, runtime, approval_rx, &host).await?;
+                        submit_current_input(terminal, state, runtime, prompts, &host).await?;
                         submitted = true;
                     } else if let Some(mapped) = map_key(key) {
                         handle_input(state, AppInput::Key(mapped));
@@ -770,7 +856,7 @@ async fn submit_current_input(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     host: &CommandHost<'_>,
 ) -> anyhow::Result<()> {
     // Expand collapsed pastes for the model, but keep the compact form in the
@@ -801,7 +887,7 @@ async fn submit_current_input(
     }
     let result = if let Some(action) = parse_slash(&prompt) {
         // A slash command takes no image attachments; the captured set is dropped.
-        run_slash(terminal, state, runtime, approval_rx, host, action).await
+        run_slash(terminal, state, runtime, prompts, host, action).await
     } else {
         // The image placeholders are stand-ins for the attachment blocks, so strip
         // them from the text the model receives while leaving `shown` intact.
@@ -820,14 +906,14 @@ async fn submit_current_input(
         if state.mode == Mode::Research {
             // In research mode a bare prompt is a topic to research (web per
             // config, ADR-0076), not a model turn.
-            run_research_prompt(terminal, state, approval_rx, host, &model_prompt).await
+            run_research_prompt(terminal, state, prompts, host, &model_prompt).await
         } else {
             state.busy = true;
             let outcome = run_turn(
                 terminal,
                 state,
                 runtime,
-                approval_rx,
+                prompts,
                 &model_prompt,
                 &attachments,
             )
@@ -848,7 +934,7 @@ async fn run_slash(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     host: &CommandHost<'_>,
     action: SlashAction,
 ) -> anyhow::Result<()> {
@@ -986,7 +1072,7 @@ async fn run_slash(
             let summary = drive_runtime_operation(
                 terminal,
                 state,
-                approval_rx,
+                prompts,
                 &mut rx,
                 &cancel,
                 std::time::Instant::now(),
@@ -1037,12 +1123,12 @@ async fn run_slash(
         SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
-            run_harness_command(terminal, state, approval_rx, host, false).await?;
+            run_harness_command(terminal, state, prompts, host, false).await?;
         }
         SlashAction::WaitResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
-            run_harness_command(terminal, state, approval_rx, host, true).await?;
+            run_harness_command(terminal, state, prompts, host, true).await?;
         }
         SlashAction::Model { provider, model } => {
             run_model_command(state, runtime, host.cwd, provider, model).await;
@@ -1096,7 +1182,7 @@ async fn run_slash(
             // current mode unchanged.
             Some(topic) => {
                 state.apply(UiEvent::UserMessage(format!("/research {topic}")));
-                run_research_prompt(terminal, state, approval_rx, host, &topic).await?;
+                run_research_prompt(terminal, state, prompts, host, &topic).await?;
             }
             // A bare `/research` enters persistent research mode. The notice
             // reflects the configured egress state (ADR-0076) rather than a
@@ -1894,7 +1980,7 @@ fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::R
 async fn run_research_prompt(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     host: &CommandHost<'_>,
     topic: &str,
 ) -> anyhow::Result<()> {
@@ -1942,7 +2028,7 @@ async fn run_research_prompt(
     let outcome = drive_runtime_operation(
         terminal,
         state,
-        approval_rx,
+        prompts,
         &mut rx,
         &cancel,
         std::time::Instant::now(),
@@ -1971,7 +2057,7 @@ fn apply_command_output(state: &mut AppState, output: Vec<u8>) {
 async fn run_harness_command(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     host: &CommandHost<'_>,
     wait_resume: bool,
 ) -> anyhow::Result<()> {
@@ -2026,16 +2112,7 @@ async fn run_harness_command(
     // captured above, so a mid-run profile swap has nothing to apply to —
     // profile slash commands keep the idle-only notice here.
     let summary = drive_runtime_operation(
-        terminal,
-        state,
-        approval_rx,
-        &mut rx,
-        &cancel,
-        started,
-        None,
-        None,
-        None,
-        operation,
+        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, operation,
     )
     .await;
     state.busy = false;
@@ -2051,7 +2128,7 @@ async fn run_turn(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     prompt: &str,
     attachments: &[ContentBlock],
 ) -> anyhow::Result<()> {
@@ -2076,7 +2153,7 @@ async fn run_turn(
     drive_runtime_operation(
         terminal,
         state,
-        approval_rx,
+        prompts,
         &mut rx,
         &cancel,
         started,
@@ -2092,7 +2169,7 @@ async fn run_turn(
 async fn drive_runtime_operation<F, T>(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    prompts: &mut UserChannels,
     rx: &mut broadcast::Receiver<RuntimeEvent>,
     cancel: &CancellationToken,
     started: std::time::Instant,
@@ -2106,8 +2183,8 @@ where
 {
     tokio::pin!(operation);
 
-    // The reply channel for an approval the user has not yet answered.
-    let mut pending: Option<oneshot::Sender<bool>> = None;
+    // What the user has been asked and has not yet answered.
+    let mut pending: Option<PendingAsk> = None;
     let mut paste_burst = PasteBurst::default();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2168,9 +2245,19 @@ where
                 state.apply(UiEvent::TurnComplete);
                 break result?;
             }
-            Some(call) = approval_rx.recv() => {
+            Some(call) = prompts.approvals.recv() => {
                 state.apply(UiEvent::ApprovalRequested(call.request));
-                pending = Some(call.reply);
+                pending = Some(PendingAsk::Approval(call.reply));
+            }
+            Some(call) = prompts.questions.recv() => {
+                let questions = PendingQuestions {
+                    questions: call.questions,
+                    index: 0,
+                    answers: Vec::new(),
+                    reply: call.reply,
+                };
+                state.apply(UiEvent::QuestionAsked(questions.view()));
+                pending = Some(PendingAsk::Questions(questions));
             }
             received = rx.recv() => {
                 match received {
@@ -2189,13 +2276,85 @@ where
     Ok(value)
 }
 
+/// Apply one terminal event while a question is open.
+///
+/// Navigation and typing go through the shared widget in `localpilot-tui`, so
+/// the deterministic loop and the REPL cannot drift. Only the two keys that
+/// *end* a question are handled here, because the answer has to be read out of
+/// the widget before it is cleared — the same division as the approval gate,
+/// where the UI shows the prompt and the REPL owns the reply.
+fn resolve_question_event(
+    state: &mut AppState,
+    mut questions: PendingQuestions,
+    event: Event,
+    cancel: &CancellationToken,
+) -> Option<PendingAsk> {
+    let Event::Key(key) = event else {
+        return Some(PendingAsk::Questions(questions));
+    };
+    if !is_key_action(key) {
+        return Some(PendingAsk::Questions(questions));
+    }
+    if is_cancel(key) {
+        // Cancelling the turn cancels the question: answer what is left as
+        // dismissed so the waiting tool call resolves rather than hanging.
+        state.apply(UiEvent::QuestionResolved);
+        questions.finish();
+        cancel.cancel();
+        return None;
+    }
+
+    let answer = match key.code {
+        KeyCode::Enter => {
+            let prompt = state.question.as_ref()?;
+            if prompt.on_other_row() && prompt.other.is_none() {
+                // The first Enter on the free-text row opens text entry.
+                None
+            } else if let Some(text) = prompt.other.as_ref() {
+                let text = text.trim();
+                Some(if text.is_empty() {
+                    UserAnswer::Dismissed
+                } else {
+                    UserAnswer::Other(text.to_string())
+                })
+            } else {
+                Some(UserAnswer::Selected(prompt.chosen()))
+            }
+        }
+        KeyCode::Esc => {
+            let prompt = state.question.as_ref()?;
+            // In text entry, Esc backs out to the list; on the list it skips.
+            prompt.other.is_none().then_some(UserAnswer::Dismissed)
+        }
+        _ => None,
+    };
+
+    if let Some(mapped) = map_key(key) {
+        handle_input(state, AppInput::Key(mapped));
+    }
+    let Some(answer) = answer else {
+        return Some(PendingAsk::Questions(questions));
+    };
+    match questions.advance(answer) {
+        Some(next) => {
+            state.apply(UiEvent::QuestionAsked(next));
+            Some(PendingAsk::Questions(questions))
+        }
+        None => {
+            state.apply(UiEvent::QuestionResolved);
+            questions.finish();
+            None
+        }
+    }
+}
+
 /// Apply a terminal event received mid-turn. Approval dialogs capture their
 /// decision keys; otherwise Ctrl-C cancels while ordinary editing and paste
 /// events continue updating the next prompt.
 #[allow(clippy::too_many_arguments)] // the mid-turn event handler threads these
 fn resolve_event(
     state: &mut AppState,
-    pending: Option<oneshot::Sender<bool>>,
+    pending: Option<PendingAsk>,
     event: Event,
     cancel: &CancellationToken,
     steer: Option<&localpilot_harness::SteerQueue>,
@@ -2203,13 +2362,13 @@ fn resolve_event(
     permissions: Option<&PermissionEngineHandle>,
     paste_burst: &mut PasteBurst,
     buffered_after: bool,
-) -> Option<oneshot::Sender<bool>> {
-    if let Some(reply) = pending {
+) -> Option<PendingAsk> {
+    if let Some(PendingAsk::Approval(reply)) = pending {
         let Event::Key(key) = event else {
-            return Some(reply);
+            return Some(PendingAsk::Approval(reply));
         };
         if !is_key_action(key) {
-            return Some(reply);
+            return Some(PendingAsk::Approval(reply));
         }
         if is_cancel(key) {
             let _ = reply.send(false);
@@ -2228,8 +2387,13 @@ fn resolve_event(
                 state.apply(UiEvent::ApprovalResolved);
                 None
             }
-            None => Some(reply),
+            None => Some(PendingAsk::Approval(reply)),
         }
+    } else if let Some(questions) = match pending {
+        Some(PendingAsk::Questions(questions)) => Some(questions),
+        _ => None,
+    } {
+        resolve_question_event(state, questions, event, cancel)
     } else {
         match event {
             Event::Key(key) if is_key_action(key) => {
@@ -2614,13 +2778,16 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
             output,
         }),
         RuntimeEvent::Usage(usage) => Some(UiEvent::Usage {
-            tokens_in: usage.input_tokens,
+            // The whole prompt the model saw, cached prefix included, so a cache
+            // hit does not appear to shrink the input.
+            tokens_in: usage.effective_input_tokens(),
             tokens_out: usage.output_tokens,
             tokens_per_sec: if elapsed_secs > 0.0 {
                 usage.output_tokens as f64 / elapsed_secs
             } else {
                 0.0
             },
+            cached_in: usage.cache_read_input_tokens,
         }),
         RuntimeEvent::ContextUsage { used, limit } => Some(UiEvent::ContextUsage {
             context_used: used,
@@ -3004,30 +3171,6 @@ mod tests {
     use super::*;
     use localpilot_tui::TranscriptLine;
 
-    #[tokio::test]
-    async fn tui_elicitor_round_trips_answers_and_cancels_when_the_host_closes() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let elicitor = TuiElicitor { tx };
-        let request = ElicitationRequest {
-            question: "Pick one".to_string(),
-            options: vec!["Red".to_string(), "Blue".to_string()],
-        };
-
-        let answer = elicitor.ask(request.clone());
-        let call = rx.recv().await.expect("question forwarded to host");
-        assert_eq!(call.request, request);
-        call.reply
-            .send(ElicitationOutcome::Answered("Blue".to_string()))
-            .expect("host answer accepted");
-        assert_eq!(
-            answer.await,
-            ElicitationOutcome::Answered("Blue".to_string())
-        );
-
-        drop(rx);
-        assert_eq!(elicitor.ask(request).await, ElicitationOutcome::Cancelled);
-    }
-
     #[test]
     fn full_screen_git_status_is_best_effort_and_truthful() {
         let directory = tempfile::tempdir().expect("temporary git workspace");
@@ -3334,11 +3477,20 @@ mod tests {
                     localpilot_store::SessionEventKind::UsageReported {
                         input_tokens,
                         output_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                     },
                 )
                 .expect("append usage");
         }
-        assert_eq!(stored_session_usage(&store, session), Some((107, 23)));
+        assert_eq!(
+            stored_session_usage(&store, session),
+            Some(TokenUsage {
+                input_tokens: 107,
+                output_tokens: 23,
+                ..TokenUsage::default()
+            })
+        );
     }
 
     #[test]
@@ -3366,6 +3518,140 @@ mod tests {
                 !is_live_slash(&action),
                 "{input} must wait for the turn to finish"
             );
+        }
+    }
+
+    fn ui_state() -> AppState {
+        AppState::new(
+            Header {
+                version: "0.1.0".to_string(),
+                provider: "local".to_string(),
+                model: "test-model".to_string(),
+                workspace: "demo".to_string(),
+                session_id: "ab12cd34".to_string(),
+                session_name: None,
+                update: None,
+            },
+            Mode::Agent,
+            UiProfile::Default,
+        )
+    }
+
+    fn one_question() -> Vec<UserQuestion> {
+        vec![UserQuestion {
+            header: Some("Storage".to_string()),
+            question: "Which store?".to_string(),
+            options: vec![
+                localpilot_tools::QuestionOption {
+                    label: "SQLite".to_string(),
+                    description: None,
+                },
+                localpilot_tools::QuestionOption {
+                    label: "Postgres".to_string(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }]
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn open_questions(
+        state: &mut AppState,
+        questions: Vec<UserQuestion>,
+    ) -> (PendingAsk, oneshot::Receiver<Vec<UserAnswer>>) {
+        let (reply, answer) = oneshot::channel();
+        let pending = PendingQuestions {
+            questions,
+            index: 0,
+            answers: Vec::new(),
+            reply,
+        };
+        state.apply(UiEvent::QuestionAsked(pending.view()));
+        (PendingAsk::Questions(pending), answer)
+    }
+
+    #[tokio::test]
+    async fn answering_a_question_replies_on_the_channel_and_clears_the_state() {
+        let mut state = ui_state();
+        let (pending, answer) = open_questions(&mut state, one_question());
+        let cancel = CancellationToken::new();
+
+        // Move to the second option, then confirm.
+        let pending = resolve_question_event(
+            &mut state,
+            unwrap_questions(pending),
+            key(KeyCode::Down),
+            &cancel,
+        );
+        let pending = resolve_question_event(
+            &mut state,
+            unwrap_questions(pending.expect("still open")),
+            key(KeyCode::Enter),
+            &cancel,
+        );
+        assert!(pending.is_none(), "the question is resolved");
+        assert!(state.question.is_none(), "and cleared from the UI");
+        assert_eq!(
+            answer.await.unwrap(),
+            vec![UserAnswer::Selected(vec!["Postgres".to_string()])]
+        );
+        assert!(!cancel.is_cancelled(), "answering never cancels the turn");
+    }
+
+    #[tokio::test]
+    async fn esc_on_the_list_dismisses_without_inventing_an_answer() {
+        let mut state = ui_state();
+        let (pending, answer) = open_questions(&mut state, one_question());
+        let cancel = CancellationToken::new();
+        let pending = resolve_question_event(
+            &mut state,
+            unwrap_questions(pending),
+            key(KeyCode::Esc),
+            &cancel,
+        );
+        assert!(pending.is_none());
+        assert_eq!(answer.await.unwrap(), vec![UserAnswer::Dismissed]);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_during_a_question_cancels_the_turn_and_still_answers_the_call() {
+        let mut state = ui_state();
+        let (pending, answer) = open_questions(&mut state, one_question());
+        let cancel = CancellationToken::new();
+        let ctrl_c = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        let pending =
+            resolve_question_event(&mut state, unwrap_questions(pending), ctrl_c, &cancel);
+        assert!(pending.is_none());
+        assert!(cancel.is_cancelled(), "Ctrl-C cancels the turn");
+        // The waiting tool call still resolves rather than hanging.
+        assert_eq!(answer.await.unwrap(), vec![UserAnswer::Dismissed]);
+    }
+
+    #[tokio::test]
+    async fn a_closed_channel_yields_dismissed_never_an_invented_answer() {
+        let (tx, rx) = mpsc::unbounded_channel::<QuestionCall>();
+        drop(rx);
+        let prompter = TuiPrompter { tx };
+        let answers = prompter.ask(&one_question()).await;
+        assert_eq!(answers, vec![UserAnswer::Dismissed]);
+    }
+
+    /// Unwrap the question arm of a pending ask, for tests that only drive that
+    /// path.
+    fn unwrap_questions(pending: PendingAsk) -> PendingQuestions {
+        match pending {
+            PendingAsk::Questions(questions) => questions,
+            PendingAsk::Approval(_) => panic!("expected a pending question"),
         }
     }
 }

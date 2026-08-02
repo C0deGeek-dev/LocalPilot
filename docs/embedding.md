@@ -1,15 +1,140 @@
 # Embedding and Headless Drive
 
-Two supported ways to drive LocalPilot without its own UI, in order of
+Three supported ways to drive LocalPilot without its own UI, in order of
 preference:
 
 1. **In-process embedding** — link the crates and own a `SessionRuntime`.
 2. **`localpilot rpc`** — newline-delimited JSON over stdin/stdout for hosts
    in another language or process.
+3. **`localpilot serve` + `localpilot connect`** — an **opt-in** local-IPC
+   server that hosts sessions in one long-lived process, so several clients can
+   attach to the same session at once (see below).
 
 There is deliberately no HTTP server and no packaged product SDK: the library
 surface below is the embedding contract, and the RPC protocol is its
 process-boundary mirror.
+
+The third option is the **opt-in local-IPC server transport** (the
+`localpilot-server` crate): a framed transport over a Unix domain socket or a
+Windows named pipe, plus daemon lifecycle (detached spawn, a retry-connect ready
+handshake, single-owner exclusivity), a registry that hosts many sessions in one
+process, and a per-session host layer for multi-client fanout and out-of-band
+control (below). It is still local-only — not an HTTP server and not a product
+SDK — and reuses the same LF-delimited JSON framing as the stdio path. It is
+strictly opt-in: it runs only when you invoke `serve`/`connect`, and the default
+in-process `chat`/`ask`/`print`/`harness` path is byte-for-byte unchanged and
+never starts it.
+
+### Multi-client fanout and out-of-band control (server crate)
+
+When several client connections attach to one session, the `localpilot-server`
+`host` module (`SessionHost`) gives them a shared view and lets control reach a
+running turn without waiting for it:
+
+- **Fanout.** A `SessionHost` owns a *session-lifetime* `broadcast` sender (not
+  one per turn). `subscribe()` hands each connection its own receiver; a driven
+  turn streams every `RuntimeEvent` into that one sender, so all attached
+  clients — including one that attaches mid-turn — see the same stream.
+  `broadcast` tracks its own receivers: a dropped client prunes itself and never
+  errors the driver, and a client that falls more than the channel capacity
+  behind observes `RecvError::Lagged` and resynchronises instead of stalling the
+  turn. `subscriber_count()` reports the live attach count.
+- **Out-of-band control.** `drive(input)` locks the session for the turn and
+  publishes that turn's `CancellationToken` into a short slot *before* awaiting
+  it. `cancel()` reads that slot and cancels the token; `steer(text)` pushes onto
+  the runtime's steer queue (extracted once at construction). Neither takes the
+  session's async mutex, so both land while `drive` holds it — cancel stops the
+  in-flight turn at its next cancellation check (a safe boundary or an executing
+  tool, both raced against the token), and a steer is admitted at the next safe
+  provider-turn boundary as a user message. `is_busy()` / `status()` read the
+  same slot, so a status snapshot never blocks on a running turn. A small
+  `control(Control::{Cancel, Steer, Status})` dispatch maps a decoded control
+  request onto these methods, ready for a transport to route control frames
+  through.
+
+This is the library surface the `serve`/`connect` commands drive over the wire
+(see [Running the opt-in server](#running-the-opt-in-server-serve--connect)).
+
+### Attaching to a session (server crate)
+
+The server transport is **one connection = one session**: a connection names
+its session exactly once, then is bound to it. It does that with an *attach*
+handshake rather than tagging every message with a session id. The shared RPC
+envelope carries one additive command and one additive confirmation:
+
+- **`attach`** (`ClientCommand::Attach { target }`) is the first thing a
+  connection sends. Its `target` is internally tagged by `mode`:
+  - `open_new` — open and bind a brand-new session;
+  - `resume_id` — resume the session with `session_id` (a UUID);
+  - `resume_name` — resume the session carrying `name`.
+- **`attached`** (`ServerEvent::Attached { session_id, server_version }`)
+  confirms the bind and reports the id the connection is now bound to.
+
+```text
+→ {"v":1,"id":"1","command":{"type":"attach","target":{"mode":"open_new"}}}
+← {"v":1,"id":"1","event":{"type":"attached","session_id":"…","server_version":"2.6.0"}}
+
+→ {"v":1,"command":{"type":"attach","target":{"mode":"resume_name","name":"nightly"}}}
+← {"v":1,"event":{"type":"attached","session_id":"…","server_version":"2.6.0"}}
+```
+
+Server-side, `localpilot-server`'s `attach(target, &registry, &factory, &store)`
+routes `open_new` → `open_new`, `resume_id` → `resume_by_id`, and `resume_name`
+→ `resume_by_name`, returning the bound `SessionId` (the caller then builds a
+`SessionHost` from `registry.get(id)`). An unknown id or name is a typed
+`AttachError` (`UnknownId` / `UnknownName`) the transport renders as an
+`error` event — never a panic. Resume-by-id is guarded against a never-seen id
+so it cannot silently mint an empty session under a caller-chosen id.
+
+**Additive evolution.** `server_version` (the server build, `SERVER_VERSION`)
+is `#[serde(default)]` and skipped when empty, so a payload written by an older
+peer that predates the field still deserializes — the field simply fills in
+empty — and a default value never bloats the wire. This is the discipline for
+every field added hereafter: default it and/or skip it when absent, so
+forward/backward compatibility holds without a second version handshake. The
+explicit `RPC_PROTOCOL_VERSION` still gates wire compatibility in `hello`; the
+serde-default discipline *coexists* with it for per-field evolution rather than
+replacing it. The `serve`/`connect` commands drive this handshake — see
+[Running the opt-in server](#running-the-opt-in-server-serve--connect).
+
+### Running the opt-in server (`serve` / `connect`)
+
+The server is off unless you start it, and it is scoped to one workspace: the
+endpoint address is derived from the workspace root, so two projects never
+collide. Nothing about `chat`/`ask`/`print`/`harness` changes — those stay
+in-process (ADR/D003).
+
+Start a server for the current workspace (foreground, `Ctrl-C` to stop):
+
+```console
+$ localpilot serve                 # uses the workspace's default model/provider
+$ localpilot serve --model <name> --provider <id> --bypass
+```
+
+`serve` acquires a single-owner lock first: if a server is already running for
+this workspace it prints that and exits cleanly rather than double-serving.
+
+Attach a client (plain text: stdin lines become prompts; session events stream
+to stdout):
+
+```console
+$ localpilot connect               # opens a new session
+$ localpilot connect --resume <id|name>   # resumes an existing session
+$ localpilot connect --server      # start a server first if none is running
+```
+
+Several `connect` clients can attach to the **same** session at once — open one
+with `connect`, note the session id it prints, and attach another with
+`connect --resume <id>`. Every attached client sees the same event stream (the
+turn's text, tool activity, and stop), and any of them can drive a turn, steer
+it, cancel it, or read `status`. In the plain-text client, a permission ask is
+answered by typing `/allow` or `/deny`; `Ctrl-C` cancels the running turn.
+
+Under the hood each connection sends one `attach` (open-new / resume-by-id /
+resume-by-name), the server confirms with `attached`, and the connection is
+bound to that session for its lifetime — the exact handshake documented above.
+Detaching a client (EOF, or a `shutdown` command) leaves the session running
+for any other attached client.
 
 ## In-process embedding
 
@@ -68,8 +193,16 @@ What the host owns:
   `Approver` implementation; the engine's verdicts cannot be bypassed,
 - **cancellation** via the `CancellationToken`,
 - **steering**: clone `runtime.steer_queue()` before a turn and push text into
-  it while the turn runs; it is admitted at the next safe provider-turn
-  boundary.
+  it while the turn runs; it is admitted at the next safe provider-turn boundary.
+  `push(text)` queues a normal user steer; `push_interrupt(SoftInterrupt { .. })`
+  queues a typed soft interrupt carrying a source (`user` / `system` /
+  `background_task`) and an `urgent` flag. A non-user message is labelled so it
+  does not read as user-typed input; an urgent interrupt is admitted between tool
+  calls (skipping the rest of the batch). A steer arriving as a turn would finish
+  keeps the turn going so the model sees it. Every injection is recorded as a
+  `SoftInterruptInjected` event in the session log. (The system/background-task
+  producer path is a library surface for future work; only user steering produces
+  interrupts today.)
 
 What the runtime guarantees is the reliability contract in
 [`docs/06`](06-harness-spec.md) and [`docs/07`](07-security-and-privacy.md):

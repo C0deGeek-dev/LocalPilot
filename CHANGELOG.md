@@ -22,8 +22,13 @@ is SemVer-stable; the configuration schema stability policy is in
   projections, restores the workspace-trust gate and durable prompt history,
   submits through the existing `SessionRuntime`, streams stable timeline items,
   shows a live response-byte counter, denies tool approvals safely, and keeps an
-  ordered visible pending-prompt queue. Escape cancels the current turn and then
-  drains that queue in submission order. Collapsed tool rows now include a
+  ordered visible pending-operation queue. During an active model turn, Escape
+  promotes the leading plain-text prompts into urgent, ordered steering: the
+  incomplete provider response remains visible but does not enter model history,
+  and the same turn restarts with the new direction. A queued shell or image is
+  an ordering barrier, so Escape hard-cancels the current turn and preserves the
+  original follow-up order instead of skipping ahead; Ctrl+C remains the direct
+  hard-cancel path. Collapsed tool rows now include a
   truthful output-line count before their expandable detail, and the theme
   picker uses a readable refactor sample for its semantic color preview. The
   full-screen host also supports
@@ -32,11 +37,12 @@ is SemVer-stable; the configuration schema stability policy is in
   the timeline and atomic text paste in the composer, boundary-aware history,
   reverse and timeline search, fuzzy slash/file completion, atomic compact
   multiline paste, and clipboard-image placeholders whose bytes stay out of
-  prompt history. The full-screen-only `ask_user` tool now pauses a model turn
-  in a numbered choice dialog with an automatic free-text Other option, resolves
-  the same timeline row with the answer, and cancels explicitly without guessing
-  when the user presses Escape or the host closes. Workspace trust now uses the
-  same full-width, numbered, keyboard/mouse-focusable timeline treatment, with
+  prompt history. The shared `ask_user` tool now pauses a model turn for up to
+  four ordered questions; the full-screen host presents numbered single- or
+  multi-select choices with descriptions and an automatic free-text Other row,
+  resolves each timeline row with the answer, and dismisses explicitly without
+  guessing when the user presses Escape or the host closes. Workspace trust now
+  uses the same full-width, numbered, keyboard/mouse-focusable timeline treatment, with
   distinct session-only, remember, and deny choices plus explicit screen-reader
   selection text; session-only trust does not write the trusted-folder list.
   Ctrl+G temporarily restores
@@ -46,6 +52,445 @@ is SemVer-stable; the configuration schema stability policy is in
   conversation surfaces, accessibility and the remaining terminal matrix remain
   branch work; the temporary selector is removed when feature parity is
   accepted.
+- **Added: `localpilot selfdev` — build, vet, publish, and reload LocalPilot from
+  its own source.** `selfdev build` fingerprints the working tree and builds it;
+  `selfdev publish` runs the build through the publish gauntlet and, only if it
+  passes, installs the binary immutably and points a channel at it, then reclaims
+  old versions beyond the most recent few (a version a channel points at is never
+  reclaimed); `selfdev gc` runs that reclaim on demand; `selfdev status` shows
+  what is installed, what each channel points at, and the auto-reload breaker's
+  state; and `selfdev reload -- <args>` builds, vets, promotes, and then swaps this
+  process onto the new binary running `<args>`. Everything here is the manual
+  capability — a developer or a CI job drives it explicitly (`reload` swaps the
+  process only because you asked it to, and carries no session continuation). The
+  autonomous in-session loop, where the model builds and reloads itself
+  mid-session, is a separate opt-in this build does not ship (ADR-0128).
+
+- **Added: reload is safe to fail — a rollback token, a no-phantom version
+  comparison, and a circuit breaker.** Before a channel is pointed at a new build,
+  what it pointed at before is recorded; if the new build does not come up, the
+  channel is rolled back to the previous version. An auto-reload triggers only when
+  the candidate is *provably* newer — both timestamps readable and the candidate
+  strictly newer — so an unreadable timestamp is treated as "no update", never as
+  "newer forever". And a durable counter bounds how many times auto-reload may be
+  attempted, incremented before each relaunch so a relaunch that never returns
+  still counts and a looping process cannot reset it by restarting. There is
+  deliberately no crash-detect-and-revert loop (see ADR-0128).
+
+- **Added: the in-place reload primitives — swap onto a freshly built binary and
+  continue the session on the other side.** Before the swap, everything durable is
+  written first — the new binary is installed immutably, the channel is pointed at
+  it, and a continuation intent naming the session and its in-flight task is
+  recorded — because a process replacement runs no destructors. The swap itself is
+  one small step that differs by platform (replace the process in place on Unix,
+  spawn the successor and exit on Windows) behind a single seam, launching the
+  concrete immutable binary so a later build can never overwrite what is running.
+  On the far side, the resumed session reads the intent and continues on its own
+  with a hidden "reload succeeded; carry on" prompt. The intent is durable, read
+  without being consumed, and marked delivered only once the continuation
+  completes, so a restart that dies mid-continuation retries and one that succeeds
+  is never replayed. These are the building blocks; the command that drives them
+  is an opt-in developer surface, off by default.
+
+- **Added: graceful shutdown for a running turn.** A host can now ask a turn to
+  *wind down* instead of cancelling it. Where cancelling discards — aborting the
+  in-flight tool and throwing the turn away — a graceful shutdown finishes safely:
+  it stops at the next boundary, answers every pending tool call so the transcript
+  stays valid and resumable, and flushes the session first. A tool whose whole job
+  is to wait is answered with a non-error result that carries its exact original
+  input, so the model can re-issue the identical call after the process returns;
+  any tool that changes something is answered as interrupted, because repeating it
+  would repeat the effect. This is the safe-stop primitive an in-place update or
+  reload needs, since a process replacement runs no destructors.
+
+- **Added: a publish gauntlet that refuses to promote a stale or broken build,
+  and `localpilot version --json`.** The new flag prints this binary's own build
+  identity — version, commit hash, and source fingerprint — as one JSON line. The
+  gauntlet reads it and holds a candidate to three checks before any channel may
+  point at it: its embedded hash *and* fingerprint must match the source it was
+  built from (so a rebuild of different bytes at the same commit is caught, not
+  just a different commit); the source tree must not have changed while the build
+  ran; and the candidate must complete a real RPC handshake within a deadline —
+  proof it can boot its config, provider, tools, and session and answer on the
+  wire, not merely print a version. A candidate that hangs is killed at the
+  deadline rather than waited on.
+
+- **Added: an immutable store for self-built versions, and marker-file channel
+  pointers.** Each self-dev build lands in its own directory named by its source
+  label and is never written to again; a rebuild of the same source is a no-op,
+  and a rebuild of different source is a different directory. Which build runs is
+  decided by a *channel pointer* — a small marker file naming a label — swapped
+  atomically by rename. So switching versions never overwrites a file a running
+  process was launched from, and the previous build stays intact and usable
+  behind it. The pointer is a plain file on every platform rather than a symlink,
+  so Windows behaves exactly like Linux and macOS and needs no elevated
+  privilege. Builds are copied into the store rather than hard-linked, on purpose:
+  the source is a live build-output path a later build rewrites, and a shared
+  inode would let that later build reach into a version already in use.
+
+- **Added: a source fingerprint, and a build that knows what it built.** A commit
+  hash answers "which commit", not "which bytes" — an uncommitted edit, a staged
+  hunk, and a stray new file all produce a different binary from the same `HEAD`.
+  LocalPilot can now reduce a working tree to one stable label: the short commit
+  hash when the tree is clean, and the hash plus a fingerprint over the status,
+  the diff, and the *contents* of untracked files when it is not. Returning a
+  tree to its earlier bytes returns its earlier label. A binary built from that
+  tree carries the identity with it, so a later step can refuse to ship a binary
+  that no longer matches the source it claims. The build that produces it keeps
+  to its own target directory and its own profile, and leaves a core free,
+  because the session that asked for the build is still running. The build script
+  now watches the repository only when it actually read something from it — a
+  caller that supplies the identity no longer pays for a full rebuild on every
+  commit.
+
+- **Added: `run_plan` — the swarm plan driver, and the prompts that go with it.**
+  A coordinator can now hand a whole task graph to the driver: it dispatches what
+  is ready, spawns a worker per task, and refills on each completion rather than
+  waiting for a whole wave. Each task carries an assignment contract in front of
+  its input, because a worker inherits none of the coordinator's prompt — so
+  "do this task and nothing else", "report what you established rather than what
+  you did", and, in depth mode, "say what you did not check" have to travel with
+  the work. A session that joins a swarm gets orchestration guidance appended to
+  its own prompt at that moment and not before. A worker that returns nothing or
+  times out is treated as gone and its task salvaged, rather than marked done on
+  the strength of silence. The run report says how much of the concurrency the
+  plan actually used, and explains it when the answer is "hardly any" — a chain
+  runs one worker at a time however large the budget, which is not a fault but is
+  worth saying out loud.
+
+- **Added: the swarm failure lifecycle.** A worker that dies holding an
+  assignment no longer strands the plan. Members heartbeat, and staleness is
+  measured from the last beat rather than from admission — a member that has
+  never beaten has not had the chance, and reaping it would reap every worker at
+  birth. A departed member's unfinished tasks return to the plan, bounded by a
+  per-task reclaim counter; past the budget the task is failed loudly, because a
+  task that keeps outliving its workers is failing rather than unlucky. Its
+  children are reparented onto the nearest surviving ancestor, and a departed
+  coordinator is replaced by the lowest surviving member id — deterministic, so
+  every observer elects the same successor without coordinating. A salvage report
+  naming each task and its fate reaches whoever now owns the work. A reaper
+  releases the hosting of finished members while keeping what they reported.
+  Durable per-swarm snapshots hold the plan and membership in their own stream,
+  so recovering a plan never requires replaying a transcript; writes are atomic,
+  keep a backup, and refuse to go backwards.
+
+- **Added: advisory file-conflict alerts.** When several agents share one
+  working tree, an agent that changes a file another agent is working in now
+  hears about it mid-turn. Every file-mutating builtin, and `read_file`, report
+  what they touched as typed data — path, operation, and the line range, computed
+  from the content that actually changed rather than from what the tool intended,
+  so `multi_edit` and `apply_patch` are covered as exactly as `write_file`. The
+  server keeps a short-lived index of who touched what and tells the peers a
+  change affects, over the same soft-interrupt path the rest of the swarm uses.
+  Two agents editing different parts of one file are left alone; two editing the
+  same lines are both told, and a prior *reader* is told its knowledge went
+  stale — in different words, because a reader has not lost work. The guarantee
+  is advisory and stated plainly: nothing is locked, nothing is blocked, and
+  nothing is rolled back. Both edits land, and git remains the merge substrate.
+
+- **Added: `swarm` — agent-to-agent messaging.** Sessions collaborating on one
+  repository can now message each other: `send` to one peer by name or id,
+  `broadcast` to the agents you spawned (the whole swarm only if you are the
+  coordinator), and `roster` to see who is here. Scope is the spawn tree, so one
+  worker cannot cost every other worker a turn. Delivery rides the same
+  soft-interrupt substrate as the user's own steering, in three modes —
+  `notify`, `interrupt`, and `wake` (which starts a turn on an idle recipient,
+  since there is nothing to interrupt). A long message requires a one-line
+  summary, because the recipient is mid-task and has to decide whether to break
+  off before reading the rest. Action verbs and field names are normalised, so a
+  model writing `dm`/`tell`/`msg` with the body under `text` or `content` is
+  understood rather than made to retry. The tool declares no effects and is
+  gated by a host capability instead: a session that is not in a swarm — nearly
+  every session — is told so and carries on.
+
+- **Added: swarm state and parallel headless workers for the opt-in server.** A
+  server can now host several sessions in one repository working on one plan.
+  Swarms are scoped by *repository* rather than by path — every git worktree of
+  one repo resolves to one swarm, read from git's own on-disk layout with no
+  `git` subprocess — so a worker spawned into a worktree joins the coordinator
+  instead of founding an invisible second swarm. Membership stores exactly one
+  structural edge (who a member reports back to) and derives children, ancestry,
+  and subtrees from it. Fan-out is bounded by two caps enforced as a
+  *reservation* taken before the expensive part: a lifetime member cap and a
+  concurrency budget, with idempotency keys so a retried spawn is answered rather
+  than starting a second worker. A worker is an ordinary hosted session, so
+  cancel, steer, event fanout, and reaping all work on it unchanged; when its
+  turn ends its answer is bounded, recorded, and injected into its spawner as a
+  labelled background message. A spawn that names a model is refused if the built
+  session is on a different one. Still strictly opt-in: nothing on the
+  single-agent path changed.
+
+- **Added: `localpilot-taskgraph`, a pure task-graph engine.** A new leaf crate
+  holding the plan several workers can share and the rules that keep it coherent
+  while they mutate it: validated `seed` / `expand` / `complete` /
+  `inject-from-gate` mutations, ownership and acyclicity checks, typed handoff
+  artifacts with a lenient confidence parser, derived (never stored) readiness,
+  and a deterministic simulator that runs a whole plan to completion with no live
+  agents. The crate has no LocalPilot dependencies and does no I/O, so it is
+  useful on its own — a single agent can decompose work into a graph, hydrate
+  each step with what earlier steps established, and have gates refuse a
+  completion that does not say what it left unchecked. Nothing is wired into the
+  session runtime yet.
+
+- **Added: multi-session resource pooling + session reaping for the opt-in
+  server.** A `serve` process now shares one provider stack and one MCP
+  connection pool across every hosted session — the MCP server subprocesses are
+  spawned once at start-up, and each session projects a fresh tool registry that
+  only *references* that one pool rather than re-spawning it, so N concurrent
+  sessions speak to one set of MCP servers, not N. Only the mutable per-session
+  state (the `SessionRuntime`, its transcript/compaction/config, a fresh
+  approver) is built per session, and it stays isolated between sessions. A new
+  periodic **reaper** keeps the resident set bounded: it removes a session once
+  its last client has been detached beyond a grace period, or it has gone idle
+  past a timeout, persisting the session's event log first
+  (`SessionRuntime::close`) and **never** touching a session with an in-flight
+  turn (it only closes what it can `try_lock`). Clean shutdown now stops the
+  reaper and persists every remaining session before releasing the endpoint.
+  Measured per-session resident-memory cost stays on the order of tens of KiB
+  (an `#[ignore]`d RAM soak records the numbers). Still strictly opt-in (D003):
+  the default in-process path is unchanged.
+
+- **Added: `localpilot serve` + `localpilot connect` — the opt-in local-IPC
+  server.** A new `serve` command hosts this workspace's sessions in one
+  long-lived process over the local transport (a Unix domain socket or a Windows
+  named pipe — never a network server), and `connect` is a thin plain-text
+  client that attaches over stdin/stdout (stdin lines become prompts, session
+  events stream to stdout; a permission ask is answered with `/allow`/`/deny`,
+  `Ctrl-C` cancels a turn). Several `connect` clients can attach to the **same**
+  session at once (`connect --resume <id|name>`): every client sees the same
+  event stream and any of them can drive, steer, cancel, or read `status`, with
+  fanout handled by the per-session host's broadcast. `serve` acquires a
+  single-owner lock first (a second `serve` for the same workspace reports the
+  running one and exits 0); `connect --server` starts a server first if none is
+  running. The wire is the existing `attach` handshake and the RPC event
+  vocabulary. **Strictly opt-in (D003):** none of this runs unless you invoke
+  `serve`/`connect`, and the default in-process `chat`/`ask`/`print`/`harness`
+  path is byte-for-byte unchanged. Internally, the stdio `rpc` command and the
+  server factory now build sessions through **one** shared recipe
+  (`SessionSetup::build`), so their runtime construction can never drift; the
+  `RuntimeEvent`→`ServerEvent` projection (`localpilot-rpc::map_event`) is now
+  public and shared by both. See
+  [docs/embedding.md](docs/embedding.md#running-the-opt-in-server-serve--connect)
+  and [docs/install.md](docs/install.md#running-the-optional-server).
+
+- **Internal/Added: connection-scoped session attach handshake + additive
+  protocol evolution.** The shared RPC envelope (`localpilot-rpc`) gains, purely
+  additively, a `ClientCommand::Attach { target }` command — where `target` is
+  `open_new` / `resume_id { session_id }` / `resume_name { name }` — and a
+  `ServerEvent::Attached { session_id, server_version }` confirmation, plus a
+  `SERVER_VERSION` constant. The server is one connection = one session: a
+  connection names its session once and is bound to it, rather than multiplexing
+  many sessions per connection. `localpilot-server` gains an `attach` dispatch
+  (`attach(target, &registry, &factory, &store)`) that routes each target to the
+  registry and returns the bound `SessionId`; an unknown id or name is a typed
+  `AttachError`, never a panic (resume-by-id is guarded so a never-seen id cannot
+  mint an empty ghost session). New fields follow an additive-evolution
+  discipline — `#[serde(default)]` and skipped-when-empty — so a payload from a
+  peer predating a field still deserializes without a second version handshake;
+  the existing `RPC_PROTOCOL_VERSION` negotiation is unchanged and coexists with
+  it. The existing single-session stdio RPC/ACP/MCP path is byte-for-byte
+  unchanged: a client that never sends `attach` behaves exactly as before. No
+  user-facing change — there is still no `serve`/`connect` command; this is the
+  protocol groundwork. See [docs/embedding.md](docs/embedding.md).
+
+- **Internal/Added: per-session multi-client fanout and lock-free out-of-band
+  control.** The `localpilot-server` crate gains a `host` module (`SessionHost`)
+  layered over a registry session handle. Several client connections can attach
+  to one session and all receive its `RuntimeEvent` stream through a
+  session-lifetime `broadcast` channel (a client attaching mid-turn still sees
+  subsequent events; a dropped client prunes itself without erroring the driver).
+  Cancel and steer reach an in-flight turn *without* taking the session's async
+  mutex that the running turn holds: `drive` publishes the turn's
+  `CancellationToken` into a short slot before awaiting it, so `cancel()`,
+  `steer()`, and `is_busy()`/`status()` operate on that slot and the steer queue
+  alone. A small `control(Control::{Cancel, Steer, Status})` dispatch maps a
+  decoded control request onto these methods. Built from safe `std` + `tokio`
+  only. No user-facing change: there is still no `serve`/`connect` command and no
+  wire protocol over the transport — this is the host-side substrate. See
+  [docs/embedding.md](docs/embedding.md).
+
+- **Added: the agent can ask you a question (ADR-0121).** A new `ask_user` tool
+  puts one to four multiple-choice questions to you inline in the TUI, driven
+  with the arrow keys like the slash and file pickers — Space toggles on a
+  multi-select question, Enter confirms, Esc skips, and a final row always
+  accepts free text. The system prompt carries the threshold with it (ask when
+  different readings would lead to materially different work, or before
+  something hard to undo; otherwise pick the obvious option and state the
+  assumption), so it does not turn into a permission prompt for everything.
+  Where no human is reachable — a piped run, a CI run, a subagent — the tool
+  says so and the model proceeds on its own judgment instead of stalling, and a
+  dismissed question hands the decision back rather than failing. The intake
+  guidance gate now asks through the same widget on a terminal, with the stdin
+  prompt unchanged everywhere else.
+
+- **Improved: configured documentation tools actually get used (ADR-0120).**
+  The agent prompt now carries a version-sensitive documentation policy — when a
+  task depends on current behaviour of an external library, framework, SDK, API,
+  CLI, or cloud service (upgrade errors, migrations, deprecated APIs, changed
+  config shapes), consult a documentation tool rather than prior knowledge —
+  in two forms: direct use when the tool set is fully advertised, and
+  `tool_search` → `tool_load` → call when the broker is on. It appears only when
+  a documentation tool is actually reachable, stays bounded (stable local
+  questions trigger no lookup), and names no vendor. Broker resolution also
+  gained a fallback for tools its own description never matched: the MCP server
+  name and schema property names/descriptions are indexed, and a generic
+  capability vocabulary bridges `upgrade`/`migration`/`version` to
+  `docs`/`documentation`/`reference` and `dependency` to `package`/`library`, so
+  a need like "`<library>` version upgrade problem" can reach a generically
+  named documentation tool. Tools that already matched rank exactly as before,
+  and each search hit now says why it matched.
+
+- **Added: path-scoped instruction files (ADR-0119).**
+  `.github/instructions/*.instructions.md` files are now discovered, and their
+  `applyTo` frontmatter glob (one glob, a comma-separated list, or a YAML list)
+  narrows a rule to the files it is about. A scoped file is injected only on
+  turns where a matching file is in play — the workspace files the session has
+  touched, plus any workspace file the prompt names outright — so a monorepo can
+  keep its Rust and web instructions apart instead of injecting both everywhere.
+  A scoped file without `applyTo` applies project-wide, and unscoped instruction
+  files (`Navigator.md`, `CLAUDE.md`, `AGENTS.md`,
+  `.github/copilot-instructions.md`) are never filtered.
+
+- **Fixed: a failing command no longer accuses `run_shell` of being stuck.** A
+  tool result now carries a three-state outcome (ADR-0116): a completed command
+  that exits non-zero, a non-2xx `fetch`, a background process dying in its
+  grace period, a refused delegation, or an MCP response with `isError: true`
+  is the *work* reporting failure, while only a tool that could not run at all
+  (spawn error, timeout, denial) counts as a malfunction. The ordinary
+  edit/test debugging loop no longer emits false `ToolStuck` warnings, the
+  repeated-failure nudge now says to change what produced the failing output
+  instead of suggesting the tool is broken, memory no longer learns "run_shell
+  failed N times" from red test runs, and the stuck-threshold message no longer
+  claims calls are being stopped when they are not. Old transcripts and event
+  logs keep parsing: the wire format is a strict superset.
+- **Fixed: `delegate` no longer reports success for a delegation that never
+  ran, and a remote MCP failure no longer arrives as `status: success`.** Both
+  now carry the reported-failure outcome with their text intact.
+- **Fixed: a tool error now takes the same redaction and output bounding as a
+  success (ADR-0117).** Error text — including synthesized denials and gate
+  blocks — is redacted and bounded at the dispatch chokepoint, so no result the
+  model sees bypasses the safety invariants.
+- **Improved: `print` mode now reports failures and survives event-stream lag
+  (ADR-0118).** The `handoff:` line gains `tool_failures`,
+  `reported_failures`, and `stuck_tools`; failing tool calls, warnings, and
+  stuck signals appear as bounded one-line stderr diagnostics while stdout
+  stays the answer alone; a printer that falls behind the event stream skips
+  the dropped events and keeps printing instead of silently truncating the
+  answer; and stderr writes are checked (a closed stderr silences diagnostics
+  without cancelling the turn).
+
+- **Internal/Added: opt-in local-IPC server transport groundwork.** A new
+  `localpilot-server` crate provides a cross-platform framed local transport
+  (Unix domain socket / Windows named pipe, reusing the existing LF-delimited
+  JSON framing) and daemon lifecycle (detached spawn, a retry-connect ready
+  handshake, and single-owner exclusivity with stale-endpoint reaping). Built
+  from safe `std` + `tokio` only — no `unsafe`, no `libc`/`nix`. No user-facing
+  change: there is no `serve`/`connect` command yet and no session hosting over
+  it; this is transport/lifecycle groundwork alongside the unchanged stdio
+  drive. (`localpilot-rpc` widened `JsonRecordReader` to `pub` so the new crate
+  reuses its framing instead of duplicating it.)
+
+- **Internal: the provider layer is split into isolated crates.**
+  `localpilot-llm` is now a thin umbrella over `localpilot-llm-core` (the shared
+  provider trait, stream events, errors, auth, headers, request shapes) and one
+  crate per adapter (`localpilot-llm-openai`, `localpilot-llm-anthropic`). Editing
+  an adapter re-checks only its ~1.5k-line crate instead of the whole provider
+  layer. No user-facing change — the public API, CLI, config, and provider
+  behaviour are byte-for-byte identical.
+
+- **Improved: `harness wait-resume` now actually waits and escalates.** On a
+  provider quota/rate limit the paused-run marker now records the real provider
+  id and a pause-attempt count that grows the backoff window across repeated
+  pauses (instead of a fixed window). `wait-resume` now waits out the pause
+  window — re-checking the safety gates and cancellation on a bounded poll,
+  honouring `quota.max_wait_minutes` — and then resumes, instead of printing an
+  ETA and exiting. Cancellation (Ctrl-C) ends the wait; an explicit `--provider`
+  that differs from the paused run is treated as a provider change.
+
+- **Added: `localpilot import claude-code`.** Import a Claude Code session
+  (`~/.claude/projects/.../<id>.jsonl`) as a resumable LocalPilot session. The
+  history is text-flattened — tool calls and results become plain-text markers
+  and provider-specific reasoning is dropped — so it resumes safely under any
+  provider; it is redacted on write like any session. Resume it by name with
+  `localpilot --resume imported_cc_<id>`; it shows a `[cc-import]` badge in
+  `session list`. A re-import never overwrites an existing session or steals its
+  name (use `--force` to import again under a new name).
+
+- **Added: already-seen read elision (opt-in).** With `[tools] elide_seen_reads`
+  on, a `read_file` that returns a file+range already read this session and
+  unchanged since (same mtime and length) is replaced with a compact stub
+  pointing at the earlier read, instead of re-spending the context on an
+  identical body — a real saving on read-heavy loops. Conservative and off by
+  default: a changed file (or any doubt) always returns full content, never a
+  stale stub, and the elided read still records as a successful `read_file`, so
+  require-prior-read and the scorecards are unaffected.
+
+- **Improved: mid-turn steering is now a typed soft-interrupt substrate.** User
+  input steered into a running turn (already admitted at a safe boundary) is now
+  one case of a typed soft interrupt that also carries a source (user / system /
+  background task) and an urgency flag. A non-user message is labelled so it does
+  not read as user-typed input; every injection is recorded as a durable
+  `SoftInterruptInjected` event for replay. A steer that arrives as a turn would
+  otherwise finish now keeps the turn going so the model sees it (Point B), and an
+  urgent interrupt is admitted between tool calls, skipping the rest of the batch
+  while keeping the tool_use/tool_result contract valid (Point C). The
+  system/background-task producer path is available as a library surface for
+  later work; only user steering produces interrupts today.
+
+- **Improved: memory retrieval now fuses keyword and semantic rankings.** When
+  the stored-vector rerank is enabled (`[retrieval] rerank` + an embedding
+  endpoint), memory injection now blends the keyword (bm25) ranking with the
+  dense (cosine) ranking via Reciprocal Rank Fusion, so a memory both retrievers
+  agree on rises instead of letting a single noisy cosine dominate. Keyword search
+  stays the candidate floor and the default (rerank off / no embeddings) path is
+  byte-identical. New `[memory] injection_dedup_ttl_turns` (default `0`, off)
+  suppresses re-injecting a memory already shown within the last N turns so a
+  persistently-relevant lesson doesn't crowd out the rest. The audit still equals
+  the injection.
+
+- **Added: Anthropic prompt caching (opt-in per provider).** Set
+  `prompt_caching = true` on an `anthropic` provider to place an ephemeral
+  `cache_control` breakpoint on the stable prefix (tools + the stable system
+  prompt), so it is cached across turns and re-served at ~0.1× cost instead of
+  re-sent in full — a large cost/latency cut on a multi-turn session. The
+  per-turn volatile context (memory, project instructions) stays after the
+  breakpoint. Off by default. Cache tokens are now accounted (`cache_creation` /
+  `cache_read`) and served-from-cache tokens show as `cached:N` in the footer;
+  OpenAI's automatic `cached_tokens` are accounted the same way.
+
+- **Cleanup: removed dead surfaces and corrected drifted docs.** Deleted unused
+  internal code (an unwired provider retry policy, an unpopulated `cost_usd`
+  footer estimate with no pricing source, and the unwired `write_loop_lesson`
+  writeback) and the dead `--mode` CLI-override plumbing. Corrected the docs that
+  advertised unbuilt surfaces: `--mode` and `--replan` are not flags (mode is
+  selected by subcommand; re-running `harness plan` regenerates the plan), and
+  the loop-outcome writeback + `[memory] outcome_downweight` are documented as
+  reserved/not-yet-wired. Reserved config keys (`[harness] mode`,
+  `[memory] outcome_downweight`) and the `ManualPin` pack source are unchanged
+  (kept for SemVer-stable config + future use). The skills research report now
+  says a skill is *eligible* for `skill_load` rather than claiming it was loaded.
+
+- **Security: writes to a secret-like path now prompt even in a trusted
+  workspace.** A trusted in-workspace write was auto-allowed with no regard for
+  the target, so overwriting `.env`, an SSH key, or another credential file was a
+  silent Allow. Secret-like writes now prompt (and deny non-interactively) under
+  `default` and `relaxed`, matching how secret-like *reads* are already gated —
+  the allowlist can no longer relax them either. Ordinary in-workspace writes are
+  unchanged.
+
+- **Fixed: large tool output is no longer lost past 64 KiB.** A tool result
+  larger than the old per-tool 64 KiB cap was truncated *before* it reached the
+  retention store, so `read_tool_output` could only page back the first 64 KiB.
+  Tools now hand their full output to the single dispatch-seam bound, which keeps
+  a head/tail view in context and retains the complete output — so an oversized
+  `search_text` or `run_shell` result is recoverable in full.
+
+- **Fixed: phase-cadence quality-gate checks now run.** A ratified check with
+  `cadence = "phase"` (a whole-suite test, dependency check, or `audit`) is
+  evaluated at the plan boundary — when a completed step leaves no incomplete
+  step — instead of never running. A blocking phase finding (e.g. a failing
+  audit) stops `harness resume` with its reason rather than reporting a clean
+  completion. Step-cadence checks are unchanged.
 
 ## v2.6.0 - 2026-07-27
 

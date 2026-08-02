@@ -149,7 +149,11 @@ cursor-paged `events` feed, and `reply_permission`, with
 `--continue`/`--resume` to pick an earlier session back up and
 `--no-approvals` for watch-and-steer coaching (the reply tool is withheld, so
 every ask denies). Corrections the driver makes become review-gated lesson
-candidates. Run `localpilot --help` for the complete command tree.
+candidates. `localpilot serve` + `localpilot connect` are an opt-in local-IPC
+server (a Unix socket or Windows named pipe, never a network server) that hosts
+sessions in one process so several clients can attach to the same session at
+once; it runs only when you start it, and the default in-process path is
+unchanged. Run `localpilot --help` for the complete command tree.
 
 ### Terminal controls
 
@@ -189,6 +193,34 @@ model. By default (`[review] mode = "manual"`) nothing is written to durable
 memory without human review; the opt-in `trusted`/`automatic` review modes
 auto-promote high-confidence candidates without prompting — see
 [localmind-integration.md](docs/localmind-integration.md).
+
+## Several agents, one repository (opt-in)
+
+The opt-in local server can host several agents working on **one plan in one
+working tree**. It is off unless you ask for it: nothing on the ordinary
+single-agent path changed.
+
+- A **task graph** holds the plan. A task can decompose into children instead of
+  doing the work, review gates can raise findings by adding work, and each
+  completion hands on what it established so the next task reads it instead of
+  redoing it.
+- Agents **message each other** — one peer, or the agents you spawned. Scope is
+  the spawn tree, so nobody can cost everyone else a turn.
+- **Conflict alerts are advisory, and we say so plainly.** If another agent
+  changes a file you are working in, you are told mid-turn. Nothing is locked,
+  nothing is blocked, nothing is rolled back — both edits land, and git remains
+  the merge substrate. What this buys you is finding out now instead of at merge
+  time.
+- When a worker **dies**, its unfinished work returns to the plan (bounded, so a
+  task that keeps failing fails loudly instead of cycling), its children are
+  reparented, and a departed coordinator is replaced deterministically. The plan
+  and membership survive a restart.
+
+```text
+coordinator ──seeds──> task graph ──dispatch──> workers ──handoffs──> downstream tasks
+      ^                                            │
+      └──────────── reports, conflict alerts ──────┘
+```
 
 ## Pick the right guide
 

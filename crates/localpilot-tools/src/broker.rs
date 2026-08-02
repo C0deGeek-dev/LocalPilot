@@ -26,7 +26,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::catalog::{Catalog, CatalogEntry, DeprecationOverlay};
+use crate::catalog::{Catalog, CatalogEntry, DeprecationOverlay, ToolSource};
 use crate::error::ToolError;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -105,6 +105,10 @@ pub struct Locator {
     pub score: u32,
     pub deprecated_replacement: Option<String>,
     pub deprecated: bool,
+    /// Why this entry matched — the need words it carried and any capability
+    /// terms that bridged them. Bounded metadata, never a schema: `tool_load`
+    /// remains the reveal step.
+    pub reason: String,
 }
 
 /// The cap on the learned re-rank boost, so history nudges ranking without ever
@@ -156,17 +160,199 @@ fn need_words(need_lower: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Word-overlap score of a catalog entry against a need: how many need-words the
-/// entry's name+description contains, plus a bonus when the need names the tool
-/// directly. Mirrors the `skill_search` scorer applied to tools.
-fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> u32 {
-    let haystack = format!("{} {}", entry.name, entry.description).to_ascii_lowercase();
-    let word_hits = word_overlap(&haystack, words);
+/// A first-party capability vocabulary: groups of words that name the same
+/// capability in different vocabularies. A need word in any group also matches a
+/// tool described with any other word from that group, so `Prisma upgrade
+/// problem` can rank a tool described as "query library documentation" without
+/// anyone hardcoding Prisma — or any other vendor — into the resolver.
+///
+/// Vendor-neutral by construction: every entry is a generic capability term.
+const CAPABILITY_GROUPS: &[&[&str]] = &[
+    &["docs", "documentation", "reference", "manual", "guide"],
+    &[
+        "library",
+        "package",
+        "dependency",
+        "framework",
+        "sdk",
+        "module",
+    ],
+    &[
+        "version",
+        "upgrade",
+        "migration",
+        "migrate",
+        "deprecated",
+        "compatibility",
+        "latest",
+        "current",
+    ],
+    &[
+        "api",
+        "cli",
+        "configuration",
+        "config",
+        "schema",
+        "endpoint",
+    ],
+];
+
+/// The capability groups whose words carry a current-documentation intent. A
+/// need phrased in these terms — an upgrade error, a migration, a deprecation —
+/// is asking about behaviour that changes over time, which is what a
+/// documentation tool is for.
+const DOCUMENTATION_INTENT_GROUPS: &[usize] = &[0, 1, 2];
+
+/// The capability terms `word` belongs to, itself excluded: the words a tool
+/// could be described with that mean the same capability.
+fn capability_synonyms(word: &str) -> impl Iterator<Item = &'static str> + '_ {
+    CAPABILITY_GROUPS
+        .iter()
+        .filter(move |group| group.contains(&word))
+        .flat_map(|group| group.iter().copied())
+        .filter(move |synonym| *synonym != word)
+}
+
+/// Whether `word` signals that the need is about behaviour that changes with
+/// versions, and so about current documentation.
+fn is_documentation_intent(word: &str) -> bool {
+    DOCUMENTATION_INTENT_GROUPS
+        .iter()
+        .any(|group| CAPABILITY_GROUPS[*group].contains(&word))
+}
+
+/// A tool's own words — its name and description. The primary index, unchanged
+/// from before capability matching existed.
+fn entry_primary_text(entry: &CatalogEntry) -> String {
+    format!("{} {}", entry.name, entry.description).to_ascii_lowercase()
+}
+
+/// A tool's surrounding metadata: the server that serves it, and its schema's
+/// property **names and descriptions**. A tool generically named `query` on a
+/// `reference` server, whose input property is documented as "the library to
+/// look up", is findable by what it does rather than only by the words its
+/// author happened to fit into one sentence.
+///
+/// Schema *values* and examples never enter the index — only field names and
+/// their descriptions, which are metadata about the tool, not data passed to it.
+fn entry_metadata_text(entry: &CatalogEntry) -> String {
+    let mut text = String::new();
+    if let ToolSource::Mcp(server) = &entry.source {
+        text.push_str(server);
+    }
+    if let Some(properties) = entry
+        .schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (property, spec) in properties {
+            text.push(' ');
+            text.push_str(property);
+            if let Some(description) = spec.get("description").and_then(serde_json::Value::as_str) {
+                text.push(' ');
+                text.push_str(description);
+            }
+        }
+    }
+    text.to_ascii_lowercase()
+}
+
+/// Why an entry matched: the need words it carried, and the capability terms
+/// that bridged the gap. Returned with each locator so the model can tell a
+/// direct hit from a capability inference. Bounded and deterministic.
+fn match_reason(haystack: &str, words: &[&str], capability_hits: &[&str]) -> String {
+    let mut parts = Vec::new();
+    let direct: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| haystack.contains(word))
+        .collect();
+    if !direct.is_empty() {
+        parts.push(format!("matched {}", direct.join(", ")));
+    }
+    if !capability_hits.is_empty() {
+        parts.push(format!("capability {}", capability_hits.join(", ")));
+    }
+    parts.join("; ")
+}
+
+/// The score of a catalog entry against a need, plus why it matched.
+///
+/// A tool's **own words** rank it: direct word overlap over name plus
+/// description, with the exact-name bonus, exactly as before. Metadata and
+/// capability synonyms are a strict **fallback** — they apply only to a tool
+/// whose own words matched nothing, so they can surface a tool that would
+/// otherwise be invisible but can never re-rank tools that already matched.
+/// That keeps every existing ranking intact while letting a generically
+/// described documentation tool be found by what it does.
+fn score_entry(entry: &CatalogEntry, words: &[&str], need_lower: &str) -> (u32, String) {
+    let primary = entry_primary_text(entry);
+    let word_hits = word_overlap(&primary, words);
     let name_lower = entry.name.to_ascii_lowercase();
     let name_bonus = u32::from(
         need_lower.contains(&name_lower) || words.iter().any(|w| name_lower.contains(*w)),
     ) * 2;
-    word_hits + name_bonus
+    let direct = word_hits + name_bonus;
+    if direct > 0 {
+        return (direct, match_reason(&primary, words, &[]));
+    }
+
+    // Fallback: the tool's own sentence said nothing the need asked for.
+    let metadata = entry_metadata_text(entry);
+    let haystack = format!("{primary} {metadata}");
+    let metadata_hits = word_overlap(&metadata, words).min(METADATA_SCORE_CAP);
+
+    // Capability expansion: a need word matches a tool described with a synonym
+    // from the same group — `upgrade` reaching a tool that says `documentation`.
+    let mut capability_hits: Vec<&str> = Vec::new();
+    for word in words {
+        if haystack.contains(*word) {
+            continue;
+        }
+        if capability_synonyms(word).any(|synonym| haystack.contains(synonym)) {
+            capability_hits.push(word);
+        }
+    }
+    let capability_score = u32::try_from(capability_hits.len())
+        .unwrap_or(CAPABILITY_SCORE_CAP)
+        .min(CAPABILITY_SCORE_CAP);
+
+    // A need about version-sensitive behaviour lifts a tool that documents
+    // things, so an upgrade error can reach a generically-described
+    // documentation tool. One point, and only when both sides are present, so
+    // an ordinary local editing need gains nothing from a docs tool existing.
+    let doc_intent = words.iter().any(|w| is_documentation_intent(w))
+        && CAPABILITY_GROUPS[0].iter().any(|w| haystack.contains(w));
+    let doc_bonus = u32::from(doc_intent);
+
+    let score = metadata_hits + capability_score + doc_bonus;
+    if score == 0 {
+        return (0, String::new());
+    }
+    (score, match_reason(&haystack, words, &capability_hits))
+}
+
+/// The most a capability-only match can contribute, so it never outweighs an
+/// exact-name hit.
+const CAPABILITY_SCORE_CAP: u32 = 2;
+
+/// The most a tool's surrounding metadata (server name, schema field names and
+/// descriptions) can contribute. Bounded so a tool with a large schema cannot
+/// out-rank one whose description actually answers the need.
+const METADATA_SCORE_CAP: u32 = 2;
+
+/// Whether a tool describes itself as serving documentation — a generic,
+/// vendor-neutral check over the same capability vocabulary the resolver uses,
+/// so the prompt's documentation policy and the broker's ranking agree on what
+/// "a documentation tool" means. No server, product, or library is named.
+#[must_use]
+pub fn describes_documentation(name: &str, description: &str) -> bool {
+    let haystack = format!("{name} {description}").to_ascii_lowercase();
+    CAPABILITY_GROUPS[0].iter().any(|term| {
+        haystack
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == *term)
+    })
 }
 
 /// Resolve a need to ranked locators over `catalog`, de-ranking deprecated
@@ -180,7 +366,7 @@ pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> V
         .entries()
         .iter()
         .filter_map(|entry| {
-            let score = score_entry(entry, &words, &need_lower);
+            let (score, reason) = score_entry(entry, &words, &need_lower);
             if score == 0 {
                 return None;
             }
@@ -191,6 +377,7 @@ pub fn resolve(catalog: &Catalog, overlay: &DeprecationOverlay, need: &str) -> V
                 score,
                 deprecated_replacement: overlay.replacement_for(&entry.name).map(str::to_string),
                 deprecated,
+                reason,
             })
         })
         .collect();
@@ -665,6 +852,9 @@ impl Tool for ToolSearch {
         );
         for hit in &hits {
             let _ = write!(out, "- {} (score {}): {}", hit.name, hit.score, hit.summary);
+            if !hit.reason.is_empty() {
+                let _ = write!(out, " [{}]", hit.reason);
+            }
             if let Some(replacement) = &hit.deprecated_replacement {
                 let _ = write!(out, " [deprecated; prefer `{replacement}`]");
             } else if hit.deprecated {
@@ -1111,6 +1301,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let read = vec![Effect::ReadPath {
             inside_workspace: true,
@@ -1157,6 +1349,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let call = ToolCall::new(
             ToolUseId::from("c1"),
@@ -1170,11 +1364,151 @@ mod tests {
         let result = registry
             .dispatch(&call, &ctx, &engine, &ScriptedApprover::new(vec![false]))
             .await;
-        assert!(result.is_error, "got: {}", result.output);
+        assert!(result.is_error(), "got: {}", result.output);
         assert!(
             result.output.contains("permission denied"),
             "revealed write tool bypassed the gate: {}",
             result.output
         );
+    }
+
+    /// A synthetic MCP documentation tool: generically named and described, on a
+    /// generically named server. No real vendor is involved anywhere.
+    fn docs_catalog() -> Catalog {
+        Catalog::project([
+            (
+                "query".to_string(),
+                "Query documentation for a package".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "library": {
+                            "type": "string",
+                            "description": "the library or framework to look up"
+                        },
+                        "topic": { "type": "string", "description": "the topic to read about" }
+                    }
+                }),
+                ToolSource::Mcp("reference-server".to_string()),
+            ),
+            (
+                "edit_file".to_string(),
+                "Replace an exact block of text in a file".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "the file to edit" } }
+                }),
+                ToolSource::Builtin,
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_package_upgrade_need_reaches_a_generic_documentation_tool() {
+        // The need names a library the tool has never heard of; only the
+        // capability vocabulary bridges "upgrade" to "documentation".
+        let catalog = docs_catalog();
+        let overlay = DeprecationOverlay::default();
+        for need in [
+            "Prisma version upgrade problem",
+            "migration failure after a dependency bump",
+            "this API is deprecated, what replaced it",
+            "check compatibility with the latest framework release",
+        ] {
+            let hits = resolve(&catalog, &overlay, need);
+            assert_eq!(
+                hits.first().map(|h| h.name.as_str()),
+                Some("query"),
+                "need {need:?} should rank the documentation tool: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrelated_local_editing_need_gains_nothing_from_a_docs_tool() {
+        let hits = resolve(
+            &docs_catalog(),
+            &DeprecationOverlay::default(),
+            "edit a file",
+        );
+        assert_eq!(hits.first().map(|h| h.name.as_str()), Some("edit_file"));
+        assert!(
+            !hits.iter().any(|h| h.name == "query"),
+            "a docs tool must not match an ordinary editing need: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn server_name_and_schema_field_metadata_feed_the_ranking() {
+        let catalog = docs_catalog();
+        let overlay = DeprecationOverlay::default();
+        // The server name is indexed...
+        assert!(resolve(&catalog, &overlay, "reference server")
+            .iter()
+            .any(|h| h.name == "query"));
+        // ...as are schema property names and their descriptions.
+        assert!(resolve(&catalog, &overlay, "look up a topic")
+            .iter()
+            .any(|h| h.name == "query"));
+    }
+
+    #[test]
+    fn an_exact_name_match_outranks_a_capability_only_match() {
+        let catalog = Catalog::project([
+            (
+                "docs_lookup".to_string(),
+                "Read documentation".to_string(),
+                serde_json::json!({ "type": "object" }),
+                ToolSource::Builtin,
+            ),
+            (
+                "upgrade_helper".to_string(),
+                "Assist with a package upgrade".to_string(),
+                serde_json::json!({ "type": "object" }),
+                ToolSource::Builtin,
+            ),
+        ]);
+        let hits = resolve(&catalog, &DeprecationOverlay::default(), "upgrade_helper");
+        assert_eq!(hits[0].name, "upgrade_helper", "{hits:?}");
+    }
+
+    #[test]
+    fn a_locator_explains_why_it_matched() {
+        // "dependency" appears nowhere in the tool's own words; only the
+        // capability vocabulary connects it to "package".
+        let hits = resolve(
+            &docs_catalog(),
+            &DeprecationOverlay::default(),
+            "dependency upgrade problem",
+        );
+        let hit = hits.iter().find(|h| h.name == "query").expect("a hit");
+        assert!(
+            hit.reason.contains("capability"),
+            "a capability bridge is explained: {:?}",
+            hit.reason
+        );
+        // The reason is bounded metadata, never a schema.
+        assert!(!hit.reason.contains("properties"), "{:?}", hit.reason);
+    }
+
+    #[test]
+    fn documentation_detection_is_generic_not_vendor_specific() {
+        assert!(describes_documentation(
+            "query",
+            "Query documentation for a package"
+        ));
+        assert!(describes_documentation(
+            "read_reference",
+            "read the reference manual"
+        ));
+        assert!(!describes_documentation(
+            "edit_file",
+            "Replace text in a file"
+        ));
+        // A word that merely contains a capability term is not a match.
+        assert!(!describes_documentation(
+            "guidebook_writer",
+            "writes documentational-sounding prose"
+        ));
     }
 }

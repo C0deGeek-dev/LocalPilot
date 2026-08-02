@@ -151,7 +151,7 @@ impl EvidenceLedger {
                 }
                 ContentBlock::ToolResult(result) => {
                     if let Some(&pos) = index.get(result.id.as_str()) {
-                        records[pos].outcome = outcome_of(result.is_error);
+                        records[pos].outcome = outcome_of(result.is_error());
                         records[pos].output = result.output.clone();
                     }
                 }
@@ -333,6 +333,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "run_shell".to_string(),
                 is_error: true,
+                outcome: None,
             }),
         ];
 

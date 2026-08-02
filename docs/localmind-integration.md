@@ -194,6 +194,20 @@ commits).
   block. Each injected block is recorded under its own layer: the repository
   primer as `primer`, ranked accepted memory as `memory`, and (legacy push-mode)
   ingested chunks as `ingest`.
+- **Hybrid ranking.** With the stored-vector rerank enabled (`[retrieval] rerank`
+  + an embedding endpoint), the ranked accepted-memory candidates are ordered by
+  **Reciprocal Rank Fusion** of the keyword (bm25) ranking and the dense (cosine)
+  ranking, so a memory both retrievers agree on rises instead of a single noisy
+  cosine dominating; ties break toward the semantically closer memory. Keyword
+  search stays the candidate floor (a dense-only memory is never selected), and
+  with the rerank off or no embedding endpoint the single-list fusion is
+  order-preserving — the default lexical path is unchanged. A cross-encoder
+  reranker is deliberately not used.
+- **Injection dedup** (`[memory] injection_dedup_ttl_turns`, default off): a
+  memory injected within the last N turns is suppressed so a persistently-relevant
+  lesson does not spend the per-turn budget every turn. A suppressed memory is
+  dropped from both the injected block and the audit, so audit-equals-injection
+  still holds.
 - Interactive sessions build the project ingest index in the background on first
   use (trust-gated, off the turn path), so `knowledge_search` has data without
   the first turn paying for a full walk; they close out into LocalMind on exit,
@@ -282,12 +296,18 @@ store answered.
   holds *no accepted memory yet*; (c) a non-empty store whose memory the *query
   missed*.
 
-## Loop-Outcome Lesson Writeback
+## Loop-Outcome Lesson Writeback (planned, not yet wired)
 
-When a human accepts or rejects a self-improvement patch proposal, the outcome is
-written back as a durable lesson so the next loop run retrieves it and stops
-repeating a mistake (LocalMind decision `D-LM-0014`). This reuses the **existing**
-review-gated path — it builds no new store:
+> **Status: designed, not shipped.** The accept/reject signal for a
+> self-improvement patch lives in LocalMind's review flow, not in this repo, so
+> there is no in-repo event to hook yet. This section is the intended design; the
+> writeback is not wired to a live caller. The shipped, adjacent capability is the
+> completion-retrospective bridge below, which uses `write_retrospective_lesson`.
+
+When a human accepts or rejects a self-improvement patch proposal, the outcome
+would be written back as a durable lesson so the next loop run retrieves it and
+stops repeating a mistake (LocalMind decision `D-LM-0014`). It reuses the
+**existing** review-gated path — it builds no new store:
 
 - A loop-outcome lesson carries `{ trigger, what, why, applies_to, outcome,
   provenance_ref }` and is enqueued as a `CandidateLesson` through the normal
@@ -308,8 +328,8 @@ review-gated path — it builds no new store:
   candidate never reaches accepted memory; a bad *accepted* lesson is curated with
   the existing `memory delete` (supersede) path. No special-case store.
 
-The host surface is `localpilot_localmind::write_loop_lesson`; everything else
-(review, promote, search, delete) is the existing LocalMind loop.
+When wired, this would enqueue candidates through the same review/promote/search/
+delete path as every other LocalMind lesson — no special-case surface.
 
 ## Completion-Retrospective Lesson Bridge
 
@@ -649,7 +669,11 @@ Notes:
   exits `141` (the SIGPIPE convention) so a wrapper can tell "the reader left" from
   a real failure. Set `[harness] turn_timeout_secs` to bound a long turn by
   wall-clock (off by default). Either way `print` ends with a one-line, parseable
-  `handoff:` summary on stderr — stop reason, tool calls, files changed, and whether
+  `handoff:` summary on stderr — stop reason, tool calls, files changed, whether
   memory was written (always `false` for one-shot `print`, which reads memory but
-  never closes out) — so a non-interactive caller always has a terminal state to act
-  on. See ADR-0049.
+  never closes out), the counts of tool malfunctions and of calls whose wrapped
+  work reported failure, and any tools that crossed the stuck threshold — so a
+  non-interactive caller always has a terminal state to act on, and can tell a
+  clean turn from one whose every build failed (ADR-0118). Failing tool calls,
+  warnings, and stuck signals also appear as bounded one-line diagnostics on
+  stderr; stdout stays the answer alone. See ADR-0049.

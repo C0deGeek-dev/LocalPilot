@@ -75,7 +75,11 @@ impl LineFraming {
 /// LF-framed JSON record reader over any byte source (the JSON-RPC adapters'
 /// shared input path). Malformed JSON records are skipped — the next record
 /// may be fine.
-pub(crate) struct JsonRecordReader<R> {
+///
+/// Transport-generic: any `R: tokio::io::AsyncRead + Unpin` works, so a local
+/// IPC transport (`localpilot-server`) reuses this exact framing over its own
+/// stream instead of duplicating the codec.
+pub struct JsonRecordReader<R> {
     source: R,
     framing: LineFraming,
     queued: std::collections::VecDeque<Vec<u8>>,
@@ -83,7 +87,8 @@ pub(crate) struct JsonRecordReader<R> {
 }
 
 impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
-    pub(crate) fn new(source: R) -> Self {
+    /// Wrap a byte source in an LF-delimited JSON record reader.
+    pub fn new(source: R) -> Self {
         Self {
             source,
             framing: LineFraming::default(),
@@ -93,7 +98,12 @@ impl<R: tokio::io::AsyncRead + Unpin> JsonRecordReader<R> {
     }
 
     /// The next parseable JSON record, or `None` at end of input.
-    pub(crate) async fn next(&mut self) -> Result<Option<serde_json::Value>, std::io::Error> {
+    ///
+    /// # Errors
+    /// Propagates a read error from the source, or an
+    /// [`std::io::ErrorKind::InvalidData`] error when an unterminated record
+    /// exceeds the framing length cap.
+    pub async fn next(&mut self) -> Result<Option<serde_json::Value>, std::io::Error> {
         use tokio::io::AsyncReadExt;
         loop {
             if let Some(record) = self.queued.pop_front() {

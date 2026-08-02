@@ -371,6 +371,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         }
     }
 
@@ -436,7 +438,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         // The discoverable skill is listed; the user-only one never is.
         assert!(out.text.contains("add-provider"), "got: {}", out.text);
         assert!(
@@ -494,7 +496,7 @@ mod tests {
             .invoke(json!({ "name": "add-provider" }), &ctx(&ws, true))
             .await
             .unwrap();
-        assert!(!hit.is_error);
+        assert!(!hit.is_error());
         assert!(
             hit.text.contains("Body of add-provider"),
             "got: {}",
@@ -506,7 +508,7 @@ mod tests {
             .invoke(json!({ "name": "no-such-skill" }), &ctx(&ws, true))
             .await
             .unwrap();
-        assert!(!miss.is_error);
+        assert!(!miss.is_error());
         assert!(miss.text.contains("no skill named"), "got: {}", miss.text);
     }
 

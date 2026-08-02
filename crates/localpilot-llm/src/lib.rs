@@ -8,44 +8,36 @@
 //! endpoints.
 #![forbid(unsafe_code)]
 
-mod anthropic;
-mod auth;
 mod discovery;
-mod error;
-mod event;
 mod fake;
-mod headers;
-mod openai;
-mod provider;
 mod registry;
-mod request;
-mod retry;
 mod vision;
 
-pub use anthropic::AnthropicProvider;
-pub use auth::{AccessToken, AuthProvider, GoogleAdcAuthProvider};
 pub use discovery::{
     discover_models, discover_models_with_auth_provider, probe_vision, DiscoveredModel,
 };
-pub use error::{ProviderError, QuotaInfo};
-pub use event::{ModelEvent, ModelEventStream};
 pub use fake::FakeProvider;
-pub use openai::OpenAiProvider;
-pub use provider::{
+pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
+pub use vision::{resolve_vision, resolve_vision_with_source, VisionSource};
+
+pub use localpilot_llm_anthropic::AnthropicProvider;
+pub use localpilot_llm_openai::OpenAiProvider;
+
+pub use localpilot_llm_core::auth::{AccessToken, AuthProvider, GoogleAdcAuthProvider};
+pub use localpilot_llm_core::error::{ProviderError, QuotaInfo};
+pub use localpilot_llm_core::event::{ModelEvent, ModelEventStream};
+pub use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-pub use registry::{discovery_auth_provider_from_config, ProviderRegistry};
-pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
-pub use retry::{retry, RetryPolicy};
-pub use vision::{resolve_vision, resolve_vision_with_source, VisionSource};
+pub use localpilot_llm_core::request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
 
 /// Fuzzing entry points (enabled by the `fuzzing` feature; not public API).
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::anthropic::fuzz_sse_decoder as anthropic_sse;
-    pub use crate::openai::fuzz_sse_decoder as openai_sse;
+    pub use localpilot_llm_anthropic::fuzz_sse_decoder as anthropic_sse;
+    pub use localpilot_llm_openai::fuzz_sse_decoder as openai_sse;
 }
 
 #[cfg(test)]

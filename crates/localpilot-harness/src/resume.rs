@@ -164,8 +164,21 @@ pub async fn resume_one_step_with_events(
                 retryable: true,
                 ..QuotaInfo::default()
             });
-            let window = estimate_window(&quota, 1);
-            let paused = PausedRun::new(step.number, "provider", &window);
+            // Escalate the backoff across repeated pauses: read the prior marker's
+            // attempt (if this step already paused) and grow it, so a provider that
+            // keeps limiting is retried with an ever-wider window rather than the
+            // same one. A provider-stated window (retry_after/reset_at) ignores the
+            // attempt; only the fallback backoff widens.
+            let attempt = runtime
+                .store()
+                .get_cache(QUOTA_PAUSE_KEY)
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<PausedRun>(&bytes).ok())
+                .map_or(1, |prev| prev.attempt.saturating_add(1));
+            let window = estimate_window(&quota, attempt);
+            let paused = PausedRun::new(step.number, runtime.active_provider_id(), &window)
+                .with_attempt(attempt);
             // A failed marker write must be visible: without the marker a later
             // `resume` can't see the pause window and retries into the same
             // limit. The pause itself still proceeds (the outcome carries the
@@ -363,12 +376,52 @@ pub async fn resume_one_step_with_events(
     git(root, &["add", "PROGRESS.md"])?;
     git(root, &["commit", "-m", "harness: update progress"])?;
 
+    // Phase-cadence quality gate. Steps carry a per-step gate (`StepComplete`);
+    // phase-cadence checks — the expensive full-suite / dependency / audit set a
+    // project ratifies with `cadence = "phase"` — evaluate on a phase boundary. In
+    // this flat-step plan model the plan boundary is the phase boundary: once the
+    // step just committed leaves no incomplete step, the phase checks run here,
+    // once, rather than on every step. Without this the ratified phase checks
+    // would never run, because the per-step gate only evaluates `StepComplete`.
+    let mut gate = final_gate;
+    let plan_complete = read(&progress_path)
+        .ok()
+        .and_then(|raw| Progress::parse(&raw).ok())
+        .is_some_and(|updated| updated.next_incomplete().is_none());
+    if plan_complete {
+        let phase_outcomes = runtime
+            .run_gate_checks(checks, Trigger::PhaseComplete, root)
+            .await;
+        if !phase_outcomes.is_empty() {
+            // Reduce through the same `quality_gate` rule the step gate uses (it
+            // triggers on both cadences). A blocking phase finding (e.g. a failing
+            // `audit`) is surfaced to the human — the step stays committed, but the
+            // run stops with the reason rather than reporting a clean completion.
+            let phase_ctx = RuleContext {
+                gate_outcomes: phase_outcomes.clone(),
+                ..RuleContext::default()
+            };
+            let phase_block =
+                first_blocking_reason(rule_engine, Trigger::PhaseComplete, &phase_ctx);
+            gate.extend(phase_outcomes);
+            if let Some(reason) = phase_block {
+                return Ok(ResumeOutcome {
+                    step_number: step.number,
+                    committed: true,
+                    blocked_reason: Some(format!("phase quality gate — {reason}")),
+                    paused: false,
+                    gate,
+                });
+            }
+        }
+    }
+
     Ok(ResumeOutcome {
         step_number: step.number,
         committed: true,
         blocked_reason: None,
         paused: false,
-        gate: final_gate,
+        gate,
     })
 }
 

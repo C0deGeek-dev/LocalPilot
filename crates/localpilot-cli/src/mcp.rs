@@ -9,8 +9,6 @@ use std::sync::Arc;
 use localpilot_config::{Config, CredentialStore, McpServerConfig, ToolsConfig};
 use localpilot_mcp::{McpClient, McpTool, McpToolDescriptor, Transport};
 use localpilot_sandbox::Effect;
-#[cfg(any(feature = "tui", test))]
-use localpilot_tools::Tool;
 use localpilot_tools::{Broker, BrokerConfig, ToolLoad, ToolRegistry, ToolSearch, ToolSource};
 
 use crate::mcp_env::{spawn_server, ServerLaunchError};
@@ -58,18 +56,6 @@ impl McpTools {
     #[must_use]
     pub fn registry(&self) -> ToolRegistry {
         let mut registry = ToolRegistry::with_builtins();
-        self.extend_registry(&mut registry);
-        registry
-    }
-
-    /// Build the ordinary registry after reserving a host-owned builtin name.
-    /// MCP collision handling then prefixes a remote tool with the same name,
-    /// keeping the host capability reachable without duplicate model specs.
-    #[cfg(any(feature = "tui", test))]
-    #[must_use]
-    pub fn registry_with_builtin(&self, tool: Box<dyn Tool>) -> ToolRegistry {
-        let mut registry = ToolRegistry::with_builtins();
-        registry.register(tool);
         self.extend_registry(&mut registry);
         registry
     }
@@ -201,20 +187,7 @@ async fn connect(
 mod tests {
     use super::*;
     use localpilot_mcp::ScriptedTransport;
-    use localpilot_tools::{AskUser, ElicitationOutcome, ElicitationRequest, UserElicitor};
     use serde_json::json;
-
-    struct CancellingElicitor;
-
-    impl UserElicitor for CancellingElicitor {
-        fn ask(
-            &self,
-            _request: ElicitationRequest,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ElicitationOutcome> + Send + '_>>
-        {
-            Box::pin(std::future::ready(ElicitationOutcome::Cancelled))
-        }
-    }
 
     fn mcp_entry(server: &str, name: &str) -> (String, McpToolDescriptor, Arc<dyn Transport>) {
         (
@@ -299,7 +272,7 @@ mod tests {
             entries: vec![mcp_entry("remote", "ask_user")],
             skills_autonomous: false,
         }
-        .registry_with_builtin(Box::new(AskUser::new(Arc::new(CancellingElicitor))));
+        .registry();
 
         assert!(registry.get("ask_user").is_some());
         assert!(!registry.is_mcp("ask_user"));
@@ -343,5 +316,54 @@ mod tests {
         assert!(registry.is_mcp("lookup"));
         assert!(registry.get("search_lookup").is_none());
         assert_unique_spec_names(&registry);
+    }
+
+    // --- 06.1 one MCP pool, shared across sessions, never re-spawned ----------
+
+    #[test]
+    fn one_mcp_connection_pool_is_shared_across_registries() {
+        // The MCP "pool" is the connected transport, held once by `McpTools`.
+        // Each session projects a fresh `ToolRegistry` from the *same* `McpTools`
+        // (`SessionSetup::build` does this per session), so the transport must be
+        // cloned into each registry — never re-spawned per session.
+        let transport: Arc<dyn Transport> = Arc::new(ScriptedTransport::new());
+        let tools = McpTools {
+            entries: vec![(
+                "search".to_string(),
+                McpToolDescriptor {
+                    name: "lookup".to_string(),
+                    description: "an MCP tool".to_string(),
+                    input_schema: json!({ "type": "object" }),
+                },
+                Arc::clone(&transport),
+            )],
+            skills_autonomous: false,
+        };
+
+        // External handle + the one held by `McpTools`, before any projection.
+        let before = Arc::strong_count(&transport);
+
+        let reg_a = tools.registry();
+        let reg_b = tools.registry();
+        assert!(reg_a.is_mcp("lookup"), "session A sees the pooled MCP tool");
+        assert!(reg_b.is_mcp("lookup"), "session B sees the pooled MCP tool");
+
+        // Each registry cloned the one shared transport Arc — two sessions add
+        // exactly two strong refs to the same connection, proving the pool was
+        // not re-spawned per session.
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 2,
+            "both session registries share the one MCP transport, not a fresh spawn"
+        );
+
+        // Dropping a session's registry releases only its clone of the shared
+        // pool; the connection lives on for the other session.
+        drop(reg_a);
+        assert_eq!(
+            Arc::strong_count(&transport),
+            before + 1,
+            "the shared connection survives one session's teardown"
+        );
     }
 }

@@ -12,6 +12,7 @@ mod claim;
 mod compaction;
 mod decisions;
 mod dispatch_gate;
+mod elision;
 mod error;
 mod evidence;
 mod guidance;
@@ -20,6 +21,7 @@ mod hooks;
 mod judge;
 mod launch_targets;
 mod lessons;
+mod paths_in_play;
 mod planning;
 mod precondition;
 mod progress;
@@ -53,6 +55,7 @@ pub use handoff::{
 pub use hooks::{ContextContribution, ContextHook, HookEvent, HookFabric, SessionObserver};
 pub use judge::{judge_ranking_selftest_live, judge_score_live};
 pub use lessons::{Lesson, Lessons};
+pub use paths_in_play::PathsInPlay;
 pub use planning::{run_intake, run_plan, INTAKE_PROMPT, PLANNER_PROMPT};
 pub use progress::{Progress, Step};
 pub use project_analysis::{
@@ -82,12 +85,14 @@ pub use localx_eval_core::{
     RankingTrust, ResultsBlock, Scorecard, SpeedBlock, RANKING_FIXTURES, RUBRIC, SCORECARD_SCHEMA,
 };
 pub use session::{
-    effective_context_limit, ManualCompaction, PlanStep, RuntimeEvent, SessionConfig,
-    SessionRecovery, SessionRuntime, SteerQueue, StopReason, SwitchError, SwitchOutcome,
-    TurnHandoff, UserShellResult,
+    effective_context_limit, ManualCompaction, PlanStep, QuiesceSignal, RuntimeEvent,
+    SessionConfig, SessionRecovery, SessionRuntime, SoftInterrupt, SoftInterruptSource, SteerQueue,
+    StopReason, SwitchError, SwitchOutcome, TurnHandoff,
 };
 pub use summarizer::{FallbackReason, ProviderSummarizer, Summarizer, SummarizerTuning};
-pub use system_prompt::agent_system_prompt;
+pub use system_prompt::{
+    agent_system_prompt, assignment_contract, swarm_coordinator_directive, SwarmDepth,
+};
 pub use verify_target::{detect_verify_command, resolve_verify_check, VERIFY_CHECK_NAME};
 // Part of the public `RuntimeEvent::Recovery` payload, so consumers can match it.
 pub use localpilot_recovery::ModelHealth;

@@ -81,9 +81,22 @@ Config precedence:
 4. user config
 5. built-in defaults
 
-### `localpilot-llm`
+### `localpilot-llm` (+ `-core`, `-openai`, `-anthropic`)
 
-Owns:
+The provider layer is split across four crates so editing one adapter recompiles
+only that adapter, not the whole layer or its downstream dependents:
+
+- **`localpilot-llm-core`** — the shared contract: the provider trait, the stream
+  event model, request/response shapes, the error taxonomy, auth, and header
+  parsing. Depends on no adapter, so there is no dependency cycle.
+- **`localpilot-llm-openai`** / **`localpilot-llm-anthropic`** — one hand-written
+  adapter each, depending only on `-core`.
+- **`localpilot-llm`** — the umbrella: the provider registry (the seam that wires
+  the adapters), model discovery, vision resolution, and the test `FakeProvider`.
+  It re-exports the whole public surface, so `harness`/`cli`/`rpc`/`quota` import
+  everything as `localpilot_llm::…` unchanged.
+
+Owns (across the four crates):
 
 - provider trait
 - stream event model
@@ -91,7 +104,10 @@ Owns:
 - official provider implementations
 - local provider implementations
 
-Provider implementations must live behind the same trait.
+Provider implementations must live behind the same trait, each in its own adapter
+crate depending on `-core`. Editing an adapter re-checks its ~1.5k-line crate in
+isolation (the sibling adapter and `-core` are untouched); a full `--workspace`
+build still recompiles the downstream spine through the umbrella.
 
 Provider implementations also expose quota metadata when available:
 
@@ -121,6 +137,23 @@ Builtin v1 tools:
 - `run_shell`
 - `git_status`
 - `git_commit`
+
+### `localpilot-agents`
+
+Owns the **data** half of declarative subagents:
+
+- parsing and validating a subagent definition (a YAML file, not compiled in)
+- discovering definitions with the same precedence users know from skills
+- resolving a definition's tool list into the child's actual grants by
+  intersecting it with the parent's — a subagent's authority is always a subset
+  of the caller's
+
+Must not own: execution. Running a child session needs the harness (which depends
+on this crate), so containment is structural — a subagent is a bounded child
+session with its own context window, prompt, and always-narrower tool set.
+Subagents are not skills: a skill is text the model may read and grants nothing; a
+subagent is an execution with authority. The two share no loader, registry, or
+file format.
 
 ### `localpilot-harness`
 
@@ -175,18 +208,26 @@ provider-neutral runtime/approval/cancellation streams into terminal UI actions.
 Its async event pump mirrors the established inline runtime seam: each turn owns
 one broadcast receiver and cancellation token, approvals are deny-safe, and
 terminal input is drained in bounded batches. Prompts submitted during a turn
-are visible stable timeline items marked pending; cancelling with Escape ends
-the current turn before those prompts run in order. Runtime output is inserted
-before later pending prompts, so visible and provider transcript order agree.
+are visible stable timeline items marked pending. Escape promotes the leading
+contiguous plain-text prompts into urgent soft interrupts, preserving FIFO order;
+the open provider stream is dropped and the same runtime turn restarts with the
+new user direction. Its incomplete assistant segment remains visible as
+interrupted feedback but is not persisted as model history. Shell operations and
+image prompts are ordering barriers: when one is at the queue head, Escape
+hard-cancels the current work and leaves every follow-up in its original order
+instead of steering a later prompt past it. Ctrl+C remains a distinct hard
+cancel. Runtime output is inserted before later pending operations, so visible
+and provider transcript order agree.
 
 `localpilot-tui` is the explicit legacy inline rollback while the remaining
 physical terminal matrix is completed. Full-screen chat is the interactive
-default (ADR-0109). The legacy crate owns:
+default (ADR-0129). The legacy crate owns:
 
 - terminal layout
 - message rendering
 - keyboard input
 - approval dialogs
+- the inline question widget (`ask_user` and the intake guidance gate both drive it)
 - status lines
 - footer stats
 - optional thinking/reasoning panel
@@ -324,6 +365,48 @@ Owns the write half of the self-improvement loop (ADR-0034):
 - the `ApprovalToken`-gated promotion path (single human-only constructor)
 - the change-provenance record carried with each proposal
 
+### `localpilot-dist`
+
+Owns the **on-disk contract** for what is installed, which version runs, and how a
+new one lands — the reuse base the self-dev store and the updater share:
+
+- the version-per-directory cache (every version in its own directory, so
+  switching is a rename and rollback is free — the only layout that behaves the
+  same on Windows, where a running executable cannot be replaced in place)
+- the install marker (its presence makes a version resolvable) and SHA-256
+  verification recorded at install, not re-checked on the hot path
+- resolution order (newest / pinned / rolled-back) and the pin/rollback state
+- a `PATH`-visible `bin/` refreshed from the resolver on every change, by copy
+  (a symlink needs a privilege on Windows; a copy works everywhere), replaced
+  rename-then-copy so a running executable can be moved aside and swept later
+
+Must not own: the download. It deliberately reaches no network — it is the small,
+testable on-disk half the networked updater commits into.
+
+### `localpilot-selfdev`
+
+Owns the primitives for building LocalPilot from its own source and swapping
+onto the result:
+
+- `SourceState` — a content fingerprint of the working tree (commit hash,
+  status, diff, and untracked file *contents*) reduced to one stable
+  `version_label`, so "which bytes" is answerable and not just "which commit"
+- an isolated build (own cargo profile, own target directory, a job count that
+  leaves a core for the running session) that passes the source identity to the
+  build script as environment rather than making it watch `.git`
+- an immutable version store (`versions/<label>/`, copy-in, never overwritten)
+  and marker-file channel pointers, so a running process is never launched from a
+  path a later build can overwrite
+- a publish gauntlet that refuses to promote a stale or broken build (identity +
+  freshness + a real RPC handshake)
+- the reload primitives: a durable, idempotent, non-consuming continuation intent,
+  and a one-seam relaunch (`exec` on Unix, spawn-then-exit on Windows) that swaps
+  onto the new binary and lets the session continue itself on the far side
+
+Must not own: the decision to reload. This crate makes each step safe to take;
+whether to take it is the caller's policy (the opt-in self-dev surface, off by
+default).
+
 ### `localpilot-selfreview`
 
 Owns the read-only front of the human-gated self-improvement loop
@@ -388,6 +471,170 @@ Owns:
 Must not own: any HTTP server, permission decisions, or a product SDK — the
 supported embedding surface stays the in-process session runtime
 ([`docs/embedding.md`](embedding.md)).
+
+### `localpilot-taskgraph`
+
+A pure task-graph engine: the plan several workers agree on, plus every rule that
+keeps that plan coherent while they mutate it concurrently. It is a **leaf crate
+with no LocalPilot dependencies** — no I/O, no sessions, no models, no tools — so
+a whole plan can be driven from seed to settled by a deterministic simulator with
+no live agents attached. Wiring it to real workers is the server's job, never
+this crate's.
+
+Owns:
+
+- the graph: tasks and review gates, edges stored only as "what this waits on"
+  (dependents are derived, so the two directions cannot disagree), and a plan
+  `version` that increments on every accepted mutation
+- validated mutations — `seed` (idempotent under a caller-supplied key),
+  `expand_node` (a task becomes a *join* over its children rather than being
+  replaced, so nothing downstream is rewired), `complete_node`, and
+  `inject_from_gate` (a review raises findings by adding work and then
+  re-reviews) — plus the supervisor operations `fail_node`, `abandon_node`, and
+  `salvage_assignment`
+- the four invariants every mutation satisfies: ownership (only a task's owner
+  or its current assignee may change it), acyclicity (checked before an edge is
+  written, and for a batch of new tasks before any of them is created),
+  terminality (a finished task never changes; rework enters as new tasks), and
+  honest completion (a completion carries a typed `HandoffArtifact`; in deep mode
+  it must also state what was *not* checked, and a gate must say how it reviewed
+  and cite something)
+- derived scheduling: `ready_nodes` (deterministic, id-ordered — the same plan
+  yields the same frontier everywhere), the third state `Blocked` for a task
+  whose upstream ended badly, `cascade_blocked` to settle a stranded tail rather
+  than hang on it, and `assemble_input`, which hydrates a task's upstream
+  handoffs into its prompt so a worker reads what earlier tasks found instead of
+  re-deriving it
+- a deterministic simulator (`sim`): no clock, no randomness, no task scheduling
+  — each round takes the ready frontier in id order and resolves it in dispatch
+  order, so a plan that misbehaves here is the engine's fault and a plan that
+  only misbehaves live is not
+
+Must not own: spawning, transport, persistence, prompts, or anything that knows
+what a worker *is*. `PlanMode::Deep` decides how strict the rules are; it does
+not decide who runs them.
+
+### `localpilot-server`
+
+The opt-in, single-machine local server behind `serve`/`connect`: a
+cross-platform framed local-IPC transport, the daemon lifecycle around it, and a
+process-local registry that hosts many `SessionRuntime`s at once for multiple
+attached clients. It is strictly opt-in — the default in-process
+`chat`/`ask`/`print`/`harness` path never touches it (D003).
+
+Owns:
+
+- a deterministic per-workspace endpoint scheme: a Unix domain socket under the
+  runtime dir (`$XDG_RUNTIME_DIR`/`$TMPDIR`/`/tmp`, `sun_path`-length checked)
+  or a Windows named pipe, keyed by a short stable hash of the canonical
+  workspace root, overridable by `LOCALPILOT_SERVER_SOCKET`
+- a uniform `Listener`/`Conn`/`connect` transport surface, identical across
+  platforms (`UnixListener`/`UnixStream` on Unix; `named_pipe` server/client on
+  Windows, with the create-next-instance-before-accept pattern), framed with
+  `localpilot-rpc`'s LF-delimited NDJSON codec reused as-is
+- daemon lifecycle: detached spawn of the current executable (new process group
+  on Unix; `DETACHED_PROCESS | CREATE_NO_WINDOW` on Windows; null stdio), a
+  bounded retry-connect ready handshake, and single-owner exclusivity
+- one-owner exclusivity with stale-endpoint reaping: an atomic exclusive-create
+  lock file next to the socket on Unix, the first-pipe-instance flag on Windows;
+  a failed acquire probes for a live daemon and either reuses it or reaps a
+  stale socket/lock and retries
+- a session registry keyed by `SessionId` (a structural `RwLock` over the map
+  plus a per-session async `Mutex` held for the whole of a turn), a per-session
+  `SessionHost` (multi-client event fanout over a session-lifetime broadcast,
+  plus lock-free out-of-band cancel/steer), and the connection-scoped attach seam
+  (open-new / resume-by-id / resume-by-name → the bound session id)
+
+#### Swarm state (opt-in)
+
+Beside the session registry — never inside it — sits the swarm layer. A session
+is a session whether or not it is collaborating, so nothing here is on the path a
+single-agent turn takes.
+
+- **Scoping.** A swarm is identified by the *repository*, not the path: every
+  git worktree of one repo resolves to one swarm, so a worker spawned into a
+  worktree joins the coordinator's swarm rather than founding an invisible second
+  one. Resolved by reading git's own on-disk contract — `.git` as a directory, or
+  as a `gitdir:` pointer file whose target names its `commondir` — with no `git`
+  subprocess, since a swarm id is needed on every spawn. Outside a repository the
+  canonical directory path is used, so non-git workspaces work rather than
+  erroring. `LOCALPILOT_SWARM_ID` overrides the whole resolution.
+- **Membership.** Members keyed by `SessionId`, each with a role
+  (coordinator/worker), a status, and **one** structural edge: who it reports
+  back to. Children, ancestry, and subtrees are all derived by walking that edge
+  — a stored child list would be a second copy of the same fact and would
+  disagree the first time a member departed. A reverse index maps a session back
+  to its swarm, because a tool call knows only its own session id.
+- **Caps and admission.** Two bounds: a *lifetime* member cap (which counts
+  departed members, so a coordinator that keeps replacing failed work is still
+  stopped) and a *concurrency* budget on running members. Both are checked and
+  the slot taken under one write lock, as a **reservation**: a spawn reserves,
+  builds the worker, then confirms or releases. Checking a cap and inserting
+  afterwards would let a burst of concurrent spawns all read the same count and
+  all proceed. Idempotency keys are answered from the reservation table as well
+  as the member table, so a retry whose first attempt is still building is told
+  so rather than starting a second worker.
+- **Workers.** A swarm worker is an *ordinary hosted session with a swarm edge*
+  — not a second process, not a second loop, and not a special case anywhere on
+  the session path, so the registry, the `SessionHost`, cancel/steer, and the
+  reaper all work on it unchanged. Building the session is behind a
+  `WorkerFactory` the host supplies, because narrowing tools to the spawner's,
+  attributing permission asks to the spawner's approver, and resolving a provider
+  all need wiring this crate does not have. A spawn that names a model is
+  **refused** if the built session is on a different one: running anyway produces
+  work that reads normally and never says the wrong model produced it.
+- **Flow-back.** When a worker's turn ends, its final assistant text is bounded
+  (the same 4 KiB the in-process delegation path uses), recorded on its
+  membership, and injected into whoever it reports back to as a
+  `BackgroundTask`-sourced soft interrupt — labelled, so a coordinator can tell a
+  worker's report from something its user typed. If the spawner is no longer
+  hosted the report is still recorded, because a re-elected coordinator will need
+  it.
+- **The plan.** A swarm's `TaskPlan` (see `localpilot-taskgraph`) is read,
+  mutated, and stored under one write lock rather than by
+  read → change → write-back, which would leave a gap in the middle of exactly
+  the state that cannot afford one.
+
+Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
+`libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`
+(`process_group`, `creation_flags`, `create_new`, `PermissionsExt`). The
+transport is opt-in and sits alongside — never replacing — the stdio embedding
+surface.
+
+#### Multi-session RAM model
+
+One `serve` process hosts many sessions cheaply because the heavy, immutable
+inputs are a **shared pool**, resolved once at start-up and cloned (an `Arc`
+bump) into every session, while only the light, mutable per-session state is
+built per session:
+
+- **Shared, one per server** (captured in the CLI's `SessionSetup`, injected
+  into each `factory.create()`): the provider stack (`Arc<dyn ModelProvider>`)
+  and the connected MCP pool — the spawned MCP server subprocesses and their
+  transports are launched **once** and held for the life of the setup. Each
+  session projects a *fresh* `ToolRegistry` from that setup, but the registry
+  only references the one pool's MCP clients (`Arc<dyn Transport>` clones) — MCP
+  servers are never re-spawned per session. See [`mcp.md`](mcp.md).
+- **Per session, mutable** (isolated so no state bleeds between sessions): the
+  `SessionRuntime` itself with its transcript, compaction cache, and
+  `SessionConfig`, a fresh permission engine and workspace read-roots, and a
+  fresh wire approver. A turn on one session can never appear in another.
+
+The measured cost of an extra session is therefore only its mutable state — on
+the order of tens of KiB of resident memory, not the megabytes a fresh provider
+or MCP pool would add.
+
+**Reaping.** A periodic reaper keeps the resident set bounded by removing
+sessions no client needs any more. A session is reaped when either its last
+client detached at least a grace period ago, or it has been idle past a timeout
+— but **never** while a turn is in flight: busy-safety is the per-session mutex
+itself (a running turn holds it for the whole turn), so the reaper only closes a
+session it can `try_lock`, and it persists the event log
+(`SessionRuntime::close` records `SessionClosed`) **before** removing the session
+from the registry and host map. The scan holds the host-map lock — the same lock
+an attach takes — so no client can bind a session between the decision to reap it
+and its removal. On clean shutdown the reaper stops and every remaining session
+is persisted and dropped before the endpoint is released.
 
 ### `localpilot-sandbox`
 

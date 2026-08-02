@@ -205,11 +205,21 @@ impl Tool for McpTool {
 
     async fn invoke(&self, input: Value, _ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let client = McpClient::new(Arc::clone(&self.transport));
-        let text = client
-            .call_tool(&self.remote_name, input)
+        let result = client
+            .call_tool_raw(&self.remote_name, input)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
-        Ok(ToolOutput::ok(text))
+        let text = extract_text(&result);
+        // A well-formed response carrying `isError: true` is the server saying
+        // the call failed. The tool worked — transport up, server answered —
+        // so this is the wrapped work reporting failure, and it must reach the
+        // model as one, not as `status: success`. Only a transport/protocol
+        // fault above is a malfunction.
+        if result["isError"].as_bool() == Some(true) {
+            Ok(ToolOutput::ok(text).with_outcome(localpilot_core::ToolOutcome::ReportedFailure))
+        } else {
+            Ok(ToolOutput::ok(text))
+        }
     }
 }
 
@@ -280,6 +290,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let input = json!({ "url": "https://example.test" });
         let output = tool.invoke(input.clone(), &context).await.unwrap();
@@ -292,5 +304,92 @@ mod tests {
                 json!({ "name": "fetch", "arguments": input }),
             )]
         );
+    }
+
+    fn test_context(workspace: &localpilot_sandbox::Workspace) -> ToolContext<'_> {
+        ToolContext {
+            workspace,
+            interactivity: localpilot_sandbox::Interactivity::NonInteractive,
+            trusted: true,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn server_is_error_flag_becomes_a_reported_failure_with_text_intact() {
+        let transport = Arc::new(ScriptedTransport::new().with(
+            "tools/call",
+            json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": "query failed: no such table" }]
+            }),
+        ));
+        let descriptor = McpToolDescriptor {
+            name: "query".to_string(),
+            description: "run a query".to_string(),
+            input_schema: json!({ "type": "object" }),
+        };
+        let tool = McpTool::new(&descriptor, vec![Effect::Network], transport);
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = localpilot_sandbox::Workspace::new(dir.path()).unwrap();
+        let output = tool
+            .invoke(json!({}), &test_context(&workspace))
+            .await
+            .unwrap();
+
+        // The server said the call failed; the model must see a failure, and
+        // the server's message must survive the flattening.
+        assert_eq!(
+            output.outcome,
+            localpilot_core::ToolOutcome::ReportedFailure
+        );
+        assert!(output.text.contains("no such table"));
+    }
+
+    #[tokio::test]
+    async fn absent_or_false_is_error_stays_a_success() {
+        for response in [
+            json!({ "content": [{ "type": "text", "text": "ok" }] }),
+            json!({ "isError": false, "content": [{ "type": "text", "text": "ok" }] }),
+        ] {
+            let transport = Arc::new(ScriptedTransport::new().with("tools/call", response));
+            let descriptor = McpToolDescriptor {
+                name: "query".to_string(),
+                description: "run a query".to_string(),
+                input_schema: json!({ "type": "object" }),
+            };
+            let tool = McpTool::new(&descriptor, vec![Effect::Network], transport);
+
+            let dir = tempfile::tempdir().unwrap();
+            let workspace = localpilot_sandbox::Workspace::new(dir.path()).unwrap();
+            let output = tool
+                .invoke(json!({}), &test_context(&workspace))
+                .await
+                .unwrap();
+            assert_eq!(output.outcome, localpilot_core::ToolOutcome::Ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_fault_is_still_a_tool_error() {
+        // No scripted response for tools/call: the transport errors, which is
+        // a malfunction (`ToolError::Failed`), unchanged by the isError path.
+        let transport = Arc::new(ScriptedTransport::new());
+        let descriptor = McpToolDescriptor {
+            name: "query".to_string(),
+            description: "run a query".to_string(),
+            input_schema: json!({ "type": "object" }),
+        };
+        let tool = McpTool::new(&descriptor, vec![Effect::Network], transport);
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = localpilot_sandbox::Workspace::new(dir.path()).unwrap();
+        let result = tool.invoke(json!({}), &test_context(&workspace)).await;
+        assert!(matches!(result, Err(ToolError::Failed(_))));
     }
 }

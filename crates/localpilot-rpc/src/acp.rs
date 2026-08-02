@@ -308,6 +308,9 @@ fn stop_reason(reason: StopReason) -> &'static str {
     match reason {
         StopReason::Done => "end_turn",
         StopReason::Cancelled => "cancelled",
+        // A graceful wind-down is a clean, resumable stop, not an error: the turn
+        // ended safely at a boundary and can be continued.
+        StopReason::Quiesced => "cancelled",
         StopReason::Degraded
         | StopReason::ProviderError
         | StopReason::BudgetExceeded

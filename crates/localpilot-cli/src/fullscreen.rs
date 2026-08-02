@@ -24,17 +24,20 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use localpilot_core::ContentBlock;
-use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, StopReason};
+use localpilot_harness::{
+    ModelHealth, RuntimeEvent, SessionRuntime, SoftInterrupt, SteerQueue, StopReason,
+};
 use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PlanEntry, RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection,
-    SettingEdit, SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities,
-    Theme, TimelineNavigation, UserShellCommand, UserShellOutput, VisualRowPart,
+    KeyboardSupport, PlanEntry, QuestionOption as UiQuestionOption, QuestionResponse,
+    RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
+    StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
+    UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
-use localpilot_tools::ElicitationOutcome;
+use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
 use localpilot_tui::{parse_slash, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -45,7 +48,7 @@ use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
     may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
-use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead, ElicitationCall};
+use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead, QuestionCall};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
@@ -70,12 +73,55 @@ pub(crate) fn capture_local_utc_offset() {
 pub(crate) struct HostContext<'a> {
     pub(crate) runtime: &'a mut SessionRuntime,
     pub(crate) approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
-    pub(crate) elicitation_rx: &'a mut mpsc::UnboundedReceiver<ElicitationCall>,
+    pub(crate) question_rx: &'a mut mpsc::UnboundedReceiver<QuestionCall>,
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
     pub(crate) config: &'a localpilot_config::Config,
     pub(crate) trust_required: bool,
+}
+
+/// A model `ask_user` call being answered one question at a time.
+struct PendingQuestions {
+    questions: Vec<UserQuestion>,
+    index: usize,
+    answers: Vec<UserAnswer>,
+    reply: oneshot::Sender<Vec<UserAnswer>>,
+}
+
+impl PendingQuestions {
+    fn show_current(&self, app: &mut AppModel) {
+        let question = &self.questions[self.index];
+        app.request_question(
+            question.header.clone(),
+            question.question.clone(),
+            question.options.iter().map(|option| UiQuestionOption {
+                label: option.label.clone(),
+                description: option.description.clone(),
+            }),
+            question.multi_select,
+            self.index + 1,
+            self.questions.len(),
+        );
+    }
+
+    fn advance(&mut self, app: &mut AppModel, answer: UserAnswer) -> bool {
+        self.answers.push(answer);
+        self.index += 1;
+        if self.index < self.questions.len() {
+            self.show_current(app);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn finish(mut self) {
+        while self.answers.len() < self.questions.len() {
+            self.answers.push(UserAnswer::Dismissed);
+        }
+        let _ = self.reply.send(self.answers);
+    }
 }
 
 /// Bounded, already-selected state projected into the first full-screen frame.
@@ -88,6 +134,7 @@ pub(crate) enum StartupItem {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: u64,
     },
     ContextUsage {
         used: usize,
@@ -398,9 +445,11 @@ fn apply_startup_item(app: &mut AppModel, item: StartupItem) {
         StartupItem::Usage {
             input_tokens,
             output_tokens,
+            cached_input_tokens,
         } => app.apply_runtime(RuntimeUpdate::Usage {
             input_tokens,
             output_tokens,
+            cached_input_tokens,
         }),
         StartupItem::ContextUsage { used, limit } => {
             app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
@@ -421,12 +470,18 @@ fn exit_presentation(app: &AppModel, cwd: &Path, elapsed: Duration, print: bool)
         "LocalPilot".to_string(),
         format!("Session: {}", format_elapsed(elapsed)),
     ];
-    if let Some((input, output)) = app.usage {
+    if let Some(usage) = app.usage {
         summary.push(format!(
             "Tokens: {} input · {} output",
-            format_count(input),
-            format_count(output)
+            format_count(usage.input_tokens),
+            format_count(usage.output_tokens)
         ));
+        if usage.cached_input_tokens > 0 {
+            summary.push(format!(
+                "Prompt cache: {} input tokens read",
+                format_count(usage.cached_input_tokens)
+            ));
+        }
     }
     if let Some(status) = crate::repl::workspace_git_status(cwd) {
         let state = match status.dirty {
@@ -1691,7 +1746,7 @@ async fn run_event_loop(
     let HostContext {
         runtime,
         approval_rx,
-        elicitation_rx,
+        question_rx,
         cwd,
         history,
         ingest,
@@ -1800,7 +1855,7 @@ async fn run_event_loop(
                             app,
                             runtime,
                             approval_rx,
-                            elicitation_rx,
+                            question_rx,
                             operation,
                             &mut queue,
                             history,
@@ -1823,7 +1878,7 @@ async fn run_event_loop(
                             app,
                             runtime,
                             approval_rx,
-                            elicitation_rx,
+                            question_rx,
                             operation,
                             &mut queue,
                             history,
@@ -1864,7 +1919,11 @@ async fn run_event_loop(
         }
     }
     if let Some(usage) = crate::repl::stored_session_usage(runtime.store(), runtime.session_id()) {
-        app.usage = Some(usage);
+        app.usage = Some(UsageTotals {
+            input_tokens: usage.effective_input_tokens(),
+            output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cache_read_input_tokens,
+        });
     }
     Ok(LoopExit::Normal)
 }
@@ -1875,7 +1934,7 @@ async fn drive_operation_chain(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>,
+    question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
     first: QueuedOperation,
     queue: &mut VecDeque<QueuedOperation>,
     history: &localpilot_store::PromptHistory,
@@ -1896,7 +1955,7 @@ async fn drive_operation_chain(
                     app,
                     runtime,
                     approval_rx,
-                    elicitation_rx,
+                    question_rx,
                     &prompt.text,
                     &prompt.attachments,
                     queue,
@@ -2051,19 +2110,19 @@ async fn drive_shell(
                 let _ = draw_synchronized(terminal, app)?;
             }
             result = &mut operation => {
-                let output = result.shell.map_or_else(
+                let output = result.presentation.map_or_else(
                     || {
                         UserShellOutput::diagnostic(
-                            result.result.is_error,
+                            result.result.is_error(),
                             present_shell_diagnostic(&result.result.output),
                         )
                     },
-                    |captured| {
-                        UserShellOutput::captured(
+                    |presentation| match presentation {
+                        ToolOutputPresentation::Shell(captured) => UserShellOutput::captured(
                             captured.exit_code,
                             &captured.stdout,
                             &captured.stderr,
-                        )
+                        ),
                     },
                 );
                 let _ = app.finish_shell(shell.item_id, &shell.command, &output);
@@ -2181,7 +2240,7 @@ async fn drive_turn(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>,
+    question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
     prompt: &str,
     attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedOperation>,
@@ -2201,7 +2260,9 @@ async fn drive_turn(
         vision_capable: runtime.active_accepts_images(),
     };
     let mut pending: Option<oneshot::Sender<bool>> = None;
-    let mut pending_elicitation: Option<oneshot::Sender<ElicitationOutcome>> = None;
+    let mut pending_questions: Option<PendingQuestions> = None;
+    let mut pending_steer_items = VecDeque::new();
+    let steer = runtime.steer_queue();
     let outcome = {
         let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
         tokio::pin!(operation);
@@ -2215,9 +2276,9 @@ async fn drive_turn(
                 workspace_index.refresh(app);
                 let mut hit_map = draw_synchronized(terminal, app)?;
                 if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
-                    if pending.is_none() && pending_elicitation.is_none() {
+                    if pending.is_none() && pending_questions.is_none() {
                         let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
-                    } else if pending_elicitation.is_some() {
+                    } else if pending_questions.is_some() {
                         let _ = app.handle_question_input(InputAction::Paste(text));
                     }
                 }
@@ -2230,13 +2291,13 @@ async fn drive_turn(
                         if is_key_action(*key) {
                             let buffered_after = buffered_after_fullscreen_key(*key)
                                 .context("poll after active full-screen paste key")?;
-                            let consumed = if pending.is_some() || pending_elicitation.is_some() {
+                            let consumed = if pending.is_some() || pending_questions.is_some() {
                                 handle_dialog_paste_burst(
                                     app,
                                     paste_burst,
                                     *key,
                                     buffered_after,
-                                    pending_elicitation.is_some(),
+                                    pending_questions.is_some(),
                                 )
                             } else {
                                 handle_fullscreen_paste_burst(
@@ -2253,11 +2314,11 @@ async fn drive_turn(
                         }
                     }
                     let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
-                    let exit = if pending_elicitation.is_some() {
+                    let exit = if pending_questions.is_some() {
                         handle_question_event(
                             app,
                             next,
-                            &mut pending_elicitation,
+                            &mut pending_questions,
                             &cancel,
                             &hit_map,
                         )
@@ -2274,7 +2335,7 @@ async fn drive_turn(
                                 paste_text_from_clipboard(app, hit_map.editor_width);
                                 false
                             }
-                            RoutedEvent::Unhandled => handle_turn_event(
+                            RoutedEvent::Unhandled => handle_turn_event_with_steering(
                                 app,
                                 next,
                                 &cancel,
@@ -2283,6 +2344,8 @@ async fn drive_turn(
                                 history,
                                 cwd,
                                 &image_capability,
+                                &steer,
+                                &mut pending_steer_items,
                             ),
                         }
                     };
@@ -2298,12 +2361,12 @@ async fn drive_turn(
                 let _ = draw_synchronized(terminal, app)?;
             }
             reason = &mut operation => {
-                drain_runtime_events(app, &mut rx);
+                drain_runtime_events(app, &mut rx, &mut pending_steer_items);
                 app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
                 let _ = draw_synchronized(terminal, app)?;
                 return Ok(false);
             }
-            Some(call) = approval_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
+            Some(call) = approval_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
                 mouse_state.reset_gesture();
                 if let Some(text) = paste_burst.flush_pending() {
                     let _ = app.handle_input(InputAction::Paste(text), 1);
@@ -2317,18 +2380,28 @@ async fn drive_turn(
             }
             received = rx.recv() => {
                 match received {
-                    Ok(event) => app.apply_runtime(map_runtime_event(event)),
+                    Ok(event) => apply_runtime_event(app, event, &mut pending_steer_items),
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => {}
                 }
             }
-            Some(call) = elicitation_rx.recv(), if pending.is_none() && pending_elicitation.is_none() => {
+            Some(call) = question_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
                 mouse_state.reset_gesture();
                 if let Some(text) = paste_burst.flush_pending() {
                     let _ = app.handle_input(InputAction::Paste(text), 1);
                 }
-                app.request_question(call.request.question, call.request.options);
-                pending_elicitation = Some(call.reply);
+                if call.questions.is_empty() {
+                    let _ = call.reply.send(Vec::new());
+                } else {
+                    let questions = PendingQuestions {
+                        questions: call.questions,
+                        index: 0,
+                        answers: Vec::new(),
+                        reply: call.reply,
+                    };
+                    questions.show_current(app);
+                    pending_questions = Some(questions);
+                }
             }
         }
             }
@@ -2337,13 +2410,13 @@ async fn drive_turn(
     };
     deny_pending(app, &mut pending);
     deny_buffered_approvals(approval_rx);
-    cancel_pending_elicitation(app, &mut pending_elicitation);
-    cancel_buffered_elicitations(elicitation_rx);
+    dismiss_pending_questions(app, &mut pending_questions);
+    dismiss_buffered_questions(question_rx);
     outcome
 }
 
 #[allow(clippy::too_many_arguments)] // the live input router threads each state owner explicitly
-fn handle_turn_event(
+fn handle_turn_event_impl(
     app: &mut AppModel,
     event: Event,
     cancel: &CancellationToken,
@@ -2352,6 +2425,7 @@ fn handle_turn_event(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     image_capability: &ImageCapabilitySnapshot,
+    mut steering: Option<(&SteerQueue, &mut VecDeque<ItemId>)>,
 ) -> bool {
     match event {
         Event::Key(key) if is_key_action(key) => {
@@ -2380,7 +2454,23 @@ fn handle_turn_event(
                     true
                 }
                 AppCommand::CancelWork => {
-                    cancel.cancel();
+                    let promoted = if key.code == KeyCode::Esc {
+                        steering.as_mut().map_or(0, |(steer, pending_items)| {
+                            promote_queued_prompts_to_urgent_steering(
+                                app,
+                                queue,
+                                steer,
+                                pending_items,
+                            )
+                        })
+                    } else {
+                        0
+                    };
+                    if promoted > 0 {
+                        app.clear_cancellation_request();
+                    } else {
+                        cancel.cancel();
+                    }
                     false
                 }
                 AppCommand::Copy(text) => {
@@ -2445,6 +2535,85 @@ fn handle_turn_event(
         | Event::Resize(_, _)
         | Event::Key(_) => false,
     }
+}
+
+fn handle_turn_event(
+    app: &mut AppModel,
+    event: Event,
+    cancel: &CancellationToken,
+    hit_map: &HitMap,
+    queue: &mut VecDeque<QueuedOperation>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    image_capability: &ImageCapabilitySnapshot,
+) -> bool {
+    handle_turn_event_impl(
+        app,
+        event,
+        cancel,
+        hit_map,
+        queue,
+        history,
+        cwd,
+        image_capability,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_turn_event_with_steering(
+    app: &mut AppModel,
+    event: Event,
+    cancel: &CancellationToken,
+    hit_map: &HitMap,
+    queue: &mut VecDeque<QueuedOperation>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    image_capability: &ImageCapabilitySnapshot,
+    steer: &SteerQueue,
+    pending_steer_items: &mut VecDeque<ItemId>,
+) -> bool {
+    handle_turn_event_impl(
+        app,
+        event,
+        cancel,
+        hit_map,
+        queue,
+        history,
+        cwd,
+        image_capability,
+        Some((steer, pending_steer_items)),
+    )
+}
+
+fn promote_queued_prompts_to_urgent_steering(
+    app: &mut AppModel,
+    queue: &mut VecDeque<QueuedOperation>,
+    steer: &SteerQueue,
+    pending_steer_items: &mut VecDeque<ItemId>,
+) -> usize {
+    let mut promoted = 0;
+    while queue.front().is_some_and(|operation| {
+        matches!(operation, QueuedOperation::Prompt(prompt) if prompt.attachments.is_empty())
+    }) {
+        let Some(QueuedOperation::Prompt(prompt)) = queue.pop_front() else {
+            break;
+        };
+        pending_steer_items.push_back(prompt.item_id);
+        steer.push_interrupt(SoftInterrupt {
+            content: prompt.text,
+            source: localpilot_harness::SoftInterruptSource::User,
+            urgent: true,
+        });
+        promoted += 1;
+    }
+    if promoted > 0 {
+        app.apply_runtime(RuntimeUpdate::Notice(format!(
+            "steering with {promoted} queued prompt{}",
+            if promoted == 1 { "" } else { "s" }
+        )));
+    }
+    promoted
 }
 
 fn route_pointer_or_navigation(
@@ -2941,7 +3110,7 @@ fn handle_approval_event(
 fn handle_question_event(
     app: &mut AppModel,
     event: Event,
-    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+    pending: &mut Option<PendingQuestions>,
     cancel: &CancellationToken,
     hit_map: &HitMap,
 ) -> bool {
@@ -2981,12 +3150,12 @@ fn handle_question_event(
             if is_cancel(key) {
                 return match app.handle_input(InputAction::CancelOrExit, hit_map.editor_width) {
                     AppCommand::Exit => {
-                        finish_question(app, pending, ElicitationOutcome::Cancelled);
+                        dismiss_pending_questions(app, pending);
                         cancel.cancel();
                         true
                     }
                     AppCommand::CancelWork => {
-                        finish_question(app, pending, ElicitationOutcome::Cancelled);
+                        dismiss_pending_questions(app, pending);
                         cancel.cancel();
                         false
                     }
@@ -3015,28 +3184,36 @@ fn handle_question_event(
 fn resolve_question_action(
     app: &mut AppModel,
     action: QuestionAction,
-    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
+    pending: &mut Option<PendingQuestions>,
 ) -> bool {
     match action {
         QuestionAction::None => false,
-        QuestionAction::Submit(answer) => {
-            finish_question(app, pending, ElicitationOutcome::Answered(answer));
+        QuestionAction::Submit(response) => {
+            let answer = match response {
+                QuestionResponse::Selected(labels) => UserAnswer::Selected(labels),
+                QuestionResponse::Other(text) => UserAnswer::Other(text),
+            };
+            let finished = pending
+                .as_mut()
+                .is_some_and(|questions| questions.advance(app, answer));
+            if finished {
+                if let Some(questions) = pending.take() {
+                    questions.finish();
+                }
+                app.clear_dialog();
+            }
             false
         }
         QuestionAction::Cancel => {
-            finish_question(app, pending, ElicitationOutcome::Cancelled);
+            dismiss_pending_questions(app, pending);
             false
         }
     }
 }
 
-fn finish_question(
-    app: &mut AppModel,
-    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
-    outcome: ElicitationOutcome,
-) {
-    if let Some(reply) = pending.take() {
-        let _ = reply.send(outcome);
+fn dismiss_pending_questions(app: &mut AppModel, pending: &mut Option<PendingQuestions>) {
+    if let Some(questions) = pending.take() {
+        questions.finish();
     }
     app.clear_dialog();
 }
@@ -3054,16 +3231,11 @@ fn deny_buffered_approvals(approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCal
     }
 }
 
-fn cancel_pending_elicitation(
-    app: &mut AppModel,
-    pending: &mut Option<oneshot::Sender<ElicitationOutcome>>,
-) {
-    finish_question(app, pending, ElicitationOutcome::Cancelled);
-}
-
-fn cancel_buffered_elicitations(elicitation_rx: &mut mpsc::UnboundedReceiver<ElicitationCall>) {
-    while let Ok(call) = elicitation_rx.try_recv() {
-        let _ = call.reply.send(ElicitationOutcome::Cancelled);
+fn dismiss_buffered_questions(question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>) {
+    while let Ok(call) = question_rx.try_recv() {
+        let _ = call
+            .reply
+            .send(vec![UserAnswer::Dismissed; call.questions.len()]);
     }
 }
 
@@ -3074,10 +3246,30 @@ fn present_shell_diagnostic(output: &str) -> &str {
         .trim()
 }
 
-fn drain_runtime_events(app: &mut AppModel, rx: &mut broadcast::Receiver<RuntimeEvent>) {
+fn apply_runtime_event(
+    app: &mut AppModel,
+    event: RuntimeEvent,
+    pending_steer_items: &mut VecDeque<ItemId>,
+) {
+    if matches!(
+        &event,
+        RuntimeEvent::SoftInterruptInjected { source, .. } if source == "user"
+    ) {
+        if let Some(item_id) = pending_steer_items.pop_front() {
+            let _ = app.activate_prompt(item_id);
+        }
+    }
+    app.apply_runtime(map_runtime_event(event));
+}
+
+fn drain_runtime_events(
+    app: &mut AppModel,
+    rx: &mut broadcast::Receiver<RuntimeEvent>,
+    pending_steer_items: &mut VecDeque<ItemId>,
+) {
     loop {
         match rx.try_recv() {
-            Ok(event) => app.apply_runtime(map_runtime_event(event)),
+            Ok(event) => apply_runtime_event(app, event, pending_steer_items),
             Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
                 break
@@ -3279,8 +3471,9 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             duration_ms,
         },
         RuntimeEvent::Usage(usage) => RuntimeUpdate::Usage {
-            input_tokens: usage.input_tokens,
+            input_tokens: usage.effective_input_tokens(),
             output_tokens: usage.output_tokens,
+            cached_input_tokens: usage.cache_read_input_tokens,
         },
         RuntimeEvent::ContextUsage { used, limit } => RuntimeUpdate::ContextUsage { used, limit },
         RuntimeEvent::Warning(message) => RuntimeUpdate::Warning(message),
@@ -3300,6 +3493,8 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             ModelHealth::Degraded => RecoveryState::Degraded,
         }),
         RuntimeEvent::ToolStuck { name, count } => RuntimeUpdate::ToolStuck { name, count },
+        RuntimeEvent::FilesTouched(_) => RuntimeUpdate::FilesTouched,
+        RuntimeEvent::SoftInterruptInjected { .. } => RuntimeUpdate::SoftInterruptInjected,
         RuntimeEvent::Stopped(reason) => RuntimeUpdate::Stopped(match reason {
             StopReason::Done => StopState::Done,
             StopReason::Cancelled => StopState::Cancelled,
@@ -3308,6 +3503,7 @@ pub(crate) fn map_runtime_event(event: RuntimeEvent) -> RuntimeUpdate {
             StopReason::BudgetExceeded => StopState::BudgetExceeded,
             StopReason::NoProgress => StopState::NoProgress,
             StopReason::TimedOut => StopState::TimedOut,
+            StopReason::Quiesced => StopState::Quiesced,
         }),
     }
 }
@@ -3947,6 +4143,7 @@ mod tests {
                 StartupItem::Usage {
                     input_tokens: 11,
                     output_tokens: 7,
+                    cached_input_tokens: 0,
                 },
                 StartupItem::ContextUsage {
                     used: 20,
@@ -3962,7 +4159,14 @@ mod tests {
             .items()
             .iter()
             .any(|item| item.text == "existing conversation"));
-        assert_eq!(app.usage, Some((11, 7)));
+        assert_eq!(
+            app.usage,
+            Some(UsageTotals {
+                input_tokens: 11,
+                output_tokens: 7,
+                cached_input_tokens: 0,
+            })
+        );
         assert!(app
             .timeline
             .items()
@@ -4017,6 +4221,7 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::Usage {
             input_tokens: 1_234,
             output_tokens: 56,
+            cached_input_tokens: 0,
         });
 
         let directory = tempfile::tempdir().expect("tempdir");
@@ -4802,7 +5007,14 @@ mod tests {
         );
 
         let mut question = app();
-        question.request_question("Explain", std::iter::empty());
+        question.request_question(
+            None,
+            "Explain",
+            std::iter::empty::<UiQuestionOption>(),
+            false,
+            1,
+            1,
+        );
         assert_eq!(
             question.handle_question_input(InputAction::Submit),
             QuestionAction::None
@@ -4822,7 +5034,7 @@ mod tests {
         }
         assert_eq!(
             question.handle_question_input(InputAction::Submit),
-            QuestionAction::Submit("x y".to_string())
+            QuestionAction::Submit(QuestionResponse::Other("x y".to_string()))
         );
     }
 
@@ -4853,7 +5065,7 @@ mod tests {
     }
 
     #[test]
-    fn active_turn_queues_typeahead_and_escape_cancels_real_token() {
+    fn active_turn_queues_typeahead_and_escape_promotes_fifo_steering() {
         let mut app = app();
         app.begin_work();
         app.editor.insert("next prompt");
@@ -4861,8 +5073,10 @@ mod tests {
         let history = localpilot_store::PromptHistory::with_store(None);
         let cwd = Path::new("fixture");
         let mut queue = VecDeque::new();
+        let steer = SteerQueue::default();
+        let mut pending_steer_items = VecDeque::new();
 
-        assert!(!handle_turn_event(
+        assert!(!handle_turn_event_with_steering(
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
@@ -4871,6 +5085,8 @@ mod tests {
             &history,
             cwd,
             &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
         ));
         assert!(app.editor.text().is_empty());
         assert_eq!(queue.len(), 1);
@@ -4884,7 +5100,7 @@ mod tests {
         assert!(!cancel.is_cancelled());
 
         app.editor.insert("third prompt");
-        assert!(!handle_turn_event(
+        assert!(!handle_turn_event_with_steering(
             &mut app,
             Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
             &cancel,
@@ -4893,6 +5109,8 @@ mod tests {
             &history,
             cwd,
             &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
         ));
         assert_eq!(
             queue
@@ -4902,7 +5120,11 @@ mod tests {
             vec!["next prompt", "third prompt"]
         );
 
-        assert!(!handle_turn_event(
+        let queued_ids = queue
+            .iter()
+            .map(QueuedOperation::item_id)
+            .collect::<Vec<_>>();
+        assert!(!handle_turn_event_with_steering(
             &mut app,
             Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
             &cancel,
@@ -4911,14 +5133,35 @@ mod tests {
             &history,
             cwd,
             &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
         ));
-        assert!(cancel.is_cancelled());
+        assert!(!cancel.is_cancelled());
+        assert!(queue.is_empty());
+        assert!(!steer.is_empty());
+        assert_eq!(
+            pending_steer_items.iter().copied().collect::<Vec<_>>(),
+            queued_ids
+        );
         assert_eq!(
             app.work,
             WorkState::Busy {
-                cancellation_requested: true
+                cancellation_requested: false
             }
         );
+
+        for item_id in queued_ids {
+            apply_runtime_event(
+                &mut app,
+                RuntimeEvent::SoftInterruptInjected {
+                    point: "during_stream".to_string(),
+                    source: "user".to_string(),
+                },
+                &mut pending_steer_items,
+            );
+            assert!(!app.timeline.item(item_id).expect("steered row").pending);
+        }
+        assert!(pending_steer_items.is_empty());
     }
 
     #[test]
@@ -4989,6 +5232,124 @@ mod tests {
     }
 
     #[test]
+    fn escape_does_not_reorder_a_shell_before_a_queued_prompt() {
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let steer = SteerQueue::default();
+        let mut pending_steer_items = VecDeque::new();
+
+        let _ = app.handle_input(InputAction::Insert("!echo first".to_string()), 80);
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+        app.editor.insert("second prompt");
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(queue.front(), Some(QueuedOperation::Shell(_))));
+        assert!(matches!(queue.back(), Some(QueuedOperation::Prompt(_))));
+        assert!(steer.is_empty());
+        assert!(pending_steer_items.is_empty());
+    }
+
+    #[test]
+    fn escape_promotes_only_the_prompt_prefix_before_a_shell() {
+        let temp = tempfile::tempdir().expect("temp history");
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let steer = SteerQueue::default();
+        let mut pending_steer_items = VecDeque::new();
+
+        app.editor.insert("first prompt");
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+        let prompt_id = queue.front().expect("queued prompt").item_id();
+        let _ = app.handle_input(InputAction::Insert("!echo second".to_string()), 80);
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Esc, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            temp.path(),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+
+        assert!(!cancel.is_cancelled());
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(queue.front(), Some(QueuedOperation::Shell(_))));
+        assert!(!steer.is_empty());
+        assert_eq!(pending_steer_items, VecDeque::from([prompt_id]));
+    }
+
+    #[test]
     fn active_exit_cancels_work_and_discards_queued_operations() {
         let history = localpilot_store::PromptHistory::with_store(None);
         let mut app = app();
@@ -5039,6 +5400,7 @@ mod tests {
             StartupItem::Usage {
                 input_tokens: 100,
                 output_tokens: 25,
+                cached_input_tokens: 0,
             },
             StartupItem::ContextUsage {
                 used: 300,
@@ -5053,7 +5415,14 @@ mod tests {
         assert_eq!(app.timeline.items()[0].text, "prior prompt");
         assert_eq!(app.timeline.items()[1].kind, ItemKind::Assistant);
         assert_eq!(app.timeline.items()[1].text, "prior answer");
-        assert_eq!(app.usage, Some((100, 25)));
+        assert_eq!(
+            app.usage,
+            Some(UsageTotals {
+                input_tokens: 100,
+                output_tokens: 25,
+                cached_input_tokens: 0,
+            })
+        );
         assert_eq!(app.context_usage, Some((300, 4_000)));
         assert_eq!(
             app.timeline.items().last().expect("notice").kind,
@@ -5415,10 +5784,33 @@ mod tests {
     fn question_mouse_focus_and_enter_resolve_reply_without_cancelling_work() {
         let mut app = app();
         app.begin_work();
-        app.request_question("Pick one", ["Red".to_string(), "Blue".to_string()]);
-        let hit_map = draw_hit_map(&app, 120, 30);
+        let questions = vec![UserQuestion {
+            header: None,
+            question: "Pick one".to_string(),
+            options: vec![
+                localpilot_tools::QuestionOption {
+                    label: "Red".to_string(),
+                    description: None,
+                },
+                localpilot_tools::QuestionOption {
+                    label: "Blue".to_string(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }];
         let (reply, mut answer) = oneshot::channel();
-        let mut pending = Some(reply);
+        let mut pending = Some(PendingQuestions {
+            questions,
+            index: 0,
+            answers: Vec::new(),
+            reply,
+        });
+        pending
+            .as_ref()
+            .expect("pending questions")
+            .show_current(&mut app);
+        let hit_map = draw_hit_map(&app, 120, 30);
         let cancel = CancellationToken::new();
 
         let blue = hit_map.question_rows[1].area;
@@ -5442,7 +5834,7 @@ mod tests {
         ));
         assert_eq!(
             answer.try_recv(),
-            Ok(ElicitationOutcome::Answered("Blue".to_string()))
+            Ok(vec![UserAnswer::Selected(vec!["Blue".to_string()])])
         );
         assert!(app.dialog.is_none());
         assert!(!cancel.is_cancelled());
@@ -5455,21 +5847,105 @@ mod tests {
         for _ in 0..3 {
             let (reply, answer) = oneshot::channel();
             sender
-                .send(ElicitationCall {
-                    request: localpilot_tools::ElicitationRequest {
+                .send(QuestionCall {
+                    questions: vec![UserQuestion {
+                        header: None,
                         question: "fixture".to_string(),
-                        options: vec!["A".to_string(), "B".to_string()],
-                    },
+                        options: vec![
+                            localpilot_tools::QuestionOption {
+                                label: "A".to_string(),
+                                description: None,
+                            },
+                            localpilot_tools::QuestionOption {
+                                label: "B".to_string(),
+                                description: None,
+                            },
+                        ],
+                        multi_select: false,
+                    }],
                     reply,
                 })
                 .expect("queue question");
             answers.push(answer);
         }
 
-        cancel_buffered_elicitations(&mut receiver);
+        dismiss_buffered_questions(&mut receiver);
         for mut answer in answers {
-            assert_eq!(answer.try_recv(), Ok(ElicitationOutcome::Cancelled));
+            assert_eq!(answer.try_recv(), Ok(vec![UserAnswer::Dismissed]));
         }
+    }
+
+    #[test]
+    fn question_sets_advance_in_order_and_dismiss_only_the_unanswered_tail() {
+        let questions = vec![
+            UserQuestion {
+                header: Some("First".to_string()),
+                question: "Choose first".to_string(),
+                options: vec![
+                    localpilot_tools::QuestionOption {
+                        label: "A".to_string(),
+                        description: None,
+                    },
+                    localpilot_tools::QuestionOption {
+                        label: "B".to_string(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            },
+            UserQuestion {
+                header: Some("Second".to_string()),
+                question: "Choose second".to_string(),
+                options: vec![
+                    localpilot_tools::QuestionOption {
+                        label: "C".to_string(),
+                        description: None,
+                    },
+                    localpilot_tools::QuestionOption {
+                        label: "D".to_string(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            },
+        ];
+        let (reply, mut answers) = oneshot::channel();
+        let mut pending = Some(PendingQuestions {
+            questions,
+            index: 0,
+            answers: Vec::new(),
+            reply,
+        });
+        let mut app = app();
+        pending
+            .as_ref()
+            .expect("pending questions")
+            .show_current(&mut app);
+
+        assert!(!resolve_question_action(
+            &mut app,
+            QuestionAction::Submit(QuestionResponse::Selected(vec!["B".to_string()])),
+            &mut pending,
+        ));
+        assert!(matches!(
+            answers.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(app.dialog.is_some(), "the second question remains visible");
+
+        assert!(!resolve_question_action(
+            &mut app,
+            QuestionAction::Cancel,
+            &mut pending,
+        ));
+        assert_eq!(
+            answers.try_recv(),
+            Ok(vec![
+                UserAnswer::Selected(vec!["B".to_string()]),
+                UserAnswer::Dismissed,
+            ])
+        );
+        assert!(app.dialog.is_none());
     }
 
     #[test]
@@ -5660,15 +6136,26 @@ mod tests {
             map_runtime_event(RuntimeEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 34,
+                cache_creation_input_tokens: 5,
+                cache_read_input_tokens: 6,
             })),
             RuntimeUpdate::Usage {
-                input_tokens: 12,
+                input_tokens: 23,
                 output_tokens: 34,
+                cached_input_tokens: 6,
             }
         );
         assert_eq!(
             map_runtime_event(RuntimeEvent::Stopped(StopReason::Cancelled)),
             RuntimeUpdate::Stopped(StopState::Cancelled)
+        );
+        assert_eq!(
+            map_runtime_event(RuntimeEvent::FilesTouched(Vec::new())),
+            RuntimeUpdate::FilesTouched
+        );
+        assert_eq!(
+            map_runtime_event(RuntimeEvent::Stopped(StopReason::Quiesced)),
+            RuntimeUpdate::Stopped(StopState::Quiesced)
         );
     }
 
@@ -5810,6 +6297,7 @@ mod tests {
                 RuntimeEvent::Usage(TokenUsage {
                     input_tokens: 12,
                     output_tokens: 34,
+                    ..TokenUsage::default()
                 }),
                 RuntimeEvent::ToolStarted {
                     id: "fixture-tool".to_string(),
@@ -5839,7 +6327,14 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.text == "inspect completed · 2 lines · 25 ms"));
-        assert_eq!(following.usage, Some((12, 34)));
+        assert_eq!(
+            following.usage,
+            Some(UsageTotals {
+                input_tokens: 12,
+                output_tokens: 34,
+                cached_input_tokens: 0,
+            })
+        );
         assert_eq!(following.work, WorkState::Idle);
 
         let mut held = seed;

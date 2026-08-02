@@ -357,14 +357,40 @@ pub fn context_hits(
     // as today, so a no-embed run is byte-identical.
     let cosines = relevance_cosines(&persistence, query);
     // The opt-in rerank stage (`[retrieval] rerank` + an embedding endpoint):
-    // reorder the top keyword candidates by the same stored-vector cosines the
-    // gate uses, through the engine's rerank policy — keyword stays the
-    // candidate floor, a hit without a stored vector keeps its slot, and with
-    // the flag off (the default) the order is byte-identical.
+    // fuse the keyword (bm25) ranking with the dense (cosine) ranking by
+    // Reciprocal Rank Fusion, so a candidate the two retrievers agree on rises.
+    // Keyword stays the candidate floor — RRF only reorders the bm25 candidates
+    // (a dense-only memory is never selected), a hit absent from the dense list
+    // keeps only its keyword contribution, and with the flag off (the default,
+    // or when no embedding endpoint is configured) the order is byte-identical.
     let hits = match (&cosines, active_rerank_window(project_root)) {
-        (Some(by_id), Some(window)) => localmind_search::rerank_scored(hits, window, |hit| {
-            by_id.get(&hit.memory_id.to_string()).copied()
-        }),
+        (Some((by_id, dense_ids)), Some(_)) => {
+            let bm25_ids: Vec<String> = hits.iter().map(|h| h.memory_id.to_string()).collect();
+            let fused = crate::fuse::reciprocal_rank_fusion(
+                &[bm25_ids, dense_ids.clone()],
+                crate::fuse::RRF_K,
+            );
+            let score: std::collections::HashMap<&str, f64> =
+                fused.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            let mut reordered = hits;
+            // Higher fused score first; break a tie toward the semantically closer
+            // memory (higher cosine), then by id so the order is deterministic. A
+            // bm25 candidate always has a fused score (it was an input list).
+            reordered.sort_by(|a, b| {
+                let (ia, ib) = (a.memory_id.to_string(), b.memory_id.to_string());
+                let sa = score.get(ia.as_str()).copied().unwrap_or(0.0);
+                let sb = score.get(ib.as_str()).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let ca = by_id.get(&ia).copied().unwrap_or(0.0);
+                        let cb = by_id.get(&ib).copied().unwrap_or(0.0);
+                        cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| ia.cmp(&ib))
+            });
+            reordered
+        }
         _ => hits,
     };
     Ok(hits
@@ -374,7 +400,7 @@ pub fn context_hits(
             let memory_id = hit.memory_id.to_string();
             let cosine = cosines
                 .as_ref()
-                .and_then(|by_id| by_id.get(&memory_id).copied());
+                .and_then(|(by_id, _)| by_id.get(&memory_id).copied());
             SearchHit {
                 memory_id,
                 score: hit.score,
@@ -402,21 +428,25 @@ fn active_rerank_window(project_root: &Path) -> Option<usize> {
 /// caller then attaches no cosine and the keyword path is unchanged. Reuses the
 /// engine's `embed_query` + global-aware `vector_search` (the same primitives the
 /// review-mode semantic dedup uses); no new retrieval engine.
+/// Returns `(id -> cosine, dense-ranked memory ids)`: the map is the per-hit gate
+/// value; the `Vec` is the memory ids in dense-similarity order (best first), the
+/// dense retriever's ranked list for RRF. `vector_search` already returns rows
+/// sorted by descending cosine, so the `Vec` position is the dense rank.
 fn relevance_cosines(
     persistence: &MemoryPersistence,
     query: &str,
-) -> Option<std::collections::HashMap<String, f32>> {
+) -> Option<(std::collections::HashMap<String, f32>, Vec<String>)> {
     let vector = persistence.embed_query(query).ok().flatten()?;
     let scored = persistence
         .vector_search(&vector, RELEVANCE_VECTOR_WINDOW)
         .ok()?;
-    Some(
-        scored
-            .into_iter()
-            .filter(|result| result.subject_kind == "memory")
-            .map(|result| (result.subject_id, result.score))
-            .collect(),
-    )
+    let memories: Vec<(String, f32)> = scored
+        .into_iter()
+        .filter(|result| result.subject_kind == "memory")
+        .map(|result| (result.subject_id, result.score))
+        .collect();
+    let order: Vec<String> = memories.iter().map(|(id, _)| id.clone()).collect();
+    Some((memories.into_iter().collect(), order))
 }
 
 /// How many nearest vectors to score for the injection relevance gate. Generous
@@ -1220,7 +1250,9 @@ mod tests {
             hits.iter().map(|h| h.snippet.clone()).collect::<Vec<_>>()
         );
 
-        // On: the stored-vector rerank reorders the top candidates.
+        // On: RRF fuses the keyword and stored-vector rankings; the two retrievers
+        // tie on this symmetric pair, so the cosine tiebreak lifts the
+        // semantically closer memory.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(crate::CONFIG_FILE),
@@ -1237,6 +1269,70 @@ mod tests {
             "rerank on: the semantically closer memory must climb, got {:?}",
             hits.iter().map(|h| h.snippet.clone()).collect::<Vec<_>>()
         );
+    }
+
+    fn seed_body(root: &Path, body: &str) {
+        let lesson = crate::SeedLesson {
+            body: body.to_string(),
+            category: Some("Process".to_string()),
+            confidence: Some(0.8),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            evidence: None,
+            tags: Vec::new(),
+        };
+        crate::seed_memory(root, &[lesson], false).unwrap();
+    }
+
+    /// Deterministic offline before/after retrieval eval: hybrid (RRF) must not
+    /// rank the truly-relevant memory *below* lexical-only. The fixture is built to
+    /// lift — the relevant memory is keyword-weak but semantically closest — so it
+    /// also demonstrates a strict improvement (precision@1 0 -> 1).
+    #[test]
+    fn hybrid_retrieval_does_not_regress_and_lifts_a_built_to_lift_case() {
+        let base_url = content_aware_embeddings_server(64);
+
+        // Relevance: only the "cypress" memory answers the query; it is keyword-weak
+        // (one query-term match) while a decoy is keyword-strong (two matches).
+        let relevant = "cypress"; // the stub embeds this memory ~= the query
+        let seed = |root: &Path| {
+            seed_body(root, "redwood redwood build lesson"); // keyword-strong decoy
+            seed_body(root, "maple build lesson"); // keyword decoy
+            seed_body(root, "cypress build tips"); // relevant, keyword-weak
+        };
+        let query = "redwood build";
+        let precision_at_1 = |hits: &[SearchHit]| {
+            usize::from(hits.first().is_some_and(|h| h.snippet.contains(relevant)))
+        };
+
+        // Baseline: lexical only (rerank off). The keyword-strong decoy wins.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!("[learning]\nenabled = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n"),
+        )
+        .unwrap();
+        seed(dir.path());
+        let lexical = context_hits(dir.path(), query, None).unwrap();
+        let lexical_p1 = precision_at_1(&lexical);
+
+        // Hybrid: rerank on → RRF fuses keyword + dense; the relevant memory climbs.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::CONFIG_FILE),
+            format!("[learning]\nenabled = true\n\n[retrieval]\nrerank = true\n\n[inference]\nembedding_base_url = \"{base_url}\"\nembedding_model = \"stub\"\ntimeout_secs = 5\n"),
+        )
+        .unwrap();
+        seed(dir.path());
+        let hybrid = context_hits(dir.path(), query, None).unwrap();
+        let hybrid_p1 = precision_at_1(&hybrid);
+
+        assert!(
+            hybrid_p1 >= lexical_p1,
+            "hybrid must never regress precision@1: lexical={lexical_p1} hybrid={hybrid_p1}"
+        );
+        assert_eq!(lexical_p1, 0, "the built-to-lift baseline misses at rank 1");
+        assert_eq!(hybrid_p1, 1, "hybrid lifts the relevant memory to rank 1");
     }
 
     #[test]

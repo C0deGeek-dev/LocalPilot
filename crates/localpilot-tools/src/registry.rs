@@ -1,7 +1,7 @@
 //! The tool registry and permission-gated dispatch.
 
 use localpilot_config::redact::redact;
-use localpilot_core::{ToolCall, ToolResult};
+use localpilot_core::{ToolCall, ToolOutcome, ToolResult};
 use localpilot_sandbox::{
     Approver, Decision, Effect, PermissionEngine, PermissionRequest, Profile,
 };
@@ -14,8 +14,10 @@ use crate::builtins::{
     GitLog, GitRestore, GitStatus, ListFiles, MultiEdit, ReadFile, ReadToolOutput, ReplaceInFile,
     SearchText, UpdatePlan, WriteFile,
 };
+use crate::builtins_ask::AskUser;
 use crate::builtins_background::RunBackground;
 use crate::builtins_shell::RunShell;
+use crate::builtins_swarm::Swarm;
 use crate::catalog::{Catalog, ToolSource};
 use crate::tool::{GateVerdict, ShellOutput, Tool, ToolContext, ToolGate, ToolOutputPresentation};
 
@@ -42,6 +44,7 @@ pub struct ToolRegistry {
 pub struct ToolDispatchResult {
     pub result: ToolResult,
     pub presentation: Option<ToolOutputPresentation>,
+    pub touches: Vec<crate::touch::FileTouch>,
 }
 
 impl ToolDispatchResult {
@@ -49,6 +52,7 @@ impl ToolDispatchResult {
         Self {
             result,
             presentation: None,
+            touches: Vec::new(),
         }
     }
 }
@@ -94,6 +98,8 @@ impl ToolRegistry {
         registry.register(Box::new(GitRestore));
         registry.register(Box::new(GitCommit));
         registry.register(Box::new(Delegate));
+        registry.register(Box::new(AskUser));
+        registry.register(Box::new(Swarm));
         registry.register(Box::new(UpdatePlan));
         registry
     }
@@ -228,13 +234,11 @@ impl ToolRegistry {
         approver: &dyn Approver,
     ) -> ToolDispatchResult {
         if call.name != "run_shell" {
-            return ToolDispatchResult::plain(ToolResult::error(
-                call.id.clone(),
-                format_tool_output(
-                    &call.name,
-                    "the explicit user-shell dispatch accepts only run_shell",
-                    true,
-                ),
+            return ToolDispatchResult::plain(unusable_result(
+                &call.name,
+                &call.id,
+                "the explicit user-shell dispatch accepts only run_shell",
+                ctx,
             ));
         }
         self.dispatch_gated_detailed_with_intent(
@@ -263,6 +267,26 @@ impl ToolRegistry {
         self.dispatch_gated_detailed(call, ctx, engine, approver, gates)
             .await
             .result
+    }
+
+    /// [`ToolRegistry::dispatch_gated`], also returning what the tool reported
+    /// touching.
+    ///
+    /// The touches are deliberately *not* on [`ToolResult`]: that type is the
+    /// durable wire shape written into every transcript. Callers that care ask
+    /// for them; the rest use `dispatch` and never see them.
+    pub async fn dispatch_reporting(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext<'_>,
+        engine: &PermissionEngine,
+        approver: &dyn Approver,
+        gates: &[&dyn ToolGate],
+    ) -> (ToolResult, Vec<crate::touch::FileTouch>) {
+        let dispatch = self
+            .dispatch_gated_detailed(call, ctx, engine, approver, gates)
+            .await;
+        (dispatch.result, dispatch.touches)
     }
 
     async fn dispatch_gated_detailed(
@@ -294,18 +318,22 @@ impl ToolRegistry {
         intent: DispatchIntent,
     ) -> ToolDispatchResult {
         let Some(tool) = self.get(&call.name) else {
-            return ToolDispatchResult::plain(ToolResult::error(
-                call.id.clone(),
-                format_tool_output(&call.name, &format!("unknown tool: {}", call.name), true),
+            return ToolDispatchResult::plain(unusable_result(
+                &call.name,
+                &call.id,
+                &format!("unknown tool: {}", call.name),
+                ctx,
             ));
         };
 
         let effects = match tool.effects(&call.input, ctx) {
             Ok(effects) => effects,
             Err(err) => {
-                return ToolDispatchResult::plain(ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(tool.name(), &err.to_string(), true),
+                return ToolDispatchResult::plain(unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &err.to_string(),
+                    ctx,
                 ))
             }
         };
@@ -346,22 +374,22 @@ impl ToolRegistry {
                 Decision::Deny => false,
             };
             if !allowed {
-                return ToolDispatchResult::plain(ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(tool.name(), &denial_message(tool.name(), &request), true),
+                return ToolDispatchResult::plain(unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &denial_message(tool.name(), &request),
+                    ctx,
                 ));
             }
         }
 
         for gate in gates {
             if let GateVerdict::Block { reason } = gate.check(call, &effects) {
-                return ToolDispatchResult::plain(ToolResult::error(
-                    call.id.clone(),
-                    format_tool_output(
-                        tool.name(),
-                        &format!("blocked by {}: {reason}", gate.name()),
-                        true,
-                    ),
+                return ToolDispatchResult::plain(unusable_result(
+                    tool.name(),
+                    &call.id,
+                    &format!("blocked by {}: {reason}", gate.name()),
+                    ctx,
                 ));
             }
         }
@@ -374,15 +402,18 @@ impl ToolRegistry {
                 ToolDispatchResult {
                     result: ToolResult {
                         id: call.id.clone(),
-                        output: format_tool_output(tool.name(), &bounded, output.is_error),
-                        is_error: output.is_error,
+                        output: format_tool_output(tool.name(), &bounded, output.outcome),
+                        outcome: output.outcome,
                     },
                     presentation: output.presentation.map(redact_presentation),
+                    touches: output.touches,
                 }
             }
-            Err(err) => ToolDispatchResult::plain(ToolResult::error(
-                call.id.clone(),
-                format_tool_output(tool.name(), &err.to_string(), true),
+            Err(err) => ToolDispatchResult::plain(unusable_result(
+                tool.name(),
+                &call.id,
+                &err.to_string(),
+                ctx,
             )),
         }
     }
@@ -396,6 +427,26 @@ fn redact_presentation(presentation: ToolOutputPresentation) -> ToolOutputPresen
             stderr: redact(&shell.stderr),
         }),
     }
+}
+
+/// The single exit for every result the model sees without the tool having
+/// produced a normal output: tool errors and the registry's own synthesized
+/// refusals (unknown tool, effects error, denial, gate block). An error is
+/// model-visible data like any other result, so it takes the same redaction
+/// and the same context bound as the success arm — the safety invariant in
+/// `docs/05-tool-system.md` holds per result, not per happy path.
+fn unusable_result(
+    tool_name: &str,
+    call_id: &localpilot_core::ToolUseId,
+    text: &str,
+    ctx: &ToolContext<'_>,
+) -> ToolResult {
+    let redacted = redact(text);
+    let bounded = bound_output(tool_name, call_id, &redacted, ctx);
+    ToolResult::error(
+        call_id.clone(),
+        format_tool_output(tool_name, &bounded, ToolOutcome::Unusable),
+    )
 }
 
 /// The model-visible text for a denied tool call. An out-of-workspace path
@@ -481,9 +532,140 @@ impl Default for ToolRegistry {
     }
 }
 
-fn format_tool_output(tool: &str, output: &str, is_error: bool) -> String {
-    let status = if is_error { "error" } else { "success" };
-    format!("tool: {tool}\nstatus: {status}\noutput:\n{output}")
+fn format_tool_output(tool: &str, output: &str, outcome: ToolOutcome) -> String {
+    format!(
+        "tool: {tool}\nstatus: {}\noutput:\n{output}",
+        outcome.status_label()
+    )
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::tool::OutputRetention;
+    use async_trait::async_trait;
+    use localpilot_core::{ToolCall, ToolUseId};
+    use localpilot_sandbox::{
+        Effect, Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace,
+    };
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// An in-memory retention store standing in for the host's disk-backed one.
+    #[derive(Default)]
+    struct MemoryRetention(Mutex<HashMap<String, String>>);
+
+    impl crate::tool::OutputRetention for MemoryRetention {
+        fn retain(&self, id: &str, output: &str) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), output.to_string());
+            Ok(())
+        }
+        fn fetch(&self, id: &str) -> Result<Option<String>, String> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+    }
+
+    /// A tool that emits a large output through `cap`, exactly as a real builtin
+    /// (`search_text`, `run_shell`, …) does — the seam the fix touches.
+    struct BigTool(String);
+
+    #[async_trait]
+    impl Tool for BigTool {
+        fn name(&self) -> &str {
+            "big"
+        }
+        fn description(&self) -> &str {
+            "emits a large output"
+        }
+        fn schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        fn effects(
+            &self,
+            _input: &Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<Vec<Effect>, crate::error::ToolError> {
+            Ok(Vec::new())
+        }
+        async fn invoke(
+            &self,
+            _input: Value,
+            _ctx: &ToolContext<'_>,
+        ) -> Result<crate::ToolOutput, crate::error::ToolError> {
+            Ok(crate::builtins::cap(self.0.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn output_over_the_per_tool_cap_is_retained_in_full_and_readable() {
+        // A ~128 KiB output — well past the old 64 KiB per-tool cap — with a unique
+        // marker on its own final line. Before the fix the per-tool cap dropped
+        // everything past 64 KiB *before* retention, so the tail marker never
+        // reached the store and `read_tool_output` could not recover it.
+        let tail = "END-OF-BIG-OUTPUT-MARKER";
+        let body = format!("{}\n", "a".repeat(63)).repeat(2000);
+        let tail_line = 2001; // the 2000 body lines, then the marker on line 2001
+        let big = format!("{body}{tail}");
+        assert!(big.len() > 64 * 1024);
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let retention = MemoryRetention::default();
+        let ctx = ToolContext {
+            workspace: &ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted: true,
+            retention: Some(&retention),
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(BigTool(big.clone())));
+        registry.register(Box::new(crate::builtins::ReadToolOutput));
+        let engine = PermissionEngine::new(Profile::Bypass, Vec::new());
+        let approver = ScriptedApprover::always();
+
+        // An alphanumeric call id so the retention key equals it (retention_key
+        // only strips storage-unsafe characters).
+        let call = ToolCall::new(ToolUseId::new("bigcall1"), "big", json!({}));
+        let result = registry.dispatch(&call, &ctx, &engine, &approver).await;
+        assert!(!result.is_error());
+        assert!(
+            result.output.contains("retained under id bigcall1"),
+            "the bounded result must point at the retained output: {}",
+            result.output
+        );
+
+        // The store holds the FULL output, tail included — the whole point.
+        let stored = retention.fetch("bigcall1").unwrap().unwrap();
+        assert_eq!(stored.len(), big.len(), "the full output must be retained");
+        assert!(
+            stored.ends_with(tail),
+            "content past the old 64 KiB cap must be retained"
+        );
+
+        // And `read_tool_output` can page to the tail via the line range (the
+        // marker is on the last line).
+        let read = ToolCall::new(
+            ToolUseId::new("readback1"),
+            "read_tool_output",
+            json!({ "id": "bigcall1", "start_line": tail_line, "end_line": tail_line }),
+        );
+        let readback = registry.dispatch(&read, &ctx, &engine, &approver).await;
+        assert!(!readback.is_error());
+        assert!(
+            readback.output.contains(tail),
+            "read_tool_output must recover the tail: {}",
+            readback.output
+        );
+    }
 }
 
 #[cfg(test)]

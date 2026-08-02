@@ -10,6 +10,7 @@
 //! Provenance: request and streaming shapes implemented from the public
 //! Anthropic API reference (<https://docs.anthropic.com/en/api/messages>). No
 //! vendor SDK code, prompts, or identifiers were copied.
+#![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
@@ -19,14 +20,14 @@ use indexmap::IndexMap;
 use localpilot_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 use serde_json::{json, Value};
 
-use crate::error::{ProviderError, QuotaInfo};
-use crate::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
-use crate::headers::{parse_retry_after, parse_rfc3339_epoch};
-use crate::provider::{
+use localpilot_llm_core::error::{ProviderError, QuotaInfo};
+use localpilot_llm_core::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
+use localpilot_llm_core::headers::{parse_retry_after, parse_rfc3339_epoch};
+use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-use crate::request::{ModelRequest, ToolSpec};
+use localpilot_llm_core::request::{ModelRequest, ToolSpec};
 
 /// The documented Messages API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -48,6 +49,9 @@ pub struct AnthropicProvider {
     base_url: String,
     api_key: Option<Secret>,
     default_options: IndexMap<String, Value>,
+    /// When set, place a prompt-cache breakpoint on the stable prefix (tools +
+    /// the stable leading system block). Off by default; opt-in per provider.
+    prompt_caching: bool,
 }
 
 /// Default stall window (`request_timeout_secs`): the longest silence
@@ -106,7 +110,18 @@ impl AnthropicProvider {
             base_url: base_url.into(),
             api_key,
             default_options: IndexMap::new(),
+            prompt_caching: false,
         }
+    }
+
+    /// Enable prompt caching: place an ephemeral `cache_control` breakpoint on the
+    /// stable prefix so tools and the stable system prompt are cached across turns.
+    /// Off by default (opt-in per provider); harmless against a backend that does
+    /// not implement caching.
+    #[must_use]
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.prompt_caching = enabled;
+        self
     }
 
     /// Override the stall window (`request_timeout_secs`): the longest
@@ -152,11 +167,40 @@ impl AnthropicProvider {
             "messages": messages,
             "stream": true,
         });
+
+        let mut tools: Vec<Value> = request.tools.iter().map(translate_tool).collect();
+        // With caching on, put one ephemeral breakpoint on the stable prefix. The
+        // stable system prompt is the first leading-system block; the breakpoint
+        // sits on it, so everything before it in the tools -> system -> messages
+        // render order — all tools and the stable system prompt — is cached, while
+        // the per-turn volatile system context after it is re-sent each turn. If
+        // there is no system prompt, fall back to a breakpoint on the last tool.
         if !system.is_empty() {
-            body["system"] = json!(system);
+            if self.prompt_caching {
+                let last = system.len() - 1;
+                let stable_idx = if system.len() >= 2 { 0 } else { last };
+                let blocks: Vec<Value> = system
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let mut block = json!({ "type": "text", "text": text });
+                        if i == stable_idx {
+                            block["cache_control"] = ephemeral_cache_control();
+                        }
+                        block
+                    })
+                    .collect();
+                body["system"] = Value::Array(blocks);
+            } else {
+                body["system"] = json!(system.join("\n"));
+            }
+        } else if self.prompt_caching {
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = ephemeral_cache_control();
+            }
         }
-        if !request.tools.is_empty() {
-            body["tools"] = Value::Array(request.tools.iter().map(translate_tool).collect());
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
         }
         if let Value::Object(map) = &mut body {
             for (key, value) in self.default_options.iter().chain(request.options.iter()) {
@@ -241,8 +285,12 @@ fn translate_tool(tool: &ToolSpec) -> Value {
 /// positional system role (see docs/04 §Late System Messages). Tool results
 /// become `tool_result` blocks in a user message; consecutive messages that map
 /// to the same role are merged, since the API requires alternating roles.
-fn translate_messages(messages: &[Message]) -> (String, Vec<Value>) {
-    let mut system = String::new();
+fn translate_messages(messages: &[Message]) -> (Vec<String>, Vec<Value>) {
+    // The leading system run is returned as its ordered text blocks (not joined),
+    // so the caller can either join them (no caching) or emit a block array with a
+    // cache breakpoint on the stable prefix. The stable system prompt is the first
+    // block; per-turn volatile context (memory, project instructions) follows it.
+    let mut system: Vec<String> = Vec::new();
     let mut turns: Vec<(&'static str, Vec<Value>)> = Vec::new();
     let mut in_leading_system = true;
 
@@ -250,10 +298,7 @@ fn translate_messages(messages: &[Message]) -> (String, Vec<Value>) {
         if message.role == Role::System && in_leading_system {
             for block in &message.content {
                 if let ContentBlock::Text { text } = block {
-                    if !system.is_empty() {
-                        system.push('\n');
-                    }
-                    system.push_str(text);
+                    system.push(text.clone());
                 }
             }
             continue;
@@ -276,6 +321,11 @@ fn translate_messages(messages: &[Message]) -> (String, Vec<Value>) {
         .map(|(role, content)| json!({ "role": role, "content": anthropic_content(content) }))
         .collect();
     (system, messages)
+}
+
+/// An ephemeral prompt-cache breakpoint marker.
+fn ephemeral_cache_control() -> Value {
+    json!({ "type": "ephemeral" })
 }
 
 fn anthropic_content(blocks: Vec<Value>) -> Value {
@@ -320,7 +370,7 @@ fn translate_blocks(message: &Message) -> Vec<Value> {
                 "type": "tool_result",
                 "tool_use_id": result.id.as_str(),
                 "content": result.output,
-                "is_error": result.is_error,
+                "is_error": result.is_error(),
             })),
             ContentBlock::Image { media_type, data } => blocks.push(json!({
                 "type": "image",
@@ -465,6 +515,8 @@ struct SseDecoder {
     closed_blocks: usize,
     saw_content_delta: bool,
     input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
     done: bool,
     warned_stop_reason: bool,
     saw_stop_reason: bool,
@@ -567,9 +619,14 @@ impl SseDecoder {
     fn handle_event(&mut self, event: &Value, out: &mut EventQueue) {
         match event["type"].as_str() {
             Some("message_start") => {
-                self.input_tokens = event["message"]["usage"]["input_tokens"]
-                    .as_u64()
-                    .unwrap_or(0);
+                let usage = &event["message"]["usage"];
+                self.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                // Prompt-cache tokens are reported here, on message_start, not in
+                // the message_delta that carries output_tokens.
+                self.cache_creation_input_tokens =
+                    usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                self.cache_read_input_tokens =
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
             }
             Some("content_block_start") => {
                 let index = event["index"].as_u64().unwrap_or(0);
@@ -602,6 +659,8 @@ impl SseDecoder {
                     out.push_back(Ok(ModelEvent::Usage(TokenUsage {
                         input_tokens: self.input_tokens,
                         output_tokens,
+                        cache_creation_input_tokens: self.cache_creation_input_tokens,
+                        cache_read_input_tokens: self.cache_read_input_tokens,
                     })));
                 }
                 if let Some(reason) = event["delta"]["stop_reason"].as_str() {
@@ -763,6 +822,34 @@ mod tests {
             Ok(ModelEvent::Usage(u)) if u.input_tokens == 7 && u.output_tokens == 5
         )));
         assert!(matches!(events.last(), Some(Ok(ModelEvent::Done))));
+    }
+
+    #[test]
+    fn parses_prompt_cache_usage_from_message_start() {
+        // Cache tokens are reported on message_start (alongside input_tokens),
+        // not on the message_delta that carries output_tokens; the decoder must
+        // carry them forward onto the emitted usage.
+        let events = collect_sse(&[
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":100000}}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ]);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Ok(ModelEvent::Usage(u)) => Some(*u),
+                _ => None,
+            })
+            .expect("a usage event");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.cache_creation_input_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, 100_000);
+        assert_eq!(usage.output_tokens, 3);
+        // Effective input = fresh + created + read (the whole prompt the model saw).
+        assert_eq!(usage.effective_input_tokens(), 100_062);
     }
 
     #[test]
@@ -993,6 +1080,110 @@ mod tests {
         // The system message is not duplicated into the messages array.
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    fn caching_provider() -> AnthropicProvider {
+        AnthropicProvider::new(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            None,
+        )
+        .with_prompt_caching(true)
+    }
+
+    fn a_tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: format!("the {name} tool"),
+            input_schema: json!({ "type": "object" }),
+        }
+    }
+
+    #[test]
+    fn prompt_caching_marks_the_stable_system_block_only() {
+        // A stable system prompt followed by per-turn volatile context. The cache
+        // breakpoint must sit on the stable block (index 0) and nowhere else, so
+        // the volatile block is re-sent while tools + stable system are cached.
+        let messages = vec![
+            Message::text(Role::System, "STABLE system prompt"),
+            Message::text(Role::System, "volatile per-turn memory"),
+            Message::text(Role::User, "hi"),
+        ];
+        let request = ModelRequest::new("claude", messages).with_tools(vec![a_tool("read")]);
+        let body = caching_provider().build_body(&request);
+
+        let system = body["system"].as_array().expect("system is a block array");
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], "STABLE system prompt");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["text"], "volatile per-turn memory");
+        assert!(system[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn prompt_caching_off_keeps_the_plain_string_system_and_no_breakpoints() {
+        let provider = AnthropicProvider::new(
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1",
+            None,
+        );
+        let messages = vec![
+            Message::text(Role::System, "STABLE"),
+            Message::text(Role::System, "volatile"),
+            Message::text(Role::User, "hi"),
+        ];
+        let request = ModelRequest::new("claude", messages).with_tools(vec![a_tool("read")]);
+        let body = provider.build_body(&request);
+        // System stays a joined string and no cache_control appears anywhere.
+        assert_eq!(body["system"], "STABLE\nvolatile");
+        assert!(!body.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn prompt_caching_falls_back_to_the_last_tool_when_there_is_no_system() {
+        let messages = vec![Message::text(Role::User, "hi")];
+        let request =
+            ModelRequest::new("claude", messages).with_tools(vec![a_tool("read"), a_tool("write")]);
+        let body = caching_provider().build_body(&request);
+        assert!(body.get("system").is_none());
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn prompt_caching_prefix_is_stable_across_turns() {
+        // The cacheable prefix (tools + the stable system block) must be
+        // byte-identical across two turns that differ only in the volatile context
+        // and the newest user message — otherwise the cache never hits.
+        let tools = vec![a_tool("read"), a_tool("write")];
+        let turn1 = ModelRequest::new(
+            "claude",
+            vec![
+                Message::text(Role::System, "STABLE system prompt"),
+                Message::text(Role::System, "memory: turn one"),
+                Message::text(Role::User, "first question"),
+            ],
+        )
+        .with_tools(tools.clone());
+        let turn2 = ModelRequest::new(
+            "claude",
+            vec![
+                Message::text(Role::System, "STABLE system prompt"),
+                Message::text(Role::System, "memory: a totally different turn two"),
+                Message::text(Role::User, "second question, unrelated"),
+            ],
+        )
+        .with_tools(tools);
+        let a = caching_provider().build_body(&turn1);
+        let b = caching_provider().build_body(&turn2);
+        // The cached prefix is identical...
+        assert_eq!(a["system"][0], b["system"][0]);
+        assert_eq!(a["tools"], b["tools"]);
+        // ...while the volatile block genuinely differs (so the test is meaningful).
+        assert_ne!(a["system"][1], b["system"][1]);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! only data: any call the model then makes runs through the permission engine
 //! exactly as always.
 
-use localpilot_core::ToolResult;
+use localpilot_core::{ToolOutcome, ToolResult};
 use serde::{Deserialize, Serialize};
 
 /// The trust level of content the model is shown.
@@ -27,6 +27,10 @@ pub enum Trust {
 pub struct Observation {
     content: String,
     is_error: bool,
+    /// Optional refinement of `is_error` (see [`ToolOutcome`]); absent on
+    /// observations recorded before the outcome existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outcome: Option<ToolOutcome>,
     trust: Trust,
 }
 
@@ -36,7 +40,8 @@ impl Observation {
     pub fn from_tool_result(result: &ToolResult) -> Self {
         Self {
             content: result.output.clone(),
-            is_error: result.is_error,
+            is_error: result.is_error(),
+            outcome: Some(result.outcome),
             trust: Trust::Untrusted,
         }
     }
@@ -51,6 +56,18 @@ impl Observation {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.is_error
+    }
+
+    /// How the call turned out. An observation recorded before the outcome
+    /// existed degrades to the boolean's meaning, matching the transcript
+    /// fallback.
+    #[must_use]
+    pub fn outcome(&self) -> ToolOutcome {
+        self.outcome.unwrap_or(if self.is_error {
+            ToolOutcome::Unusable
+        } else {
+            ToolOutcome::Ok
+        })
     }
 
     /// The trust level — always [`Trust::Untrusted`] for a tool observation.

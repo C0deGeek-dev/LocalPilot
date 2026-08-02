@@ -22,16 +22,19 @@ Harness mode is entered three ways:
 
 ## Mode and Permission Flags
 
-Mode and permission profile are selectable per launch. Flags override config;
-config overrides built-in defaults.
+The permission profile is selectable per launch. Flags override config; config
+overrides built-in defaults.
 
-- `--mode <agent|harness>`: operating mode. Default `agent`.
 - `--permission <default|relaxed|bypass>`: permission profile. Default `default`.
 - `--bypass`: shorthand for `--permission bypass`. Allow-all, no prompts. Must be
   set explicitly; the active profile is shown in the footer/status.
 
-These flags apply to the interactive REPL, print mode, and every `localpilot
-harness` subcommand. The `localpilot harness` subcommands imply `--mode harness`.
+The **operating mode is selected structurally by the subcommand**, not by a
+flag: the `localpilot harness` subcommands run harness mode, while `chat`,
+`print`, and `eval` run agent mode. `[harness] mode` records the default label
+for that concept; it is a reserved config key and does not gate behaviour on its
+own. The permission flags apply to the interactive REPL, print mode, and every
+`localpilot harness` subcommand.
 
 Config equivalents:
 
@@ -56,7 +59,7 @@ ratified gate below shares the file (ADR-0012).
 mode = "agent"
 attempts_per_step = 3
 auto_commit = true
-test_command = "cargo test"   # shorthand; equivalent to a single cadence="phase" check
+test_command = "cargo test"   # shorthand; equivalent to a single cadence="step" check
 claim_gate = "off"            # "warn" flags a final-reply action claim no verified call backs (ADR-0023)
 
 [harness.rules]
@@ -224,8 +227,11 @@ With the guidance gate enabled, a pre-brief assessment scores how much
 load-bearing guidance the idea contains. At or above
 `[harness.guidance] threshold` intake proceeds unchanged. Below it, the open
 decision axes become questions (capped at `max_questions`, most consequential
-first): on a terminal, intake asks each question on stdin — an empty answer
-delegates that one axis to the model — and folds the answers into the idea as
+first): on a terminal, intake asks each question through the shared choice
+widget (`ask_user`'s, driven by the arrow keys), falling back to a plain stdin
+prompt when the surface is not a terminal — an empty answer, or the explicit
+"let the model decide" row, delegates that one axis to the model — and folds the
+answers into the idea as
 an explicit user-decisions block before generating the brief; on a
 non-terminal, intake emits a structured JSON report (`"status":
 "needs_guidance"` with the open axes and escape hatches), writes **no**
@@ -240,7 +246,8 @@ Inputs:
 
 - `brief.md`
 - repository summary
-- optional `--replan`
+
+Re-running `localpilot harness plan` regenerates `PROGRESS.md` from the brief.
 
 Output:
 
@@ -399,11 +406,13 @@ See ADR-0028 for the decision.
 > discipline (stale state, tests, commit hygiene, launch discipline) on top of
 > that boundary — it is not the boundary.
 >
-> Two further live-path caveats: `decision_logged` is not implemented as a rule —
-> a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it;
-> and phase-cadence `quality_gate` checks require a `phase_complete` trigger the
-> live loop does not emit outside tests. This list is the source of truth; treat
-> a rule's prose below as its *intent*, gated by this status.
+> One further live-path caveat: `decision_logged` is not implemented as a rule —
+> a deviation auto-appends to `DECISIONS.md` on replan, but nothing gates on it.
+> Phase-cadence `quality_gate` checks now run at the plan boundary — when a
+> committed step leaves no incomplete step, the `phase`-cadence checks
+> (whole-suite test, dependency, audit) run once and a blocking finding stops the
+> run with its reason. This list is the source of truth; treat a rule's prose
+> below as its *intent*, gated by this status.
 
 #### `no_stale_uncommitted`
 
@@ -546,9 +555,61 @@ needs an ADR.
    messages are persisted today; full fidelity (including repair prompts)
    lands with the durable session store and is pinned by its
    transcript-equivalence test when it does.
+4. **Urgent steering is stream-preemptive, never mid-tool.** The steer queue is
+   the source of truth and its notification only wakes a pending provider
+   stream. An urgent interrupt admits every queued item in FIFO order, records a
+   content-free `SoftInterruptInjected` event, discards any incomplete assistant
+   response, and starts the next provider call inside the same turn. Tool calls
+   retain their existing safe boundaries; steering never interrupts a tool
+   halfway through its effect. Enforced by
+   `urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn`.
 
 The permission half of the contract lives in
 [`docs/07`](07-security-and-privacy.md) §Reliability Contract.
+
+## Graceful Shutdown (Quiesce)
+
+A host can ask a running turn to *wind down gracefully* rather than be cancelled.
+Cancelling discards: it aborts the in-flight tool, persists no partial reply, and
+stops. Quiescing **finishes safely**: the turn stops at the next safe boundary,
+but nothing in flight is thrown away that could be resumed, and the session is
+flushed before the loop returns. It is the primitive a graceful update or an
+exec-in-place reload builds on — persist, quiesce, then swap — because a process
+replacement runs no destructors, so nothing durable may be left only in memory
+when it happens.
+
+The request is raised on a clonable signal (`quiesce_signal()`), so a host on
+another task can wind the turn down while it runs, exactly as it can steer. It is
+honoured at the same safe boundaries as cancellation:
+
+- **Before a provider call, and while the response streams** — no tool is
+  running, so the turn simply flushes and stops.
+- **Between tool calls, and while a tool is running** — the interesting case. The
+  running call and every still-queued call in the batch are answered, so the
+  wire's one-`tool_result`-per-`tool_use` pairing stays valid, and then the turn
+  stops. How each is answered depends on the tool:
+  - A **wait-like tool** — one whose whole job is to wait, so re-issuing it has no
+    extra effect — is answered with a **non-error, resumable** result that embeds
+    its exact original input. The model can re-issue the identical call verbatim
+    after the process comes back.
+  - Every other interrupted or skipped tool is answered with a plain interrupted
+    result, because re-issuing a tool that *changes* something would repeat the
+    effect.
+
+The turn stops with reason `Quiesced`, which is distinct from `Cancelled`
+precisely because it is not a discard. Enforced by the `localpilot-harness`
+`quiesce` test suite (`cargo test -p localpilot-harness --test quiesce`).
+
+This is what an in-place reload builds on. Before swapping onto a new binary, the
+reload persists the session, quiesces the running turn, and writes a *continuation
+intent* naming the session and its in-flight task. On the far side of the swap the
+resumed session reads that intent and runs a hidden continuation prompt as its
+opening turn — "a reload succeeded; continue from where you left off; do not ask
+the user what to do next" — so the session picks up on its own. The intent is
+durable, read without being consumed, and marked delivered only once the
+continuation turn completes, so a restart that dies mid-continuation retries and
+one that succeeds is never replayed. The reload machinery itself lives in
+`localpilot-selfdev`; it is an opt-in developer surface, off by default.
 
 ## Bad-Output Recovery
 
@@ -668,8 +729,13 @@ Independent of the opt-in budget, the loop carries an always-on guard so a turn
 can never spin unbounded even with the budget off (ADR-0052). When the budget is
 disabled, the turn still stops with `NoProgress` if either the no-progress
 detector trips (a repeated or cyclic *successful* call set) or a run of
-consecutive *failing* calls — the denied/failing spin the detector never sees,
-since it is fed only by successful calls — exceeds a fixed conservative limit. The
+consecutive *non-successful* calls — the denied/failing spin the detector never
+sees, since it is fed only by successful calls — exceeds a fixed conservative
+limit. Both failure kinds count here (a missing binary routed through the shell
+comes back as a *reported* exit 127 and must not spin unchecked), but only a
+tool that could not run at all (`Unusable`, ADR-0116) counts against the
+per-tool stuck signal; a completed run whose wrapped work failed clears it,
+because it is direct evidence the tool works. The
 failure streak resets on any successful call, so a productive turn is never cut;
 when the budget is configured the controller above owns the no-progress stop and
 this guard is inert. It is a safety backstop, not a cost control — "budget off"
@@ -812,3 +878,73 @@ harness: <step description>
 User can disable auto-commit, but the harness must then report reduced
 recoverability.
 
+## Swarm failure lifecycle (opt-in)
+
+When several agents share one plan, one of them will die holding an assignment,
+and everything waiting on that assignment waits forever unless something
+notices. Four things happen, in order, and each replaces something that does not
+work:
+
+1. **Notice.** Members heartbeat; staleness is measured from the *last beat*. A
+   member that has never beaten is not stale — it has not had the chance, and
+   treating silence-since-birth as death reaps every worker the instant it is
+   admitted.
+2. **Salvage.** The departed member's non-terminal assignments go back into the
+   plan, bounded by a per-task reclaim counter. Past the budget the task is
+   **failed loudly** instead: a task that keeps outliving its workers is failing,
+   not unlucky, and requeuing it forever turns one bad task into a plan that
+   never finishes and never says why.
+3. **Repair the tree.** Children are reparented onto the nearest surviving
+   ancestor — grandparent, then the coordinator, then nothing, because a child
+   pointing at a member that no longer exists is a completion report delivered
+   nowhere. A departed coordinator is replaced by the **lowest surviving member
+   id**: deterministic, so every observer of the same state elects the same
+   successor without coordinating.
+4. **Say so.** A salvage report reaches whoever now owns the work, naming each
+   task and what became of it. A plan that silently re-runs a task is
+   indistinguishable from one that is stuck.
+
+**Reaping** releases the *hosting* of members that are finished and have no
+children still reporting to them — the runtime, the event broadcast, the
+subscriber task. Their membership records stay: a coordinator reading the plan
+later still needs to know what a finished worker reported.
+
+**Durable snapshots** hold a swarm's plan and membership in their own stream,
+separate from session event logs, so recovering a plan never requires replaying
+anybody's transcript. Writes are serialised, land atomically (temp then rename),
+keep the previous good file as a backup, and **refuse to go backwards**: a write
+whose revision is not newer than what is on disk is dropped, so a slow writer
+cannot restore an older plan over a newer one. A torn primary falls back to the
+backup, costing the newest revision rather than the plan.
+
+### Running a swarm plan
+
+The driver dispatches what is ready, spawns a fresh worker per task, and refills
+**on each completion** rather than on each round — waiting for a whole wave costs
+the difference between its fastest and slowest worker, every wave. When nothing
+is in flight and nothing is ready, the run ends: a plan that cannot move is over,
+settled or not, and saying so beats waiting on a worker that was never
+dispatched.
+
+Each dispatched task carries an **assignment contract** in front of its input. A
+worker does not inherit the coordinator's system prompt, so anything expected of
+it — do this task and nothing else, report what you established rather than what
+you did, cite where it came from, and in depth mode say what you did not check —
+has to travel with the work or it is not in effect.
+
+A worker that returns nothing, times out, or produces a report the graph refuses
+is treated as gone: the task is salvaged back into the plan rather than marked
+done on the strength of silence.
+
+A free-text answer becomes a handoff that does not overstate itself: everything
+said is the finding, nothing is claimed as verified, and the coverage gap says
+outright that it is unknown. For a **review gate** the driver additionally
+records what the gate reviewed, because that is a fact about the dispatch — the
+graph says what the gate waited on — rather than a claim about the model. Without
+it a gate could never close, and depth mode would fail on a formality.
+
+The report ends with a **starvation hint** when the plan never came close to
+using its concurrency. A chain runs one worker at a time no matter how large the
+budget; that is not a fault, but a run four times slower than the budget
+suggested with nothing anywhere saying why is the most disappointing possible
+outcome.

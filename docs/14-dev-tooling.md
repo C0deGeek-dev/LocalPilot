@@ -253,7 +253,20 @@ cargo machete
 
 # Snapshot review after a render/prompt change
 cargo insta review
+
+# Iterate on one provider adapter without re-checking the whole provider layer
+cargo check -p localpilot-llm-anthropic   # ~1.5k-line unit, sibling adapter + core untouched
+cargo check -p localpilot-llm-openai
 ```
+
+The provider layer is split into `localpilot-llm-core` (shared contract) plus one
+crate per adapter (`-openai`, `-anthropic`) under the `localpilot-llm` umbrella
+(see [02-architecture.md](02-architecture.md#localpilot-llm--core--openai--anthropic)).
+Check a single adapter with `cargo check -p localpilot-llm-<adapter>` — its
+compilation unit is the one adapter, not the old 5.9k-line monolith, and the other
+adapter and the core contract are not re-checked. A full `cargo build --workspace`
+is not faster after an adapter edit (the downstream harness/cli spine recompiles
+through the umbrella regardless); the win is the isolated per-adapter inner loop.
 
 ## 7. Build-process planning (tiered)
 
@@ -308,6 +321,102 @@ README alone — the numbered spec set, the topic docs
 `docs/wiki/` guides (Getting Started / How-Tos / Examples / Troubleshooting),
 and `CHANGELOG.md` for user-facing changes. Durable architecture decisions
 still graduate to an ADR in [`10-decisions.md`](10-decisions.md).
+
+## 8. Self-dev builds
+
+A *self-dev build* is LocalPilot building the binary it intends to become. It is
+an ordinary `cargo build` with four deliberate differences, all of them policy
+rather than cleverness. `localpilot-selfdev` owns them
+([02-architecture.md](02-architecture.md#localpilot-selfdev)).
+
+**Its own target directory.** Sharing `target/` would invalidate the artefacts
+the running session and `rust-analyzer` depend on, turning every rebuild into a
+full rebuild of your inner loop. Self-dev artefacts go to their own directory
+under the per-user data root, beside (never inside) the release cache.
+
+**Its own profile.** `[profile.selfdev]` inherits `release` — same codegen
+units, same panic strategy, same `debug_assertions` state as a shipped binary —
+but sets `opt-level = 0`. A binary that exists to be replaced within the minute
+should not spend that minute being optimised. Debug info is kept: a self-dev
+binary is the one most likely to need a backtrace.
+
+**A job count that leaves room.** One fewer job than the machine has cores,
+floored at one, because the session that started the build still has to answer
+while it runs. Override it explicitly when you are not running a live session.
+
+**Source identity passed in, not sniffed.** The build receives the commit hash,
+the source fingerprint, and the version string as environment values, and the
+build script embeds what it is told. Two things follow:
+
+- A later step can ask a binary what source it came from and check the answer
+  against the tree in hand, which is what makes "refuse to ship a stale binary"
+  possible at all.
+- The build script watches the repository **only when it read something from
+  it**. An ordinary source build still watches `.git/HEAD`, the branch ref, and
+  `packed-refs`, so its `git describe` version does not go stale after you
+  commit. A build that was handed the identity watches nothing, so committing
+  does not force a rebuild. The policy lives in
+  `crates/localpilot-cli/build_meta.rs`, included by both the build script and
+  the crate's tests so the two cannot drift.
+
+The fingerprint covers the commit hash, `git status`, `git diff HEAD`, **and the
+contents of untracked files** — an untracked file being exactly the case a
+commit hash cannot see. It is a SHA-256 over a length-framed digest, so no two
+different trees can produce the same value by concatenation accident. Ignored
+paths (`target/`, editor state) are excluded, because `git status` excludes
+them.
+
+```powershell
+# What is this tree, exactly?
+#   clean: <short-hash>            dirty: <short-hash>-dirty-<fingerprint>
+# The label is stable: return the bytes and you return the label.
+```
+
+**The publish gauntlet.** Before a channel is ever pointed at a freshly built
+binary, that binary has to earn it. `localpilot version --json` prints the
+identity a build embedded — `{version, git_hash, fingerprint}` — and the gauntlet
+holds a candidate to three checks in rising cost:
+
+1. **Identity** — the reported `git_hash` *and* `fingerprint` must equal the tree
+   the build came from. The hash alone would wave through a dirty rebuild of
+   different bytes at the same commit; the fingerprint is what closes that gap.
+2. **Freshness** — the source tree is re-read after the build. If it moved while
+   the build ran, the candidate is already behind and is superseded, not shipped.
+3. **Handshake** — the candidate is spawned in `rpc` mode and must complete a real
+   init round-trip within a deadline. This is deliberately more than
+   `--version`: it proves the binary can construct its config, provider, tools,
+   and session and answer on the wire. A candidate that hangs is killed at the
+   deadline, never waited on forever.
+
+Only a binary that passes all three may be promoted.
+
+**The `selfdev` command.** All of the above is driven from the command line:
+
+```powershell
+localpilot selfdev build              # fingerprint the tree and build it
+localpilot selfdev publish            # build -> gauntlet -> install -> promote `current`
+localpilot selfdev publish --channel stable
+localpilot selfdev status             # installed versions, channel targets, breaker state
+localpilot selfdev gc --keep 5        # reclaim old versions (channel targets always kept)
+localpilot selfdev reload -- <args>   # build+vet+promote, then swap this process onto it
+```
+
+`publish` is the guardrailed release step: it refuses a stale or broken build
+before any channel moves, and afterwards sweeps versions beyond the most recent
+few so a copy-in store does not grow without bound — a version a channel points at
+is never swept. `gc` runs that sweep on demand.
+
+`reload` is the one command that *does* swap the running process, and only because
+you asked it to: it builds, vets, promotes `current`, then replaces this process
+with the new binary (`exec` on Unix, spawn-then-exit on Windows) running the
+arguments after `--` (default `status`, so you can see it came up on the new
+version). It carries no session continuation — a one-shot CLI invocation has no
+session to continue.
+
+All of this is the **manual** self-dev capability — a developer or a CI job drives
+it explicitly. The autonomous in-session loop — the model building and reloading
+*itself* mid-session — is a separate, opt-in product decision that this build
+deliberately does not ship (see ADR-0128).
 
 Two rules keep `tasks/` from leaking into the product: the folder is
 **disposable** (deleted before v1) so shipped code, commits, and identifiers

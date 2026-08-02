@@ -11,8 +11,8 @@ use std::time::Duration;
 use localpilot_core::Secret;
 use serde_json::Value;
 
-use crate::auth::AuthProvider;
-use crate::error::ProviderError;
+use localpilot_llm_core::auth::AuthProvider;
+use localpilot_llm_core::error::ProviderError;
 
 /// A model reported by a server's model listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +97,7 @@ async fn discover_models_with_auth(
             status.as_u16(),
             None,
             None,
-            crate::error::QuotaInfo::default(),
+            localpilot_llm_core::error::QuotaInfo::default(),
         ));
     }
     let body: Value = response

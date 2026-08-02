@@ -14,15 +14,17 @@ mod chunk_store;
 mod codegraph;
 mod context_hook;
 mod context_prefix;
+#[cfg(test)]
+mod dead_endpoint;
 mod defs;
 mod defs_tool;
 mod error;
+mod fuse;
 mod ingest;
 mod inspector;
 mod knowledge_tool;
 mod layered;
 mod layered_tool;
-mod loop_lesson;
 mod memory_search_tool;
 mod ops;
 mod pack;
@@ -72,7 +74,6 @@ pub use inspector::{
 pub use knowledge_tool::KnowledgeSearch;
 pub use layered::{expand_layer, fetch_layer, Expansion, FetchedBody};
 pub use layered_tool::{KnowledgeExpand, KnowledgeFetch};
-pub use loop_lesson::{write_loop_lesson, LoopLesson, LoopOutcome};
 pub use memory_search_tool::MemorySearch;
 pub use ops::{
     audit, cluster_by_similarity, context_for, flag_unhelpful_lesson, freshness_pass,
@@ -464,7 +465,7 @@ fn render_transcript(messages: &[Message]) -> String {
                     let _ = writeln!(out, "{speaker} calls {}: {}", call.name, call.input);
                 }
                 ContentBlock::ToolResult(result) => {
-                    let label = if result.is_error {
+                    let label = if result.is_error() {
                         "tool error"
                     } else {
                         "tool result"
@@ -491,10 +492,18 @@ fn render_session_signals<'a>(kinds: impl Iterator<Item = &'a SessionEventKind>)
         match kind {
             SessionEventKind::ToolFinished {
                 name,
-                is_error: true,
+                is_error,
+                outcome,
                 ..
             } => {
-                *failed_tools.entry(name.clone()).or_default() += 1;
+                // Count tool *malfunctions*, not failing wrapped work: a turn
+                // of red test runs teaches nothing about run_shell's health.
+                // Events written before the outcome existed degrade to the
+                // boolean's meaning.
+                let malfunction = outcome.map_or(*is_error, |o| o.is_malfunction());
+                if malfunction {
+                    *failed_tools.entry(name.clone()).or_default() += 1;
+                }
             }
             SessionEventKind::RecoveryDiagnostic { kind, health } => {
                 recoveries.push(format!("{kind} (health: {health})"));
@@ -689,16 +698,19 @@ mod tests {
                 id: "1".into(),
                 name: "run_shell".into(),
                 is_error: true,
+                outcome: None,
             },
             SessionEventKind::ToolFinished {
                 id: "2".into(),
                 name: "run_shell".into(),
                 is_error: true,
+                outcome: None,
             },
             SessionEventKind::ToolFinished {
                 id: "3".into(),
                 name: "read_file".into(),
                 is_error: false,
+                outcome: None,
             },
             SessionEventKind::RecoveryDiagnostic {
                 kind: "degenerate_output".into(),
@@ -805,17 +817,18 @@ mod tests {
     /// extractor, which still surfaces the explicit lesson.
     #[test]
     fn closeout_falls_back_to_deterministic_when_endpoint_unavailable() {
-        // A bound-then-dropped port is guaranteed closed → connection refused.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_addr = dead.local_addr().unwrap();
-        drop(dead);
+        // Held for the whole test rather than bound-and-dropped: a released
+        // ephemeral port can be handed straight to another test, which brings
+        // the "dead" endpoint back to life.
+        let dead = crate::dead_endpoint::DeadEndpoint::new();
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
             root.join(CONFIG_FILE),
             format!(
-                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"http://{dead_addr}\"\nchat_model = \"m\"\ntimeout_secs = 2\n"
+                "[learning]\nenabled = true\n\n[inference]\nchat_base_url = \"{}\"\nchat_model = \"m\"\ntimeout_secs = 2\n",
+                dead.url()
             ),
         )
         .unwrap();

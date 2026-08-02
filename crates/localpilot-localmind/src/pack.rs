@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum PackSource {
     /// A context entry the user explicitly pinned; highest precedence.
+    /// Reserved: no producer emits this yet (a future `context pin` command is
+    /// the intended source). Its unfilled reserve binds nothing — those tokens
+    /// flow to the shared pool — so it is inert scaffolding, not a budget cost.
     ManualPin,
     /// An accepted, review-gated LocalMind memory.
     AcceptedMemory,

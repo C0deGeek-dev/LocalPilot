@@ -35,7 +35,7 @@ localpilot chat
 remaining cross-terminal acceptance matrix is completed. Any other value is
 rejected with a configuration error. This environment-only recovery switch is
 not part of the stable TOML schema and does not affect non-interactive/plain
-output. The inline host and selector are removed after the gates in ADR-0109.
+output. The inline host and selector are removed after the gates in ADR-0129.
 
 For the full-screen host, `LOCALPILOT_CHAT_THEME` accepts
 `default`, `dim`, `high-contrast`, or `colorblind`. An invalid value is shown as
@@ -52,6 +52,14 @@ behavior. These environment-only controls do not extend the stable TOML schema.
 Mouse reporting is enabled by default; set `LOCALPILOT_CHAT_MOUSE=false` (or
 `0`) before launch for a keyboard-only fallback that leaves pointer handling to
 the terminal.
+
+Input submitted while the model is working appears immediately as a pending
+timeline row. Escape turns the leading run of plain-text pending prompts into
+ordered steering and restarts the current provider turn with that direction;
+Ctrl+C hard-cancels instead. A pending shell command or image prompt remains an
+ordering barrier, so Escape cancels the current work and then the queued
+operations continue in their original order rather than being reordered.
+
 Set `LOCALPILOT_CHAT_SCREEN_READER=true` (or `1`) for the target-shaped
 full-screen accessible projection: tabs become a wrapped current-tab sentence,
 conversation rows use explicit textual roles and states, decorative banner and
@@ -67,14 +75,16 @@ finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
 with an explicit middle-omission marker, while the provider transcript and
 retained tool-output path keep their existing independent limits.
 
-The full-screen host also advertises the builtin `ask_user` tool. A pending
-question appears as an asking timeline row and a centered numbered-choice
-dialog with an automatic free-text Other option; the same state is projected as
-borderless role-labeled text in screen-reader mode. Arrows, Enter, Escape and
-mouse focus stay inside the dialog, while wheel/Page navigation can continue to
-move the conversation behind it. Answered or cancelled questions resolve their
-existing timeline row in place. The inline rollback and non-interactive hosts do
-not advertise this tool because they do not own that dialog.
+Interactive chat also advertises the builtin `ask_user` tool through one shared
+host-capability contract. In the full-screen host, up to four questions appear
+in order as asking timeline rows and centered numbered-choice dialogs; each can
+be single- or multi-select, carries optional choice descriptions, and always
+offers a free-text Other row. The same state is projected as borderless
+role-labeled text in screen-reader mode. Arrows, Space, Enter, Escape and mouse
+focus stay inside the dialog as applicable, while wheel/Page navigation can
+continue to move the conversation behind it. Answered or dismissed questions
+resolve their existing timeline row in place. Headless hosts wire no prompter,
+so they report the capability unavailable instead of waiting forever.
 
 When workspace trust is required, the full-screen host presents it as a
 full-width timeline dialog. The first choice trusts the workspace for the
@@ -134,7 +144,10 @@ that orient the agent with project conventions and constraints:
 - **`CLAUDE.md`** and **`AGENTS.md`** — the widely-shared agent-instruction
   conventions;
 - **`.github/copilot-instructions.md`** — GitHub Copilot's convention, treated as
-  a repo-root instruction (the lowest-precedence of the four).
+  a repo-root instruction (the lowest-precedence of the four);
+- **`.github/instructions/*.instructions.md`** — GitHub Copilot's **path-scoped**
+  convention: each file carries an `applyTo` glob in YAML frontmatter and reaches
+  the model only when a file it is about is in play.
 
 LocalPilot discovers them, resolves their `@`-imports, and merges them into one
 ordered context document. That document is used **two** ways: it is **injected
@@ -147,8 +160,9 @@ review-gated (ADR-0056).
 
 **Discovery.** Three layers are collected:
 
-- **repo-root** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` and
-  `.github/copilot-instructions.md` at the workspace root;
+- **repo-root** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md`,
+  `.github/copilot-instructions.md`, and every
+  `.github/instructions/*.instructions.md` at the workspace root;
 - **nested** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` in subdirectories of
   the workspace (the walk honours ignore files and is depth-bounded);
 - **global** — `Navigator.md` / `CLAUDE.md` / `AGENTS.md` under the per-user
@@ -156,11 +170,34 @@ review-gated (ADR-0056).
 
 **Precedence** (most → least specific): **repo-root > nested directory >
 global**, and within one tier by **instruction kind** (`Navigator.md` >
-`CLAUDE.md` > `AGENTS.md` > `copilot-instructions.md`). The workspace-root files
+`CLAUDE.md` > `AGENTS.md` > `copilot-instructions.md` > path-scoped
+`*.instructions.md`). The workspace-root files
 are the authoritative project instructions and lead the merge; nested-directory
 files refine within their subtree and follow (ordered by ascending directory
 depth, then kind, then path, for determinism); the per-user global files are the
 baseline and come last.
+
+**Path scoping (`applyTo`).** A `.github/instructions/*.instructions.md` file may
+narrow itself to the files it is about:
+
+```markdown
+---
+applyTo: "**/*.ts"
+---
+Prefer named exports.
+```
+
+`applyTo` takes one glob, a comma-separated list, or a YAML list. The file is
+injected only on turns where a file **in play** matches — the workspace files the
+session has touched through tool calls, plus any workspace file the prompt names
+outright, so a rule can apply on the very first turn. A scoped file whose
+frontmatter omits `applyTo` (or leaves it empty) applies project-wide, like the
+unscoped kinds. Unscoped instruction files are never filtered.
+
+Only the **repo-root** `.github/` directory is read for these. `.github` is a
+repo-level directory — GitHub reads only the one at the root — and per-directory
+instructions already work through the nested `Navigator.md` / `CLAUDE.md` /
+`AGENTS.md` walk. See ADR-0119.
 
 **`@`-imports.** A line whose trimmed text is exactly `@<path>` imports that
 file's body inline at that point (relative paths resolve against the importing
@@ -255,6 +292,7 @@ and `--provider`.
 | `request_timeout_secs` | int | 600 | Stall window: longest tolerated silence on an open response (to first byte, then between stream chunks) — not a total deadline; a server that keeps streaming is never cut off (ADR-0080) |
 | `context_window` | int | none | The model's context window in tokens; when set, the session budget derives from it (window minus a response reserve) and takes precedence over `[harness] context_token_limit` |
 | `supports_vision` | bool | none | Whether this provider's model accepts image (vision) input. A user assertion that resolves the model's vision capability (config > probe > false, ADR-0061): `true` lifts the image-input gate even for a local server; unset/`false` keeps the text-only default. LocalBox sets this automatically when it loads a multimodal projector. See [04-provider-contract.md](04-provider-contract.md) §Vision. |
+| `prompt_caching` | bool | `false` | Enable prompt caching for an Anthropic provider: place an ephemeral `cache_control` breakpoint on the stable prefix (tools + the stable system prompt) so it is cached across turns, cutting the input cost/latency of a multi-turn session. Off by default; only pays off against a backend that implements prompt caching (hosted Claude or a proxy that does) and is harmless otherwise. The per-turn volatile context (memory, project instructions) stays after the breakpoint and is re-sent each turn. Cached tokens show as `cached:N` in the footer. |
 
 Any other keys under a provider table are preserved and passed through as
 provider options (for example `max_tokens` for `anthropic`, or the
@@ -285,7 +323,7 @@ discovery time (it never runs model inference).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `mode` | `agent` \| `harness` | `agent` | Operating mode |
+| `mode` | `agent` \| `harness` | `agent` | Default operating-mode label. Reserved: the active mode is selected by the subcommand (`localpilot harness …` runs harness mode; `chat`/`print`/`eval` run agent mode); this key does not gate behaviour on its own. |
 | `attempts_per_step` | int | `3` | Max attempts per plan step |
 | `auto_commit` | bool | `true` | Commit each completed step |
 | `test_command` | string | none | Command run to gate step completion |
@@ -341,7 +379,8 @@ endpoint is configured.
 | `injection_context_aware` | bool | `false` | Scale the injected budget toward the default provider's declared `context_window` (a small model gets less), never above `injection_char_budget`. |
 | `injection_skip_categories` | list | `[]` | Lesson categories to skip injecting because a rule already enforces equivalent guidance (e.g. `["SecurityWarning"]`). Values match `LessonCategory` names. |
 | `injection_language_filter` | bool | `true` | Skip an accepted memory clearly about a different programming language than the workspace's; a language-agnostic lesson stays eligible. |
-| `outcome_downweight` | bool | `false` | **Outcome-aware down-weight.** When the uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). Off by default: a single eval is a weak signal, so the host acts on the A/B verdict (joined by the per-turn `memories_used` audit), not a live turn, and the action is reversible. |
+| `injection_dedup_ttl_turns` | int | `0` | Suppress re-injecting an accepted memory that was already injected within the last N turns, so a persistently-relevant lesson does not spend the per-turn budget every turn and crowd out other memory. `0` disables (the default) — a memory may be injected on consecutive turns. Dropping a suppressed memory keeps it out of both the injected block and the memories-used audit. |
+| `outcome_downweight` | bool | `false` | **Outcome-aware down-weight (reserved; engine built, not yet wired to a live eval).** The intent: when an uplift A/B eval shows a lesson coincided with an arm under-performing its control, route that lesson to review (never delete it). The down-weight engine and this default-off lever exist, but no in-repo uplift-eval runner reads the key yet, so it is currently inert. Off by default: a single eval is a weak signal, and the action must stay reversible. |
 
 ### `[docs]`
 
@@ -489,6 +528,7 @@ broker is off and the full tool set is advertised.
 | `readable_errors` | bool | `true` | When a tool call's arguments do not match the tool schema, hand the model a concise, schema-aware error (the offending field, the expected shape, and a valid example) instead of the raw deserializer string, so it can self-correct on the next turn. Set `false` to restore the raw message (the rollback). The raw detail is always kept in the logs/telemetry. |
 | `repair` | `off`/`warn`/`on` | `off` | Conservative, schema-guided repair of a shape-invalid call's arguments (wrap a bare string as a one-element array, parse a stringified array/object of the right item type, unwrap a markdown autolink on a path field) — applied **only** on read-only / project-write tools, **never** on a destructive/external-write/irreversible/MCP tool or a content/command field, and only to the validator-reported fields. A repaired call carries a model-visible note and runs through the permission engine on the repaired input. `warn` applies the repair and logs it loudly (for vetting before any default change to `on`); `off` (the default) never rewrites arguments — a shape-invalid call gets the readable error instead. |
 | `repair_learning` | bool | `false` | Offer the session's argument-repair patterns to LocalMind as aggregate, redacted, **review-gated** candidates at session close (which model needed which repair on which tool). Reuse-only: it stores no raw inputs/paths/content, writes no accepted memory, and adds no new store — a human promotes a candidate or it expires in review. Off by default. |
+| `elide_seen_reads` | bool | `false` | Elide a `read_file` result whose file+range was already read this session and is unchanged since (same mtime **and** length): return a compact stub pointing at the earlier read instead of the full body, cutting context waste on read-heavy loops. Conservative — a changed file, a coarse-mtime same-length overwrite, or any unreadable stat always returns full content, never a stale stub; the model can re-page any range with `read_file` start_line/end_line. The elided read still records as a successful `read_file`, so nothing that depends on "was this read" changes. Off by default; in-memory, so a resumed session serves full content until it re-reads. |
 
 **Migration:** these defaults reproduce prior behaviour, so an existing config
 keeps working unchanged. Opt in with `[tools] broker = true`; see

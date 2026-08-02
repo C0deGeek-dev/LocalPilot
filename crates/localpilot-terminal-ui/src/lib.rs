@@ -18,9 +18,10 @@ mod timeline;
 pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
     DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PlanEntry, QuestionAction,
-    RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
-    StopState, TabId, TakeoverKind, TakeoverNavigation, TerminalCapabilities, TimelineNavigation,
-    TrustAction, UserShellCommand, UserShellOutput, WorkState,
+    QuestionOption, QuestionResponse, RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection,
+    SettingEdit, SettingEntry, StopState, TabId, TakeoverKind, TakeoverNavigation,
+    TerminalCapabilities, TimelineNavigation, TrustAction, UsageTotals, UserShellCommand,
+    UserShellOutput, WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
 pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};

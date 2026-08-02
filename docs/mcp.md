@@ -124,11 +124,48 @@ prompts for approval before each call; in a non-interactive run (`print`,
 `harness`) they require a trusting profile. Output is redacted before it reaches
 the transcript, the model, or the logs.
 
+A server that answers a call with `isError: true` reaches the model as a
+failure (`status: error`) with its text intact — a reported failure, not a tool
+malfunction, so it never counts against the loop's stuck detection (ADR-0116).
+Only a transport- or protocol-level fault is a malfunction. MCP tools are held
+to the same result contract as builtins.
+
+## Finding the right tool
+
+Connecting a server proves availability, not use. Two things close that gap, and
+neither names a vendor (ADR-0120):
+
+- The agent prompt carries a **version-sensitive documentation policy**: when a
+  task depends on current or version-specific behaviour of an external library,
+  framework, SDK, API, CLI, or cloud service — an upgrade error, a migration, a
+  deprecated API, a changed configuration shape — the model consults a
+  documentation tool rather than its own recollection. With the full tool set
+  advertised it calls the suitable tool directly; with the pull-discovery broker
+  on it searches, reveals, then calls. Stable local implementation questions do
+  not trigger a lookup, and when nothing suitable is configured the model
+  continues from local evidence and says current documentation was unverified.
+- Broker resolution is **capability-aware**, so a need phrased as
+  `<library> version upgrade problem` can reach a tool that only describes
+  itself as querying documentation. See
+  [`docs/extending.md`](extending.md#pull-discovery-broker-host-installed).
+
 ## Scope
 
 Only local servers launched over stdio are supported. The connection is used by
 the interactive REPL, `print`, and `harness` runs; harness connects each server
 once and reuses it across steps.
+
+### One MCP pool per server process
+
+Under `serve` (the opt-in local server that hosts many sessions for multiple
+attached clients), the configured MCP servers are spawned **once** at start-up
+and their connections form a single shared pool for the whole server process.
+Each hosted session projects its own tool registry, but that registry only
+references the one pool's MCP clients — MCP subprocesses are never re-spawned per
+session. So N concurrent sessions still speak to one set of MCP servers, not N,
+and the per-session RAM cost stays small (see the multi-session RAM model in
+[02-architecture.md](02-architecture.md)). Redaction and permission gating are
+per session as always; only the underlying connections are shared.
 
 ## Research search tools
 

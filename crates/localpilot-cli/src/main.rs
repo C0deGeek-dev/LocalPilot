@@ -18,6 +18,7 @@ mod eval_cmd;
 mod fullscreen;
 mod handoff_cmd;
 mod harness_cmd;
+mod import_cmd;
 mod ingest_cmd;
 #[cfg(feature = "tui")]
 mod key_input;
@@ -36,6 +37,9 @@ mod repl;
 mod research;
 mod rpc_cmd;
 mod self_review_cmd;
+mod selfdev_cmd;
+mod selfdev_reload;
+mod server_cmd;
 mod session_cmd;
 mod skill_discovery;
 mod skills_cmd;
@@ -119,10 +123,23 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Build LocalPilot from its own source, vet it, and promote it (developer
+    /// self-dev surface; the autonomous self-editing loop is a separate opt-in).
+    Selfdev {
+        #[command(subcommand)]
+        command: SelfdevCommand,
+    },
     /// Inspect and choose between installed versions.
     Version {
         #[command(subcommand)]
-        command: VersionCommand,
+        command: Option<VersionCommand>,
+        /// Emit this binary's own version and embedded build identity as JSON
+        /// (`{version, git_hash, fingerprint}`), the contract the self-dev publish
+        /// gauntlet reads to check a candidate against the source it was built
+        /// from. With no subcommand and without this flag, prints the version
+        /// string.
+        #[arg(long)]
+        json: bool,
     },
     /// Initialize project-local harness state (.localpilot.toml + .gitignore).
     Init {
@@ -258,6 +275,40 @@ enum Command {
         #[arg(long)]
         resume: Option<String>,
     },
+    /// Serve this workspace's sessions over the opt-in local-IPC transport (a
+    /// Unix domain socket or a Windows named pipe) until Ctrl-C. Clients attach
+    /// with `localpilot connect`. Strictly opt-in: the default in-process
+    /// `chat`/`ask`/`print`/`harness` path is unchanged and never starts it.
+    Serve {
+        /// Model name to request; defaults to the provider's configured model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id; defaults to the configured default provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Permission profile (default | relaxed | bypass | unrestricted).
+        #[arg(long)]
+        permission: Option<String>,
+        /// Shorthand for `--permission bypass`. Must be set explicitly.
+        #[arg(long)]
+        bypass: bool,
+    },
+    /// Connect to this workspace's `serve` server and relay a session over
+    /// stdin/stdout (plain text): stdin lines become prompts, session events
+    /// stream to stdout. Errors clearly when no server is running unless
+    /// `--server` is passed to start one first.
+    Connect {
+        /// Resume an existing session by id or name instead of opening a new one.
+        #[arg(long)]
+        resume: Option<String>,
+        /// Start a server for this workspace if none is running, then connect.
+        #[arg(long)]
+        server: bool,
+    },
+    /// Internal: run the detached server the auto-spawn (`connect --server`)
+    /// path starts. Not for direct use — `localpilot serve` is the entry point.
+    #[command(name = "__server-serve", hide = true)]
+    ServerServe,
     /// Model Context Protocol surfaces.
     #[command(subcommand)]
     Mcp(McpCommand),
@@ -378,6 +429,11 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Import a session from another coding agent into this workspace.
+    Import {
+        #[command(subcommand)]
+        command: ImportCommand,
+    },
     /// Subagent definitions: list and inspect the agents this project sees.
     Agents {
         #[command(subcommand)]
@@ -459,6 +515,46 @@ enum HandoffCommand {
     Resume {
         /// The handoff id (see the writer's output).
         id: String,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum SelfdevCommand {
+    /// Fingerprint the working tree and build it into an isolated target dir.
+    Build {
+        /// Where cargo writes the build (default: `build-target/` in the workspace).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+    },
+    /// Build, run the publish gauntlet, and — only if it passes — install the
+    /// binary immutably and point a channel at it.
+    Publish {
+        /// The channel to promote (`current`, `stable`, `slow`, or a bare name).
+        #[arg(long, default_value = "current")]
+        channel: String,
+        /// Where cargo writes the build (default: `build-target/` in the workspace).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+    },
+    /// Show installed self-dev versions, channel targets, and the auto-reload
+    /// breaker state.
+    Status,
+    /// Reclaim disk: remove self-dev versions beyond the most recent, keeping any
+    /// a channel points at.
+    Gc {
+        /// How many recent versions to keep.
+        #[arg(long, default_value_t = 5)]
+        keep: usize,
+    },
+    /// Build, vet, promote `current`, and swap this process onto the new binary.
+    /// A manual, explicit process reload — not the autonomous in-session loop.
+    Reload {
+        /// Where cargo writes the build (default: `build-target/` in the data root).
+        #[arg(long, value_name = "DIR")]
+        target_dir: Option<PathBuf>,
+        /// Arguments to run under the new binary after the swap (default: `status`).
+        #[arg(last = true)]
+        args: Vec<String>,
     },
 }
 
@@ -654,6 +750,29 @@ enum McpCommand {
         /// but never answer an ask, so every ask denies (watch-and-steer mode).
         #[arg(long)]
         no_approvals: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCommand {
+    /// Import a Claude Code session (`~/.claude/projects/.../<id>.jsonl`) as a
+    /// resumable LocalPilot session. The history is text-flattened — tool calls
+    /// and results become plain-text markers and reasoning is dropped — so it
+    /// resumes safely under any provider. Resume it by the name `imported_cc_<id>`.
+    ClaudeCode {
+        /// A Claude Code `.jsonl` file, its project directory, or a project's
+        /// working directory (its `~/.claude/projects` folder is derived). When
+        /// omitted, the current directory's project folder is used.
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+        /// A specific session id within the project (its `.jsonl` stem). When
+        /// omitted, the most recently modified session is imported.
+        #[arg(long)]
+        session: Option<String>,
+        /// Re-import even if this session was already imported, under a new name
+        /// (never overwrites an existing session or steals its name).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1182,6 +1301,21 @@ fn maybe_show_learning_notice() {
     );
 }
 
+/// This binary's own build identity as a compact JSON line — the contract the
+/// self-dev publish gauntlet reads to check a candidate against the source it
+/// claims to come from. The three values are embedded at build time by
+/// `build.rs` (see `build_meta.rs`): the version string, the commit hash, and
+/// the source fingerprint the build was handed. `fingerprint` is the empty
+/// string for a build that was not given one (an ordinary release build).
+fn build_identity_json() -> String {
+    serde_json::json!({
+        "version": env!("LOCALPILOT_VERSION"),
+        "git_hash": env!("LOCALPILOT_GIT_HASH"),
+        "fingerprint": env!("LOCALPILOT_SOURCE_FINGERPRINT"),
+    })
+    .to_string()
+}
+
 fn main() -> anyhow::Result<std::process::ExitCode> {
     // The clap command tree and the top-level command future are large; on Windows
     // the OS main thread's ~1 MiB default stack overflows building them in a debug
@@ -1338,15 +1472,72 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             )
             .await?;
         }
-        Command::Version { command } => {
+        Command::Serve {
+            model,
+            provider,
+            permission,
+            bypass,
+        } => {
+            let profile = session_cmd::resolve_profile(permission.as_deref(), bypass);
+            server_cmd::serve(model.as_deref(), provider.as_deref(), profile).await?;
+        }
+        Command::Connect { resume, server } => {
+            server_cmd::connect(resume.as_deref(), server).await?;
+        }
+        Command::ServerServe => {
+            // The detached daemon the auto-spawn path starts: the spawn argv
+            // carries no flags, so resolve model/provider from config and use the
+            // default profile. If the endpoint is already owned, `serve` prints
+            // that and exits 0.
+            let profile = session_cmd::resolve_profile(None, false);
+            server_cmd::serve(None, None, profile).await?;
+        }
+        Command::Selfdev { command } => {
+            let mut stdout = io::stdout().lock();
+            let cwd = std::env::current_dir()?;
+            let selfdev_root = localpilot_selfdev::default_root().ok_or_else(|| {
+                anyhow::anyhow!("this platform reports no per-user data directory")
+            })?;
+            match command {
+                SelfdevCommand::Build { target_dir } => {
+                    selfdev_cmd::run_build(&cwd, &selfdev_root, target_dir, &mut stdout)?;
+                }
+                SelfdevCommand::Publish {
+                    channel,
+                    target_dir,
+                } => {
+                    selfdev_cmd::run_publish(
+                        &cwd,
+                        &selfdev_root,
+                        &channel,
+                        target_dir,
+                        &mut stdout,
+                    )?;
+                }
+                SelfdevCommand::Status => {
+                    selfdev_cmd::run_status(&selfdev_root, &mut stdout)?;
+                }
+                SelfdevCommand::Gc { keep } => {
+                    selfdev_cmd::run_gc(&selfdev_root, keep, &mut stdout)?;
+                }
+                SelfdevCommand::Reload { target_dir, args } => {
+                    // Never returns on success (Unix): the process is replaced.
+                    selfdev_cmd::run_reload(&cwd, &selfdev_root, target_dir, &args, &mut stdout)?;
+                }
+            }
+            stdout.flush()?;
+        }
+        Command::Version { command, json } => {
             let mut stdout = io::stdout().lock();
             match command {
-                VersionCommand::List => update::list_versions(&mut stdout)?,
-                VersionCommand::Pin { version, clear } => {
+                Some(VersionCommand::List) => update::list_versions(&mut stdout)?,
+                Some(VersionCommand::Pin { version, clear }) => {
                     let requested = if clear { None } else { version.as_deref() };
                     update::set_pin(requested, &mut stdout)?;
                 }
-                VersionCommand::Rollback => update::rollback(&mut stdout)?,
+                Some(VersionCommand::Rollback) => update::rollback(&mut stdout)?,
+                None if json => writeln!(stdout, "{}", build_identity_json())?,
+                None => writeln!(stdout, "{}", env!("LOCALPILOT_VERSION"))?,
             }
             stdout.flush()?;
         }
@@ -1812,6 +2003,26 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
             })
             .await?;
         }
+        Command::Import { command } => match command {
+            ImportCommand::ClaudeCode {
+                project,
+                session,
+                force,
+            } => {
+                let cwd = std::env::current_dir()?;
+                let store = localpilot_store::Store::open(&cwd);
+                let mut stdout = io::stdout().lock();
+                import_cmd::import_claude_code(
+                    &store,
+                    &cwd,
+                    project.as_deref(),
+                    session.as_deref(),
+                    force,
+                    &mut stdout,
+                )?;
+                stdout.flush()?;
+            }
+        },
         Command::Session { command } => match command {
             SessionCommand::List => {
                 let mut stdout = io::stdout().lock();
@@ -2417,5 +2628,109 @@ mod tests {
             cli.command,
             Some(Command::Eval { learn: false, .. })
         ));
+    }
+}
+
+/// The build script's metadata policy, included from the same file the script
+/// itself uses so the two can never drift. A build script cannot be tested where
+/// it lives; this is how it gets tested.
+#[cfg(test)]
+#[path = "../build_meta.rs"]
+mod build_meta;
+
+#[cfg(test)]
+mod build_meta_tests {
+    use super::build_meta::{resolve, UNKNOWN_HASH};
+
+    /// Stand-ins for the two repository lookups, so a test never depends on the
+    /// state of the checkout it runs in.
+    fn described() -> Option<String> {
+        Some("v2.6.0-3-gabc1234".to_string())
+    }
+    fn head() -> Option<String> {
+        Some("abc1234def5678".to_string())
+    }
+    fn absent() -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn an_ordinary_source_build_reads_the_repository_and_therefore_watches_it() {
+        let meta = resolve(None, None, None, "2.6.0", described, head);
+
+        assert_eq!(meta.version, "v2.6.0-3-gabc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint, None);
+        assert!(
+            meta.watch_git,
+            "a version read from the repo goes stale on the next commit unless watched"
+        );
+    }
+
+    #[test]
+    fn a_supplied_identity_embeds_verbatim_and_stops_watching_the_repository() {
+        let meta = resolve(
+            Some("2.6.0-selfdev-abc1234".to_string()),
+            Some("abc1234def5678".to_string()),
+            Some("ff00".to_string()),
+            "2.6.0",
+            || panic!("describe must not be consulted when the version was supplied"),
+            || panic!("head must not be consulted when the hash was supplied"),
+        );
+
+        assert_eq!(meta.version, "2.6.0-selfdev-abc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint.as_deref(), Some("ff00"));
+        assert!(
+            !meta.watch_git,
+            "nothing was read from the repo, so a commit cannot invalidate this build"
+        );
+    }
+
+    #[test]
+    fn supplying_only_one_value_still_watches_the_repository() {
+        let meta = resolve(
+            Some("2.6.0-selfdev-abc1234".to_string()),
+            None,
+            None,
+            "2.6.0",
+            || panic!("describe must not be consulted when the version was supplied"),
+            head,
+        );
+
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert!(
+            meta.watch_git,
+            "the hash still came from the repo, so the repo still has to be watched"
+        );
+    }
+
+    #[test]
+    fn a_blank_environment_value_is_not_an_answer() {
+        let meta = resolve(
+            Some("   ".to_string()),
+            Some(String::new()),
+            Some("  ".to_string()),
+            "2.6.0",
+            described,
+            head,
+        );
+
+        assert_eq!(meta.version, "v2.6.0-3-gabc1234");
+        assert_eq!(meta.git_hash, "abc1234def5678");
+        assert_eq!(meta.fingerprint, None);
+        assert!(meta.watch_git);
+    }
+
+    #[test]
+    fn outside_a_repository_the_package_version_and_an_unknown_hash_are_embedded() {
+        let meta = resolve(None, None, None, "2.6.0", absent, absent);
+
+        assert_eq!(meta.version, "2.6.0");
+        assert_eq!(meta.git_hash, UNKNOWN_HASH);
+        assert!(
+            !meta.watch_git,
+            "there is no repository to watch, so no trigger should be emitted"
+        );
     }
 }

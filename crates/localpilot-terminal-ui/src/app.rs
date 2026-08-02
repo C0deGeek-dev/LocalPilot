@@ -697,6 +697,21 @@ pub enum StopState {
     BudgetExceeded,
     NoProgress,
     TimedOut,
+    Quiesced,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+}
+
+impl UsageTotals {
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -792,12 +807,17 @@ pub enum TrustAction {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct QuestionDialog {
+    header: Option<String>,
     question: String,
-    options: Vec<String>,
+    options: Vec<QuestionOption>,
     selected: usize,
+    checked: Vec<bool>,
+    multi_select: bool,
     editing_other: bool,
     other: String,
     other_cursor: usize,
+    index: usize,
+    total: usize,
 }
 
 impl fmt::Debug for QuestionDialog {
@@ -813,24 +833,39 @@ impl fmt::Debug for QuestionDialog {
                 &format_args!("<{} redacted>", self.options.len()),
             )
             .field("selected", &self.selected)
+            .field("checked", &self.checked)
+            .field("multi_select", &self.multi_select)
             .field("editing_other", &self.editing_other)
             .field(
                 "other",
                 &format_args!("<{} bytes redacted>", self.other.len()),
             )
             .field("other_cursor", &self.other_cursor)
+            .field("index", &self.index)
+            .field("total", &self.total)
             .finish()
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct QuestionView<'a> {
+    pub header: Option<&'a str>,
     pub question: &'a str,
-    pub options: &'a [String],
+    pub options: &'a [QuestionOption],
     pub selected: usize,
+    pub checked: &'a [bool],
+    pub multi_select: bool,
     pub editing_other: bool,
     pub other: &'a str,
     pub other_cursor: usize,
+    pub index: usize,
+    pub total: usize,
 }
 
 impl fmt::Debug for QuestionView<'_> {
@@ -846,20 +881,30 @@ impl fmt::Debug for QuestionView<'_> {
                 &format_args!("<{} redacted>", self.options.len()),
             )
             .field("selected", &self.selected)
+            .field("checked", &self.checked)
+            .field("multi_select", &self.multi_select)
             .field("editing_other", &self.editing_other)
             .field(
                 "other",
                 &format_args!("<{} bytes redacted>", self.other.len()),
             )
             .field("other_cursor", &self.other_cursor)
+            .field("index", &self.index)
+            .field("total", &self.total)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionResponse {
+    Selected(Vec<String>),
+    Other(String),
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum QuestionAction {
     None,
-    Submit(String),
+    Submit(QuestionResponse),
     Cancel,
 }
 
@@ -867,8 +912,12 @@ impl fmt::Debug for QuestionAction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => formatter.write_str("None"),
-            Self::Submit(answer) => formatter
-                .debug_tuple("Submit")
+            Self::Submit(QuestionResponse::Selected(answers)) => formatter
+                .debug_tuple("Submit::Selected")
+                .field(&format_args!("<{} answers redacted>", answers.len()))
+                .finish(),
+            Self::Submit(QuestionResponse::Other(answer)) => formatter
+                .debug_tuple("Submit::Other")
                 .field(&format_args!("<{} bytes redacted>", answer.len()))
                 .finish(),
             Self::Cancel => formatter.write_str("Cancel"),
@@ -896,6 +945,7 @@ pub enum RuntimeUpdate {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: u64,
     },
     ContextUsage {
         used: usize,
@@ -910,6 +960,8 @@ pub enum RuntimeUpdate {
         name: String,
         count: u32,
     },
+    FilesTouched,
+    SoftInterruptInjected,
     Stopped(StopState),
 }
 
@@ -948,7 +1000,7 @@ pub struct AppModel {
     escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
     pub plan: Vec<PlanEntry>,
-    pub usage: Option<(u64, u64)>,
+    pub usage: Option<UsageTotals>,
     pub context_usage: Option<(usize, usize)>,
     pub stream_bytes: usize,
     copy_on_select: bool,
@@ -1455,12 +1507,15 @@ impl AppModel {
             RuntimeUpdate::Usage {
                 input_tokens,
                 output_tokens,
+                cached_input_tokens,
             } => {
-                let (previous_input, previous_output) = self.usage.unwrap_or_default();
-                self.usage = Some((
-                    previous_input.saturating_add(input_tokens),
-                    previous_output.saturating_add(output_tokens),
-                ));
+                let mut usage = self.usage.unwrap_or_default();
+                usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
+                usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
+                usage.cached_input_tokens = usage
+                    .cached_input_tokens
+                    .saturating_add(cached_input_tokens);
+                self.usage = Some(usage);
             }
             RuntimeUpdate::ContextUsage { used, limit } => {
                 self.context_usage = Some((used, limit));
@@ -1491,6 +1546,14 @@ impl AppModel {
                     format!("tool {name} stopped after {count} repeated failures"),
                 );
             }
+            RuntimeUpdate::FilesTouched => {}
+            RuntimeUpdate::SoftInterruptInjected => {
+                self.style_active_transcript();
+                self.active_assistant = None;
+                self.active_reasoning = None;
+                self.active_tools.clear();
+                self.active_insert_before = None;
+            }
             RuntimeUpdate::Stopped(_) => {
                 self.style_active_transcript();
                 self.work = WorkState::Idle;
@@ -1519,6 +1582,14 @@ impl AppModel {
     pub fn begin_work_before(&mut self, item: Option<ItemId>) {
         self.begin_work();
         self.active_insert_before = item;
+    }
+
+    pub fn clear_cancellation_request(&mut self) {
+        if matches!(self.work, WorkState::Busy { .. }) {
+            self.work = WorkState::Busy {
+                cancellation_requested: false,
+            };
+        }
     }
 
     #[must_use]
@@ -2352,23 +2423,41 @@ impl AppModel {
 
     pub fn request_question(
         &mut self,
+        header: Option<String>,
         question: impl Into<String>,
-        options: impl IntoIterator<Item = String>,
+        options: impl IntoIterator<Item = QuestionOption>,
+        multi_select: bool,
+        index: usize,
+        total: usize,
     ) {
         self.claim_dialog_focus();
         let options = options
             .into_iter()
-            .map(|option| bounded_inline_text(&option, 1024))
-            .filter(|option| !option.is_empty())
+            .map(|option| QuestionOption {
+                label: bounded_inline_text(&option.label, 1024),
+                description: option
+                    .description
+                    .map(|description| bounded_inline_text(&description, 1024))
+                    .filter(|description| !description.is_empty()),
+            })
+            .filter(|option| !option.label.is_empty())
             .take(8)
-            .collect();
+            .collect::<Vec<_>>();
+        let checked = vec![false; options.len()];
         self.dialog = Some(DialogState::Question(QuestionDialog {
+            header: header
+                .map(|header| bounded_inline_text(&header, 128))
+                .filter(|header| !header.is_empty()),
             question: bounded_inline_text(&question.into(), MAX_TOOL_DETAIL_BYTES),
             options,
             selected: 0,
+            checked,
+            multi_select,
             editing_other: false,
             other: String::new(),
             other_cursor: 0,
+            index: index.max(1),
+            total: total.max(1),
         }));
     }
 
@@ -2378,12 +2467,17 @@ impl AppModel {
             return None;
         };
         Some(QuestionView {
+            header: question.header.as_deref(),
             question: &question.question,
             options: &question.options,
             selected: question.selected,
+            checked: &question.checked,
+            multi_select: question.multi_select,
             editing_other: question.editing_other,
             other: &question.other,
             other_cursor: question.other_cursor,
+            index: question.index,
+            total: question.total,
         })
     }
 
@@ -2445,7 +2539,7 @@ impl AppModel {
                 InputAction::Submit => {
                     let answer = question.other.trim();
                     if !answer.is_empty() {
-                        return QuestionAction::Submit(answer.to_string());
+                        return QuestionAction::Submit(QuestionResponse::Other(answer.to_string()));
                     }
                 }
                 _ => {}
@@ -2464,9 +2558,35 @@ impl AppModel {
                     .min(question.options.len());
                 QuestionAction::None
             }
+            InputAction::Insert(text)
+                if text == " "
+                    && question.multi_select
+                    && question.selected < question.options.len() =>
+            {
+                if let Some(checked) = question.checked.get_mut(question.selected) {
+                    *checked = !*checked;
+                }
+                QuestionAction::None
+            }
             InputAction::Submit | InputAction::AcceptCompletion => {
-                if let Some(answer) = question.options.get(question.selected) {
-                    QuestionAction::Submit(answer.clone())
+                if question.selected < question.options.len() {
+                    let selected = if question.multi_select {
+                        let checked = question
+                            .options
+                            .iter()
+                            .zip(&question.checked)
+                            .filter(|(_, checked)| **checked)
+                            .map(|(option, _)| option.label.clone())
+                            .collect::<Vec<_>>();
+                        if checked.is_empty() {
+                            vec![question.options[question.selected].label.clone()]
+                        } else {
+                            checked
+                        }
+                    } else {
+                        vec![question.options[question.selected].label.clone()]
+                    };
+                    QuestionAction::Submit(QuestionResponse::Selected(selected))
                 } else {
                     question.editing_other = true;
                     question.other_cursor = question.other.len();
@@ -3584,12 +3704,21 @@ mod tests {
         app.apply_runtime(RuntimeUpdate::Usage {
             input_tokens: 100,
             output_tokens: 20,
+            cached_input_tokens: 60,
         });
         app.apply_runtime(RuntimeUpdate::Usage {
             input_tokens: 7,
             output_tokens: 3,
+            cached_input_tokens: 5,
         });
-        assert_eq!(app.usage, Some((107, 23)));
+        assert_eq!(
+            app.usage,
+            Some(UsageTotals {
+                input_tokens: 107,
+                output_tokens: 23,
+                cached_input_tokens: 65,
+            })
+        );
     }
 
     fn command(name: &str, description: &str) -> CompletionCommand {
@@ -5382,14 +5511,30 @@ mod tests {
     #[test]
     fn question_dialog_owns_choices_other_text_and_cancellation() {
         let mut app = model();
-        app.request_question("Pick a color", ["Red".to_string(), "Blue".to_string()]);
+        app.request_question(
+            Some("Palette".to_string()),
+            "Pick a color",
+            [
+                QuestionOption {
+                    label: "Red".to_string(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "Blue".to_string(),
+                    description: Some("cool tone".to_string()),
+                },
+            ],
+            false,
+            1,
+            1,
+        );
         assert_eq!(
             app.handle_question_input(InputAction::MoveDown),
             QuestionAction::None
         );
         assert_eq!(
             app.handle_question_input(InputAction::Submit),
-            QuestionAction::Submit("Blue".to_string())
+            QuestionAction::Submit(QuestionResponse::Selected(vec!["Blue".to_string()]))
         );
 
         app.select_question_option(2);
@@ -5401,7 +5546,10 @@ mod tests {
         let _ = app.handle_question_input(InputAction::MoveLeft);
         let _ = app.handle_question_input(InputAction::Backspace);
         let submitted = app.handle_question_input(InputAction::Submit);
-        assert_eq!(submitted, QuestionAction::Submit("Cya界".to_string()));
+        assert_eq!(
+            submitted,
+            QuestionAction::Submit(QuestionResponse::Other("Cya界".to_string()))
+        );
         assert!(!format!("{submitted:?}").contains("Cya"));
         let _ = app.handle_question_input(InputAction::Escape);
         assert_eq!(
@@ -5411,6 +5559,41 @@ mod tests {
         let debug = format!("{:?}", app.dialog);
         assert!(!debug.contains("Pick a color"));
         assert!(!debug.contains("Cya"));
+    }
+
+    #[test]
+    fn multi_select_question_toggles_and_returns_every_checked_label_in_order() {
+        let mut app = model();
+        app.request_question(
+            None,
+            "Choose stores",
+            [
+                QuestionOption {
+                    label: "SQLite".to_string(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "Postgres".to_string(),
+                    description: None,
+                },
+            ],
+            true,
+            1,
+            1,
+        );
+        assert_eq!(
+            app.handle_question_input(InputAction::Insert(" ".to_string())),
+            QuestionAction::None
+        );
+        let _ = app.handle_question_input(InputAction::MoveDown);
+        let _ = app.handle_question_input(InputAction::Insert(" ".to_string()));
+        assert_eq!(
+            app.handle_question_input(InputAction::Submit),
+            QuestionAction::Submit(QuestionResponse::Selected(vec![
+                "SQLite".to_string(),
+                "Postgres".to_string(),
+            ]))
+        );
     }
 
     #[test]

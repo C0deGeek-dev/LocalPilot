@@ -1,0 +1,16 @@
+---
+source: crates/localpilot-tui/tests/render.rs
+assertion_line: 411
+expression: "render_natural(&state, 90)"
+---
+Storage                                                                                   
+Which store should this use?                                                              
+ SQLite  one file, no server                                                              
+ Postgres                                                                                 
+ Something else…                                                                          
+[↑↓] move    [Enter] choose    [Esc] skip                                                 
+╭ input  (Enter sends · Alt+Enter/Ctrl+J/trailing \ newline · Ctrl+T history scope)──────╮
+│                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+mode:agent profile:default tok in/out:120/48 24 t/s ctx:~1200/8000                        
+test-model · session:ab12cd34

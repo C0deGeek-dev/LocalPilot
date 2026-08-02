@@ -35,7 +35,6 @@ tui = [
     "dep:base64",
     "dep:image",
     "dep:time",
-    "dep:tempfile",
 ]
 # LocalMind is always linked; this feature remains as a compatibility alias for
 # existing build commands.
@@ -78,9 +77,12 @@ ratatui = { workspace = true, features = [
 reqwest.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+# A scratch directory for the self-dev publish gauntlet's throwaway smoke config
+# (`selfdev publish`). Also a dev-dependency for tests; declared here because it
+# is used on a non-test code path.
+tempfile.workspace = true
 thiserror.workspace = true
 time = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -100,7 +102,15 @@ localpilot-render = { path = "../localpilot-render", optional = true }
 localpilot-research = { path = "../localpilot-research" }
 localpilot-rpc = { path = "../localpilot-rpc" }
 localpilot-sandbox = { path = "../localpilot-sandbox" }
+# Self-dev build/reload primitives (source fingerprint, immutable version store,
+# publish gauntlet, reload continuation). Used by the reload-continuation seam on
+# resume and, later, the self-dev build/release surface.
+localpilot-selfdev = { path = "../localpilot-selfdev" }
 localpilot-selfreview = { path = "../localpilot-selfreview" }
+# The opt-in local-IPC server (`serve`/`connect`): transport, daemon lifecycle,
+# session registry, per-session host, and attach dispatch. Strictly opt-in — the
+# default chat/ask/print/harness in-process path never touches it (D003).
+localpilot-server = { path = "../localpilot-server" }
 localpilot-skills = { path = "../localpilot-skills" }
 localpilot-store = { path = "../localpilot-store" }
 localpilot-tools = { path = "../localpilot-tools" }
@@ -111,5 +121,4 @@ localpilot-terminal-ui = { path = "../localpilot-terminal-ui", optional = true }
 assert_cmd = { workspace = true }
 crossterm = { workspace = true }
 insta = { workspace = true }
-tempfile = { workspace = true }
 wiremock = { workspace = true }

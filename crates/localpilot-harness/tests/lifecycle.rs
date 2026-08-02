@@ -230,7 +230,7 @@ async fn resume_applies_the_current_profile_never_the_logged_one() {
             _ => None,
         })
         .unwrap();
-    assert!(last_result.is_error);
+    assert!(last_result.is_error());
     assert!(
         last_result.output.contains("permission denied"),
         "{}",

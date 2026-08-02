@@ -36,6 +36,7 @@ async fn an_mcp_write_is_denied_like_a_builtin_write() {
         vec![Effect::WritePath {
             inside_workspace: false,
             overwrite: false,
+            secret_like: false,
         }],
         transport,
     );
@@ -50,6 +51,8 @@ async fn an_mcp_write_is_denied_like_a_builtin_write() {
         retention: None,
         processes: None,
         agents: None,
+        prompter: None,
+        peers: None,
     };
     let result = registry
         .dispatch(
@@ -60,7 +63,7 @@ async fn an_mcp_write_is_denied_like_a_builtin_write() {
         )
         .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("permission denied"));
 }
 
@@ -94,6 +97,8 @@ async fn mcp_tool_output_is_redacted() {
         retention: None,
         processes: None,
         agents: None,
+        prompter: None,
+        peers: None,
     };
     let result = registry
         .dispatch(
@@ -104,7 +109,7 @@ async fn mcp_tool_output_is_redacted() {
         )
         .await;
 
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert!(
         !result.output.contains(secret),
         "secret leaked: {}",
@@ -154,6 +159,8 @@ async fn repeated_mcp_registry_rebuilds_preserve_dynamic_metadata_and_routing() 
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let result = registry
             .dispatch(
@@ -164,7 +171,7 @@ async fn repeated_mcp_registry_rebuilds_preserve_dynamic_metadata_and_routing() 
             )
             .await;
 
-        assert!(!result.is_error, "{}", result.output);
+        assert!(!result.is_error(), "{}", result.output);
         assert!(result.output.contains(expected), "{}", result.output);
     }
 }

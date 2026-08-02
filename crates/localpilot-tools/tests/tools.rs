@@ -34,6 +34,8 @@ fn ctx(ws: &Workspace, interactivity: Interactivity, trusted: bool) -> ToolConte
         retention: None,
         processes: None,
         agents: None,
+        prompter: None,
+        peers: None,
     }
 }
 
@@ -88,14 +90,14 @@ async fn unknown_tool_returns_an_error_result_not_a_panic() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("unknown tool"));
 }
 
 #[test]
 fn every_builtin_generates_a_schema() {
     let registry = ToolRegistry::with_builtins();
-    assert_eq!(registry.names().len(), 22);
+    assert_eq!(registry.names().len(), 24);
     for (name, schema) in registry.schemas() {
         assert!(schema.is_object(), "{name} produced a non-object schema");
     }
@@ -123,7 +125,7 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!inside.is_error);
+    assert!(!inside.is_error());
     assert!(inside.output.contains("status: success"));
     assert!(inside.output.contains("fn main"));
 
@@ -139,7 +141,7 @@ async fn read_file_inside_workspace_is_allowed_and_outside_is_denied() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(outside.is_error);
+    assert!(outside.is_error());
     assert!(outside.output.contains("status: error"));
     assert!(outside.output.contains("permission denied"));
 }
@@ -164,7 +166,7 @@ async fn out_of_workspace_read_is_grantable_interactively_and_denial_is_actionab
         &ScriptedApprover::new(vec![true]),
     )
     .await;
-    assert!(!approved.is_error, "{}", approved.output);
+    assert!(!approved.is_error(), "{}", approved.output);
     assert!(approved.output.contains("notes.md"));
 
     // A refusal denies with an actionable message: it names every way the
@@ -178,7 +180,7 @@ async fn out_of_workspace_read_is_grantable_interactively_and_denial_is_actionab
         &ScriptedApprover::new(vec![false]),
     )
     .await;
-    assert!(refused.is_error);
+    assert!(refused.is_error());
     assert!(refused.output.contains("permission denied"));
     assert!(refused.output.contains("outside the workspace"));
     assert!(refused.output.contains("extra_read_roots"));
@@ -206,7 +208,7 @@ async fn extra_read_root_grants_headless_reads_but_never_writes() {
         &ScriptedApprover::new(Vec::new()),
     )
     .await;
-    assert!(!read.is_error, "{}", read.output);
+    assert!(!read.is_error(), "{}", read.output);
     assert!(read.output.contains("granted contents"));
 
     // The grant is read-only: a write under the same root keeps the boundary.
@@ -220,7 +222,7 @@ async fn extra_read_root_grants_headless_reads_but_never_writes() {
         &ScriptedApprover::new(Vec::new()),
     )
     .await;
-    assert!(write.is_error);
+    assert!(write.is_error());
     assert!(!escape.exists());
 }
 
@@ -244,7 +246,7 @@ async fn bypass_asks_for_an_out_of_workspace_read_instead_of_hard_denying() {
         &ScriptedApprover::new(vec![true]),
     )
     .await;
-    assert!(!approved.is_error, "{}", approved.output);
+    assert!(!approved.is_error(), "{}", approved.output);
     assert!(approved.output.contains("notes.md"));
 }
 
@@ -268,7 +270,7 @@ async fn unrestricted_allows_out_of_workspace_reads_and_writes_without_prompting
         &ScriptedApprover::new(Vec::new()),
     )
     .await;
-    assert!(!read.is_error, "{}", read.output);
+    assert!(!read.is_error(), "{}", read.output);
     assert!(read.output.contains("outside note"));
 
     let target = outside_dir.path().join("written.txt");
@@ -281,7 +283,7 @@ async fn unrestricted_allows_out_of_workspace_reads_and_writes_without_prompting
         &ScriptedApprover::new(Vec::new()),
     )
     .await;
-    assert!(!write.is_error, "{}", write.output);
+    assert!(!write.is_error(), "{}", write.output);
     assert!(target.exists());
 }
 
@@ -306,7 +308,7 @@ async fn read_file_returns_a_placeholder_for_binary_content() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.output.contains("binary data"));
     // Raw NUL must never reach the model-visible output.
     assert!(!result.output.contains('\u{00}'));
@@ -327,7 +329,7 @@ async fn write_file_in_workspace_and_denied_outside() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!ok.is_error, "{}", ok.output);
+    assert!(!ok.is_error(), "{}", ok.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
         "hello"
@@ -344,7 +346,7 @@ async fn write_file_in_workspace_and_denied_outside() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(outside.is_error);
+    assert!(outside.is_error());
     assert!(!outside_path.exists());
 }
 
@@ -364,7 +366,7 @@ async fn write_file_refuses_an_oversized_payload_and_steers_to_split() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(res.is_error, "an oversized write must be refused");
+    assert!(res.is_error(), "an oversized write must be refused");
     assert!(
         res.output.contains("modular") && res.output.contains("append_file"),
         "the refusal steers to split: {}",
@@ -385,7 +387,7 @@ async fn write_file_refuses_an_oversized_payload_and_steers_to_split() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!ok.is_error, "{}", ok.output);
+    assert!(!ok.is_error(), "{}", ok.output);
 }
 
 #[tokio::test]
@@ -402,7 +404,7 @@ async fn untrusted_overwrite_prompts_for_approval() {
         &ScriptedApprover::new(vec![false]),
     )
     .await;
-    assert!(denied.is_error);
+    assert!(denied.is_error());
     assert!(denied.output.contains("permission denied"));
 }
 
@@ -421,7 +423,7 @@ async fn edit_file_exact_match_and_rejects_ambiguous() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!ok.is_error, "{}", ok.output);
+    assert!(!ok.is_error(), "{}", ok.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
         "beta once"
@@ -436,7 +438,7 @@ async fn edit_file_exact_match_and_rejects_ambiguous() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(ambiguous.is_error);
+    assert!(ambiguous.is_error());
     assert!(ambiguous.output.contains("ambiguous"));
 }
 
@@ -462,7 +464,7 @@ async fn edit_file_matches_lf_old_text_against_a_crlf_file() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!res.is_error, "{}", res.output);
+    assert!(!res.is_error(), "{}", res.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("win.txt")).unwrap(),
         "line one\r\nLINE TWO\r\nline three\r\n"
@@ -495,7 +497,7 @@ async fn edit_file_applies_an_indentation_drifted_unique_block() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!res.is_error, "{}", res.output);
+    assert!(!res.is_error(), "{}", res.output);
     // The file's 8-space block indentation is preserved on the replacement.
     assert_eq!(
         std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
@@ -525,7 +527,7 @@ async fn edit_file_guiding_error_quotes_the_nearest_line_and_a_reread_hint() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(res.is_error);
+    assert!(res.is_error());
     assert!(
         res.output.contains("was not found"),
         "error: {}",
@@ -558,7 +560,7 @@ async fn edit_file_ambiguous_error_reports_the_match_count() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(res.is_error);
+    assert!(res.is_error());
     assert!(
         res.output.contains("ambiguous") && res.output.contains("2 times"),
         "the error should report the match count: {}",
@@ -581,7 +583,7 @@ async fn edit_file_rejects_a_no_op_edit() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(res.is_error);
+    assert!(res.is_error());
     assert!(res.output.contains("identical"), "{}", res.output);
     // The file is untouched.
     assert_eq!(
@@ -606,7 +608,7 @@ async fn append_file_creates_then_concatenates() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!first.is_error, "{}", first.output);
+    assert!(!first.is_error(), "{}", first.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
         "# Part 1\n"
@@ -622,7 +624,7 @@ async fn append_file_creates_then_concatenates() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!second.is_error, "{}", second.output);
+    assert!(!second.is_error(), "{}", second.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("doc.md")).unwrap(),
         "# Part 1\n# Part 2\n"
@@ -645,7 +647,7 @@ async fn append_file_is_not_idempotent() {
             &ScriptedApprover::always(),
         )
         .await;
-        assert!(!r.is_error, "{}", r.output);
+        assert!(!r.is_error(), "{}", r.output);
     }
     // Each append adds another copy: re-running is not a no-op.
     assert_eq!(
@@ -671,7 +673,7 @@ async fn append_file_preserves_crlf_newline_style() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!r.is_error, "{}", r.output);
+    assert!(!r.is_error(), "{}", r.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("win.txt")).unwrap(),
         "a\r\nb\r\nc\r\nd\r\n"
@@ -694,7 +696,7 @@ async fn append_file_refuses_a_non_utf8_file() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(r.is_error);
+    assert!(r.is_error());
     assert!(r.output.contains("not a UTF-8 text file"));
     // The binary file is untouched.
     assert_eq!(
@@ -749,7 +751,7 @@ async fn multi_edit_applies_all_edits_atomically() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!ok.is_error, "{}", ok.output);
+    assert!(!ok.is_error(), "{}", ok.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
         "one beta three"
@@ -770,7 +772,7 @@ async fn multi_edit_applies_all_edits_atomically() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(failed.is_error);
+    assert!(failed.is_error());
     assert_eq!(
         std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
         "one beta three"
@@ -794,7 +796,7 @@ async fn list_files_respects_ignore_files() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.output.contains("keep.rs"));
     assert!(
         !result.output.contains("ignored.rs"),
@@ -822,7 +824,7 @@ async fn find_files_matches_filename_patterns() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     let output = result.output.replace('\\', "/");
     assert!(output.contains("src/main.rs"));
     assert!(output.contains("src/lib.rs"));
@@ -843,7 +845,7 @@ async fn search_text_finds_matches_within_the_workspace() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error);
+    assert!(!result.is_error());
     assert!(result.output.contains("a.rs:1"));
     assert!(!result.output.contains("b.rs"));
 }
@@ -877,7 +879,7 @@ async fn run_shell_allows_read_only_and_denies_destructive_non_interactive() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!allowed.is_error, "{}", allowed.output);
+    assert!(!allowed.is_error(), "{}", allowed.output);
     assert!(allowed.output.contains("hello"));
 
     let denied = dispatch(
@@ -889,7 +891,7 @@ async fn run_shell_allows_read_only_and_denies_destructive_non_interactive() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(denied.is_error);
+    assert!(denied.is_error());
     assert!(denied.output.contains("permission denied"));
 }
 
@@ -924,7 +926,7 @@ async fn run_shell_runs_relative_paths_against_the_workspace_not_a_fallback_dir(
     )
     .await;
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "a relative read failed — the shell did not run in the workspace: {}",
         result.output
     );
@@ -953,7 +955,7 @@ async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!pwd.is_error, "{}", pwd.output);
+    assert!(!pwd.is_error(), "{}", pwd.output);
     assert!(pwd.output.contains(&cwd));
 
     let echo_pwd = dispatch(
@@ -965,7 +967,7 @@ async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!echo_pwd.is_error, "{}", echo_pwd.output);
+    assert!(!echo_pwd.is_error(), "{}", echo_pwd.output);
     assert!(echo_pwd.output.contains(&cwd));
 
     let quoted = dispatch(
@@ -977,7 +979,7 @@ async fn run_shell_accepts_simple_command_strings_and_builtin_reads() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!quoted.is_error, "{}", quoted.output);
+    assert!(!quoted.is_error(), "{}", quoted.output);
     assert!(quoted.output.contains("hello world"));
 }
 
@@ -1001,7 +1003,7 @@ async fn run_shell_command_field_uses_the_platform_shell() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert!(result.output.contains("hello"));
 }
 
@@ -1037,7 +1039,7 @@ async fn run_shell_runs_and_chained_commands_on_an_and_capable_shell() {
 
     if and_capable {
         assert!(
-            !result.is_error,
+            !result.is_error(),
             "an &&-capable shell must run a chained command: {}",
             result.output
         );
@@ -1051,7 +1053,7 @@ async fn run_shell_runs_and_chained_commands_on_an_and_capable_shell() {
         // is that it does not *pretend* the chain succeeded — it surfaces an error
         // rather than running only the first half and reporting success.
         assert!(
-            result.is_error,
+            result.is_error(),
             "the PS5.1 fallback must report a `&&` chain as failed, not silently succeed: {}",
             result.output
         );
@@ -1078,7 +1080,7 @@ async fn run_shell_classifies_normalized_command_strings_before_running() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(denied.is_error);
+    assert!(denied.is_error());
     assert!(denied.output.contains("permission denied"));
 }
 
@@ -1096,7 +1098,7 @@ async fn git_commit_rejects_a_secret_bearing_message() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("secret"));
 }
 
@@ -1127,7 +1129,7 @@ async fn git_diff_and_add_are_gated_by_command_class() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!diff.is_error, "{}", diff.output);
+    assert!(!diff.is_error(), "{}", diff.output);
     assert!(diff.output.contains("-one"));
     assert!(diff.output.contains("+two"));
 
@@ -1140,7 +1142,7 @@ async fn git_diff_and_add_are_gated_by_command_class() {
         &ScriptedApprover::new(vec![true]),
     )
     .await;
-    assert!(!add.is_error, "{}", add.output);
+    assert!(!add.is_error(), "{}", add.output);
 
     let restore = dispatch(
         &registry,
@@ -1151,7 +1153,7 @@ async fn git_diff_and_add_are_gated_by_command_class() {
         &ScriptedApprover::new(vec![false]),
     )
     .await;
-    assert!(restore.is_error);
+    assert!(restore.is_error());
     assert!(restore.output.contains("permission denied"));
 }
 
@@ -1172,7 +1174,7 @@ async fn bypass_still_redacts_output_and_keeps_the_workspace_boundary() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!read.is_error, "{}", read.output);
+    assert!(!read.is_error(), "{}", read.output);
     // ...but the output is still redacted.
     assert!(
         !read.output.contains(secret),
@@ -1193,7 +1195,7 @@ async fn bypass_still_redacts_output_and_keeps_the_workspace_boundary() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(escape.is_error);
+    assert!(escape.is_error());
     assert!(escape.output.contains("permission denied"));
     assert!(!outside_path.exists());
 }
@@ -1291,7 +1293,7 @@ async fn explicit_user_shell_skips_only_redundant_contract_confirmation() {
     let wrong_result = registry
         .dispatch_user_shell_detailed(&wrong_tool, &c, &default_engine(), &safe_approver)
         .await;
-    assert!(wrong_result.result.is_error);
+    assert!(wrong_result.result.is_error());
     assert!(!dir.path().join("must-not-exist.txt").exists());
 
     let dangerous_approver = RecordingApprover::new();
@@ -1412,7 +1414,7 @@ async fn write_file_refuses_to_clobber_a_binary_file_when_overwrite_is_false() {
     )
     .await;
 
-    assert!(result.is_error, "{}", result.output);
+    assert!(result.is_error(), "{}", result.output);
     assert!(result.output.contains("exists and overwrite is false"));
     // The binary content is untouched.
     assert_eq!(
@@ -1465,7 +1467,7 @@ async fn apply_patch_applies_create_update_and_delete_atomically() {
     )
     .await;
 
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     let lib = std::fs::read_to_string(ws.root().join("src/lib.rs")).unwrap();
     assert!(lib.contains("fn renamed()"));
     assert!(std::fs::read_to_string(ws.root().join("src/new.rs"))
@@ -1495,7 +1497,7 @@ async fn apply_patch_rejects_the_whole_patch_when_one_hunk_misses() {
     )
     .await;
 
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(
         result.output.contains("operation 2") && result.output.contains("was not found"),
         "the error names the failing operation: {}",
@@ -1548,6 +1550,8 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
         retention: Some(&retention),
         processes: None,
         agents: None,
+        prompter: None,
+        peers: None,
     };
 
     let result = dispatch(
@@ -1560,7 +1564,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
     )
     .await;
 
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert!(
         result.output.len() < big.len() / 2,
         "context output is bounded"
@@ -1581,7 +1585,7 @@ async fn oversized_output_is_bounded_and_spilled_to_retention() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!fetched.is_error, "{}", fetched.output);
+    assert!(!fetched.is_error(), "{}", fetched.output);
     assert!(fetched.output.contains("line of output"));
 }
 
@@ -1605,7 +1609,7 @@ async fn fetch_returns_body_when_network_is_approved() {
         &ScriptedApprover::new(vec![true]),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert!(result.output.contains("hello from the web"));
 }
 
@@ -1624,7 +1628,7 @@ async fn fetch_is_denied_non_interactive_without_hitting_the_network() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("permission denied"));
     assert_eq!(
         server.received_requests().await.unwrap().len(),
@@ -1665,7 +1669,7 @@ async fn fetch_rejects_non_http_schemes_without_a_network_call() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("invalid input"));
     assert!(result.output.contains("http or https"));
 }
@@ -1683,7 +1687,7 @@ async fn replace_in_file_literal_changes_only_the_target() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
     assert_eq!(content, "ALPHA\nbeta\nALPHA gamma\n");
 }
@@ -1701,7 +1705,7 @@ async fn replace_in_file_regex_mode_matches_a_pattern() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
         "X\nbeta\n"
@@ -1721,7 +1725,7 @@ async fn replace_in_file_no_match_leaves_the_file_unchanged() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert!(result.output.contains("no match"));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
@@ -1745,7 +1749,7 @@ async fn replace_in_file_denied_outside_the_workspace() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("permission denied"));
     // The file outside the workspace is untouched.
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "alpha\n");
@@ -1768,7 +1772,7 @@ async fn replace_in_file_treats_shell_metacharacters_as_literal_data() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
         format!("{payload}\n")
@@ -1797,7 +1801,7 @@ async fn replace_in_file_replaces_a_multiline_block() {
         &ScriptedApprover::always(),
     )
     .await;
-    assert!(!result.is_error, "{}", result.output);
+    assert!(!result.is_error(), "{}", result.output);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
         "fn renamed() {\n    work();\n    extra();\n}\n\nfn keep() {}\n"
@@ -1891,7 +1895,7 @@ async fn irreversible_tool_prompts_under_relaxed_where_reversible_auto_approves(
     )
     .await;
     assert!(
-        denied.is_error,
+        denied.is_error(),
         "an irreversible tool must prompt under relaxed"
     );
     assert!(denied.output.contains("permission denied"));
@@ -1909,7 +1913,7 @@ async fn irreversible_tool_prompts_under_relaxed_where_reversible_auto_approves(
     )
     .await;
     assert!(
-        !allowed.is_error,
+        !allowed.is_error(),
         "a reversible tool auto-approves under relaxed"
     );
 }
@@ -1932,7 +1936,304 @@ async fn bypass_scope_is_unchanged_by_reversibility() {
     )
     .await;
     assert!(
-        !result.is_error,
+        !result.is_error(),
         "bypass must not prompt, even for an irreversible tool"
+    );
+}
+
+// --- tool outcome classification (#46, #48, #52) ----------------------------
+
+/// The platform's guaranteed shell, per ADR-0007: no dependence on `$SHELL`
+/// or on pwsh being installed.
+fn exit_command(code: u32) -> serde_json::Value {
+    #[cfg(windows)]
+    return json!({ "program": "cmd", "args": ["/c", format!("exit {code}")] });
+    #[cfg(not(windows))]
+    return json!({ "program": "sh", "args": ["-c", format!("exit {code}")] });
+}
+
+#[tokio::test]
+async fn a_non_zero_exit_is_a_reported_failure_with_full_capture() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        exit_command(3),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    // The tool worked; the command said no. That is a reported failure — an
+    // error to the model, never a malfunction.
+    assert_eq!(
+        result.outcome,
+        localpilot_core::ToolOutcome::ReportedFailure
+    );
+    assert!(result.is_error());
+    assert!(result.output.contains("exit: 3"), "{}", result.output);
+    assert!(
+        result.output.contains("--- stdout ---"),
+        "{}",
+        result.output
+    );
+    assert!(
+        result.output.contains("--- stderr ---"),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn a_zero_exit_is_ok_and_still_reports_the_exit_line() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        exit_command(0),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert_eq!(result.outcome, localpilot_core::ToolOutcome::Ok);
+    assert!(result.output.contains("exit: 0"), "{}", result.output);
+}
+
+#[tokio::test]
+async fn a_genuine_spawn_failure_is_a_malfunction() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    // `program` plus at least one arg: a bare `program` with no args is
+    // normalized through the shell and comes back as a reported exit instead.
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "program": "definitely-not-a-real-binary-xyz", "args": ["--version"] }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert_eq!(result.outcome, localpilot_core::ToolOutcome::Unusable);
+    assert!(
+        result.output.contains("failed to start"),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn a_missing_binary_as_a_command_string_is_a_reported_failure() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    // Routed through the platform shell, the shell runs and reports the
+    // missing binary as a non-zero exit. This asymmetry is why reported
+    // failures still count toward the unproductive-streak guard.
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": "definitely-not-a-real-binary-xyz" }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert_eq!(
+        result.outcome,
+        localpilot_core::ToolOutcome::ReportedFailure
+    );
+}
+
+#[tokio::test]
+async fn a_denied_call_is_a_malfunction_not_a_reported_failure() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, false);
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        json!({ "command": "echo hello" }),
+        &c,
+        &default_engine(),
+        &ScriptedApprover::new(vec![false]),
+    )
+    .await;
+    assert_eq!(result.outcome, localpilot_core::ToolOutcome::Unusable);
+}
+
+#[tokio::test]
+async fn a_failing_command_reaches_the_model_as_status_error() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "run_shell",
+        exit_command(1),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result
+        .output
+        .starts_with("tool: run_shell\nstatus: error\n"));
+}
+
+struct ErroringTool(String);
+
+#[async_trait]
+impl Tool for ErroringTool {
+    fn name(&self) -> &str {
+        "erroring"
+    }
+    fn description(&self) -> &str {
+        "always fails"
+    }
+    fn schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+    fn effects(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<Vec<Effect>, ToolError> {
+        Ok(Vec::new())
+    }
+    async fn invoke(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::Failed(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn a_tool_error_is_redacted_before_the_model_sees_it() {
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+    let (_dir, ws) = workspace_with(&[]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ErroringTool(format!(
+        "request rejected for key {secret}"
+    ))));
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "erroring",
+        json!({}),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(
+        !result.output.contains(secret),
+        "secret leaked: {}",
+        result.output
+    );
+    assert!(result.output.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn an_oversized_tool_error_is_bounded_with_the_truncation_note() {
+    let (_dir, ws) = workspace_with(&[]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ErroringTool("x".repeat(64 * 1024))));
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "erroring",
+        json!({}),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    assert!(result.is_error());
+    assert!(
+        result.output.len() < 32 * 1024,
+        "error output not bounded: {} bytes",
+        result.output.len()
+    );
+    assert!(
+        result.output.contains("output truncated"),
+        "no truncation note"
+    );
+}
+
+struct RefusingHost;
+
+impl localpilot_tools::AgentHost for RefusingHost {
+    fn available(&self) -> Vec<(String, String)> {
+        vec![("researcher".to_string(), "reads things".to_string())]
+    }
+    fn run<'a>(
+        &'a self,
+        _agent: &'a str,
+        _task: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        Box::pin(async { Err("the agent refused the task".to_string()) })
+    }
+}
+
+#[tokio::test]
+async fn a_refused_delegation_is_a_reported_failure_not_a_success() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let host = RefusingHost;
+    let mut c = ctx(&ws, Interactivity::NonInteractive, true);
+    c.agents = Some(&host);
+    let result = dispatch(
+        &registry,
+        "delegate",
+        json!({ "agent": "researcher", "task": "look something up" }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    // The status word must not contradict the text: nothing ran.
+    assert_eq!(
+        result.outcome,
+        localpilot_core::ToolOutcome::ReportedFailure
+    );
+    assert!(
+        result.output.contains("delegation did not run"),
+        "{}",
+        result.output
+    );
+}
+
+#[tokio::test]
+async fn delegation_without_a_host_is_a_success_with_direct_guidance() {
+    let (_dir, ws) = workspace_with(&[]);
+    let registry = ToolRegistry::with_builtins();
+    let c = ctx(&ws, Interactivity::NonInteractive, true);
+    let result = dispatch(
+        &registry,
+        "delegate",
+        json!({ "agent": "researcher", "task": "look something up" }),
+        &c,
+        &bypass_engine(),
+        &ScriptedApprover::always(),
+    )
+    .await;
+    // No delegation surface configured is a fact about the session, not a
+    // failure; the guidance is to do the work directly.
+    assert_eq!(result.outcome, localpilot_core::ToolOutcome::Ok);
+    assert!(
+        result.output.contains("Do the work directly"),
+        "{}",
+        result.output
     );
 }

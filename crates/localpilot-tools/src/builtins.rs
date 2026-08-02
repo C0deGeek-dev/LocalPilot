@@ -16,6 +16,8 @@ use crate::contract::{
 };
 use crate::error::ToolError;
 use crate::tool::{detail_preview, parse_input, schema_for, Tool, ToolContext, ToolOutput};
+use crate::touch::{changed_range, FileTouch, LineRange, TouchOp};
+use localpilot_core::ToolOutcome;
 
 /// Approval detail from a single string field of the input. Tools know their
 /// own schema; this is a typed read, not cross-tool key-guessing.
@@ -73,8 +75,12 @@ fn paths_detail(input: &Value, prefix: &str) -> String {
     detail_preview(&format!("{prefix} {joined}"))
 }
 
-/// Cap on a tool's textual output before truncation.
+/// Cap on a typed host presentation before truncation. Model-facing text is
+/// retained and bounded only at the registry seam.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+/// Bound on the slice a single `read_tool_output` call returns. The full output
+/// is already retained, so this is a non-lossy display bound, not a data cap.
+const MAX_READBACK_BYTES: usize = 64 * 1024;
 
 /// Soft cap on a single `write_file` payload. A write larger than this risks
 /// being truncated in transit (an oversized tool call can arrive as malformed
@@ -83,17 +89,43 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// source file, so it only trips on the pathological single-huge-file path.
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
+/// Wrap a tool's full textual output. Bounding the model-visible view *and*
+/// spilling the complete text to the retention store both happen once, at the
+/// registry seam (`bound_output`) — so tools return their whole output here and
+/// never lose data to a per-tool pre-truncation. A large result is retained in
+/// full and paged back with `read_tool_output`; the model still only sees the
+/// bounded view in context.
+/// The touch for an in-place edit: the changed span where there is one, and the
+/// whole file when the change cannot be localised.
+fn edit_touch(path: &std::path::Path, before: &str, after: &str) -> FileTouch {
+    match changed_range(before, after) {
+        Some(lines) => FileTouch::ranged(path, TouchOp::Modified, lines),
+        None => FileTouch::whole(path, TouchOp::Modified),
+    }
+}
+
 pub(crate) fn cap(text: String) -> ToolOutput {
-    if text.len() <= MAX_OUTPUT_BYTES {
+    ToolOutput::ok(text)
+}
+
+/// Bound the slice a `read_tool_output` call returns. The full output stays
+/// retained under the call id, so this truncation loses nothing — it only keeps
+/// a single read-back from flooding the context, and points the model at the
+/// line-range parameters to page further. `read_tool_output` bounds itself
+/// because the registry seam deliberately does not re-bound it.
+fn bound_readback(text: String) -> ToolOutput {
+    if text.len() <= MAX_READBACK_BYTES {
         return ToolOutput::ok(text);
     }
-    let mut end = MAX_OUTPUT_BYTES;
+    let mut end = MAX_READBACK_BYTES;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut capped = text[..end].to_string();
-    capped.push_str("\n... [output truncated]");
-    ToolOutput::truncated(capped)
+    let mut out = text[..end].to_string();
+    out.push_str(
+        "\n... [read-back truncated; the full output is still retained — narrow start_line/end_line to page further]",
+    );
+    ToolOutput::ok(out)
 }
 
 /// Heuristic: does this byte slice look like binary (non-text) data?
@@ -148,6 +180,7 @@ fn write_path_effect(ctx: &ToolContext<'_>, path: &Path, overwrite: bool) -> Eff
     Effect::WritePath {
         inside_workspace: ctx.workspace.contains(path),
         overwrite,
+        secret_like: is_secret_like(path),
     }
 }
 
@@ -504,6 +537,7 @@ impl Tool for ReadFile {
         }
         let text = String::from_utf8(bytes)
             .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+        let total = text.lines().count();
         let selected = match (input.start_line, input.end_line) {
             (None, None) => text,
             (start, end) => {
@@ -520,7 +554,21 @@ impl Tool for ReadFile {
                     .join("\n")
             }
         };
-        Ok(cap(selected))
+        // The read side is recorded too, with the range that was actually read.
+        // Whether a prior *reader* is told its ground moved is a policy decision
+        // taken where the index lives — not one settled here by staying silent.
+        let touch = match (input.start_line, input.end_line) {
+            (None, None) => FileTouch::whole(&path, TouchOp::Read),
+            (start, end) => FileTouch::ranged(
+                &path,
+                TouchOp::Read,
+                LineRange::new(
+                    u32::try_from(start.unwrap_or(1).max(1)).unwrap_or(u32::MAX),
+                    u32::try_from(end.unwrap_or(total.max(1))).unwrap_or(u32::MAX),
+                ),
+            ),
+        };
+        Ok(cap(selected).touching(touch))
     }
 }
 
@@ -603,11 +651,13 @@ impl Tool for WriteFile {
         let newline = existing.as_deref().map_or("\n", detect_newline);
         let body = apply_newline(&input.content, newline);
         atomic_write(&path, body.as_bytes())?;
-        Ok(ToolOutput::ok(format!(
-            "wrote {} bytes to {}",
-            body.len(),
-            path.display()
-        )))
+        // A whole-file write is reported without a range on purpose: it is in
+        // the way of every other edit to that file, and pretending otherwise
+        // would hide exactly the collision worth catching.
+        Ok(
+            ToolOutput::ok(format!("wrote {} bytes to {}", body.len(), path.display()))
+                .touching(FileTouch::whole(&path, TouchOp::Wrote)),
+        )
     }
 }
 
@@ -680,6 +730,9 @@ impl Tool for AppendFile {
         // chunked write stays consistent across appends and platforms.
         let newline = existing.as_deref().map_or("\n", detect_newline);
         let addition = apply_newline(&input.content, newline);
+        // Kept for the touch range: the append consumes `existing`, and the
+        // changed span is the difference between what was there and what is now.
+        let before = existing.clone().unwrap_or_default();
         let body = match existing {
             Some(mut current) => {
                 current.push_str(&addition);
@@ -688,11 +741,13 @@ impl Tool for AppendFile {
             None => addition.clone(),
         };
         atomic_write(&path, body.as_bytes())?;
+        let touch = edit_touch(&path, &before, &body);
         Ok(ToolOutput::ok(format!(
             "appended {} bytes to {}",
             addition.len(),
             path.display()
-        )))
+        ))
+        .touching(touch))
     }
 }
 
@@ -761,7 +816,8 @@ impl Tool for EditFile {
             Ok(plan) => {
                 let updated = apply_plan(&haystack, &plan);
                 atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
-                Ok(ToolOutput::ok(format!("edited {}", path.display())))
+                Ok(ToolOutput::ok(format!("edited {}", path.display()))
+                    .touching(edit_touch(&path, &haystack, &updated)))
             }
             Err(miss) => Err(edit_miss_error(&location, &haystack, &needle, &miss)),
         }
@@ -848,11 +904,15 @@ impl Tool for MultiEdit {
             }
         }
         atomic_write(&path, apply_newline(&updated, newline).as_bytes())?;
+        // Several edits in one call collapse into one enclosing range. This is
+        // the case a per-call inference gets wrong, and the reason the range is
+        // computed from the content rather than from the arguments.
         Ok(ToolOutput::ok(format!(
             "applied {} edits to {}",
             input.edits.len(),
             path.display()
-        )))
+        ))
+        .touching(edit_touch(&path, &original, &updated)))
     }
 }
 
@@ -1296,15 +1356,30 @@ impl Tool for ApplyPatch {
         // Apply. Each file write is atomic (temp-then-rename); validation
         // above makes the whole patch all-or-nothing in practice.
         let mut applied = Vec::new();
+        let mut touches = Vec::new();
         for ((path, content), op) in writes.iter().zip(&input.operations) {
             match content {
-                Some(content) => atomic_write(path, content.as_bytes())?,
-                None => std::fs::remove_file(path)
-                    .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?,
+                Some(content) => {
+                    // Read back what was there so the touch names the lines that
+                    // actually moved. One patch can span several files, so each
+                    // gets its own touch rather than the call getting one.
+                    let before = std::fs::read_to_string(path).unwrap_or_default();
+                    atomic_write(path, content.as_bytes())?;
+                    touches.push(if before.is_empty() {
+                        FileTouch::whole(path, TouchOp::Wrote)
+                    } else {
+                        edit_touch(path, &before, content)
+                    });
+                }
+                None => {
+                    std::fs::remove_file(path)
+                        .map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+                    touches.push(FileTouch::whole(path, TouchOp::Deleted));
+                }
             }
             applied.push(op.describe());
         }
-        Ok(ToolOutput::ok(format!("applied: {}", applied.join("; "))))
+        Ok(ToolOutput::ok(format!("applied: {}", applied.join("; "))).touching_all(touches))
     }
 }
 
@@ -1377,7 +1452,7 @@ impl Tool for ReadToolOutput {
                     .join("\n")
             }
         };
-        Ok(cap(selected))
+        Ok(bound_readback(selected))
     }
 }
 
@@ -1502,7 +1577,13 @@ impl Tool for Fetch {
             format!("HTTP {status} {content_type}\n")
         };
         let mut result = cap(format!("{header}{body}"));
-        result.is_error = !status.is_success();
+        // A delivered non-2xx response is the server saying no; transport
+        // failures return `Err` and stay malfunctions.
+        result.outcome = if status.is_success() {
+            ToolOutcome::Ok
+        } else {
+            ToolOutcome::ReportedFailure
+        };
         Ok(result)
     }
 }
@@ -1627,7 +1708,8 @@ impl Tool for ReplaceInFile {
             return Ok(cap(format!("no match for find in {}", path.display())));
         }
         atomic_write(&path, updated.as_bytes())?;
-        Ok(cap(format!("updated {}", path.display())))
+        Ok(cap(format!("updated {}", path.display()))
+            .touching(edit_touch(&path, &original, &updated)))
     }
 }
 
@@ -2150,8 +2232,11 @@ impl Tool for Delegate {
     async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
         let input: DelegateInput = parse_input(&input)?;
         let Some(host) = ctx.agents else {
+            // A configuration fact, not a failure: nothing was attempted, and
+            // doing the work directly is the correct next step.
             return Ok(ToolOutput::ok(
-                "delegation is not available in this session: no agent definitions are loaded.                  Do the work directly."
+                "delegation is not available in this session: no agent definitions are loaded. \
+                 Do the work directly."
                     .to_string(),
             ));
         };
@@ -2176,8 +2261,12 @@ impl Tool for Delegate {
         match host.run(agent, &input.task).await {
             Ok(summary) => Ok(cap(summary)),
             // A refused or failed delegation is information the model should
-            // reason about, not a tool crash: it comes back as readable output.
-            Err(reason) => Ok(ToolOutput::ok(format!("delegation did not run: {reason}"))),
+            // reason about, not a tool crash — but the status must say so too:
+            // the tool worked and the delegation it wrapped did not happen, so
+            // this is a reported failure, never `status: success` for work
+            // that was not performed.
+            Err(reason) => Ok(ToolOutput::ok(format!("delegation did not run: {reason}"))
+                .with_outcome(ToolOutcome::ReportedFailure)),
         }
     }
 }

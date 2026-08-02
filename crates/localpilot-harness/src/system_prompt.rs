@@ -16,7 +16,22 @@ use localpilot_tools::ToolRegistry;
 pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    build_prompt_with(&names, marker_enabled)
+    compose_with(
+        &names,
+        marker_enabled,
+        PromptParts::all(),
+        has_doc_tool(tools),
+    )
+}
+
+/// Whether the registry advertises a tool that serves documentation. Judged by
+/// the shared, vendor-neutral capability vocabulary, over each tool's own name
+/// and description — no server or library is named anywhere in this decision.
+fn has_doc_tool(tools: &ToolRegistry) -> bool {
+    tools
+        .specs()
+        .iter()
+        .any(|(name, description, _)| localpilot_tools::describes_documentation(name, description))
 }
 
 /// Build a prompt from a *subset* of the sections the main session uses.
@@ -34,7 +49,7 @@ pub fn composed_system_prompt(
 ) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    compose(&names, marker_enabled, parts)
+    compose_with(&names, marker_enabled, parts, has_doc_tool(tools))
 }
 
 /// The cue, appended only when a knowledge-base search tool is registered, that
@@ -110,6 +125,57 @@ const TOOL_MARKER_CUE: &str = concat!(
     "also just call `tool_search` directly.",
 );
 
+/// The cue, appended only when `ask_user` is registered, that tells the model it
+/// can put a decision to the user — and, just as importantly, when not to. The
+/// threshold is part of the text: without it a model starts asking permission
+/// for everything, which is worse than the silent guess this replaces.
+const ASK_USER_CUE: &str = concat!(
+    "
+
+",
+    "You can ask the user a question with `ask_user`. Ask when different readings of the request ",
+    "would lead to materially different work, or before something hard to undo. Otherwise pick the ",
+    "obvious option and state the assumption in your answer — do not ask for permission to do work ",
+    "you were already asked to do, and do not ask to report progress. Where no user is reachable ",
+    "the tool says so; then choose and say what you assumed.",
+);
+
+/// The documentation policy for a session that advertises its full tool set: the
+/// suitable tool is already visible, so the guidance is to call it directly and
+/// never mentions the broker's discovery surface.
+const DOCUMENTATION_CUE_DIRECT: &str = concat!(
+    "
+
+",
+    "When a task depends on current or version-specific behaviour of an external library, ",
+    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
+    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
+    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
+    "stale. Inspect the project first to identify the dependency, its installed version, its ",
+    "configuration, and the exact error, then call the most suitable documentation tool listed ",
+    "above. Stable local implementation questions need no documentation lookup. If no suitable ",
+    "tool can answer, continue from local evidence and say that current documentation could not ",
+    "be verified.",
+);
+
+/// The documentation policy for a brokered session, where a suitable tool may be
+/// hidden behind discovery: the same threshold, routed through the reveal flow.
+const DOCUMENTATION_CUE_BROKERED: &str = concat!(
+    "
+
+",
+    "When a task depends on current or version-specific behaviour of an external library, ",
+    "framework, SDK, API, CLI, or cloud service, consult current documentation rather than ",
+    "relying on what you remember. Upgrade errors, migration failures, deprecated APIs, changed ",
+    "configuration shapes, and version mismatches are strong signals that your prior knowledge is ",
+    "stale. Inspect the project first to identify the dependency, its installed version, its ",
+    "configuration, and the exact error, then call `tool_search` with the capability you need ",
+    "(for example `current documentation for a library version`), reveal the best match with ",
+    "`tool_load`, and call it normally. Stable local implementation questions need no ",
+    "documentation lookup. If no suitable tool can answer, continue from local evidence and say ",
+    "that current documentation could not be verified.",
+);
+
 /// Render the prompt from the sorted tool names with the marker nudge off. A
 /// test-only convenience over [`build_prompt_with`] so the existing cue tests stay
 /// terse; production code calls [`agent_system_prompt`].
@@ -119,8 +185,16 @@ fn build_prompt(names: &[&str]) -> String {
 }
 
 /// Render the prompt, optionally adding the `NEED:` marker convention.
+#[cfg(test)]
 fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
-    compose(names, marker_enabled, PromptParts::all())
+    compose_with(names, marker_enabled, PromptParts::all(), false)
+}
+
+/// [`compose_with`] with no documentation tool advertised — the common case in
+/// the section tests, which pass bare tool names.
+#[cfg(test)]
+fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
+    compose_with(names, marker_enabled, parts, false)
 }
 
 /// The agent-mode opening. Always present when `include_base` is on; it is the
@@ -188,7 +262,13 @@ needed, respond with a concise final answer that states what changed and how it
 was verified. If stuck, say exactly what blocks progress.";
 
 /// Assemble the selected sections plus the tool list and its cues.
-fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
+fn compose_with(
+    names: &[&str],
+    marker_enabled: bool,
+    parts: PromptParts,
+    doc_tool_advertised: bool,
+) -> String {
+    let ask_user_enabled = parts.include_ask_user;
     let mut sections: Vec<String> = Vec::new();
     if parts.include_base {
         sections.push(BASE_SECTION.to_string());
@@ -199,7 +279,12 @@ fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
     if parts.include_safety {
         sections.push(SAFETY_SECTION.to_string());
     }
-    sections.push(tools_section(names, marker_enabled));
+    sections.push(tools_section(
+        names,
+        marker_enabled,
+        doc_tool_advertised,
+        ask_user_enabled,
+    ));
     if parts.include_look_before_launch {
         sections.push(LOOK_BEFORE_LAUNCH_SECTION.to_string());
     }
@@ -215,7 +300,12 @@ fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
 }
 
 /// The available-tools line plus every cue gated on a registered tool name.
-fn tools_section(names: &[&str], marker_enabled: bool) -> String {
+fn tools_section(
+    names: &[&str],
+    marker_enabled: bool,
+    doc_tool_advertised: bool,
+    ask_user_enabled: bool,
+) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
     } else {
@@ -248,8 +338,25 @@ fn tools_section(names: &[&str], marker_enabled: bool) -> String {
     } else {
         ""
     };
+    // The documentation policy needs a way to reach a documentation tool: either
+    // one is advertised outright, or the broker can reveal one. With neither,
+    // the guidance would be an instruction the model cannot follow.
+    // Gated on both the definition's flag and the tool being registered: a
+    // subagent has no prompter, so telling it to ask would be a dead end.
+    let ask_user_cue = if ask_user_enabled && names.contains(&"ask_user") {
+        ASK_USER_CUE
+    } else {
+        ""
+    };
+    let documentation_cue = if names.contains(&"tool_search") {
+        DOCUMENTATION_CUE_BROKERED
+    } else if doc_tool_advertised {
+        DOCUMENTATION_CUE_DIRECT
+    } else {
+        ""
+    };
     format!(
-        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}",
+        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}",
         tools = names.join(", ")
     )
 }
@@ -521,6 +628,7 @@ mod composition_tests {
             include_safety: false,
             include_tool_instructions: false,
             include_look_before_launch: false,
+            include_ask_user: false,
         };
         let prompt = compose(&["read_file"], false, parts);
         assert!(
@@ -565,4 +673,238 @@ mod composition_tests {
             "joining introduced a triple newline: {prompt:?}"
         );
     }
+
+    /// A synthetic registry holding one generically-described documentation
+    /// tool. Nothing here names a real MCP server, product, or library.
+    fn registry_with_doc_tool() -> ToolRegistry {
+        struct DocsTool;
+
+        #[async_trait::async_trait]
+        impl localpilot_tools::Tool for DocsTool {
+            fn name(&self) -> &str {
+                "query"
+            }
+            fn description(&self) -> &str {
+                "Query documentation for a package"
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({ "type": "object" })
+            }
+            fn effects(
+                &self,
+                _input: &serde_json::Value,
+                _ctx: &localpilot_tools::ToolContext<'_>,
+            ) -> Result<Vec<localpilot_sandbox::Effect>, localpilot_tools::ToolError> {
+                Ok(Vec::new())
+            }
+            async fn invoke(
+                &self,
+                _input: serde_json::Value,
+                _ctx: &localpilot_tools::ToolContext<'_>,
+            ) -> Result<localpilot_tools::ToolOutput, localpilot_tools::ToolError> {
+                Ok(localpilot_tools::ToolOutput::ok("docs"))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DocsTool));
+        registry
+    }
+
+    #[test]
+    fn an_advertised_documentation_tool_gets_direct_use_guidance() {
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        assert!(
+            prompt.contains("current or version-specific behaviour"),
+            "the version-sensitive documentation policy must be present"
+        );
+        assert!(
+            prompt.contains("Upgrade errors, migration failures"),
+            "the policy must name the signals that trigger it"
+        );
+        assert!(
+            prompt.contains("call the most suitable documentation tool listed above"),
+            "with the full tool set advertised the guidance is direct use"
+        );
+        assert!(
+            !prompt.contains("tool_search"),
+            "broker-off guidance must not reference the discovery surface: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_brokered_session_gets_the_search_then_load_flow() {
+        let prompt = build_prompt(&["read_file", "tool_search", "tool_load"]);
+        assert!(prompt.contains("current or version-specific behaviour"));
+        assert!(
+            prompt.contains("call `tool_search`")
+                && prompt.contains("`tool_load`")
+                && prompt.contains("call it normally"),
+            "the brokered policy must describe search → load → call"
+        );
+    }
+
+    #[test]
+    fn the_documentation_policy_is_vendor_neutral() {
+        let brokered = build_prompt(&["read_file", "tool_search"]);
+        let direct = agent_system_prompt(&registry_with_doc_tool(), false);
+        for prompt in [&brokered, &direct] {
+            let lower = prompt.to_ascii_lowercase();
+            for vendor in ["context7", "prisma", "npm", "pypi", "github"] {
+                assert!(
+                    !lower.contains(vendor),
+                    "the policy must name no vendor, found {vendor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_documentation_policy_without_a_way_to_reach_documentation() {
+        // No documentation tool advertised and no broker to reveal one: the
+        // guidance would be an instruction the model cannot act on.
+        let prompt = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !prompt.contains("current or version-specific behaviour"),
+            "the policy must be absent when no tool could satisfy it"
+        );
+    }
+
+    #[test]
+    fn the_policy_stays_bounded_to_version_sensitive_work() {
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        assert!(
+            prompt.contains("Stable local implementation questions need no documentation lookup"),
+            "the policy must state its own threshold"
+        );
+        assert!(
+            prompt.contains("current documentation could not be verified"),
+            "the policy must say what to do when no tool can answer"
+        );
+    }
 }
+
+/// How strictly a swarm plan is being run, for prompt selection. Mirrors the
+/// task-graph crate's mode without depending on it: this crate composes text and
+/// has no business knowing what a plan is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SwarmDepth {
+    /// Decomposition and ordering.
+    #[default]
+    Light,
+    /// Decomposition plus accountability — gates and full handoffs.
+    Deep,
+}
+
+/// The orchestration guidance a coordinator gets when it is running a swarm.
+///
+/// First-party text, written for this project from the behaviour we want. It is
+/// appended to the coordinator's prompt only while a swarm is active, because
+/// guidance a session cannot act on is context it pays for and nothing else.
+///
+/// The three things it has to fight are the three failure modes of a model given
+/// workers: decomposing into pieces too small to be worth a worker, spawning
+/// before it knows what the pieces are, and treating a worker's report as fact
+/// because it arrived in a confident tone.
+#[must_use]
+pub fn swarm_coordinator_directive(depth: SwarmDepth) -> String {
+    let mut out = String::from(SWARM_COORDINATOR_BASE);
+    if depth == SwarmDepth::Deep {
+        out.push_str(SWARM_COORDINATOR_DEEP);
+    }
+    out
+}
+
+const SWARM_COORDINATOR_BASE: &str = "\
+You are coordinating several agents working in this repository at the same time.
+
+Work as a graph, not a queue. Before spawning anything, decide what the separable \
+pieces of this task are and what each one needs from the others; then seed those \
+as tasks with the dependencies between them. A task is worth a worker when it \
+needs real reading or real work to produce a small answer. Splitting further than \
+that costs more in coordination than it saves.
+
+Do not spawn before you know what the pieces are. If you cannot yet name them, \
+the first task is finding out — seed that one task, read what it hands back, and \
+expand from there.
+
+Every worker starts with none of your context and gets only what its task \
+carries. Say what you want in the task itself; do not assume it can see this \
+conversation, your earlier reasoning, or what another worker found.
+
+When a worker reports back, read what it actually established rather than \
+accepting its confidence. A report that cites nothing is a claim. If two reports \
+disagree, that is a finding, not an inconvenience — resolve it before building on \
+either.
+
+You share one working tree with these agents. You will be told when one of them \
+changes a file you are working in. Nothing is locked: both edits land, so \
+re-read before your next edit and say so to the agent concerned rather than \
+racing it.
+";
+
+const SWARM_COORDINATOR_DEEP: &str = "\n\
+This plan is being run in depth mode. Review gates are inserted over every set of \
+tasks you seed or expand, and a gate has to say how it checked its inputs and \
+cite what it looked at. A gate that finds a gap does not complain — it adds the \
+work that closes the gap, and reviews again afterwards.
+
+Completions in this mode must state what was *not* checked. That field is the \
+point of the mode: a task that reports only what it did leaves the next task \
+guessing at the edges of its evidence.
+";
+
+/// The contract that travels with one dispatched task.
+///
+/// A worker does not inherit the coordinator's system prompt, so anything the
+/// coordinator was told about how to behave has to be repeated here or it is not
+/// in effect. This is the *entire* behavioural contract a worker sees.
+#[must_use]
+pub fn assignment_contract(depth: SwarmDepth) -> &'static str {
+    match depth {
+        SwarmDepth::Light => ASSIGNMENT_CONTRACT_LIGHT,
+        SwarmDepth::Deep => ASSIGNMENT_CONTRACT_DEEP,
+    }
+}
+
+const ASSIGNMENT_CONTRACT_LIGHT: &str = "\
+You are one of several agents working on this repository. You have been given one \
+task from a shared plan.
+
+Do that task and nothing else. If it turns out to be several tasks, say so and \
+describe the pieces rather than quietly doing all of them — the plan can be \
+expanded, and work done outside it is work nobody knows about.
+
+Finish by reporting what you established, not what you did. The next task reads \
+your report instead of redoing your work, so a report that says \"done\" costs the \
+plan everything you just learned. Cite where each finding came from.
+
+Other agents are editing this working tree. You will be told if one of them \
+changes a file you are working in. Nothing is locked — re-read before your next \
+edit rather than assuming what you read is still there.
+";
+
+const ASSIGNMENT_CONTRACT_DEEP: &str = "\
+You are one of several agents working on this repository. You have been given one \
+task from a shared plan, and this plan is being run in depth mode.
+
+Do that task and nothing else. If it turns out to be several tasks, say so and \
+describe the pieces rather than quietly doing all of them.
+
+Your report has to carry four things, and the last is the one that matters most:
+
+- what you established, in your own words;
+- where each finding came from — a path, a command, an output. A finding with no \
+evidence is an assertion;
+- how you verified it, or plainly that you did not;
+- **what you did not check.** Every task has edges its evidence does not reach. \
+Naming them is not an admission of failure; it is the difference between a report \
+the next task can build on and one it has to redo.
+
+State a confidence, and mean it. \"High\" on work you did not verify is worse than \
+\"low\" on work you did.
+
+Other agents are editing this working tree. You will be told if one of them \
+changes a file you are working in. Nothing is locked — re-read before your next \
+edit rather than assuming what you read is still there.
+";

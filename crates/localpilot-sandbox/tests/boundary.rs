@@ -31,6 +31,7 @@ fn scripted_approval_run_resolves_each_ask_in_order() {
         Effect::WritePath {
             inside_workspace: true,
             overwrite: false,
+            secret_like: false,
         },
         Interactivity::Interactive,
         false,
@@ -211,6 +212,7 @@ fn bypass_keeps_the_workspace_boundary_for_path_effects() {
         Effect::WritePath {
             inside_workspace: false,
             overwrite: true,
+            secret_like: false,
         },
         Interactivity::NonInteractive,
         true,
@@ -221,6 +223,7 @@ fn bypass_keeps_the_workspace_boundary_for_path_effects() {
         Effect::WritePath {
             inside_workspace: true,
             overwrite: true,
+            secret_like: false,
         },
         Interactivity::NonInteractive,
         true,

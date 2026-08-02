@@ -8,11 +8,11 @@ use std::time::Duration;
 use localpilot_config::{Config, ProviderAuth, ProviderConfig};
 use localpilot_core::Secret;
 
-use crate::anthropic::AnthropicProvider;
-use crate::auth::{AuthProvider, GoogleAdcAuthProvider};
-use crate::error::ProviderError;
-use crate::openai::OpenAiProvider;
-use crate::provider::{ModelProvider, SourceType};
+use localpilot_llm_anthropic::AnthropicProvider;
+use localpilot_llm_core::auth::{AuthProvider, GoogleAdcAuthProvider};
+use localpilot_llm_core::error::ProviderError;
+use localpilot_llm_core::provider::{ModelProvider, SourceType};
+use localpilot_llm_openai::OpenAiProvider;
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -130,7 +130,8 @@ fn build_provider(
             AnthropicProvider::new(id, id, base_url, credential)
                 .with_timeout(timeout)
                 .with_default_options(options)
-                .with_max_context_tokens(entry.context_window),
+                .with_max_context_tokens(entry.context_window)
+                .with_prompt_caching(entry.prompt_caching == Some(true)),
         ));
     }
 
@@ -319,7 +320,7 @@ mod tests {
         assert_eq!(declaration.source_type, SourceType::OfficialApi);
         assert_eq!(
             declaration.tool_call_shape,
-            crate::provider::ToolCallShape::AnthropicToolUse
+            localpilot_llm_core::provider::ToolCallShape::AnthropicToolUse
         );
     }
 
@@ -344,7 +345,7 @@ mod tests {
         assert_eq!(declaration.source_type, SourceType::OfficialApi);
         assert_eq!(
             declaration.auth,
-            crate::provider::AuthRequirement::BearerToken
+            localpilot_llm_core::provider::AuthRequirement::BearerToken
         );
         assert_eq!(
             registry.default_model("gemini"),

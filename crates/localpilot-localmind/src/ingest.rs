@@ -3028,14 +3028,14 @@ mod tests {
 
     #[test]
     fn ingest_keeps_keyword_rows_when_embed_endpoint_is_down() {
-        // A bound-then-dropped port is guaranteed closed → connection refused.
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_addr = dead.local_addr().unwrap();
-        drop(dead);
+        // Held for the whole test rather than bound-and-dropped: a released
+        // ephemeral port can be handed straight to another test, which brings
+        // the "dead" endpoint back to life.
+        let dead = crate::dead_endpoint::DeadEndpoint::new();
 
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("README.md"), "parser guide\n").unwrap();
-        write_inference_config(dir.path(), &format!("http://{dead_addr}"));
+        write_inference_config(dir.path(), &dead.url());
 
         // Ingest must not fail just because embedding is unreachable.
         let summary = run(dir.path(), &config(), RunMode::Full).unwrap();
@@ -3167,14 +3167,15 @@ mod tests {
 
     #[test]
     fn hybrid_falls_back_to_keyword_when_embed_endpoint_is_down() {
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_addr = dead.local_addr().unwrap();
-        drop(dead);
+        // Held for the whole test rather than bound-and-dropped: a released
+        // ephemeral port can be handed straight to another test, which brings
+        // the "dead" endpoint back to life.
+        let dead = crate::dead_endpoint::DeadEndpoint::new();
 
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("alpha.md"), "alpha unique marker\n").unwrap();
         fs::write(dir.path().join("beta.md"), "beta unrelated prose\n").unwrap();
-        write_inference_config(dir.path(), &format!("http://{dead_addr}"));
+        write_inference_config(dir.path(), &dead.url());
         run(dir.path(), &config(), RunMode::Full).unwrap();
 
         // The endpoint is configured but unreachable: the query embed fails and

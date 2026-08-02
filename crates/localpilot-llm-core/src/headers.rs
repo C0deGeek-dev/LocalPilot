@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Parse a `retry-after` value: either non-negative delay-seconds or an
 /// HTTP-date (IMF-fixdate), returned as a delay relative to `now`.
 #[must_use]
-pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
     let value = value.trim();
     if let Ok(secs) = value.parse::<u64>() {
         return Some(Duration::from_secs(secs));
@@ -29,7 +29,7 @@ pub(crate) fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration
 /// `h`, `m`, `s`, or `ms` and the number may be fractional: `"1s"`, `"6m0s"`,
 /// `"1m30s"`, `"59.812s"`.
 #[must_use]
-pub(crate) fn parse_compact_duration(value: &str) -> Option<Duration> {
+pub fn parse_compact_duration(value: &str) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -66,7 +66,7 @@ pub(crate) fn parse_compact_duration(value: &str) -> Option<Duration> {
 /// Parse an RFC 3339 timestamp (`2026-06-04T07:13:19Z`, optional fractional
 /// seconds, `Z` or `±HH:MM` offset) into Unix epoch seconds (floored).
 #[must_use]
-pub(crate) fn parse_rfc3339_epoch(value: &str) -> Option<u64> {
+pub fn parse_rfc3339_epoch(value: &str) -> Option<u64> {
     let value = value.trim();
     // Minimum shape: YYYY-MM-DDTHH:MM:SS + zone designator. All structural
     // slicing is checked, so multi-byte garbage degrades to `None`.

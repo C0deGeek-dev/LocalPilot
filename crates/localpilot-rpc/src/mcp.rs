@@ -370,7 +370,9 @@ where
                 _ = &mut turn => break,
                 event = rx.recv() => {
                     if let Ok(event) = event {
-                        push_event(state, writer, map_event(event)).await?;
+                        if let Some(mapped) = map_event(event) {
+                            push_event(state, writer, mapped).await?;
+                        }
                     }
                 }
                 Some(ask) = ask_rx.recv() => {
@@ -447,7 +449,9 @@ where
     // Flush events still buffered when the turn future completed (the
     // runtime's own `stopped` event arrives this way).
     while let Ok(event) = rx.try_recv() {
-        push_event(state, writer, map_event(event)).await?;
+        if let Some(mapped) = map_event(event) {
+            push_event(state, writer, mapped).await?;
+        }
     }
     Ok(client_gone)
 }

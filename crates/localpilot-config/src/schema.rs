@@ -462,6 +462,13 @@ pub struct ToolsConfig {
     /// inputs/paths/content, writes no accepted memory, and adds no new store — a
     /// human promotes a candidate or it expires in review.
     pub repair_learning: bool,
+    /// Elide a `read_file` result whose file+range was already read this session
+    /// and is unchanged since (same mtime and length), returning a compact stub
+    /// that points at the earlier read instead of the full body — cutting context
+    /// waste on read-heavy loops. Default `false` (conservative): a changed file
+    /// (or any doubt) always returns full content, never a stale stub. The model
+    /// can still re-page any range with `read_file` start_line/end_line.
+    pub elide_seen_reads: bool,
 }
 
 impl Default for ToolsConfig {
@@ -477,6 +484,7 @@ impl Default for ToolsConfig {
             readable_errors: true,
             repair: RepairMode::Off,
             repair_learning: false,
+            elide_seen_reads: false,
         }
     }
 }
@@ -711,6 +719,11 @@ pub struct MemoryConfig {
     /// byte-identical. The gate only re-filters keyword candidates by semantic
     /// relevance; it never selects.
     pub injection_min_cosine: f32,
+    /// Suppress re-injecting an accepted memory that was injected within the last
+    /// N turns, so a persistently-relevant lesson does not consume the per-turn
+    /// budget every turn and crowd out other memory. `0` disables (the default) —
+    /// a memory may be injected on consecutive turns, the prior behaviour.
+    pub injection_dedup_ttl_turns: u32,
     /// Outcome-aware down-weight: when the uplift A/B eval shows an injected
     /// lesson coincided with an arm under-performing its control, route that
     /// lesson to review (never delete it). **Off by default** — a single eval is a
@@ -729,6 +742,7 @@ impl Default for MemoryConfig {
             injection_skip_categories: Vec::new(),
             injection_language_filter: true,
             injection_min_cosine: 0.6,
+            injection_dedup_ttl_turns: 0,
             outcome_downweight: false,
         }
     }
@@ -914,6 +928,12 @@ pub struct ProviderConfig {
     /// precedence over the best-effort discovery probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_vision: Option<bool>,
+    /// Enable prompt caching for this provider (Anthropic): place an ephemeral
+    /// `cache_control` breakpoint on the stable prefix (tools + the stable system
+    /// prompt) so it is cached across turns. Off by default; only pays off against
+    /// a backend that implements prompt caching, and is harmless otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<bool>,
     /// Namespaced provider options the core does not model are preserved here.
     #[serde(flatten)]
     pub options: IndexMap<String, serde_json::Value>,

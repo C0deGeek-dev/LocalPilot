@@ -2,7 +2,7 @@
 
 This file starts the decision log. Add new records at the top.
 
-## ADR-0109: Full-Screen Chat Is The Interactive Default
+## ADR-0129: Full-Screen Chat Is The Interactive Default
 
 Status: accepted. Advances ADR-0107's transition without yet removing its
 temporary rollback host.
@@ -79,7 +79,7 @@ The implementation boundary is intentionally narrow:
    The driver owns key-event routing and terminal cleanup.
 
 The foundation initially kept the inline UI as the default rollback while
-`fullscreen` selected the new host. ADR-0109 advances that transition:
+`fullscreen` selected the new host. ADR-0129 advances that transition:
 full-screen is now the default and explicit `inline` is the temporary rollback.
 Both compile against the same runtime contracts. The compatibility host and
 selector are removed after their remaining physical gates and shared-type
@@ -89,7 +89,725 @@ The historical alternate-screen renderer, current inline state/widgets, and the
 abandoned custom terminal surface are evidence about failure modes, not source
 architectures. Only bounded content-coordinate, grapheme-editor, terminal-mode
 accounting, and regression-test ideas are adapted into the new foundation.
+## ADR-0128: Self-Dev Reload Ships Primitives, Not A Crash-Detect-And-Revert Loop
 
+Status: accepted.
+
+LocalPilot can build a binary from its own source and swap onto it while a
+session is live (`localpilot-selfdev`). The obvious next thing — a loop that
+watches the new build, notices it crashing, and automatically reverts — is
+deliberately **not** built. It is the one piece a working reference implemented
+and then *deleted*, because it was the source of an infinite-reload bug family
+rather than the cure. Three plainer mechanisms replace it, and each is chosen
+against a more tempting alternative that does not hold up:
+
+1. **A rollback token, not crash detection.** Before a channel is repointed at a
+   new build, the previous target is written to a `PendingActivation` token. The
+   new build is confirmed only by a successful post-reload handshake; anything
+   else rolls the channel pointer back to the recorded previous version. There is
+   no heuristic deciding whether a crash "counts" — either the new build
+   handshook or it did not.
+
+2. **A no-downgrade, no-phantom comparison.** An auto-reload may trigger only when
+   the candidate payload is *provably* newer than the running one: both
+   modification times readable and the candidate strictly newer. An unreadable
+   mtime is "no update", never "newer" — the reference's loops began with an
+   unreadable timestamp read as "newer forever". The comparison reads the
+   concrete immutable binary a channel resolves to, never the channel marker, so
+   a wrapper's timestamp can never stand in for the payload's (structural here,
+   because a channel is a separate marker file resolving to an immutable version
+   directory, not a symlink).
+
+3. **A durable circuit breaker.** A persisted counter bounds auto-reload attempts
+   and is incremented *before* each relaunch, so a relaunch that never returns is
+   still counted and a looping process cannot reset the bound by restarting. Once
+   tripped, auto-reload halts with a clear error until a *successful* reload
+   resets it.
+
+The autonomous self-editing loop these primitives make possible stays opt-in and
+off by default; enabling it is a separate product decision, not a consequence of
+shipping the primitives.
+
+## ADR-0127: A Failing Task Fails Loudly, And A Plan Survives A Restart
+
+Status: accepted. The failure half of ADR-0125.
+
+A worker will die holding an assignment. Four things follow, and each replaces
+something more obvious that does not work.
+
+1. **Staleness is measured from the last heartbeat, and never-observed is not
+   dead.** Measuring from admission reaps every worker the instant it starts.
+   The distinction has its own test because it only appears under load.
+
+2. **Salvage is bounded.** A departed worker's unfinished tasks return to the
+   plan, but each task carries a reclaim counter, and past the budget it is
+   **failed** rather than requeued. A task that keeps outliving its workers is
+   failing, not unlucky; requeuing it forever turns one bad task into a plan
+   that never finishes and never says why. Salvage is idempotent, so two sweeps
+   racing cannot reclaim the same work twice.
+
+3. **Re-election is deterministic — the lowest surviving member id.** Not the
+   oldest, not the nearest: every observer of the same state has to reach the
+   same answer without coordinating, or there is a window in which two of them
+   believe different things and both act. Children are reparented onto the
+   nearest surviving ancestor (grandparent → coordinator → root), because a
+   report-back edge pointing at a member that no longer exists is a completion
+   report delivered nowhere.
+
+4. **Somebody is told.** A salvage report naming each task and its fate reaches
+   whoever now owns the work. A plan that silently re-runs a task is
+   indistinguishable from one that is stuck.
+
+**Snapshots are their own stream.** A swarm's plan and membership persist
+separately from session event logs, so recovering a plan never requires replaying
+anybody's transcript. Writes are serialised, atomic (temp then rename), keep the
+previous good file as a backup, and **refuse to go backwards**: a write whose
+revision is not newer than what is on disk is dropped, because a slow writer
+restoring an older plan over a newer one is worse than not persisting at all. A
+torn primary falls back to the backup, costing the newest revision rather than
+the plan.
+
+**The driver treats silence as death, not success.** A worker that returns
+nothing, times out, or produces a report the graph refuses is salvaged rather
+than completed. Marking a task done because a worker said nothing is the failure
+that makes a plan finish and be wrong.
+
+## ADR-0126: File-Conflict Alerts Are Advisory, Reported By Tools, And Reach Readers Too
+
+Status: accepted. Applies to sessions sharing one working tree under ADR-0125.
+
+**The guarantee is advisory and is stated as such.** No lock is taken, no write
+is blocked, nothing is rolled back. Two agents that edit the same lines both
+succeed and both are told. Git stays the merge substrate and the task graph stays
+the ordering mechanism; this exists so agents find out *now* rather than at merge
+time. Saying that plainly matters: the honest version is less impressive than
+"conflict detection" sounds and far more useful than a lock agents route around.
+
+**Tools report what they touched; nothing infers it.** Every file-mutating
+builtin, and `read_file`, attach a typed `FileTouch` to their own output. The
+three alternatives all fail: inferring from the tool name and arguments works for
+`write_file` and not for `multi_edit` (one call, several ranges, some of which may
+not apply); parsing the range out of prose output reads like it works and stops
+silently when the wording changes; watching the filesystem catches everything and
+attributes nothing.
+
+**The line range is diffed from content, not taken from arguments.** Comparing
+the file before and after gives the extent that actually changed, uniformly,
+without per-tool plumbing. Scattered edits in one call collapse into the
+enclosing range — over-reporting costs a message, under-reporting costs the
+collision.
+
+**Prior readers are alerted, not only prior writers.** An agent that read a
+function and is now reasoning about it is exactly the agent whose conclusions
+just went stale. The wording differs: a reader has not lost work, it has lost
+currency, and telling it its edit may have been overwritten would send it looking
+for an edit it never made.
+
+**Paths are compared after normalisation.** `src/lib.rs` and `./src/lib.rs` must
+land in one bucket; getting this wrong fails *open* — two agents editing one file,
+each told nothing. Touches expire on a short, configurable window, and recording
+and querying happen under one lock, because a gap between them is a race in which
+two simultaneous edits each record before either queries and neither is told.
+
+Known gap: a file changed by `run_shell` reports nothing. The shell tool cannot
+know what the command it ran touched without watching the filesystem, which is the
+option that attributes nothing. Documented rather than left to be discovered.
+
+## ADR-0125: A Swarm Is Scoped By Repository, Bounded By Reservation, And Shaped By One Edge
+
+Status: accepted. Builds on ADR-0123 (the hosting server) and reuses ADR-0111
+(the soft-interrupt substrate). Strictly opt-in: nothing on the single-agent path
+changed.
+
+**Scope is the repository, not the path.** A git worktree has its own directory
+and is the same repo, so a path-keyed swarm would let a worker spawned into a
+worktree found an invisible second swarm that the coordinator then waits on
+forever. Resolution reads git's own on-disk contract — `.git` as a directory, or
+as a `gitdir:` pointer whose target names its `commondir` — with no `git`
+subprocess, because a swarm id is needed on every spawn. Outside a repository the
+canonical path is used, so non-git workspaces work rather than erroring.
+
+**The spawn tree is one stored edge.** A member records only who it reports back
+to; children, ancestry, and subtrees are derived by walking it. A stored child
+list is a second copy of the same fact, and the two disagree the first time a
+member departs.
+
+**Admission is a reservation, and there are two caps.** Building a worker session
+is slow, so the caps are enforced *before* that work starts, under the lock that
+counts them: reserve → build → confirm-or-release. Checking a cap and inserting
+afterwards lets a burst of concurrent spawns all read the same count and all
+proceed. The caps are a **lifetime** member cap and a **live** concurrency
+budget, because they stop different failures — only a cap counting departed
+members ends a coordinator that keeps replacing work that keeps failing.
+Idempotency keys are answered from the reservation table as well as the member
+table, so a retry whose first attempt is still building is told so rather than
+starting a second worker on the same task.
+
+**A worker is an ordinary hosted session with a swarm edge** — not a second
+process, not a second loop, and not a special case on the session path, so
+cancel, steer, fanout, and reaping all work on it unchanged. Building it stays
+behind a host-supplied factory: narrowing tools, attributing the approver, and
+resolving a provider need wiring the server crate does not have. A spawn naming a
+model is **refused** if the built session is on a different one; running anyway
+produces work that reads normally and never says the wrong model produced it.
+
+**Messaging scope is the spawn tree.** A member may address what it spawned; only
+the coordinator may address the whole swarm. Without that, one worker deciding to
+keep everyone informed costs every other worker a turn, and the cost scales with
+the square of the swarm. An ambiguous recipient is refused rather than resolved
+arbitrarily. Delivery rides the one soft-interrupt substrate the user's own
+steering uses, so there is one set of ordering rules rather than two.
+
+## ADR-0124: The Task Graph Is A Pure Crate, Simulated Before It Is Wired
+
+Status: accepted. Establishes `localpilot-taskgraph`; see
+[`docs/02-architecture.md`](02-architecture.md).
+
+The hard part of running several agents on one plan is not spawning them. It is
+that the graph is shared mutable state under concurrent, unreliable, occasionally
+creative writers. So every rule that keeps it coherent lives in **one pure crate**
+— no I/O, no sessions, no models, no tools, and no LocalPilot dependencies — where
+it can be tested exhaustively in microseconds and run end to end by a
+deterministic simulator with no live agents attached.
+
+That ordering is the decision, not a nicety. A stuck plan and a slow one look
+identical from outside; a mis-scheduled dispatch and an unhelpful model look
+identical too. Building the engine first and simulating it separates them: a plan
+that misbehaves in the simulator is the engine's fault, and one that misbehaves
+only live is not. It paid immediately — the two defects that survived a full unit
+suite were both composition bugs that only whole-plan scenarios found.
+
+Four invariants hold across every mutation:
+
+1. **Ownership** — only a task's owner or its current assignee may change it, so
+   one worker cannot rewrite another's subtree unnoticed.
+2. **Acyclicity** — checked before an edge is written, and for a *batch* of new
+   tasks before any of them is created. A batch is the one place a caller names
+   edges among nodes that do not exist yet, so the graph's own check has nothing
+   to look at.
+3. **Terminality** — a finished task never changes; rework enters as new tasks,
+   which keeps the record of what went wrong.
+4. **Honest completion** — a completion carries a typed handoff. In deep mode it
+   must also state what was *not* checked, and a review gate must say how it
+   reviewed and cite something. A gate that waves work through is worse than no
+   gate, because the plan then claims a review happened.
+
+Two structural choices follow from wanting the graph to stay coherent rather than
+merely correct. **Expansion makes a task a join over its children** instead of
+replacing it, so nothing downstream is rewired and an expanding worker cannot
+corrupt the part of the graph it cannot see. **Readiness is derived, never
+stored** — a stored flag is a second source of truth that can disagree with the
+edges — and a third state, `Blocked`, names a task whose upstream ended badly,
+because without it a driver waits forever on a plan that is already over.
+
+Determinism is load-bearing: ordered maps throughout, no clock and no randomness
+in the engine or the simulator, so the same plan produces the same frontier and
+the same dispatch order on every machine. Without that the simulator is a flaky
+test rather than a safety net.
+
+## ADR-0123: The Server Hosts Many Sessions As Actors With Broadcast Fanout, Lock-Free Control, A Shared Pool, And Reaping
+
+Status: accepted. Builds on ADR-0122 (the opt-in server) and reuses ADR-0111 (the
+soft-interrupt substrate); the crate map is in
+[`docs/02-architecture.md`](02-architecture.md).
+
+How the daemon hosts sessions, given that the in-process `SessionRuntime` stays the
+one execution engine.
+
+1. **Actor-per-session.** A turn drives `run_turn(&mut self, …)`, so a session is
+   owned by exactly one task and never shared `&mut` across clients; the registry
+   holds `Arc<tokio::Mutex<SessionRuntime>>` behind a short-held structural
+   `RwLock<HashMap>` — a turn on one session never blocks structural access to
+   another. `SessionRuntime` is compile-time-asserted `Send` so it can live in a
+   task.
+
+2. **The registry is generic over a `SessionFactory`.** The heavy construction
+   recipe (provider registry, tools, MCP, broker, hooks, permission engine) lives in
+   the CLI, not the server crate; the server takes a caller-supplied factory, so the
+   crate dependency direction stays sane and the registry is unit-testable with a
+   fake. The CLI factors the recipe into one builder that both the existing `rpc`
+   command and the server share — one construction, not two.
+
+3. **Fanout is a session-lifetime broadcast; control is lock-free.** Each session
+   holds one `broadcast::Sender<RuntimeEvent>` (not the per-turn channel), so many
+   clients `subscribe()` and a mid-turn joiner still sees subsequent events. Cancel
+   and steer reach an in-flight turn **without** the session mutex: the turn's
+   `CancellationToken` clone and the `SteerQueue` clone are extracted into control
+   slots at construction, so a client cancels/steers while the turn holds the mutex
+   (proven by a test that holds the mutex unacquirable while control still lands).
+   Steer arrives as a `SoftInterrupt` at the next turn safe point (ADR-0111).
+
+4. **Connection-scoped attach, not per-message multiplexing.** A connection names
+   its session once — an additive `Attach { OpenNew | ResumeId | ResumeName }`
+   command answered by `Attached { session_id, server_version }` — rather than every
+   message carrying a `session_id`. Resume-by-id is guarded against minting a ghost
+   session for an unseen id (the store index is the source of truth). Existing stdio
+   clients that never send `Attach` are unaffected; new optional fields are
+   `#[serde(default)]`/`skip_serializing_if`, and the coarse `RPC_PROTOCOL_VERSION`
+   fence stays for structural breaks.
+
+5. **One shared pool; per-session cost is only mutable state.** The provider stack
+   and the MCP server connections are captured once at `serve` startup (`Arc`s) and
+   cloned into each session; only the mutable `SessionRuntime` is per-session. A soak
+   measured **~11 KiB of resident memory per added session** at N=32 — three orders
+   of magnitude below a fresh-stack-per-session — while per-session state stays
+   isolated.
+
+6. **Sessions are reaped, busy-safe and persist-first.** A periodic reaper removes a
+   session after its last client disconnects (a grace) or after an idle timeout,
+   calling `close()` (which records `SessionClosed`) **before** removal and refusing
+   to reap a session whose turn holds the mutex (`try_lock`, taken under the same
+   host-map lock as attach, so there is no attach/reap race). Clean shutdown stops
+   the reaper and persists every remaining session.
+
+**Deferred, disclosed:** multi-client permission-ask fanout — today the wire
+approver is single-owner (only the connection that created a session answers its
+asks; a second client's reply fails closed with a clear error). Broadening it to
+per-client ask routing is a follow-up, not silently dropped.
+
+## ADR-0122: An Opt-In Persistent Server Over A Local-IPC Transport, With A Safe-Only Daemon Lifecycle
+
+Status: accepted, opt-in. Extends the embedding surface in
+[`docs/embedding.md`](embedding.md); bound by ADR-0007 (tri-platform tier-1),
+ADR-0004/ADR-0042 (local/official endpoints only — the socket is local, never a
+vendor client), and the `#![forbid(unsafe_code)]` workspace rule.
+
+`localpilot serve` runs an **optional** persistent daemon hosting many sessions in
+one process; `localpilot connect` is a thin client attaching over a local
+transport. The default in-process path (`chat`/`ask`/`print`/`harness`) keeps
+working with **no daemon** and identical behaviour — the server is additive and
+never a silent default; a broken or absent daemon cannot degrade the single-process
+product.
+
+1. **One cross-platform local transport, reusing the framing.** A Unix domain
+   socket (Unix) / named pipe (Windows) carries the existing `localpilot-rpc` NDJSON
+   record framing — the framing and the `serve<R, W>` loop were already generic over
+   the byte stream, so there is no second codec. The endpoint lives under the OS
+   runtime dir, keyed by a stable hash of the workspace root, overridable by
+   `LOCALPILOT_SERVER_SOCKET`.
+
+2. **The lifecycle uses only safe std primitives.** No `unsafe`/`libc`/`flock`/
+   `setsid`: the singleton is the Windows named pipe's `first_pipe_instance(true)`
+   (auto-released on process death) plus a Unix `create_new` (O_EXCL) lock file;
+   detached spawn is `CommandExt::process_group(0)` (Unix) / `creation_flags(
+   DETACHED_PROCESS)` (Windows) with null stdio; the ready handshake is retry-connect
+   (distinguishing down from busy). The tradeoff — the O_EXCL lock has no
+   crash-auto-release a `flock` would — is covered by a bounded stale-endpoint reap.
+   tokio's `net` feature is enabled per-crate (as `localpilot-render` already does),
+   keeping it out of every other crate's build.
+
+3. **Tier-1 with an honest gap.** Both OS paths are implemented and the Windows path
+   is tested live; the Unix path is compile-verified but its live run is deferred on
+   a Windows-only build box per the workspace offline-evidence policy — the first
+   real Unix run is where a socket-perms/path-length/reap edge could still surface.
+
+## ADR-0121: The Agent Can Ask The User Through A Shared Host Capability
+
+Status: accepted. Supersedes ADR-0081 §4's "no multiple-choice UI machinery
+exists", which was the standing reason the intake gate asks over stdin. Issue
+#53.
+
+The agent had no way to put a question to the user. It could only write the
+question into its answer as prose — which the user had to find, interpret, and
+answer by retyping — and the prompt told it to finish or state a blocker, never
+to ask, so ambiguity was resolved by a silent guess. Meanwhile the machinery to
+suspend a turn and wait for a human already existed and worked; its answer type
+was just hardcoded to `bool`.
+
+1. **Asking is a host capability, following the delegation precedent.** A tool
+   cannot reach the user by itself, so `UserPrompter` is handed in through
+   `ToolContext` beside `retention`, `processes`, and `agents`. `ask_user` stays
+   an ordinary tool with no special path through the registry, and the REPL —
+   the one surface with a human on it — is the only caller that wires a prompter.
+
+2. **The capability is the gate, not the permission engine.** `ask_user`
+   declares no effects: a profile that grants everything still cannot conjure a
+   user, and a profile that grants nothing should not stop one being asked. Where
+   no human is reachable the tool returns a model-visible string telling the model
+   to choose and state its assumption, exactly as `delegate` does when no agents
+   are loaded — so a piped run, a CI run, and a subagent never stall.
+
+3. **Hosts project one typed question contract.** The default full-screen host
+   renders ordered single- and multi-select questions in its timeline/dialog
+   model, including the screen-reader projection. During the rollback window,
+   `localpilot-tui` adapts the same `UserQuestion`/`UserAnswer` contract to its
+   inline top section. The REPL owns the channel and reads each answer before a
+   host clears its widget; neither presentation defines a second tool or result
+   path.
+
+4. **A closed channel is a dismissal, never an invented answer** — the same rule
+   the approver follows for a denial. Ctrl-C cancels the turn *and* answers the
+   waiting call, so the tool resolves instead of hanging.
+
+5. **The prompt cue carries its threshold.** "Ask when different readings would
+   lead to materially different work, or before something hard to undo;
+   otherwise pick the obvious option and state the assumption." Without the
+   second half a model starts asking permission for everything, which is worse
+   than the guess this replaces. Gated on the tool being registered and on its
+   own `PromptParts` flag.
+
+6. **Intake asks through the same widget.** `Clarification::Ask` now takes a
+   `QuestionAsker`: `StdinAsker` is today's loop moved behind the trait, so every
+   existing piped/non-TTY intake test passes unchanged and the "empty answer
+   delegates this axis" contract is preserved; a terminal drives the widget
+   instead. The stored `guidance["answers"]` and `assumed_judgment` shape does
+   not change.
+
+The approval gate is deliberately untouched: folding it into this widget is a
+change to a safety surface and deserves its own decision. Editor integrations
+(RPC/ACP) get the non-interactive string for now.
+
+## ADR-0120: Documentation Tools Are Reached By A Prompt Threshold And Capability-Aware Resolution
+
+Status: accepted. Extends the broker contract in ADR-0031 and the agent prompt.
+Issue #45.
+
+A configured MCP documentation tool was available but not reliably *used*: with
+the broker off it was advertised and ignored; with the broker on a need like
+`<library> upgrade error` did not match a tool that describes itself as
+"query documentation". Availability is not use, and the gap was in two places.
+
+1. **The prompt states when current documentation is needed, not just that
+   tools exist.** One version-sensitive policy: a task depending on current or
+   version-specific behaviour of an external library, framework, SDK, API, CLI,
+   or cloud service consults documentation instead of recollection, with upgrade
+   errors, migrations, deprecations, changed configuration shapes, and version
+   mismatches named as the triggers. It is bounded in both directions — stable
+   local implementation questions do not trigger a lookup, and with nothing
+   suitable configured the model continues from local evidence and says so.
+
+2. **The policy has two forms because reaching a tool differs by mode.** With
+   the full registry advertised, the guidance is to call the suitable tool
+   directly and the discovery surface is never mentioned; with the broker on, it
+   is `tool_search` → `tool_load` → call. The cue appears only when one of those
+   routes exists — a documentation tool is advertised, or the broker can reveal
+   one — so the model is never told to do something it cannot.
+
+3. **Vendor neutrality is structural.** No prompt text, no resolver mapping, and
+   no core working-set entry names Context7, any other MCP server, or any
+   library. What "a documentation tool" means is one generic capability
+   vocabulary, shared by the prompt gate and the resolver so they cannot drift.
+
+4. **Resolution indexes more, but ranks the same.** A tool's own name and
+   description remain the primary index with the exact-name bonus unchanged.
+   Only when those match nothing does a bounded fallback apply: the MCP server
+   name, the schema's property names and descriptions (never values or
+   examples), and capability synonyms. The fallback can surface an otherwise
+   invisible tool; it can never re-rank tools that matched directly, which is
+   what keeps every existing resolution intact. Deprecation de-ranking, score
+   floors, learned boosts, working-set limits, and reveal-never-grant are
+   untouched, and `tool_search` still returns lean locators — now each with a
+   short match reason, still never a schema.
+
+## ADR-0119: Path-Scoped Instruction Files Are Matched At Injection, Against The Files In Play
+
+Status: accepted. Extends the context-file discovery contract in
+[`docs/configuration.md`](configuration.md) and ADR-0056. Issue #44.
+
+`.github/instructions/*.instructions.md` files carry an `applyTo` glob in
+frontmatter, so a repo can say "this rule is about the Rust crates, that one is
+about the web app" without either bleeding into the other. Until now every
+instruction kind was all-or-nothing per directory, which in a monorepo is the
+difference between usable instructions and a wall of irrelevant ones.
+
+1. **Discovery adds a kind; matching happens per turn.** The glob is parsed at
+   discovery (which runs once per session — the files do not change mid-session),
+   but *whether it applies* is decided each turn, because which files are in play
+   is a per-turn fact. `ProjectContext::render_for(paths)` filters scoped files;
+   `render()` keeps rendering everything for the ingest path.
+
+2. **"In play" is what the session touched, plus what the prompt names.** The
+   runtime records every workspace path a tool call names — read, write, or
+   failed, since the rule is about the file, not the outcome — in a shared,
+   bounded, session-scoped set. The hook adds any workspace file the prompt names
+   outright, so "fix the types in src/app.ts" reaches a `**/*.ts` rule on the
+   first turn, before any tool has run.
+
+3. **Precedence sits beside repo-root instructions, after them.** A scoped rule
+   refines the general ones and is narrowed further by its own glob. A scoped
+   file with no `applyTo` applies project-wide, matching the convention's
+   default; an unparseable glob also applies rather than silently swallowing the
+   rule.
+
+4. **Only the root `.github/` is read.** A nested `.github/instructions/` is
+   deliberately not discovered, for the same reason a nested
+   `copilot-instructions.md` is not: `.github` is a repo-level directory, and
+   per-directory instructions already work through the nested
+   `Navigator.md`/`CLAUDE.md`/`AGENTS.md` walk.
+
+5. **Frontmatter parsing is deliberately narrow.** Only `applyTo` is read, and
+   only from a `---` block opening the first line of a path-scoped file. Every
+   other kind keeps its bytes verbatim, so a leading `---` in an ordinary
+   `CLAUDE.md` stays markdown.
+
+## ADR-0118: Print-Mode Diagnostics Are Loss-Tolerant, Checked, And Fed From The Harness
+
+Status: accepted. Extends the print-mode contract in
+[`docs/01-product-spec.md`](01-product-spec.md) and the turn-handoff record in
+[`docs/06-harness-spec.md`](06-harness-spec.md). Issues #47 and #50.
+
+1. **A lagged printer keeps printing.** The print-mode event loop consumes a
+   broadcast receiver, and a receiver that falls behind returns `Lagged`, not
+   `Closed`. Treating both as end-of-stream silently truncated the answer under
+   load. The loop now skips the dropped events, notes the drop count on stderr,
+   and ends only on `Closed`. Losing some events must never mean losing the rest.
+
+2. **Per-turn failure counters live in the runtime, not in any event consumer.**
+   Because a broadcast subscriber can drop events by design, any consumer-side
+   tally undercounts. The runtime — which sees every call by construction —
+   counts malfunctions and reported failures (ADR-0116's distinction) and the
+   tools that crossed the stuck threshold, and folds them into the turn handoff:
+   `tool_failures`, `reported_failures`, `stuck_tools`. A headless caller can now
+   distinguish a clean turn from one whose every build failed; existing handoff
+   keys are unchanged.
+
+3. **Failures are visible on the diagnostics stream, and only there.** The
+   printer renders failing `ToolFinished`, `Warning`, and `ToolStuck` events as
+   bounded one-line stderr notes (whitespace collapsed, capped, already redacted
+   at the dispatch chokepoint). Stdout carries the answer and nothing else.
+
+4. **Stderr gets the same checked-write discipline as stdout, with independent
+   fates.** The `eprintln!` family panics on a write error — the forbidden
+   runtime-path panic — so diagnostics go through the checked writer. A closed
+   stdout cancels the turn (the answer has nowhere to go); a closed stderr only
+   silences further diagnostics and is never reported as the consumer going away.
+
+## ADR-0117: Every Model-Visible Tool Result Takes The Same Redaction And Bounding Path
+
+Status: accepted. Closes a structural gap against the invariants in
+[`docs/05-tool-system.md`](05-tool-system.md) §Result Model and §Safety
+Invariants. Issue #52.
+
+At the dispatch chokepoint, the success arm redacted and bounded tool output;
+the error arm handed `err.to_string()` to the model verbatim — unredacted,
+unbounded. The guarantee "tool outputs are stored only after redaction" held
+per happy path, not per result, and its safety depended on every tool author
+keeping error strings short and secret-free forever.
+
+Both arms now converge on one exit: error text (including the registry's own
+synthesized refusals — unknown tool, effects error, permission denial, gate
+block, whose denial message interpolates a caller-supplied path) is redacted,
+then bounded to the context budget with the explicit truncation note, then
+formatted. The retention spill applies to oversized errors as a side effect of
+sharing the path; a second, spill-free error path was judged not worth the
+asymmetry it would reintroduce.
+
+## ADR-0116: A Tool Result Carries A Three-State Outcome, Not A Boolean
+
+Status: accepted. Refines the result model in
+[`docs/05-tool-system.md`](05-tool-system.md) and the degenerate-loop guards in
+[`docs/06-harness-spec.md`](06-harness-spec.md) (ADR-0052). Issues #46, #48,
+#49, #51.
+
+`ToolResult.is_error` conflated two materially different outcomes: the tool ran
+to completion and the work it wrapped reported failure (a `cargo test` exiting
+1 — information the model must act on), and the tool could not do its job at
+all (a spawn error, timeout, denial — nothing learned about the work). The
+session loop's guards treated the first as the second, so an ordinary
+edit/test debugging loop accused a healthy `run_shell` of being stuck.
+
+1. **The type carries the distinction.** `ToolOutcome { Ok, ReportedFailure,
+   Unusable }` replaces the boolean on `ToolResult` and `ToolOutput`, with
+   `is_error()` (what the model sees) and `is_malfunction()` (what tool-health
+   guards measure) as the two consumer questions. The model-visible rendering is
+   unchanged: both failure kinds are `status: error`.
+
+2. **The wire format is a superset, because transcript reads drop unparseable
+   lines.** `is_error` is always written; `outcome` is an optional refinement;
+   a line without it degrades to the boolean's meaning (`error` → `Unusable`).
+   The same additive pattern extends the durable `ToolFinished` session event
+   and the verifier's `Observation`, so old logs keep replaying (the #21 lesson).
+
+3. **Producers classify at the source.** A completed non-zero exit, a delivered
+   non-2xx fetch, a background process dying inside its grace period, a refused
+   delegation (#48), and an MCP response carrying `isError: true` (#49) are
+   reported failures — the tool worked; the world said no. Everything returning
+   `ToolError`, plus an unknown background id (polling a stale id is exactly the
+   spin the guard catches), is a malfunction. `delegate`'s "no agent definitions
+   are loaded" stays a success: a configuration fact whose correct next step is
+   doing the work directly.
+
+4. **Guards measure what they claim to measure.** The per-tool stuck guard
+   counts only malfunctions and is *cleared* by a reported failure — a call that
+   spawned, ran, and captured output is direct evidence against malfunction. The
+   unproductive-call streak counts both kinds (a missing binary routed through
+   the shell comes back as exit 127, a reported failure, and must not spin
+   unchecked) and still resets on success. The repeated-error breaker observes
+   both kinds but injects failing-work wording for reported failures — re-running
+   will not change the result — instead of the malfunction-shaped "write it to a
+   script file" advice. The stuck-threshold message no longer claims the runtime
+   is "stopping further calls": it never did (#51); the guard's job is
+   signalling, and the real stop remains the whole-turn unproductive limit.
+
+5. **Boolean surfaces stay boolean, converting at the edge.** The RPC/ACP
+   protocols (exactly `completed`/`failed`), the TUI event, hook events, and the
+   Anthropic wire field keep `is_error`; the verifier keeps judging a declared
+   `ResultStatus` postcondition as failed on a non-zero exit, so the claim gate
+   stays closed. The lesson extractor now counts only malfunctions as tool
+   failures, so memory stops learning "run_shell failed N times" from turns in
+   which run_shell never failed.
+
+## ADR-0115: Harness Correctness And Safety Fixes — Phase-Cadence Firing, Full Tool-Output Retention, And Secret-Path Write Gating
+
+Status: accepted. Refines ADR-0009 (discovered quality gate), the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md), and the permission
+model in [`docs/07-security-and-privacy.md`](07-security-and-privacy.md).
+
+A cluster of harness-correctness fixes that share no feature but the same bar —
+the runtime should not silently do the wrong safe-looking thing.
+
+1. **A `cadence = "phase"` quality-gate check fires at the plan boundary.** The
+   PROGRESS.md model is a flat step list with no sub-phase markers, so the only
+   unambiguous phase boundary is plan completion: the `phase_complete` trigger
+   fires when a committed step leaves no incomplete step behind, and the ratified
+   phase-cadence checks run once there instead of never. A check configured to run
+   per phase that never runs is worse than no check — it reads as covered.
+
+2. **Tool output is retained in full past the display cap.** The output cap
+   truncates what the model is *shown* in-band, but the full output is retained so
+   a later `read_tool_output` can page the untruncated bytes. Capping the retained
+   copy at the same bound as the shown copy made the paging tool a no-op past the
+   cap — the data the tool existed to reach was already gone.
+
+3. **A write to a secret-looking path asks, even in a trusted workspace.** Trust
+   authorizes ordinary edits without a prompt; it does not silently authorize
+   writing a `.env`/key/credential path. The permission engine treats a
+   secret-like write target as ask-or-deny regardless of workspace trust, because
+   the blast radius of a mistaken secret write is not what workspace trust was
+   granted for.
+
+4. **SemVer-stable config keys built but not yet wired are reserved, not deleted**
+   (D005): `[harness] mode`, `[memory] outcome_downweight`, and
+   `PackSource::ManualPin` each carry a documented "reserved" note rather than
+   being removed. Deleting a stable config key or a cross-referenced public enum
+   variant for zero runtime benefit trades a compatibility promise for nothing.
+
+## ADR-0114: The Provider Layer Is Split Into A Shared-Contract Core Plus One Crate Per Adapter
+
+Status: accepted. Refines ADR-0001 (narrow crates) and ADR-0002 (provider-neutral
+core); the crate map is in [`docs/02-architecture.md`](02-architecture.md) and the
+per-adapter build loop in [`docs/14-dev-tooling.md`](14-dev-tooling.md).
+
+`localpilot-llm` had grown to a single ~5.9k-line crate holding the trait, the
+event model, and both hand-written adapters, so editing one adapter recompiled the
+whole provider layer as one unit. It is now four crates: **`localpilot-llm-core`**
+(the shared contract — the `ModelProvider` trait, stream events, error taxonomy,
+auth, header parsing, request shapes; no adapter, so no dependency cycle);
+**`localpilot-llm-openai`** and **`localpilot-llm-anthropic`** (one adapter each,
+depending only on core); and **`localpilot-llm`** as a thin umbrella that keeps the
+registry, discovery, vision, and the test fake, and **re-exports the identical
+public surface** so `harness`/`cli`/`rpc`/`quota` compile unchanged.
+
+The move was behaviour-neutral: only cross-crate use-path rewrites and widening six
+adapter-facing items from `pub(crate)` to `pub`; the full test suite passed with no
+downstream edits. **Honestly scoped by measurement:** the win is the isolated
+inner loop — `cargo check -p localpilot-llm-anthropic` checks a 1.4k-line unit
+without re-checking the sibling adapter or core — *not* a faster full
+`cargo build --workspace`, which still recompiles the downstream spine through the
+umbrella. The docs say so rather than claiming a whole-build speedup the split does
+not deliver.
+
+## ADR-0113: A Claude Code Session Imports By Text-Flattening; The Quota Pause Is Waited Out And Escalated
+
+Status: accepted. Extends the resume/quota model in
+[`docs/06-harness-spec.md`](06-harness-spec.md) and the migration guide in
+[`docs/install.md`](install.md); bound by ADR-0004/ADR-0042 — the import reads only
+local files, never a private or subscription endpoint.
+
+Two self-contained items sharing the resume machinery.
+
+1. **Import text-flattens rather than re-homing foreign structure.**
+   `localpilot import claude-code` reads a Claude Code session
+   (`~/.claude/projects/.../<id>.jsonl`, one content block per line chained by
+   `parentUuid`), parses leniently, and flattens: tool calls and results become
+   plain-text markers and provider-specific reasoning is dropped, because foreign
+   tool ids/schemas and reasoning signatures cannot be replayed under a different
+   provider. The result is prose any adapter serializes verbatim. It writes both
+   the transcript and the event log (so the session both counts and resumes),
+   redacted on write, under a distinct `imported_cc_<id>` name with a `[cc-import]`
+   badge; a re-import never overwrites a session and refuses without `--force`. The
+   format was verified against a real Claude Code file, not inferred.
+
+2. **`wait-resume` actually waits and escalates.** The pause estimator and
+   decision rules already existed but the call site printed an ETA and exited and
+   pinned the retry attempt to 1. The paused-run marker now records the real
+   provider id and a pause-attempt count that grows the backoff across repeated
+   pauses (a provider-stated retry-after still wins), and `wait-resume` waits out
+   the window in a bounded, cancellable loop — re-checking the safety gates on a
+   capped poll, honouring `max_wait_minutes` — then resumes. A pure `wait_nap`
+   helper computes each clamped nap so the loop is unit-testable without a clock.
+
+## ADR-0112: An Already-Seen Read Elides To A Stub, In-Memory And Exact-Match
+
+Status: accepted, opt-in (`[tools] elide_seen_reads`). Extends the tool-output
+contract in [`docs/05-tool-system.md`](05-tool-system.md).
+
+A `read_file` that returns a path+range already read this session, unchanged since
+(same mtime and length), is replaced with a compact stub pointing at the earlier
+read instead of re-spending context on identical bytes. The read-history is
+**in-memory per session, not a durable store event**, and matching is **exact
+`(path, start, end)`, not full-read-covers-sub-range** (D008): the smallest blast
+radius (no store-format bump, no elision across a resume boundary) that still
+captures the dominant repeated-identical-read waste. Coverage matching is a
+follow-up if it is ever measured worthwhile; a conservative elision that never
+hides changed bytes is the point.
+
+## ADR-0111: A Typed Soft-Interrupt Substrate Delivers Steering At Turn-Loop Safe Points
+
+Status: accepted. Extends the turn loop in
+[`docs/06-harness-spec.md`](06-harness-spec.md); the non-user producers are
+library-only for now (D007).
+
+Steering, cancellation, and background/system signals reach an in-flight turn
+through one typed `SoftInterrupt { source }` queue admitted only at labelled safe
+points, never mid-tool. Non-urgent interrupts are admitted between tool dispatch
+and the next model call. An urgent interrupt may also preempt an open provider
+stream: the incomplete assistant response is discarded from history, queued
+interrupts are admitted in FIFO order, and the same turn starts a fresh provider
+call. The queue is the durable source of truth; notification is only a wakeup
+mechanism. `User` steering is produced by interactive and hosted clients, while
+the server/swarm path may inject labelled `System` or `BackgroundTask` messages
+without making them read as user-authored input.
+
+## ADR-0110: Memory Retrieval Fuses Keyword And Dense Ranks With Reciprocal Rank Fusion
+
+Status: accepted. Amends the rank composition of ADR-0086 (normalized-relevance
+context pack) and reuses the embeddings of ADR-0059; keyword search stays the
+candidate floor, so retrieval is byte-identical when embeddings are absent.
+
+Context hits are fused from the BM25 keyword ranking and the dense/vector ranking
+by **Reciprocal Rank Fusion** (k=60): each list contributes `1/(k + rank)` and the
+sums are combined, with cosine similarity as the tiebreak. RRF ranks on position
+not raw score, so it needs no score normalization across two incomparable scales
+and an item that both rankers surface beats one that only a single ranker finds —
+while a single-list query degrades to the identity of that list's order. A separate
+per-turn injection-dedup TTL (`[memory] injection_dedup_ttl_turns` in
+`.localpilot.toml`) stops the same memory being re-injected every turn within the
+window. RRF's convexity is the reason a naive "consistent middle rank beats a
+split high/low rank" intuition is wrong and the tests assert the both-lists rule
+instead.
+
+## ADR-0109: Anthropic Prompt Caching Marks The Stable Prefix Only
+
+Status: accepted, opt-in (`prompt_caching` on a `[providers.<id>]` table). Extends
+the provider contract in [`docs/04-provider-contract.md`](04-provider-contract.md)
+and [`docs/providers.md`](providers.md).
+
+The Anthropic adapter emits a `cache_control: {type: "ephemeral"}` breakpoint on
+the **stable prefix** — the tools block plus the first, stable system block — and
+reads back `cache_creation_input_tokens`/`cache_read_input_tokens` from
+`message_start`, surfaced through `TokenUsage` with an `effective_input_tokens`
+accessor. Caching the tools+system prefix is the highest-ROI, lowest-blast-radius
+breakpoint: that prefix is the largest always-identical span of the request, so it
+is where a cache hit pays most. The **rolling message-history cache is deliberately
+deferred** (D006): a breakpoint on the growing conversation needs per-turn
+block-array expansion of collapsed turns and ≤4-breakpoint management —
+disproportionate request-path risk against a marginal gain over the prefix already
+cached. A follow-on can add it.
+
+Cache counters are also stored as defaulted additive fields on usage events, so
+resumed sessions and offline scorecards retain effective-input truth while event
+logs written before prompt caching continue to deserialize with zero cache use.
 ## ADR-0105: Releases Ship Verified Prebuilt Binaries With A Version-Keyed Cache
 
 Status: accepted. Extends the release process in

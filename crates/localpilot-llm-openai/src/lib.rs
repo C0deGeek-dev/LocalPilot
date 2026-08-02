@@ -9,6 +9,7 @@
 //! Provenance: request and streaming shapes implemented from the public OpenAI
 //! API reference (<https://platform.openai.com/docs/api-reference/chat>). No
 //! private endpoint behaviour, prompts, or identifiers were copied.
+#![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,15 +21,15 @@ use indexmap::IndexMap;
 use localpilot_core::{ContentBlock, Message, Role, Secret, TokenUsage};
 use serde_json::{json, Value};
 
-use crate::auth::AuthProvider;
-use crate::error::{ProviderError, QuotaInfo};
-use crate::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
-use crate::headers::{parse_compact_duration, parse_retry_after};
-use crate::provider::{
+use localpilot_llm_core::auth::AuthProvider;
+use localpilot_llm_core::error::{ProviderError, QuotaInfo};
+use localpilot_llm_core::event::{InlineThinkingFilter, ModelEvent, ModelEventStream};
+use localpilot_llm_core::headers::{parse_compact_duration, parse_retry_after};
+use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-use crate::request::{ModelRequest, ToolSpec};
+use localpilot_llm_core::request::{ModelRequest, ToolSpec};
 
 /// How a tool-call constraint is encoded in the request body. A local server may
 /// accept the OpenAI structured-output `response_format` wrapper, the documented
@@ -922,9 +923,22 @@ impl SseDecoder {
         }
         if chunk["usage"].is_object() {
             let usage = &chunk["usage"];
+            // OpenAI's `prompt_tokens` *includes* any automatically cached prefix
+            // (reported under `prompt_tokens_details.cached_tokens`), unlike
+            // Anthropic where `input_tokens` excludes it. Split the cached tokens
+            // out so `input_tokens` means fresh input in both providers and
+            // `effective_input_tokens()` stays the true prompt size (no double
+            // count). OpenAI reports no separate cache-creation count.
+            let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            let cached = usage["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(prompt);
             out.push_back(Ok(ModelEvent::Usage(TokenUsage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
+                input_tokens: prompt.saturating_sub(cached),
                 output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: cached,
             })));
         }
     }
@@ -1793,7 +1807,7 @@ mod tests {
         )
         .with_default_options(options);
         let request = ModelRequest::new("m", Vec::new())
-            .with_reasoning_effort(Some(crate::request::ReasoningEffort::High));
+            .with_reasoning_effort(Some(localpilot_llm_core::request::ReasoningEffort::High));
         let body = provider.build_body(&request);
         assert_eq!(body["reasoning_effort"], "high");
         // Without an explicit request value the option default stands.

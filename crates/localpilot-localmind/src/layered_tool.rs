@@ -189,6 +189,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         }
     }
 
@@ -221,7 +223,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("marker_widget"), "got: {}", out.text);
         assert!(out.text.contains("fetch layer"));
     }
@@ -234,7 +236,7 @@ mod tests {
             .invoke(json!({ "ids": [] }), &context(&ws))
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
     }
 
     #[tokio::test]
@@ -246,7 +248,7 @@ mod tests {
             .invoke(json!({ "ids": [hits[0].chunk_id.clone()] }), &context(&ws))
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(out.text.contains("expand layer"));
     }
 
@@ -261,7 +263,7 @@ mod tests {
             .invoke(json!({ "query": "marker_widget" }), &context(&ws))
             .await
             .unwrap();
-        assert!(!search.is_error);
+        assert!(!search.is_error());
         let id_start = search
             .text
             .find("(id ")
@@ -282,7 +284,7 @@ mod tests {
             .invoke(json!({ "ids": [id] }), &context(&ws))
             .await
             .unwrap();
-        assert!(!fetched.is_error);
+        assert!(!fetched.is_error());
         assert!(
             fetched.text.contains("marker_widget"),
             "the emitted id must fetch its full body: {}",
@@ -302,7 +304,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!fetched.is_error);
+        assert!(!fetched.is_error());
         assert!(
             fetched.text.contains("memory:abc123")
                 && fetched.text.contains("not fetchable")
@@ -320,7 +322,7 @@ mod tests {
             .invoke(json!({ "ids": ["graph:Symbol"] }), &context(&ws))
             .await
             .unwrap();
-        assert!(!expanded.is_error);
+        assert!(!expanded.is_error());
         assert!(
             expanded.text.contains("graph:Symbol") && expanded.text.contains("not fetchable"),
             "a graph id must be rejected with its reason: {}",

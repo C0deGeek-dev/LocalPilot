@@ -187,6 +187,22 @@ where
                 emit(&mut writer, id, ServerEvent::Closed).await?;
                 break;
             }
+            // The stdio drive is one-session-per-process: its session is fixed
+            // at process start, so the connection-scoped attach handshake does
+            // not apply here. Reject it without disturbing the bound session.
+            ClientCommand::Attach { .. } => {
+                emit(
+                    &mut writer,
+                    id,
+                    ServerEvent::Error {
+                        message: "attach is not supported on the stdio drive; \
+                                  this connection is already bound to its session"
+                            .to_string(),
+                    },
+                )
+                .await?;
+                continue;
+            }
             // Any disposition starts a turn now when the session is idle.
             ClientCommand::Prompt { text, .. } => text,
         };
@@ -246,7 +262,9 @@ where
                 _ = &mut turn => break,
                 event = rx.recv() => {
                     if let Ok(event) = event {
-                        emit(writer, None, map_event(event)).await?;
+                        if let Some(mapped) = map_event(event) {
+                            emit(writer, None, mapped).await?;
+                        }
                     }
                 }
                 Some(ask) = ask_rx.recv() => emit_ask(writer, &ask).await?,
@@ -306,6 +324,12 @@ where
                                 cancel.cancel();
                                 shutdown = true;
                             }
+                            ClientCommand::Attach { .. } => {
+                                emit(writer, id, ServerEvent::Error {
+                                    message: "attach is not supported on the stdio drive"
+                                        .to_string(),
+                                }).await?;
+                            }
                         }
                     }
                 }
@@ -314,7 +338,9 @@ where
     }
     // Flush events still buffered when the turn future completed.
     while let Ok(event) = rx.try_recv() {
-        emit(writer, None, map_event(event)).await?;
+        if let Some(mapped) = map_event(event) {
+            emit(writer, None, mapped).await?;
+        }
     }
     if shutdown {
         emit(writer, None, ServerEvent::Closed).await?;
@@ -375,8 +401,23 @@ pub(crate) fn next_incomplete_step(root: &Path) -> Option<String> {
         .map(|line| line.trim_start_matches("- [ ]").trim().to_string())
 }
 
-pub(crate) fn map_event(event: RuntimeEvent) -> ServerEvent {
-    match event {
+/// Map one runtime session event onto its wire form.
+///
+/// This is the single source of truth for the `RuntimeEvent` → [`ServerEvent`]
+/// projection, shared by the stdio serve loop here and the opt-in local-IPC
+/// server (`localpilot-server` via the CLI) so the two never drift.
+///
+/// `None` means the event has no client-facing form. That is a real category,
+/// not a gap: an internal signal projected as an empty warning would put noise
+/// into every attached UI rather than admitting it has nothing to say.
+pub fn map_event(event: RuntimeEvent) -> Option<ServerEvent> {
+    // File touches are an internal signal, feeding the swarm's advisory conflict
+    // alerts. They reach the agents they affect through the soft-interrupt path,
+    // not the client event stream.
+    if matches!(event, RuntimeEvent::FilesTouched(_)) {
+        return None;
+    }
+    Some(match event {
         RuntimeEvent::Text(text) => ServerEvent::TextDelta { text },
         RuntimeEvent::Reasoning(text) => ServerEvent::ReasoningDelta { text },
         RuntimeEvent::ToolStarted { id, name, .. } => ServerEvent::ToolStarted { id, name },
@@ -415,7 +456,9 @@ pub(crate) fn map_event(event: RuntimeEvent) -> ServerEvent {
             reason: stop_reason_label(reason).to_string(),
         },
         RuntimeEvent::ToolStuck { name, count } => ServerEvent::ToolStuck { name, count },
-    }
+        // Handled above; the early return keeps every other arm a plain value.
+        RuntimeEvent::FilesTouched(_) | RuntimeEvent::SoftInterruptInjected { .. } => return None,
+    })
 }
 
 fn stop_reason_label(reason: StopReason) -> &'static str {
@@ -427,5 +470,6 @@ fn stop_reason_label(reason: StopReason) -> &'static str {
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
         StopReason::TimedOut => "timed_out",
+        StopReason::Quiesced => "quiesced",
     }
 }

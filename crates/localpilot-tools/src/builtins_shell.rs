@@ -25,6 +25,7 @@ use crate::tool::{
     detail_preview, parse_input, schema_for, ShellOutput, Tool, ToolContext, ToolOutput,
     ToolOutputPresentation,
 };
+use localpilot_core::ToolOutcome;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct RunShellInput {
@@ -580,17 +581,26 @@ impl Tool for RunShell {
         let stdout = render_stream(&output.stdout);
         let stderr = render_stream(&output.stderr);
         let code = output.status.code().unwrap_or(-1);
-        let (stdout, stderr, truncated) = cap_shell_streams(code, stdout, stderr);
         let text = command_output(code, &stdout, &stderr);
+        let (presentation_stdout, presentation_stderr, presentation_truncated) =
+            cap_shell_streams(code, stdout, stderr);
+        let outcome = if output.status.success() {
+            ToolOutcome::Ok
+        } else {
+            // A completed command that exited non-zero is the world saying no,
+            // not the tool breaking: spawn, wait and capture all worked.
+            ToolOutcome::ReportedFailure
+        };
         Ok(ToolOutput {
             text,
-            is_error: !output.status.success(),
-            truncated,
+            outcome,
+            truncated: presentation_truncated,
             presentation: Some(ToolOutputPresentation::Shell(ShellOutput {
                 exit_code: code,
-                stdout,
-                stderr,
+                stdout: presentation_stdout,
+                stderr: presentation_stderr,
             })),
+            touches: Vec::new(),
         })
     }
 }
@@ -676,6 +686,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         RunShell.effects(&value, &ctx).unwrap()
     }
@@ -691,6 +703,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         // A command that sleeps well past the 1s timeout: the timeout path must
         // return a "timed out" error and exercise the tree-reap (kill_process_tree
@@ -722,6 +736,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let input = json!({ "program": "sort", "timeout_secs": 10 });
         let output = RunShell
@@ -729,7 +745,7 @@ mod tests {
             .await
             .expect("sort on a null stdin must exit promptly, not hit the timeout");
         assert!(
-            !output.is_error,
+            !output.is_error(),
             "sort on a null stdin should exit cleanly: {}",
             output.text
         );
@@ -763,6 +779,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let started = dir.path().join("started.txt");
         let leaked = dir.path().join("leaked.txt");

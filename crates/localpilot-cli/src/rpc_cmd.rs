@@ -4,13 +4,8 @@
 //! Permission asks are surfaced as events and answered by `permission_reply`
 //! commands; an unanswered ask is denied, exactly like non-interactive mode.
 
-use localpilot_config::{CliOverrides, ConfigPaths};
-use localpilot_harness::{SessionConfig, SessionRuntime};
-use localpilot_llm::ProviderRegistry;
-use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
-use localpilot_rpc::{serve, serve_acp, serve_mcp, McpServeOptions, RpcApprover, ServeContext};
-use localpilot_sandbox::{Interactivity, PermissionEngine, Profile};
-use localpilot_store::Store;
+use localpilot_rpc::{serve, serve_acp, serve_mcp, McpServeOptions, ServeContext};
+use localpilot_sandbox::Profile;
 
 /// Which stdio protocol to serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +26,8 @@ pub enum WireProtocol {
 /// Serve one client on stdin/stdout until shutdown or end of input.
 ///
 /// # Errors
-/// Returns an error if configuration, the provider, or the workspace cannot
-/// be set up, a resumed session's event log cannot be read, or the transport
+/// Returns an error if configuration, the provider, or the workspace cannot be
+/// set up, a resumed session's event log cannot be read, or the transport
 /// fails.
 pub async fn run(
     model: Option<&str>,
@@ -41,88 +36,16 @@ pub async fn run(
     protocol: WireProtocol,
     resume: Option<localpilot_core::SessionId>,
 ) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
-    let model = model
-        .map(str::to_string)
-        .or_else(|| config.resolve_model(provider_id))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model: pass --model, or set a default in .localpilot.toml \
-                 ([providers.<id>] model = \"...\")"
-            )
-        })?;
-    let registry = ProviderRegistry::from_config(&config)?;
-    let provider = match provider_id {
-        Some(id) => registry.get(id),
-        None => registry.default_provider(),
-    }
-    .cloned()
-    .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
-
-    let (approver, ask_rx, asks) = RpcApprover::new();
-    let context_token_limit = localpilot_harness::effective_context_limit(
-        provider.declaration().max_context_tokens,
-        config.harness.context_token_limit,
-    );
-    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
-    let broker = crate::mcp::install_broker(&config.tools, &mut registry);
-    // The serve loop is driven by a client (interactive): apply the built-in
-    // safety rails so an unconfigured project still bounds a runaway, with the
-    // interactive profile (higher ceiling, no default wall-clock). Explicit
-    // `[harness]` values win inside `resolved_rails`.
-    let rails = config.harness.resolved_rails(true);
-    let mut runtime = SessionRuntime::new(
-        provider,
-        registry,
-        PermissionEngine::new(profile, Vec::new()),
-        Box::new(approver),
-        Store::open(&cwd),
-        crate::session_cmd::workspace_with_read_roots(&cwd, &config)?,
-        RecoveryEngine::new(RecoveryBudget::default()),
-        SessionConfig {
-            model: model.clone(),
-            // The wire client answers asks; the engine itself treats the
-            // session as interactive so ask-class effects reach the client
-            // instead of being denied outright.
-            interactivity: Interactivity::Interactive,
-            trusted: matches!(profile, Profile::Bypass | Profile::Unrestricted),
-            context_token_limit,
-            compaction_mode: compaction_mode(config.compaction.mode),
-            summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
-                &config.compaction,
-            ),
-            tool_call_budget: rails.tool_call_budget,
-            tool_call_budget_max: rails.tool_call_budget_max,
-            tool_budget_explicit: rails.budget_explicit,
-            rules: config.harness.rules.clone(),
-            enforce_claim_gate: config.harness.claim_gate.is_enabled(),
-            tool_marker_enabled: config.tools.marker,
-            enforce_readable_errors: config.tools.readable_errors,
-            repair_mode: config.tools.repair,
-            turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
-            verify_before_done: config.harness.verify_before_done,
-            verify_command: config.harness.verify_command.clone(),
-            ..SessionConfig::default()
-        },
-        Vec::new(),
-    );
-    runtime.set_broker(broker);
-    if let Some(agents) = crate::agents_cmd::session_agents(&cwd) {
-        runtime.set_agents(agents);
-    }
-    localpilot_harness::register_project_analysis_context(
-        &cwd,
-        config.context.project_analysis,
-        config.docs.lookup_policy,
-        &mut runtime,
-    );
-    localpilot_harness::register_project_instructions_context(
-        &cwd,
-        config.context.inject_instructions,
-        config.context.instruction_char_budget,
-        &mut runtime,
-    );
+    // Construct the session through the one shared recipe (also used by the
+    // opt-in server factory), so the stdio and server paths never drift.
+    let setup = crate::server_cmd::SessionSetup::resolve(model, provider_id, profile).await?;
+    let model = setup.model().to_string();
+    let cwd = setup.cwd().to_path_buf();
+    let profile_label = crate::server_cmd::profile_label(profile).to_string();
+    let built = setup.build()?;
+    let mut runtime = built.runtime;
+    let ask_rx = built.ask_rx;
+    let asks = built.asks;
 
     // Resume before serving so the handshake reports the resumed session's id;
     // the current profile and trust stay in force, exactly as the REPL's resume.
@@ -144,7 +67,7 @@ pub async fn run(
         WireProtocol::Native => {
             let context = ServeContext {
                 model,
-                profile: profile_label(profile).to_string(),
+                profile: profile_label,
                 root: Some(cwd),
             };
             serve(
@@ -170,7 +93,7 @@ pub async fn run(
         WireProtocol::Mcp { approvals } => {
             let options = McpServeOptions {
                 model,
-                profile: profile_label(profile).to_string(),
+                profile: profile_label,
                 root: Some(cwd),
                 approvals,
             };
@@ -237,26 +160,6 @@ fn offer_intervention_lessons(
     }
     if offered > 0 {
         eprintln!("learning: offered {offered} driver-intervention candidate(s) to review");
-    }
-}
-
-fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {
-    match mode {
-        localpilot_config::CompactionMode::Deterministic => {
-            localpilot_harness::CompactionMode::Deterministic
-        }
-        localpilot_config::CompactionMode::SmartWithFallback => {
-            localpilot_harness::CompactionMode::SmartWithFallback
-        }
-    }
-}
-
-fn profile_label(profile: Profile) -> &'static str {
-    match profile {
-        Profile::Default => "default",
-        Profile::Relaxed => "relaxed",
-        Profile::Bypass => "bypass",
-        Profile::Unrestricted => "unrestricted",
     }
 }
 

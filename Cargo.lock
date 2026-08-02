@@ -1586,16 +1586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "localmind-search"
-version = "2.6.0"
-dependencies = [
- "localmind-core",
- "localmind-store",
- "thiserror 2.0.9",
- "time",
-]
-
-[[package]]
 name = "localmind-store"
 version = "2.6.0"
 dependencies = [
@@ -1646,7 +1636,9 @@ dependencies = [
  "localpilot-research",
  "localpilot-rpc",
  "localpilot-sandbox",
+ "localpilot-selfdev",
  "localpilot-selfreview",
+ "localpilot-server",
  "localpilot-skills",
  "localpilot-store",
  "localpilot-terminal-ui",
@@ -1682,6 +1674,7 @@ name = "localpilot-config"
 version = "2.6.0"
 dependencies = [
  "figment",
+ "globset",
  "ignore",
  "indexmap",
  "insta",
@@ -1756,8 +1749,39 @@ version = "2.6.0"
 dependencies = [
  "async-trait",
  "futures",
- "indexmap",
  "localpilot-config",
+ "localpilot-core",
+ "localpilot-llm-anthropic",
+ "localpilot-llm-core",
+ "localpilot-llm-openai",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "localpilot-llm-anthropic"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "localpilot-core",
+ "localpilot-llm-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "localpilot-llm-core"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
  "localpilot-core",
  "proptest",
  "reqwest",
@@ -1765,8 +1789,21 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.9",
  "tokio",
+]
+
+[[package]]
+name = "localpilot-llm-openai"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "localpilot-core",
+ "localpilot-llm-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
  "tracing",
- "wiremock",
 ]
 
 [[package]]
@@ -1779,7 +1816,6 @@ dependencies = [
  "localmind-core",
  "localmind-inference",
  "localmind-mcp",
- "localmind-search",
  "localmind-store",
  "localpilot-config",
  "localpilot-core",
@@ -1899,6 +1935,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-selfdev"
+version = "2.6.0"
+dependencies = [
+ "localpilot-dist",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.9",
+]
+
+[[package]]
 name = "localpilot-selfreview"
 version = "2.6.0"
 dependencies = [
@@ -1907,6 +1955,30 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "localpilot-server"
+version = "2.6.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "localpilot-core",
+ "localpilot-harness",
+ "localpilot-llm",
+ "localpilot-recovery",
+ "localpilot-rpc",
+ "localpilot-sandbox",
+ "localpilot-store",
+ "localpilot-taskgraph",
+ "localpilot-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.9",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1937,6 +2009,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.9",
+]
+
+[[package]]
+name = "localpilot-taskgraph"
+version = "2.6.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.9",
 ]
 

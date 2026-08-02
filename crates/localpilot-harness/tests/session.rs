@@ -1,20 +1,24 @@
 //! Agent-mode session runtime integration tests, driven by the fake provider.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use localpilot_core::{ContentBlock, Message};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
-use localpilot_llm::{FakeProvider, ModelEvent, ProviderError, QuotaInfo};
+use localpilot_llm::{
+    FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderDeclaration,
+    ProviderError, QuotaInfo,
+};
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionRequest, Profile, ScriptedApprover,
     Workspace,
 };
 use localpilot_store::Store;
-use localpilot_tools::ToolRegistry;
+use localpilot_tools::{ToolOutputPresentation, ToolRegistry};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -117,6 +121,30 @@ fn build_from_arc(
     }
 }
 
+fn build_from_provider(provider: Arc<dyn ModelProvider>, config: SessionConfig) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path());
+    let runtime = SessionRuntime::new(
+        provider,
+        ToolRegistry::with_builtins(),
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(dir.path()),
+        Workspace::new(dir.path()).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        config,
+        Vec::new(),
+    );
+    let (events, _rx) = broadcast::channel(256);
+    Harness {
+        _dir: dir,
+        runtime,
+        events,
+        cancel: CancellationToken::new(),
+        store,
+    }
+}
+
 fn drain(rx: &mut broadcast::Receiver<RuntimeEvent>) -> Vec<RuntimeEvent> {
     let mut out = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -146,6 +174,243 @@ fn tool_result_outputs(messages: &[Message]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn an_unchanged_reread_is_elided_but_still_counts_as_a_read() {
+    // Two identical read_file calls on an unchanged file: the second returns a
+    // compact "elided" stub instead of the full body, but it still records as a
+    // successful read_file — so a later overwrite still passes RequiresPriorRead
+    // and the file content is never actually hidden (the stub says how to re-read).
+    let big = "fn main() {}\n".repeat(400); // well over the stub size
+    let provider = FakeProvider::new()
+        .tool_call("r1", "read_file", json!({ "path": "src/lib.rs" }))
+        .tool_call("r2", "read_file", json!({ "path": "src/lib.rs" }))
+        .text("done");
+    let mut h = build(
+        provider,
+        &[("src/lib.rs", big.as_str())],
+        SessionConfig {
+            elide_seen_reads: true,
+            ..SessionConfig::default()
+        },
+    );
+
+    let reason = h
+        .runtime
+        .run_turn("read the file twice", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let outputs = tool_result_outputs(&transcript);
+    assert_eq!(outputs.len(), 2, "both reads produced a result");
+    assert!(
+        outputs[0].contains("fn main"),
+        "the first read returns the full body"
+    );
+    assert!(
+        outputs[1].contains("elided") && outputs[1].len() < outputs[0].len(),
+        "the second, unchanged re-read is elided to a smaller stub: {}",
+        outputs[1]
+    );
+    // Neither read is an error (so RequiresPriorRead and the scorecards still see
+    // two successful read_file calls).
+    assert!(
+        !transcript
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ToolResult(r) if r.is_error())),
+        "an elided read is not an error"
+    );
+}
+
+#[tokio::test]
+async fn elision_off_by_default_returns_full_content_on_a_reread() {
+    let big = "data\n".repeat(400);
+    let provider = FakeProvider::new()
+        .tool_call("r1", "read_file", json!({ "path": "src/lib.rs" }))
+        .tool_call("r2", "read_file", json!({ "path": "src/lib.rs" }))
+        .text("done");
+    // Default config: elide_seen_reads is false.
+    let mut h = build(
+        provider,
+        &[("src/lib.rs", big.as_str())],
+        SessionConfig::default(),
+    );
+    let _ = h.runtime.run_turn("read twice", &h.events, &h.cancel).await;
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let outputs = tool_result_outputs(&transcript);
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(
+        outputs[0], outputs[1],
+        "with elision off both reads return full content"
+    );
+    assert!(!outputs[1].contains("elided"));
+}
+
+#[tokio::test]
+async fn queued_soft_interrupts_are_admitted_labelled_and_recorded() {
+    use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
+
+    // A user steer and a system notice queued before a call-free turn. Both are
+    // admitted at the safe boundary and injected as user-role messages — the user
+    // steer verbatim, the system notice labelled so it does not read as the user —
+    // and each is recorded as a durable SoftInterruptInjected event.
+    let provider = FakeProvider::new().text("acknowledged");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let steer = h.runtime.steer_queue();
+    steer.push("also check the error path");
+    steer.push_interrupt(SoftInterrupt {
+        content: "background job finished".to_string(),
+        source: SoftInterruptSource::System,
+        urgent: false,
+    });
+
+    let reason = h
+        .runtime
+        .run_turn("review the module", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let text = message_text(&transcript);
+    assert!(
+        text.contains("also check the error path"),
+        "user steer injected: {text}"
+    );
+    assert!(
+        text.contains("[system] background job finished"),
+        "system notice injected and labelled: {text}"
+    );
+
+    let events = h.store.read_events(h.runtime.session_id()).unwrap();
+    let injected: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            localpilot_store::SessionEventKind::SoftInterruptInjected { point, source } => {
+                Some((point.clone(), source.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        injected.iter().any(|(_, s)| s == "user"),
+        "the user steer is recorded: {injected:?}"
+    );
+    assert!(
+        injected.iter().any(|(_, s)| s == "system"),
+        "the system notice is recorded: {injected:?}"
+    );
+}
+
+struct InterruptibleProvider {
+    declaration: ProviderDeclaration,
+    calls: AtomicUsize,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+impl InterruptibleProvider {
+    fn new() -> Self {
+        Self {
+            declaration: FakeProvider::new().declaration().clone(),
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for InterruptibleProvider {
+    fn declaration(&self) -> &ProviderDeclaration {
+        &self.declaration
+    }
+
+    async fn stream(&self, request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            Ok(Box::pin(
+                futures::stream::iter([Ok(ModelEvent::TextDelta("partial".to_string()))])
+                    .chain(futures::stream::pending()),
+            ))
+        } else {
+            Ok(Box::pin(futures::stream::iter([
+                Ok(ModelEvent::TextDelta("after steering".to_string())),
+                Ok(ModelEvent::Done),
+            ])))
+        }
+    }
+}
+
+#[tokio::test]
+async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn() {
+    use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
+
+    let provider = Arc::new(InterruptibleProvider::new());
+    let mut h = build_from_provider(provider.clone(), SessionConfig::default());
+    let steer = h.runtime.steer_queue();
+    let mut rx = h.events.subscribe();
+
+    let mut observed = Vec::new();
+    let reason = {
+        let turn = h.runtime.run_turn("initial request", &h.events, &h.cancel);
+        tokio::pin!(turn);
+        loop {
+            let event = tokio::select! {
+                event = rx.recv() => event.expect("runtime event channel remains open"),
+                reason = &mut turn => panic!("turn stopped before steering: {reason:?}"),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
+                    panic!("the first stream should start")
+                }
+            };
+            let saw_partial = matches!(&event, RuntimeEvent::Text(text) if text == "partial");
+            observed.push(event);
+            if saw_partial {
+                break;
+            }
+        }
+
+        steer.push_interrupt(SoftInterrupt {
+            content: "STEERING_SECRET".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        tokio::time::timeout(Duration::from_secs(1), &mut turn)
+            .await
+            .expect("urgent steering must wake the pending stream")
+    };
+    assert_eq!(reason, StopReason::Done);
+    observed.extend(drain(&mut rx));
+
+    let injected = observed
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                RuntimeEvent::SoftInterruptInjected { point, source }
+                    if point == "during_stream" && source == "user"
+            )
+        })
+        .expect("the UI receives a content-free steering boundary event");
+    let resumed = observed
+        .iter()
+        .position(|event| matches!(event, RuntimeEvent::Text(text) if text == "after steering"))
+        .expect("the restarted provider stream produces its final answer");
+    assert!(injected < resumed);
+    assert!(!format!("{:?}", observed[injected]).contains("STEERING_SECRET"));
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!message_text(&requests[0].messages).contains("STEERING_SECRET"));
+    assert!(message_text(&requests[1].messages).contains("STEERING_SECRET"));
+    drop(requests);
+
+    let transcript = h.store.read_transcript(h.runtime.session_id()).unwrap();
+    let text = message_text(&transcript);
+    assert!(!text.contains("partial"));
+    assert!(text.contains("STEERING_SECRET"));
+    assert!(text.contains("after steering"));
 }
 
 #[tokio::test]
@@ -1014,7 +1279,7 @@ async fn a_denied_tool_call_becomes_an_error_result_not_a_crash() {
             _ => None,
         });
     let result = tool_result.expect("a tool result was recorded");
-    assert!(result.is_error);
+    assert!(result.is_error());
 }
 
 #[tokio::test]
@@ -1142,7 +1407,7 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
         .runtime
         .run_user_shell("git", &["--version".to_string()], true)
         .await;
-    assert!(!excluded.is_error, "{}", excluded.output);
+    assert!(!excluded.is_error(), "{}", excluded.output);
     assert!(h.store.read_transcript(session).unwrap().is_empty());
 
     // An included run lands in the transcript as a shell-role message.
@@ -1150,7 +1415,7 @@ async fn user_shell_runs_are_auditable_and_context_exclusion_works() {
         .runtime
         .run_user_shell("git", &["--version".to_string()], false)
         .await;
-    assert!(!included.is_error, "{}", included.output);
+    assert!(!included.is_error(), "{}", included.output);
     let transcript = h.store.read_transcript(session).unwrap();
     assert_eq!(transcript.len(), 1);
     assert_eq!(transcript[0].role, localpilot_core::Role::UserShell);
@@ -1201,7 +1466,7 @@ async fn cancelled_user_shell_command_records_an_explicit_error_and_one_audit_pa
         .runtime
         .run_user_shell_command(command, &cancel, false)
         .await;
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("cancelled"), "{}", result.output);
 
     let transcript = h.store.read_transcript(session).unwrap();
@@ -1263,8 +1528,8 @@ async fn detailed_user_shell_result_carries_typed_stdout_stderr_and_exit_status(
         .runtime
         .run_user_shell_command_detailed(command, &cancel, true)
         .await;
-    assert!(detailed.result.is_error);
-    let shell = detailed.shell.expect("typed shell output");
+    assert!(detailed.result.is_error());
+    let ToolOutputPresentation::Shell(shell) = detailed.presentation.expect("typed shell output");
     assert_eq!(shell.exit_code, 5);
     assert!(shell.stdout.contains("stdout-marker"));
     assert!(shell.stderr.contains("stderr-marker"));
@@ -1317,7 +1582,7 @@ async fn cancelling_user_shell_during_approval_starts_no_process() {
         .run_user_shell_command(&command, &cancel, false)
         .await;
     assert!(called.load(Ordering::SeqCst));
-    assert!(result.is_error);
+    assert!(result.is_error());
     assert!(result.output.contains("cancelled"), "{}", result.output);
     assert!(!result.output.contains("PROTECTED_SENTINEL"));
 
@@ -1398,4 +1663,197 @@ async fn the_handoff_reports_tool_calls_and_files_changed() {
         !handoff.memory_written,
         "the run-turn path never writes memory"
     );
+}
+
+// --- outcome-aware guards (#46): reported failures are not malfunctions ------
+
+/// A `run_shell` input that completes and exits non-zero on every platform.
+fn failing_command() -> serde_json::Value {
+    json!({ "command": "exit 7" })
+}
+
+#[tokio::test]
+async fn failing_commands_never_trip_the_stuck_guard() {
+    // Twenty consecutive failing commands: every call spawned, ran, and
+    // captured output, so the per-tool stuck guard must stay silent. The stop
+    // that fires is the whole-turn unproductive limit (12), not `ToolStuck`.
+    let mut provider = FakeProvider::new();
+    for i in 0..20 {
+        provider = provider.tool_call(&format!("c{i}"), "run_shell", failing_command());
+    }
+    let provider = provider.text("giving up");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("keep trying", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::NoProgress);
+
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { .. })),
+        "a healthy tool must never be reported stuck"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            RuntimeEvent::Warning(w) if w.contains("failed (")
+        )),
+        "no failure-ladder warnings for reported failures"
+    );
+}
+
+#[tokio::test]
+async fn a_realistic_edit_test_loop_finishes_clean() {
+    // Eight repetitions of (failing command, then a successful write): the
+    // canonical debugging loop. It must finish `Done` with no stuck signal.
+    let mut provider = FakeProvider::new();
+    for i in 0..8 {
+        provider = provider
+            .tool_call(&format!("f{i}"), "run_shell", failing_command())
+            .tool_call(
+                &format!("w{i}"),
+                "write_file",
+                json!({ "path": format!("fix{i}.txt"), "content": "attempt" }),
+            );
+    }
+    let provider = provider.text("fixed it");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+    let mut rx = h.events.subscribe();
+
+    let reason = h
+        .runtime
+        .run_turn("fix the tests", &h.events, &h.cancel)
+        .await;
+    assert_eq!(reason, StopReason::Done);
+
+    let events = drain(&mut rx);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { .. })),
+        "the exact workflow the product exists for must not accuse the tool"
+    );
+}
+
+#[tokio::test]
+async fn a_malfunctioning_tool_still_trips_the_stuck_guard_at_six() {
+    // Eight reads of a missing path are genuine malfunctions; the guard fires
+    // exactly at the threshold.
+    let mut provider = FakeProvider::new();
+    for i in 0..8 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": "missing.txt" }),
+        );
+    }
+    let provider = provider.text("giving up");
+    let mut h = build(provider, &[], SessionConfig::default());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let events = drain(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolStuck { count: 6, .. })),
+        "a genuinely unusable tool still reaches ToolStuck at 6: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn identical_reported_failures_get_the_failing_work_hint() {
+    // Three identical failing runs with nothing landing in between: the nudge
+    // fires, but with the failing-work wording — not the malfunction-shaped
+    // "write it to a script file" advice.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", failing_command())
+        .tool_call("c2", "run_shell", failing_command())
+        .tool_call("c3", "run_shell", failing_command())
+        .text("giving up");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+
+    let reason = h.runtime.run_turn("run it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+
+    let outputs = tool_result_outputs(&h.store.read_transcript(h.runtime.session_id()).unwrap());
+    assert_eq!(outputs.len(), 3);
+    assert!(
+        outputs[2].contains("reported the same failure"),
+        "the third identical failure carries the failing-work hint: {}",
+        outputs[2]
+    );
+    assert!(
+        !outputs[2].contains("script file"),
+        "malfunction advice is wrong for failing work: {}",
+        outputs[2]
+    );
+}
+
+// --- turn-handoff failure counters (#47) -------------------------------------
+
+#[tokio::test]
+async fn the_handoff_counts_both_failure_kinds_and_reads_zero_when_clean() {
+    // One reported failure (a failing command) and one malfunction (a missing
+    // file read) land in their own counters; a clean follow-up turn resets both.
+    let provider = FakeProvider::new()
+        .tool_call("c1", "run_shell", json!({ "command": "exit 7" }))
+        .tool_call("c2", "read_file", json!({ "path": "missing.txt" }))
+        .text("done")
+        .text("clean turn");
+    let mut h = build_with(provider, &[], SessionConfig::default(), Profile::Bypass);
+
+    let reason = h.runtime.run_turn("try things", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.reported_failures, 1, "the failing command");
+    assert_eq!(handoff.tool_failures, 1, "the missing-file read");
+    assert!(handoff.stuck_tools.is_empty());
+    let line = handoff.to_json_line();
+    assert!(line.contains("\"reported_failures\":1"), "{line}");
+    assert!(line.contains("\"tool_failures\":1"), "{line}");
+
+    let reason = h.runtime.run_turn("say hi", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.reported_failures, 0);
+    assert_eq!(handoff.tool_failures, 0);
+}
+
+#[tokio::test]
+async fn a_stuck_tool_is_named_in_the_handoff() {
+    let mut provider = FakeProvider::new();
+    for i in 0..6 {
+        provider = provider.tool_call(
+            &format!("c{i}"),
+            "read_file",
+            json!({ "path": "missing.txt" }),
+        );
+    }
+    let provider = provider.text("giving up");
+    let mut h = build(provider, &[], SessionConfig::default());
+
+    let reason = h.runtime.run_turn("read it", &h.events, &h.cancel).await;
+    assert_eq!(reason, StopReason::Done);
+    let handoff = h
+        .runtime
+        .last_turn_handoff()
+        .expect("a handoff after a turn");
+    assert_eq!(handoff.stuck_tools, vec!["read_file".to_string()]);
+    assert!(handoff
+        .to_json_line()
+        .contains("\"stuck_tools\":[\"read_file\"]"));
 }

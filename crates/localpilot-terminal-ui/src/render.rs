@@ -1945,8 +1945,11 @@ fn status_left(app: &AppModel) -> String {
 }
 
 fn status_right(app: &AppModel) -> String {
-    let (input, output) = app.usage.unwrap_or_default();
-    let mut parts = vec![format!("{} tokens", input.saturating_add(output))];
+    let usage = app.usage.unwrap_or_default();
+    let mut parts = vec![format!("{} tokens", usage.total())];
+    if usage.cached_input_tokens > 0 {
+        parts.push(format!("{} cached", usage.cached_input_tokens));
+    }
     if let Some((used, limit)) = app.context_usage {
         let percentage = if limit == 0 {
             0
@@ -2431,6 +2434,8 @@ fn render_question_dialog(
     let projected_content_width = width.saturating_sub(horizontal_chrome);
     let footer = if question.editing_other {
         "enter to confirm · esc to return to choices"
+    } else if question.multi_select {
+        "↑/↓ to select · space to toggle · enter to confirm · esc to cancel"
     } else {
         "↑/↓ to select · enter to confirm · esc to cancel"
     };
@@ -2479,8 +2484,14 @@ fn render_question_dialog(
         .right()
         .saturating_sub(left)
         .saturating_sub(u16::from(!screen_reader));
+    let heading = match (question.header, question.total > 1) {
+        (Some(header), true) => format!("{header}  ({}/{})", question.index, question.total),
+        (Some(header), false) => header.to_string(),
+        (None, true) => format!("Question {}/{}", question.index, question.total),
+        (None, false) => "Question".to_string(),
+    };
     frame.render_widget(
-        Paragraph::new("Question").style(theme.ui(UiRole::Prompt)),
+        Paragraph::new(truncate_end(&heading, content_width)).style(theme.ui(UiRole::Prompt)),
         Rect::new(left, inner.y, content_width, 1),
     );
     if !screen_reader {
@@ -2507,12 +2518,26 @@ fn render_question_dialog(
         let selected = question.selected == index;
         let marker = if selected { "❯" } else { " " };
         let label = if let Some(option) = question.options.get(index) {
-            option.as_str()
+            option.label.as_str()
         } else if question.editing_other {
             question.other
         } else {
             "Other (type your answer)"
         };
+        let selection_mark = if index < question.options.len() && question.multi_select {
+            if question.checked.get(index).copied().unwrap_or(false) {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        } else {
+            ""
+        };
+        let description = question
+            .options
+            .get(index)
+            .and_then(|option| option.description.as_deref())
+            .map_or(String::new(), |description| format!(" — {description}"));
         let shown = if index == question.options.len() && question.editing_other {
             let value = if label.is_empty() {
                 "Type your answer"
@@ -2521,7 +2546,10 @@ fn render_question_dialog(
             };
             format!("{marker} {}. {value}", index + 1)
         } else {
-            format!("{marker} {}. {label}", index + 1)
+            format!(
+                "{marker} {}. {selection_mark}{label}{description}",
+                index + 1
+            )
         };
         let role = if selected {
             UiRole::Focus
@@ -3389,8 +3417,21 @@ mod tests {
             detail: "Do you prefer Red or Blue?".into(),
         });
         app.request_question(
+            Some("Preference".to_string()),
             "Do you prefer Red or Blue?",
-            ["Red".to_string(), "Blue".to_string()],
+            [
+                crate::QuestionOption {
+                    label: "Red".to_string(),
+                    description: None,
+                },
+                crate::QuestionOption {
+                    label: "Blue".to_string(),
+                    description: Some("cool tone".to_string()),
+                },
+            ],
+            false,
+            1,
+            1,
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
         let mut hits = None;
@@ -3399,9 +3440,10 @@ mod tests {
             .expect("draw question");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("○ Asking user Do you prefer Red or Blue?"));
-        assert!(rendered.contains("Question"));
+        assert!(rendered.contains("Preference"));
         assert!(rendered.contains("❯ 1. Red"));
         assert!(rendered.contains("2. Blue"));
+        assert!(rendered.contains("cool tone"));
         assert!(rendered.contains("3. Other (type your answer)"));
         assert!(rendered.contains("↑/↓ to select · enter to confirm · esc …"));
         let hits = hits.expect("hit map");
@@ -4122,7 +4164,11 @@ mod tests {
             app.header.workspace_dirty = Some(true);
             app.header.mode = "agent".to_string();
             app.header.profile = "relaxed".to_string();
-            app.usage = Some((12, 34));
+            app.usage = Some(crate::UsageTotals {
+                input_tokens: 12,
+                output_tokens: 34,
+                cached_input_tokens: 0,
+            });
             app.context_usage = Some((2_500, 10_000));
             let mut hit_map = None;
             terminal

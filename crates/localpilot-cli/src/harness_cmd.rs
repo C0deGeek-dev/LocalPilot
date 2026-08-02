@@ -260,12 +260,44 @@ fn provider_for(
     .ok_or_else(|| anyhow::anyhow!("no provider is configured"))
 }
 
+/// How one clarifying question is put to the user.
+///
+/// Guidance questions are open questions with no fixed options, so the two
+/// implementations differ only in how the answer is collected: a line of stdin,
+/// or the shared choice widget on a terminal. Both keep the same contract — an
+/// empty answer delegates that axis to the model's judgment.
+pub trait QuestionAsker {
+    /// Ask `question` and return the user's answer, empty for "you decide".
+    ///
+    /// # Errors
+    /// Returns an error only when the input surface itself fails.
+    fn ask(&mut self, question: &str, out: &mut dyn Write) -> anyhow::Result<String>;
+}
+
+/// The stdin asker: today's `write!` + `read_line` loop behind the trait. Every
+/// piped/non-TTY intake path keeps its exact behaviour.
+pub struct StdinAsker<R: std::io::BufRead>(pub R);
+
+impl<R: std::io::BufRead> QuestionAsker for StdinAsker<R> {
+    fn ask(&mut self, question: &str, out: &mut dyn Write) -> anyhow::Result<String> {
+        write!(
+            out,
+            "
+{question}
+> "
+        )?;
+        out.flush()?;
+        let mut answer = String::new();
+        self.0.read_line(&mut answer)?;
+        Ok(answer.trim().to_string())
+    }
+}
+
 /// How a below-threshold guidance assessment resolves the open decisions.
 pub enum Clarification<'a> {
-    /// Interactive surface: ask each open question on `out` and read one
-    /// answer per line from the reader; an empty answer delegates that axis
-    /// to the model's judgment.
-    Ask(&'a mut dyn std::io::BufRead),
+    /// Interactive surface: ask each open question and collect one answer per
+    /// axis; an empty answer delegates that axis to the model's judgment.
+    Ask(&'a mut dyn QuestionAsker),
     /// Non-interactive surface: emit a structured JSON report naming the open
     /// axes on `out` and stop without writing a brief.
     Emit,
@@ -322,12 +354,12 @@ pub async fn intake(
         use std::io::IsTerminal;
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     };
-    let mut stdin_lines;
+    let mut stdin_asker;
     let clarification = if assume_judgment {
         Clarification::AssumeJudgment
     } else if interactive {
-        stdin_lines = std::io::BufReader::new(std::io::stdin());
-        Clarification::Ask(&mut stdin_lines)
+        stdin_asker = StdinAsker(std::io::BufReader::new(std::io::stdin()));
+        Clarification::Ask(&mut stdin_asker)
     } else {
         Clarification::Emit
     };
@@ -422,7 +454,7 @@ pub(crate) async fn intake_flow(
             )?;
             Ok(IntakeOutcome::BriefWritten)
         }
-        Clarification::Ask(input) => {
+        Clarification::Ask(asker) => {
             writeln!(
                 out,
                 "guidance score {:.2} is below the threshold {threshold:.2}: {} decision(s) \
@@ -433,11 +465,7 @@ pub(crate) async fn intake_flow(
             )?;
             let mut answers: Vec<(String, String)> = Vec::new();
             for (axis, question) in open.iter().zip(&questions) {
-                write!(out, "\n{question}\n> ")?;
-                out.flush()?;
-                let mut answer = String::new();
-                input.read_line(&mut answer)?;
-                let answer = answer.trim().to_string();
+                let answer = asker.ask(question, out)?;
                 if !answer.is_empty() {
                     answers.push((axis.axis.clone(), answer));
                 }
@@ -799,6 +827,13 @@ where
         }
         if outcome.committed {
             writeln!(out, "step {} complete", outcome.step_number)?;
+            // A committed step can still carry a reason when the phase-cadence
+            // gate ran (plan boundary) and blocked — e.g. a failing dependency
+            // audit. Surface it and stop rather than reporting a clean run.
+            if let Some(reason) = &outcome.blocked_reason {
+                writeln!(out, "phase gate blocked: {reason}")?;
+                break;
+            }
         } else {
             writeln!(
                 out,
@@ -890,45 +925,102 @@ where
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())
         .unwrap_or_else(|_| Config::default());
     let policy = ResumePolicy::from(&config.quota);
-    let now = now_unix();
-    let ctx = ResumeContext {
-        window_elapsed: paused.resume_eligible_unix.is_none_or(|t| now >= t),
-        at_step_boundary: true,
-        workspace_clean: !workspace_dirty(root),
-        pending_destructive_approval: false,
-        user_cancelled: false,
-        provider_identity_changed: false,
-        waited: Duration::from_secs(now.saturating_sub(paused.paused_at_unix)),
-    };
 
-    match decide_resume(&policy, &ctx) {
-        ResumeDecision::Resume => {
-            writeln!(out, "resuming paused run at step {}", paused.step_number)?;
-            store.delete_cache(QUOTA_PAUSE_KEY)?;
-            resume_with_events(root, model, provider_id, run, events, cancel, out).await?;
+    // Wait until the pause window elapses (re-checking safety gates and
+    // cancellation each poll), then resume — instead of printing an ETA and
+    // exiting. Bounded by `max_wait` (once `waited` passes it `decide_resume`
+    // returns `BlockedBy`, ending the loop) and cancellable at any sleep.
+    loop {
+        if cancel.is_cancelled() {
+            writeln!(out, "wait cancelled")?;
+            return Ok(());
         }
-        ResumeDecision::Wait => {
-            let eta = paused
-                .resume_eligible_unix
-                .map_or(0, |t| t.saturating_sub(now));
-            writeln!(
-                out,
-                "paused ({}); resume eligible in ~{eta}s",
-                paused.reason
-            )?;
-        }
-        ResumeDecision::AskUser => {
-            writeln!(
-                out,
-                "auto_resume is 'ask'; set quota.auto_resume = run|global to continue automatically"
-            )?;
-        }
-        ResumeDecision::BlockedBy(reason) => {
-            writeln!(out, "cannot resume: {reason}")?;
+        let now = now_unix();
+        let ctx = ResumeContext {
+            window_elapsed: paused.resume_eligible_unix.is_none_or(|t| now >= t),
+            // The between-steps CLI resume is always at a step boundary and has no
+            // pending interactive approval; the interactive path feeds real values.
+            at_step_boundary: true,
+            workspace_clean: !workspace_dirty(root),
+            pending_destructive_approval: false,
+            user_cancelled: cancel.is_cancelled(),
+            // Only an explicit `--provider` that differs from the paused run's
+            // provider counts as an identity change; resuming with no override
+            // stays on the same provider.
+            provider_identity_changed: provider_id.is_some_and(|p| p != paused.provider_id),
+            waited: Duration::from_secs(now.saturating_sub(paused.paused_at_unix)),
+        };
+
+        match decide_resume(&policy, &ctx) {
+            ResumeDecision::Resume => {
+                writeln!(out, "resuming paused run at step {}", paused.step_number)?;
+                store.delete_cache(QUOTA_PAUSE_KEY)?;
+                return resume_with_events(root, model, provider_id, run, events, cancel, out)
+                    .await;
+            }
+            ResumeDecision::AskUser => {
+                writeln!(
+                    out,
+                    "auto_resume is 'ask'; set quota.auto_resume = run|global to continue automatically"
+                )?;
+                return Ok(());
+            }
+            ResumeDecision::BlockedBy(reason) => {
+                writeln!(out, "cannot resume: {reason}")?;
+                return Ok(());
+            }
+            ResumeDecision::Wait => {
+                let nap = wait_nap(&paused, &policy, now, WAIT_POLL_CAP_SECS)
+                    .unwrap_or(Duration::from_secs(1));
+                let eta = paused
+                    .resume_eligible_unix
+                    .map_or(0, |t| t.saturating_sub(now));
+                writeln!(
+                    out,
+                    "paused ({}); waiting ~{}s (resume eligible in ~{eta}s)",
+                    paused.reason,
+                    nap.as_secs()
+                )?;
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        writeln!(out, "wait cancelled")?;
+                        return Ok(());
+                    }
+                    () = tokio::time::sleep(nap) => {}
+                }
+            }
         }
     }
-    Ok(())
 }
+
+/// How long a paused run should sleep before re-deciding: `Some(nap)` to sleep
+/// then re-check, `None` when the window has elapsed (act now). The nap is
+/// clamped to `poll_cap` (so gates and cancellation are re-checked periodically)
+/// and to the time left before `max_wait` (so the loop never sleeps past its own
+/// deadline — `decide_resume` then returns `BlockedBy` and the loop ends). Pure,
+/// so it is unit-tested without a clock.
+fn wait_nap(
+    paused: &PausedRun,
+    policy: &ResumePolicy,
+    now: u64,
+    poll_cap: u64,
+) -> Option<Duration> {
+    let eligible = paused.resume_eligible_unix?;
+    if now >= eligible {
+        return None;
+    }
+    let waited = now.saturating_sub(paused.paused_at_unix);
+    let until_max = policy.max_wait.as_secs().saturating_sub(waited);
+    if until_max == 0 {
+        return None;
+    }
+    let nap = (eligible - now).min(poll_cap).min(until_max).max(1);
+    Some(Duration::from_secs(nap))
+}
+
+/// Re-check cadence while waiting on a quota pause, so cancellation and the
+/// safety gates are re-evaluated at least this often even for a long window.
+const WAIT_POLL_CAP_SECS: u64 = 30;
 
 fn workspace_dirty(root: &Path) -> bool {
     git_line(root, &["status", "--porcelain"]).is_some_and(|s| !s.trim().is_empty())
@@ -990,6 +1082,7 @@ fn build_runtime(
             tool_marker_enabled: tools.marker,
             enforce_readable_errors: tools.readable_errors,
             repair_mode: tools.repair,
+            elide_seen_reads: tools.elide_seen_reads,
             ..SessionConfig::default()
         },
         Vec::new(),
@@ -1028,6 +1121,51 @@ fn repo_summary(root: &Path) -> String {
 mod tests {
     use super::*;
     use localpilot_llm::FakeProvider;
+
+    fn paused_at(paused: u64, eligible: Option<u64>) -> PausedRun {
+        PausedRun {
+            paused_at_unix: paused,
+            reason: "limit".to_string(),
+            resume_eligible_unix: eligible,
+            step_number: 1,
+            provider_id: "p".to_string(),
+            attempt: 1,
+        }
+    }
+
+    fn wait_policy(max_wait_secs: u64) -> localpilot_quota::ResumePolicy {
+        localpilot_quota::ResumePolicy {
+            mode: localpilot_quota::ResumeMode::Run,
+            max_wait: Duration::from_secs(max_wait_secs),
+            requires_clean_workspace: false,
+            requires_no_pending_approval: false,
+            only_at_step_boundary: false,
+        }
+    }
+
+    #[test]
+    fn wait_nap_clamps_to_poll_cap_and_max_wait_and_stops_when_elapsed() {
+        // Eligible in 100s, poll cap 30 → nap 30 (re-check cadence).
+        let p = paused_at(0, Some(100));
+        assert_eq!(
+            wait_nap(&p, &wait_policy(3600), 0, 30),
+            Some(Duration::from_secs(30))
+        );
+        // Window elapsed → act now.
+        assert_eq!(wait_nap(&p, &wait_policy(3600), 100, 30), None);
+        // Clamped to the time left before max_wait: waited 50 of max 60 → nap 10.
+        assert_eq!(
+            wait_nap(&p, &wait_policy(60), 50, 30),
+            Some(Duration::from_secs(10))
+        );
+        // Past max_wait → no nap; decide_resume returns BlockedBy and the loop ends.
+        assert_eq!(wait_nap(&p, &wait_policy(60), 60, 30), None);
+        // No eligible time recorded → act now.
+        assert_eq!(
+            wait_nap(&paused_at(0, None), &wait_policy(3600), 0, 30),
+            None
+        );
+    }
 
     const VALID_BRIEF: &str = "# Brief: widget\n\n## Summary\n\nBuild the widget.\n\n\
 ## Requirements\n\n- It works\n\n## Constraints\n\n- Small\n\n\
@@ -1136,7 +1274,9 @@ mod tests {
             .text(HIGH_GUIDANCE)
             .text(VALID_BRIEF);
         let mut out = Vec::new();
-        let mut answers = std::io::Cursor::new(b"Windows desktop\nSQLite file\n".to_vec());
+        let mut answers = StdinAsker(std::io::Cursor::new(
+            b"Windows desktop\nSQLite file\n".to_vec(),
+        ));
         let gate = GuidanceGate {
             threshold: 0.7,
             max_questions: 5,
@@ -1187,7 +1327,7 @@ mod tests {
         // assess (low) -> brief; no re-assessment when nothing was answered.
         let provider = FakeProvider::new().text(LOW_GUIDANCE).text(VALID_BRIEF);
         let mut out = Vec::new();
-        let mut answers = std::io::Cursor::new(b"\n\n".to_vec());
+        let mut answers = StdinAsker(std::io::Cursor::new(b"\n\n".to_vec()));
         let gate = GuidanceGate {
             threshold: 0.7,
             max_questions: 5,

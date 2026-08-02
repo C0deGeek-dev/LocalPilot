@@ -302,9 +302,14 @@ Safety gates:
 CLI:
 
 - a run that hits a provider quota/rate limit pauses cleanly at the step
-  boundary and writes an inspectable paused-run record under the project store
-- `localpilot harness wait-resume --model <m>` re-evaluates every safety gate and
-  either continues the run, reports the remaining wait, or explains what blocks it
+  boundary and writes an inspectable paused-run record (with the provider id and
+  a pause-attempt count) under the project store; the backoff window grows across
+  repeated pauses of the same step
+- `localpilot harness wait-resume --model <m>` re-evaluates every safety gate,
+  then **waits out** the pause window — re-checking cancellation and the gates on
+  a bounded poll and honouring `quota.max_wait_minutes` — and resumes, or explains
+  what blocks it. Ctrl-C ends the wait; an explicit `--provider` differing from
+  the paused run counts as a provider change (which blocks an unattended resume)
 
 UI:
 

@@ -66,10 +66,12 @@ impl Tool for Remember {
     }
 
     fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
-        // Enqueuing a candidate writes to the project-local LocalMind store.
+        // Enqueuing a candidate writes to the project-local LocalMind store — an
+        // ordinary in-workspace file, never a secret path.
         Ok(vec![Effect::WritePath {
             inside_workspace: true,
             overwrite: false,
+            secret_like: false,
         }])
     }
 
@@ -145,6 +147,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         }
     }
 
@@ -161,7 +165,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!out.is_error);
+        assert!(!out.is_error());
 
         // It is a review candidate, visible in the review queue...
         let review = crate::ops::review_list(dir.path()).unwrap();
@@ -193,7 +197,8 @@ mod tests {
             effects,
             vec![Effect::WritePath {
                 inside_workspace: true,
-                overwrite: false
+                overwrite: false,
+                secret_like: false,
             }]
         );
     }

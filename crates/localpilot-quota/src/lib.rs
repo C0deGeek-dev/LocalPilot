@@ -85,6 +85,15 @@ pub struct PausedRun {
     pub resume_eligible_unix: Option<u64>,
     pub step_number: usize,
     pub provider_id: String,
+    /// How many times this run has paused on the provider limit, so the backoff
+    /// window grows across repeated pauses. `1` on the first pause; `#[serde(default)]`
+    /// (to `1`) so a marker written before this field still loads.
+    #[serde(default = "one")]
+    pub attempt: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 impl PausedRun {
@@ -98,7 +107,16 @@ impl PausedRun {
             resume_eligible_unix: Some(now + window.wait.as_secs()),
             step_number,
             provider_id: provider_id.into(),
+            attempt: 1,
         }
+    }
+
+    /// Set the pause attempt count (1 = first pause), so the caller can escalate
+    /// the backoff window across repeated pauses.
+    #[must_use]
+    pub fn with_attempt(mut self, attempt: u32) -> Self {
+        self.attempt = attempt.max(1);
+        self
     }
 }
 
@@ -271,6 +289,38 @@ mod tests {
         let back: PausedRun = serde_json::from_str(&json).unwrap();
         assert_eq!(run, back);
         assert_eq!(back.step_number, 2);
+    }
+
+    #[test]
+    fn escalation_grows_the_backoff_across_pauses() {
+        // A bare retryable quota falls back to backoff, which widens with the
+        // attempt (the doubling exactly covers the jitter range, so it is
+        // monotonic non-decreasing sample to sample).
+        let bare = QuotaInfo {
+            retryable: true,
+            ..QuotaInfo::default()
+        };
+        let w1 = estimate_window(&bare, 1).wait;
+        let w2 = estimate_window(&bare, 2).wait;
+        let w3 = estimate_window(&bare, 3).wait;
+        assert!(
+            w2 >= w1,
+            "attempt 2 must not be shorter than 1: {w1:?} vs {w2:?}"
+        );
+        assert!(
+            w3 >= w2,
+            "attempt 3 must not be shorter than 2: {w2:?} vs {w3:?}"
+        );
+    }
+
+    #[test]
+    fn paused_run_attempt_defaults_to_one_for_an_older_marker() {
+        let run = PausedRun::new(1, "anthropic", &estimate_window(&info(), 1)).with_attempt(4);
+        assert_eq!(run.attempt, 4);
+        // A marker written before `attempt` existed still loads, defaulting to 1.
+        let legacy = r#"{"paused_at_unix":0,"reason":"limit","resume_eligible_unix":null,"step_number":1,"provider_id":"anthropic"}"#;
+        let back: PausedRun = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.attempt, 1);
     }
 
     #[test]

@@ -16,12 +16,12 @@ mod serve;
 
 pub use acp::{serve_acp, ACP_PROTOCOL_VERSION};
 pub use approver::{AskRegistry, PendingAsk, RpcApprover};
-pub use framing::LineFraming;
+pub use framing::{JsonRecordReader, LineFraming};
 pub use mcp::{
     serve_mcp, DriverInterventionRecord, McpServeOptions, McpServeReport, MCP_PROTOCOL_VERSION,
 };
 pub use protocol::{
-    ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent, ServerRecord,
-    RPC_PROTOCOL_VERSION,
+    AttachTarget, ClientCommand, ClientRecord, InputDisposition, PlanStepWire, ServerEvent,
+    ServerRecord, RPC_PROTOCOL_VERSION, SERVER_VERSION,
 };
-pub use serve::{serve, RpcError, ServeContext};
+pub use serve::{map_event, serve, RpcError, ServeContext};

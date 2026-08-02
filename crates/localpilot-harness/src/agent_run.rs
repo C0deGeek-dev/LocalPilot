@@ -191,6 +191,7 @@ pub async fn run_agent(
         tool_marker_enabled: ctx.config.tool_marker_enabled,
         enforce_readable_errors: ctx.config.enforce_readable_errors,
         repair_mode: ctx.config.repair_mode,
+        elide_seen_reads: ctx.config.elide_seen_reads,
         turn_timeout: ctx.config.turn_timeout,
         ..SessionConfig::default()
     };
@@ -245,10 +246,23 @@ pub async fn run_agent(
 
 /// Cut a child's answer to the summary bound, on a line boundary where possible.
 fn bound(text: &str) -> (String, bool) {
-    if text.len() <= MAX_SUMMARY_BYTES {
+    bound_summary(text, MAX_SUMMARY_BYTES)
+}
+
+/// Cut `text` to `limit` bytes, preferring a line boundary, and say whether it
+/// was cut.
+///
+/// Shared rather than reimplemented: anything that hands one session's answer to
+/// another session has the same problem — a verbose child must not be able to
+/// grow its reader's context without limit — and two slightly different
+/// truncations would differ in exactly the case that matters, a report cut
+/// mid-word.
+#[must_use]
+pub fn bound_summary(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
         return (text.to_string(), false);
     }
-    let mut end = MAX_SUMMARY_BYTES;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -610,6 +624,7 @@ mod tests {
         let usage = localpilot_core::TokenUsage {
             input_tokens: 120,
             output_tokens: 34,
+            ..Default::default()
         };
         let _ = child_tx.send(RuntimeEvent::Usage(usage));
         let _ = child_tx.send(RuntimeEvent::Plan(Vec::new()));

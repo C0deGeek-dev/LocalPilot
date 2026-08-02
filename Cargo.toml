@@ -4,6 +4,9 @@ members = [
     "crates/localpilot-core",
     "crates/localpilot-config",
     "crates/localpilot-llm",
+    "crates/localpilot-llm-core",
+    "crates/localpilot-llm-openai",
+    "crates/localpilot-llm-anthropic",
     "crates/localpilot-tools",
     "crates/localpilot-harness",
     "crates/localpilot-tui",
@@ -16,11 +19,14 @@ members = [
     "crates/localpilot-dist",
     "crates/localpilot-recovery",
     "crates/localpilot-rpc",
+    "crates/localpilot-server",
+    "crates/localpilot-taskgraph",
     "crates/localpilot-quota",
     "crates/localpilot-localmind",
     "crates/localpilot-research",
     "crates/localpilot-render",
     "crates/localpilot-patchgen",
+    "crates/localpilot-selfdev",
     "crates/localpilot-selfreview",
     "crates/localpilot-verify",
 ]
@@ -65,6 +71,7 @@ ratatui = { version = "=0.29.0", default-features = false, features = [
 ] }
 figment = { version = "=0.10.19", features = ["env", "toml", "yaml"] }
 futures = "=0.3.31"
+globset = "=0.4.16"
 ignore = "=0.4.23"
 # PNG-encode a captured clipboard image (RGBA → PNG), TUI only. `arboard`'s
 # image-data feature pulls `image` regardless, so we reuse it for encoding and
@@ -129,6 +136,17 @@ wiremock = "=0.6.2"
 # would become a hard failure across the whole tree before the triggering code
 # exists. Adopt pedantic deliberately in its own later commit (see docs/13 §9).
 # `unwrap_used`/`expect_used` are relaxed inside tests via `clippy.toml`.
+# Profile for a build the running binary intends to replace itself with. It
+# inherits `release` so the produced binary behaves like a shipped one (same
+# codegen units, same panic strategy, same `debug_assertions` state), but drops
+# the optimiser: a binary that exists to be swapped in within the minute should
+# not spend that minute being optimised. Debug info is kept — a self-dev binary
+# is the one most likely to need a backtrace.
+[profile.selfdev]
+inherits = "release"
+opt-level = 0
+debug = 1
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

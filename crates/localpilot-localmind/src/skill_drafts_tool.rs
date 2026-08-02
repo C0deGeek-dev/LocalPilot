@@ -168,6 +168,8 @@ mod tests {
             retention: None,
             processes: None,
             agents: None,
+            prompter: None,
+            peers: None,
         }
     }
 
@@ -202,7 +204,7 @@ mod tests {
 
         let out = SkillDrafts.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains(&id),
             "the draft id must be listed: {}",
@@ -228,7 +230,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains("disabled"),
             "the body must report disabled: {}",
@@ -252,7 +254,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!out.is_error);
+        assert!(!out.is_error());
         assert!(
             out.text.contains("no skill draft with id"),
             "got: {}",
@@ -267,7 +269,7 @@ mod tests {
 
         let out = SkillDrafts.invoke(json!({}), &context(&ws)).await.unwrap();
 
-        assert!(!out.is_error, "an absent store must not be an error");
+        assert!(!out.is_error(), "an absent store must not be an error");
         assert!(out.text.contains("no skill drafts"), "got: {}", out.text);
         // Read-only: a bare prompt never initializes the project.
         assert!(!dir.path().join(".localmind.toml").exists());

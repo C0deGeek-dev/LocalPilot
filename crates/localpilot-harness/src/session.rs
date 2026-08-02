@@ -13,7 +13,8 @@ use indexmap::IndexMap;
 use localpilot_config::redact::redact;
 use localpilot_config::{CheckConfig, RuleSeverity};
 use localpilot_core::{
-    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolResult, ToolUseId,
+    ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolOutcome, ToolResult,
+    ToolUseId,
 };
 use localpilot_llm::{
     InputBlockKind, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError,
@@ -27,9 +28,7 @@ use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
 };
 use localpilot_store::{origin_for, transcript_from_events, OpenReason, SessionEventKind, Store};
-use localpilot_tools::{
-    Broker, ShellOutput, ToolContext, ToolDispatchResult, ToolOutputPresentation, ToolRegistry,
-};
+use localpilot_tools::{Broker, ToolContext, ToolDispatchResult, ToolRegistry};
 use localpilot_verify::{DeterministicVerifier, Observation, Verdict, VerificationInput, Verifier};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -70,13 +69,12 @@ pub enum StopReason {
     /// unbounded hang. The per-turn handoff (`last_turn_handoff`) summarizes what
     /// the turn had done when it was cut off.
     TimedOut,
-}
-
-/// A user-authored shell result with the ordinary audited/model-facing tool
-/// result plus typed, redacted streams for an interactive host.
-pub struct UserShellResult {
-    pub result: ToolResult,
-    pub shell: Option<ShellOutput>,
+    /// A graceful shutdown was requested (`quiesce_signal`): the turn stopped at
+    /// the next safe boundary after flushing the session. Distinct from
+    /// `Cancelled` because it is *not* a discard — a wait-like tool interrupted
+    /// mid-flight leaves a resumable, non-error result, so the turn can be
+    /// continued after the process comes back (e.g. a self-dev reload).
+    Quiesced,
 }
 
 /// A bounded, parseable summary of what a turn accomplished, surfaced at the
@@ -98,6 +96,13 @@ pub struct TurnHandoff {
     /// `print` one-shot path, which reads accepted memory but never closes out —
     /// the field surfaces that so a caller knows to run an explicit close-out.
     pub memory_written: bool,
+    /// Calls the tool could not perform at all (spawn error, denial, timeout).
+    pub tool_failures: usize,
+    /// Calls whose tool ran fine and whose wrapped work reported failure (a
+    /// failing test run, a non-2xx fetch).
+    pub reported_failures: usize,
+    /// Tools that crossed the per-turn stuck threshold.
+    pub stuck_tools: Vec<String>,
 }
 
 impl TurnHandoff {
@@ -110,11 +115,19 @@ impl TurnHandoff {
             .iter()
             .map(|f| serde_json::Value::String(f.clone()))
             .collect::<Vec<_>>();
+        let stuck = self
+            .stuck_tools
+            .iter()
+            .map(|t| serde_json::Value::String(t.clone()))
+            .collect::<Vec<_>>();
         serde_json::json!({
             "stop": format!("{:?}", self.reason),
             "tool_calls": self.tool_calls,
             "files_changed": files,
             "memory_written": self.memory_written,
+            "tool_failures": self.tool_failures,
+            "reported_failures": self.reported_failures,
+            "stuck_tools": stuck,
         })
         .to_string()
     }
@@ -159,6 +172,15 @@ pub enum RuntimeEvent {
     /// A tool has failed repeatedly (≥ 6 times in this turn). The safeguard
     /// stops issuing that tool and notifies the user.
     ToolStuck { name: String, count: u32 },
+    /// A tool reported touching files. Published on the ordinary event stream so
+    /// anything that cares — today, a swarm's advisory conflict alerts —
+    /// subscribes rather than being wired into the tool path. A session nobody
+    /// is watching for this simply has no subscriber.
+    FilesTouched(Vec<localpilot_tools::touch::FileTouch>),
+    /// One queued soft interrupt was admitted into the model-visible history.
+    /// Hosts use this only to advance presentation state; content stays private
+    /// in the durable message/event path.
+    SoftInterruptInjected { point: String, source: String },
     /// The loop stopped.
     Stopped(StopReason),
 }
@@ -281,6 +303,12 @@ pub struct SessionConfig {
     /// split on whitespace — no shell). `None` resolves the command from the
     /// workspace stack. Maps `[harness] verify_command`.
     pub verify_command: Option<String>,
+    /// Elide a `read_file` result for a file+range already read this session and
+    /// unchanged since (same mtime and length): return a compact stub instead of
+    /// the full body to save context. Off by default; maps `[tools]
+    /// elide_seen_reads`. Conservative — a changed file (or any doubt) always
+    /// returns full content.
+    pub elide_seen_reads: bool,
 }
 
 impl Default for SessionConfig {
@@ -306,6 +334,7 @@ impl Default for SessionConfig {
             repair_mode: localpilot_config::RepairMode::Off,
             verify_before_done: false,
             verify_command: None,
+            elide_seen_reads: false,
         }
     }
 }
@@ -335,31 +364,162 @@ pub fn effective_context_limit(window: Option<u64>, configured: usize) -> usize 
     }
 }
 
-/// A thread-safe queue of steering input: user text typed while a turn is
-/// running, admitted at the next safe provider-turn boundary (after the
-/// current iteration's tool calls, before the next provider call).
+/// Who produced a soft interrupt. Drives how the injected message is labelled so
+/// a system or background-task message is not mistaken for user-typed input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoftInterruptSource {
+    /// The user steered the running turn (typed input, the common case).
+    #[default]
+    User,
+    /// The harness itself injected context (a notice, a background result summary).
+    System,
+    /// A background task reported completion or progress into the turn.
+    BackgroundTask,
+}
+
+impl SoftInterruptSource {
+    /// A short label prefixed to a non-user injection so the model (and the
+    /// transcript) can tell it apart from user-typed steering. `User` is
+    /// unlabelled — it *is* the user talking.
+    fn label(self) -> Option<&'static str> {
+        match self {
+            SoftInterruptSource::User => None,
+            SoftInterruptSource::System => Some("system"),
+            SoftInterruptSource::BackgroundTask => Some("background task"),
+        }
+    }
+}
+
+/// One message injected into a running turn at a safe boundary. Text plus who
+/// sent it and whether it is urgent (an urgent interrupt is admitted between
+/// tool calls, skipping the rest of the batch; a normal one waits for the batch
+/// to finish).
+#[derive(Debug, Clone)]
+pub struct SoftInterrupt {
+    pub content: String,
+    pub source: SoftInterruptSource,
+    pub urgent: bool,
+}
+
+impl SoftInterrupt {
+    /// A non-urgent user steering message (the common case).
+    #[must_use]
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            source: SoftInterruptSource::User,
+            urgent: false,
+        }
+    }
+
+    /// The message as it appears in the turn: a user-role message, but a non-user
+    /// source is prefixed with its label so it does not read as user-typed input.
+    fn into_message(self) -> Message {
+        let text = match self.source.label() {
+            Some(label) => format!("[{label}] {}", self.content),
+            None => self.content,
+        };
+        Message::text(Role::User, text)
+    }
+}
+
+/// A thread-safe queue of soft interrupts: messages pushed while a turn is
+/// running, admitted at a safe provider-turn boundary. User steering is the
+/// common case; the harness and background tasks use the same queue so every
+/// mid-turn injection rides one path.
+#[derive(Debug, Default)]
+struct SteerQueueInner {
+    queue: std::sync::Mutex<std::collections::VecDeque<SoftInterrupt>>,
+    urgent: tokio::sync::Notify,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct SteerQueue(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+pub struct SteerQueue(Arc<SteerQueueInner>);
 
 impl SteerQueue {
-    /// Queue steering text for the running turn.
+    /// Queue user steering text for the running turn (a non-urgent user message).
     pub fn push(&self, text: impl Into<String>) {
-        if let Ok(mut queue) = self.0.lock() {
-            queue.push_back(text.into());
+        self.push_interrupt(SoftInterrupt::user(text.into()));
+    }
+
+    /// Queue an arbitrary soft interrupt (user, system, or background task).
+    pub fn push_interrupt(&self, interrupt: SoftInterrupt) {
+        let urgent = interrupt.urgent;
+        if let Ok(mut queue) = self.0.queue.lock() {
+            queue.push_back(interrupt);
+        }
+        if urgent {
+            self.0.urgent.notify_one();
         }
     }
 
     /// Whether anything is queued.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.lock().map(|q| q.is_empty()).unwrap_or(true)
+        self.0.queue.lock().map(|q| q.is_empty()).unwrap_or(true)
     }
 
-    fn drain(&self) -> Vec<String> {
+    /// Whether an *urgent* interrupt is queued (admitted between tool calls).
+    #[must_use]
+    fn has_urgent(&self) -> bool {
         self.0
+            .queue
+            .lock()
+            .map(|q| q.iter().any(|i| i.urgent))
+            .unwrap_or(false)
+    }
+
+    fn drain(&self) -> Vec<SoftInterrupt> {
+        self.0
+            .queue
             .lock()
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    async fn urgent_notified(&self) {
+        loop {
+            let notified = self.0.urgent.notified();
+            if self.has_urgent() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// A one-way "wind this turn down gracefully" request, honoured at the same safe
+/// boundaries as cancellation but with a gentler contract.
+///
+/// Where cancelling *discards* the running turn, quiescing *finishes it safely*:
+/// the turn stops at the next boundary, but a wait-like tool caught mid-flight is
+/// answered with a non-error, resumable result (so the exact call can be
+/// re-issued later) rather than an abort, and the session is flushed before the
+/// loop returns. It is the primitive a graceful shutdown or an exec-in-place
+/// reload builds on — persist, quiesce, then swap — because `exec` runs no
+/// destructors, so nothing durable may be left only in memory when it fires.
+///
+/// A clone shares one underlying signal, so a host holding a clone can request a
+/// quiesce on the running turn from another task, exactly as [`SteerQueue`] lets
+/// it steer.
+#[derive(Debug, Clone, Default)]
+pub struct QuiesceSignal(CancellationToken);
+
+impl QuiesceSignal {
+    /// Request a graceful wind-down of the running turn. Idempotent.
+    pub fn request(&self) {
+        self.0.cancel();
+    }
+
+    /// Whether a wind-down has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// The underlying token, for awaiting the request inside a `select!`.
+    fn token(&self) -> &CancellationToken {
+        &self.0
     }
 }
 
@@ -396,6 +556,44 @@ fn file_write_path(input: &serde_json::Value) -> Option<String> {
         .get("path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+}
+
+/// The normalized string path of a tool call's `path` argument, for a stable
+/// read-history key. `None` when the call has no string path or it cannot be
+/// resolved in the workspace.
+fn normalized_tool_path(
+    workspace: &localpilot_sandbox::Workspace,
+    input: &serde_json::Value,
+) -> Option<String> {
+    let raw = input.get("path").and_then(serde_json::Value::as_str)?;
+    workspace
+        .normalize(std::path::Path::new(raw))
+        .ok()
+        .map(|p| p.display().to_string())
+}
+
+/// The requested line range of a `read_file` call (`None` = the whole file).
+fn read_file_range(input: &serde_json::Value) -> (Option<usize>, Option<usize>) {
+    let line = |key: &str| {
+        input
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| usize::try_from(v).unwrap_or(usize::MAX))
+    };
+    (line("start_line"), line("end_line"))
+}
+
+/// Current mtime (unix seconds) and byte length of a workspace file, for the
+/// "unchanged since read" freshness check. Any error means "cannot confirm
+/// freshness" and the caller must serve full content.
+fn file_mtime_len(norm_path: &str) -> std::io::Result<(u64, u64)> {
+    let meta = std::fs::metadata(norm_path)?;
+    let mtime = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok((mtime, meta.len()))
 }
 
 /// Default threshold at which a tool is considered stuck and the safeguard
@@ -506,8 +704,10 @@ impl ToolFailureGuard {
         *count
     }
 
-    /// Reset counters for a successful (non-error) tool invocation.
-    fn record_success(&mut self, tool_name: &str) {
+    /// Clear the counter on any call that proves the tool works — a success,
+    /// or a completed run whose wrapped work reported failure. The guard
+    /// measures tool health, not task progress.
+    fn record_working(&mut self, tool_name: &str) {
         self.failures.remove(tool_name);
     }
 
@@ -527,6 +727,18 @@ fn same_error_hint(tool: &str) -> String {
          body to a script file (.py/.ps1/.sh) and run that file; if a required tool is missing, say \
          so instead of working around it; otherwise read the relevant file or inputs before \
          retrying."
+    )
+}
+
+/// A strategy-change hint appended when a *healthy* tool keeps reporting the
+/// same failing work — a test suite failing identically three runs straight
+/// with nothing landing in between. Unlike [`same_error_hint`], the tool is
+/// fine; re-running is what will not help.
+fn same_failure_hint(tool: &str) -> String {
+    format!(
+        "\n\n[recovery] `{tool}` has now reported the same failure several times. Re-running it \
+         will not change the result: read the failing output above, change what produced it, and \
+         only then run it again."
     )
 }
 
@@ -590,6 +802,15 @@ pub struct SessionRuntime {
     /// Subagent definitions this session may delegate to. `None` means the host
     /// wired none, and `delegate` reports itself unavailable.
     agents: Option<std::sync::Arc<localpilot_agents::AgentSet>>,
+    /// The host that can put a question to the user for `ask_user`. `None` (the
+    /// default) means no human is reachable on this session — a piped run, a CI
+    /// run, a subagent — and the tool says so rather than waiting.
+    prompter: Option<std::sync::Arc<dyn localpilot_tools::UserPrompter>>,
+    /// The host that can reach this session's swarm peers, enabling the `swarm`
+    /// tool. `None` (the default) means this session is not collaborating, which
+    /// is the overwhelmingly common case; the tool then reports itself
+    /// unavailable rather than failing obscurely.
+    peers: Option<std::sync::Arc<dyn localpilot_tools::SwarmPeers>>,
     config: SessionConfig,
     session_id: SessionId,
     messages: Vec<Message>,
@@ -606,6 +827,9 @@ pub struct SessionRuntime {
     compaction_cache: Option<(u64, usize, CompactionResult)>,
     /// Steering input queued by the host while a turn runs.
     steer: SteerQueue,
+    /// A graceful-shutdown request the host can raise while a turn runs, honoured
+    /// at the turn's safe boundaries (pre-stream, per stream event, per tool).
+    quiesce: QuiesceSignal,
     /// Registered lifecycle observers, context hooks, and tool gates.
     hooks: HookFabric,
     /// Per-tool failure counts within the current turn.
@@ -657,6 +881,14 @@ pub struct SessionRuntime {
     /// Whether the current turn persisted learning to memory. Reset at each turn
     /// start; the run-turn path only reads memory, so it stays `false` here.
     turn_memory_written: bool,
+    /// Calls this turn the tool could not perform at all. The counters live
+    /// here rather than in any event consumer because a broadcast subscriber
+    /// can lag and drop events; the runtime sees every call by construction.
+    turn_tool_failures: usize,
+    /// Calls this turn whose wrapped work reported failure.
+    turn_reported_failures: usize,
+    /// Tools that crossed the per-turn stuck threshold this turn.
+    turn_stuck_tools: Vec<String>,
     /// The memories injected into the current turn's context. Reset at each turn
     /// start, set from the context contribution, and delivered to the context
     /// hooks once at the turn's exit (`stop`) for best-effort usage tracking —
@@ -666,6 +898,14 @@ pub struct SessionRuntime {
     /// single exit (`stop`). Read by a non-interactive caller for a terminal
     /// state even when the turn timed out.
     last_handoff: Option<TurnHandoff>,
+    /// Per-session record of served `read_file` results and their freshness, so an
+    /// already-seen, unchanged re-read can be elided to a stub (opt-in via
+    /// `elide_seen_reads`). In-memory and session-scoped.
+    read_history: crate::elision::ReadHistory,
+    /// Workspace files this session has touched, shared with the pre-turn
+    /// context hook so a path-scoped instruction file reaches the model exactly
+    /// when its `applyTo` glob matches something in play.
+    paths_in_play: crate::PathsInPlay,
 }
 
 impl SessionRuntime {
@@ -708,6 +948,7 @@ impl SessionRuntime {
             history_generation: 0,
             compaction_cache: None,
             steer: SteerQueue::default(),
+            quiesce: QuiesceSignal::default(),
             hooks: HookFabric::default(),
             tool_failure_guard: ToolFailureGuard::default(),
             error_breaker: RepeatedErrorBreaker::default(),
@@ -715,6 +956,8 @@ impl SessionRuntime {
             rule_engine,
             named_targets: Vec::new(),
             agents: None,
+            prompter: None,
+            peers: None,
             broker: None,
             background: Arc::new(localpilot_tools::BackgroundProcesses::new()),
             registry: None,
@@ -723,8 +966,13 @@ impl SessionRuntime {
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
             turn_memory_written: false,
+            turn_tool_failures: 0,
+            turn_reported_failures: 0,
+            turn_stuck_tools: Vec::new(),
             turn_memories_used: Vec::new(),
             last_handoff: None,
+            read_history: crate::elision::ReadHistory::default(),
+            paths_in_play: crate::PathsInPlay::new(),
         };
         runtime.record_event(SessionEventKind::SessionOpened {
             reason: OpenReason::New,
@@ -1115,7 +1363,7 @@ impl SessionRuntime {
         command: &str,
         cancel: &CancellationToken,
         exclude_from_context: bool,
-    ) -> UserShellResult {
+    ) -> ToolDispatchResult {
         self.run_user_shell_input_detailed(
             serde_json::json!({ "command": command }),
             command.to_string(),
@@ -1143,7 +1391,7 @@ impl SessionRuntime {
         shown: String,
         exclude_from_context: bool,
         cancel: Option<&CancellationToken>,
-    ) -> UserShellResult {
+    ) -> ToolDispatchResult {
         let call_id = format!("user-shell-{}", EventId::new());
         let call = ToolCall::new(ToolUseId::from(call_id.as_str()), "run_shell", input);
         self.record_event(SessionEventKind::ToolStarted {
@@ -1158,6 +1406,8 @@ impl SessionRuntime {
             retention: Some(&retention),
             processes: Some(self.background.as_ref()),
             agents: None,
+            prompter: None,
+            peers: None,
         };
         let engine = self.engine.snapshot();
         let (dispatch, cancelled) = if let Some(cancel) = cancel {
@@ -1170,6 +1420,7 @@ impl SessionRuntime {
                             "cancelled by the user; execution aborted",
                         ),
                         presentation: None,
+                        touches: Vec::new(),
                     },
                     true,
                 ),
@@ -1194,27 +1445,31 @@ impl SessionRuntime {
         self.record_event(SessionEventKind::ToolFinished {
             id: call_id,
             name: "run_shell".to_string(),
-            is_error: dispatch.result.is_error,
+            is_error: dispatch.result.is_error(),
+            outcome: Some(dispatch.result.outcome),
         });
         if !exclude_from_context {
             let rendered = format!("$ {shown}\n{}", dispatch.result.output);
             self.append(Message::text(Role::UserShell, rendered));
         }
-        let shell = dispatch
-            .presentation
-            .map(|presentation| match presentation {
-                ToolOutputPresentation::Shell(shell) => shell,
-            });
-        UserShellResult {
-            result: dispatch.result,
-            shell,
-        }
+        dispatch
     }
 
     /// The session id (transcripts are stored under it).
     #[must_use]
     pub fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    /// The model this session will actually call.
+    ///
+    /// Exposed so a caller that *asked* for a particular model can check it got
+    /// one. A request for a specific model that quietly runs on the default is
+    /// the worst kind of wrong: the work completes, the report reads normally,
+    /// and nothing anywhere says the wrong thing produced it.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.config.model
     }
 
     /// The current model health.
@@ -1264,8 +1519,22 @@ impl SessionRuntime {
     /// from the local, disposable store so a common need is advertised from turn
     /// one (ADR-0012). Best-effort: a missing or unreadable record is ignored.
     /// Attach the subagent definitions this session may delegate to.
+    /// Install the host that can put a question to the user, enabling
+    /// `ask_user`. An interactive front-end wires this; a headless caller leaves
+    /// it unset, and the tool reports itself unavailable instead of stalling.
+    pub fn set_prompter(&mut self, prompter: std::sync::Arc<dyn localpilot_tools::UserPrompter>) {
+        self.prompter = Some(prompter);
+    }
+
     pub fn set_agents(&mut self, agents: std::sync::Arc<localpilot_agents::AgentSet>) {
         self.agents = Some(agents);
+    }
+
+    /// Install the host that can reach this session's swarm peers, enabling the
+    /// `swarm` tool. A server hosting a swarm wires this per session; every
+    /// other caller leaves it unset.
+    pub fn set_peers(&mut self, peers: std::sync::Arc<dyn localpilot_tools::SwarmPeers>) {
+        self.peers = Some(peers);
     }
 
     pub fn set_broker(&mut self, broker: Option<Broker>) {
@@ -1432,6 +1701,15 @@ impl SessionRuntime {
         self.steer.clone()
     }
 
+    /// A clonable handle for requesting a graceful wind-down of the running turn.
+    /// The request is honoured at the turn's next safe boundary: a wait-like tool
+    /// caught mid-flight is answered with a resumable, non-error result and the
+    /// session is flushed before the loop returns with [`StopReason::Quiesced`].
+    #[must_use]
+    pub fn quiesce_signal(&self) -> QuiesceSignal {
+        self.quiesce.clone()
+    }
+
     /// A clonable handle to the background-process registry, so the UI can list
     /// and stop processes while a turn is in flight (the registry is
     /// interior-mutable behind a single lock).
@@ -1594,6 +1872,37 @@ impl SessionRuntime {
             root,
         );
         runner.run(check).await
+    }
+
+    /// Admit every queued soft interrupt at a safe boundary: inject each as a
+    /// user-role message (a non-user source is labelled so it does not read as
+    /// user-typed input) and record a durable `SoftInterruptInjected` event.
+    /// Returns whether any were admitted, so a would-be-final turn can decide to
+    /// keep going instead of ending (Point B).
+    fn admit_soft_interrupts(
+        &mut self,
+        point: &str,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> bool {
+        let interrupts = self.steer.drain();
+        let admitted = !interrupts.is_empty();
+        for interrupt in interrupts {
+            let source = match interrupt.source {
+                SoftInterruptSource::User => "user",
+                SoftInterruptSource::System => "system",
+                SoftInterruptSource::BackgroundTask => "background_task",
+            };
+            self.append(interrupt.into_message());
+            self.record_event(SessionEventKind::SoftInterruptInjected {
+                point: point.to_string(),
+                source: source.to_string(),
+            });
+            let _ = events.send(RuntimeEvent::SoftInterruptInjected {
+                point: point.to_string(),
+                source: source.to_string(),
+            });
+        }
+        admitted
     }
 
     /// The verify-before-done gate, consulted when a turn would finalize with no
@@ -1801,6 +2110,53 @@ impl SessionRuntime {
     /// Used when a runtime is built for a subagent: the registry-derived prompt
     /// the constructor produces is the *host* half, and the agent's own
     /// instructions have to be appended before the first turn runs.
+    /// The current system prompt, as text.
+    ///
+    /// Read back rather than remembered by the host: the prompt is composed from
+    /// several sources over a session's life, and a host that tracked its own
+    /// copy would be describing what it contributed, not what is in effect.
+    #[must_use]
+    pub fn system_prompt_text(&self) -> String {
+        self.messages
+            .first()
+            .filter(|message| message.role == Role::System)
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Add to the system prompt rather than replacing it.
+    ///
+    /// Used for guidance that becomes true partway through a session's life — a
+    /// session that joins a swarm needs the orchestration directives it did not
+    /// need a moment earlier, and rebuilding the whole prompt to add a paragraph
+    /// would discard whatever else the host had put there.
+    pub fn append_system_prompt(&mut self, addition: impl AsRef<str>) {
+        let addition = addition.as_ref().trim();
+        if addition.is_empty() {
+            return;
+        }
+        let existing = self.system_prompt_text();
+        let existing = existing.trim_end();
+        self.replace_system_prompt(format!(
+            "{existing}
+
+{addition}"
+        ));
+    }
+
     pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
         let message = Message::text(Role::System, prompt.into());
         match self.messages.first_mut() {
@@ -1977,6 +2333,9 @@ impl SessionRuntime {
         self.turn_tool_calls = 0;
         self.turn_files_changed.clear();
         self.turn_memory_written = false;
+        self.turn_tool_failures = 0;
+        self.turn_reported_failures = 0;
+        self.turn_stuck_tools.clear();
         self.turn_memories_used.clear();
         // A bounded per-turn deadline, when configured: the turn stops cleanly with
         // a handoff at this instant rather than hanging. `None` leaves it unbounded.
@@ -1984,6 +2343,10 @@ impl SessionRuntime {
             .config
             .turn_timeout
             .map(|timeout| tokio::time::Instant::now() + timeout);
+        // A clone of the graceful-shutdown signal, awaited in the same `select!`s
+        // as `cancel`. A clone shares the underlying token, so a request raised on
+        // the runtime's handle from another task is seen here.
+        let quiesce = self.quiesce.clone();
         let contribution = self.hooks.contribute(user_input);
         let retrieval_text = contribution.text.unwrap_or_default();
         if !contribution.memories.is_empty() {
@@ -2046,19 +2409,23 @@ impl SessionRuntime {
         // never loop forever even with the rails off.
         let mut verify_attempts = 0usize;
 
-        loop {
+        'turn: loop {
             if cancel.is_cancelled() {
                 return self.stop(events, StopReason::Cancelled);
+            }
+            // A graceful wind-down requested before this iteration streams: no tool
+            // is running here, so there is nothing to leave resumable — flush and
+            // stop cleanly.
+            if quiesce.is_requested() {
+                return self.stop(events, StopReason::Quiesced);
             }
             if deadline.is_some_and(|dl| tokio::time::Instant::now() >= dl) {
                 return self.stop(events, StopReason::TimedOut);
             }
 
-            // Admit queued steering input at this safe boundary: after the
-            // previous iteration's tool calls, before the next provider call.
-            for steer_text in self.steer.drain() {
-                self.append(Message::text(Role::User, steer_text));
-            }
+            // Admit queued soft interrupts at this safe boundary (Point D): after
+            // the previous iteration's tool calls, before the next provider call.
+            self.admit_soft_interrupts("after_tools", events);
 
             let compacted = self.compacted_history(context_reserve, cancel).await;
             let tools = if tools_enabled {
@@ -2137,8 +2504,20 @@ impl SessionRuntime {
 
             loop {
                 tokio::select! {
+                    biased;
                     () = cancel.cancelled() => {
                         return self.stop(events, StopReason::Cancelled);
+                    }
+                    () = self.steer.urgent_notified() => {
+                        self.admit_soft_interrupts("during_stream", events);
+                        continue 'turn;
+                    }
+                    // A graceful wind-down requested while streaming: no tool is
+                    // running, so the partial response is discarded (like cancel)
+                    // and the turn stops after a flush. The next turn can resume the
+                    // conversation cleanly.
+                    () = quiesce.token().cancelled() => {
+                        return self.stop(events, StopReason::Quiesced);
                     }
                     // Bounded turn deadline (when configured). `sleep_until` targets
                     // an absolute instant, so re-arming it each iteration does not
@@ -2184,6 +2563,8 @@ impl SessionRuntime {
                             self.record_event(SessionEventKind::UsageReported {
                                 input_tokens: usage.input_tokens,
                                 output_tokens: usage.output_tokens,
+                                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                                cache_read_input_tokens: usage.cache_read_input_tokens,
                             });
                         }
                         Some(Ok(ModelEvent::ProviderWarning { message })) => {
@@ -2464,6 +2845,13 @@ impl SessionRuntime {
                     );
                     continue;
                 }
+                // A soft interrupt queued while this call-free turn was streaming
+                // (Point B): instead of ending, admit it and keep the turn going so
+                // the model sees the steer/notice before it finalizes.
+                if !self.steer.is_empty() {
+                    self.admit_soft_interrupts("turn_continued", events);
+                    continue;
+                }
                 // Verify-before-done gate (opt-in): before accepting a call-free
                 // turn as the final answer, confirm the workspace still
                 // builds/tests. On a failure within the re-entry cap, feed the
@@ -2501,7 +2889,29 @@ impl SessionRuntime {
             }
 
             // Execute tool calls through the permission-gated registry.
-            for (id, name, input, _) in &calls {
+            for (call_index, (id, name, input, _)) in calls.iter().enumerate() {
+                // A graceful wind-down requested between tool calls: answer this
+                // call and every remaining tool_use (resumable for a wait-like
+                // tool, interrupted otherwise), flush, and stop. Checked before
+                // dispatch so a queued call is never started once a shutdown is in
+                // progress.
+                if quiesce.is_requested() {
+                    return self.quiesce_tool_batch(&calls, call_index, events);
+                }
+                // Point C: an urgent interrupt arrived mid-batch. Answer this call
+                // and every remaining tool_use with a skipped result (the wire
+                // contract requires one result per tool_use), admit the interrupt,
+                // and re-enter the turn so the model sees it before continuing.
+                if self.steer.has_urgent() {
+                    for (skip_id, _, _, _) in &calls[call_index..] {
+                        self.append(tool_error_message(
+                            skip_id,
+                            "skipped: an urgent interrupt cut the tool batch short",
+                        ));
+                    }
+                    self.admit_soft_interrupts("between_tools", events);
+                    continue 'turn;
+                }
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
                 // cleanly with a model-visible, recorded reason before the next
                 // call runs. The hard cost ceiling always wins; a no-progress
@@ -2726,10 +3136,17 @@ impl SessionRuntime {
                                 agents: host
                                     .as_ref()
                                     .map(|h| h as &dyn localpilot_tools::AgentHost),
+                                prompter: self.prompter.as_deref(),
+                                peers: self.peers.as_deref(),
                             };
                             let dispatched = tokio::select! {
                                 () = cancel.cancelled() => None,
-                                result = self.tools.dispatch_gated(
+                                // A graceful wind-down requested while this tool is
+                                // running: abort the wait and fall through to the
+                                // quiesce path below, which leaves a resumable
+                                // result for a wait-like tool rather than an abort.
+                                () = quiesce.token().cancelled() => None,
+                                result = self.tools.dispatch_reporting(
                                     &active_call,
                                     &ctx,
                                     &engine,
@@ -2745,7 +3162,17 @@ impl SessionRuntime {
                                 h.delegated_calls
                                     .swap(0, std::sync::atomic::Ordering::Relaxed)
                             });
-                            dispatched
+                            // Publish what the tool reported touching on the
+                            // ordinary event stream, then hand on the result
+                            // alone. Anything that cares — today, a swarm's
+                            // advisory conflict alerts — subscribes, so the
+                            // tool path stays unaware of the swarm entirely.
+                            dispatched.map(|(result, touched)| {
+                                if !touched.is_empty() {
+                                    let _ = events.send(RuntimeEvent::FilesTouched(touched));
+                                }
+                                result
+                            })
                         }
                     }
                 };
@@ -2799,6 +3226,13 @@ impl SessionRuntime {
                     )));
                 }
                 let Some(mut result) = result else {
+                    // The dispatch produced no result: it was interrupted. A
+                    // graceful wind-down takes the resumable path (this call and
+                    // the rest of the batch answered without an abort); otherwise
+                    // it was a cancel, which discards.
+                    if quiesce.is_requested() {
+                        return self.quiesce_tool_batch(&calls, call_index, events);
+                    }
                     let aborted = localpilot_core::ToolResult::error(
                         ToolUseId::from(id.as_str()),
                         "cancelled by the user; execution aborted",
@@ -2816,6 +3250,7 @@ impl SessionRuntime {
                         id: id.clone(),
                         name: name.clone(),
                         is_error: true,
+                        outcome: Some(ToolOutcome::Unusable),
                     });
                     self.hooks.notify(&HookEvent::ToolFinished {
                         id: id.clone(),
@@ -2878,12 +3313,50 @@ impl SessionRuntime {
                     result.output = scrubbed;
                 }
 
+                // Every workspace file a call named is now "in play", whether the
+                // call read it, wrote it, or failed on it: a path-scoped
+                // instruction file is about the file, not about the outcome.
+                if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                    self.paths_in_play
+                        .record(self.workspace.root(), std::path::Path::new(&norm));
+                }
+
                 // Record a successful workspace mutation for the per-turn handoff,
                 // so a timed-out or cut-off run still reports which files it touched.
-                if !result.is_error && is_file_write_tool(name) {
+                if !result.is_error() && is_file_write_tool(name) {
                     if let Some(path) = file_write_path(input) {
                         if !self.turn_files_changed.contains(&path) {
                             self.turn_files_changed.push(path);
+                        }
+                    }
+                    // A write invalidates any elision baseline for the file, so a
+                    // later read serves full content (belt-and-suspenders — the
+                    // mtime/length check already catches an ordinary write).
+                    if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                        self.read_history.forget_path(&norm);
+                    }
+                }
+
+                // Already-seen read elision (opt-in): when this `read_file` returned
+                // a file+range already served this session and the file is unchanged
+                // since (same mtime *and* length), replace the body with a compact
+                // stub instead of re-spending the context. Conservative — any doubt
+                // (an unreadable stat, a changed file) serves full content, so the
+                // model is never handed stale bytes. The elided read still records as
+                // a successful `read_file`, so `RequiresPriorRead` and the scorecards
+                // see the same events.
+                if self.config.elide_seen_reads && !result.is_error() && name == "read_file" {
+                    if let Some(norm) = normalized_tool_path(&self.workspace, input) {
+                        let (start, end) = read_file_range(input);
+                        if let Ok((mtime, len)) = file_mtime_len(&norm) {
+                            if let Some(prior_id) =
+                                self.read_history.elidable(&norm, start, end, mtime, len)
+                            {
+                                let elided = result.output.len();
+                                result.output =
+                                    crate::elision::elision_stub(&norm, &prior_id, elided);
+                            }
+                            self.read_history.record(&norm, start, end, mtime, len, id);
                         }
                     }
                 }
@@ -2899,74 +3372,105 @@ impl SessionRuntime {
                         .push_str(&format!("\n\n[check-before-launch] {message}"));
                 }
 
-                // Track per-tool failure counts for the safeguard.
-                if result.is_error {
-                    unproductive_streak += 1;
-                    let count = self.tool_failure_guard.record_failure(name);
-                    match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
-                        std::cmp::Ordering::Less => {
+                // Track tool health and turn progress. The two failure kinds
+                // diverge here: only a tool that could not do its job counts
+                // against the per-tool stuck guard, while both kinds count as
+                // unproductive (a missing binary comes back as exit 127 — a
+                // *reported* failure — and must not spin unchecked).
+                match result.outcome {
+                    ToolOutcome::Unusable => {
+                        unproductive_streak += 1;
+                        self.turn_tool_failures += 1;
+                        let count = self.tool_failure_guard.record_failure(name);
+                        match count.cmp(&DEFAULT_TOOL_FAILURE_THRESHOLD) {
+                            std::cmp::Ordering::Less => {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "tool `{name}` failed ({}/{})",
+                                    count, DEFAULT_TOOL_FAILURE_THRESHOLD
+                                )));
+                            }
+                            std::cmp::Ordering::Equal => {
+                                let msg = format!(
+                                    "tool `{name}` has failed {count} times this turn; a \
+                                     different approach is likely needed"
+                                );
+                                let _ = events.send(RuntimeEvent::Warning(msg.clone()));
+                                let _ = events.send(RuntimeEvent::ToolStuck {
+                                    name: name.clone(),
+                                    count,
+                                });
+                                if !self.turn_stuck_tools.contains(name) {
+                                    self.turn_stuck_tools.push(name.clone());
+                                }
+                            }
+                            std::cmp::Ordering::Greater => {
+                                let _ = events.send(RuntimeEvent::Warning(format!(
+                                    "tool `{name}` failed again (#{count}); still stuck"
+                                )));
+                            }
+                        }
+                        // Same-error breaker: when a tool fails identically several
+                        // times in a row, force a strategy change *before* the failure
+                        // budget is spent by surfacing a hint in the model-visible
+                        // result, rather than letting it re-send the same call.
+                        if self.error_breaker.observe(name, &result.output) {
                             let _ = events.send(RuntimeEvent::Warning(format!(
-                                "tool `{name}` failed ({}/{})",
-                                count, DEFAULT_TOOL_FAILURE_THRESHOLD
+                                "tool `{name}` keeps failing the same way; nudging a strategy change"
                             )));
+                            let hint = same_error_hint(name);
+                            result.output.push_str(&hint);
                         }
-                        std::cmp::Ordering::Equal => {
-                            let msg = format!(
-                                "tool `{name}` has failed {count} times this turn; stopping further \
-                                 calls and trying another approach"
-                            );
-                            let _ = events.send(RuntimeEvent::Warning(msg.clone()));
-                            let _ = events.send(RuntimeEvent::ToolStuck {
-                                name: name.clone(),
-                                count,
-                            });
-                        }
-                        std::cmp::Ordering::Greater => {
+                    }
+                    ToolOutcome::ReportedFailure => {
+                        unproductive_streak += 1;
+                        self.turn_reported_failures += 1;
+                        // The call spawned, ran, and captured output — direct
+                        // evidence the tool works, which is the property the
+                        // stuck guard measures. Clear it like a success.
+                        self.tool_failure_guard.record_working(name);
+                        // Three identical failing runs with nothing landing in
+                        // between deserve a nudge, but a failing-work nudge:
+                        // re-running will not change the result. In a genuine
+                        // edit/test loop the intervening success resets the
+                        // breaker, so it never fires there.
+                        if self.error_breaker.observe(name, &result.output) {
                             let _ = events.send(RuntimeEvent::Warning(format!(
-                                "tool `{name}` failed again (#{count}); still stuck"
+                                "tool `{name}` keeps reporting the same failure; nudging a \
+                                 strategy change"
                             )));
+                            result.output.push_str(&same_failure_hint(name));
                         }
                     }
-                    // Same-error breaker: when a tool fails identically several
-                    // times in a row, force a strategy change *before* the failure
-                    // budget is spent by surfacing a hint in the model-visible
-                    // result, rather than letting it re-send the same call.
-                    if self.error_breaker.observe(name, &result.output) {
-                        let hint = same_error_hint(name);
-                        let _ = events.send(RuntimeEvent::Warning(format!(
-                            "tool `{name}` keeps failing the same way; nudging a strategy change"
-                        )));
-                        result.output.push_str(&hint);
-                    }
-                } else {
-                    unproductive_streak = 0;
-                    self.tool_failure_guard.record_success(name);
-                    // Feed the broker's learned re-rank: a revealed tool that ran
-                    // successfully ranks higher next time (no-op when learning off
-                    // or the tool was not revealed).
-                    if let Some(broker) = &self.broker {
-                        broker.note_success(name);
-                    }
-                    self.error_breaker.reset();
-                    // No-progress breaker: a successful call that keeps repeating
-                    // with the same result, or a turn cycling a tiny set of calls,
-                    // gets one strategy-change nudge before the budget controller
-                    // may stop the turn. The signature pairs the tool with its
-                    // arguments; the output is the observable state, so a re-read
-                    // after a real change (different output) is not flagged.
-                    let signature = format!("{name}\u{1f}{input}");
-                    if no_progress.observe(&signature, &result.output) {
-                        let _ = events.send(RuntimeEvent::Warning(
-                            "tool calls are not making forward progress; nudging a strategy change"
-                                .to_string(),
-                        ));
-                        result.output.push_str(&no_progress_hint());
+                    ToolOutcome::Ok => {
+                        unproductive_streak = 0;
+                        self.tool_failure_guard.record_working(name);
+                        // Feed the broker's learned re-rank: a revealed tool that ran
+                        // successfully ranks higher next time (no-op when learning off
+                        // or the tool was not revealed).
+                        if let Some(broker) = &self.broker {
+                            broker.note_success(name);
+                        }
+                        self.error_breaker.reset();
+                        // No-progress breaker: a successful call that keeps repeating
+                        // with the same result, or a turn cycling a tiny set of calls,
+                        // gets one strategy-change nudge before the budget controller
+                        // may stop the turn. The signature pairs the tool with its
+                        // arguments; the output is the observable state, so a re-read
+                        // after a real change (different output) is not flagged.
+                        let signature = format!("{name}\u{1f}{input}");
+                        if no_progress.observe(&signature, &result.output) {
+                            let _ = events.send(RuntimeEvent::Warning(
+                                "tool calls are not making forward progress; nudging a strategy change"
+                                    .to_string(),
+                            ));
+                            result.output.push_str(&no_progress_hint());
+                        }
                     }
                 }
                 let _ = events.send(RuntimeEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
                     cancelled: false,
                     output: result.output.clone(),
                     duration_ms: u64::try_from(tool_started_at.elapsed().as_millis())
@@ -2975,12 +3479,13 @@ impl SessionRuntime {
                 self.record_event(SessionEventKind::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
+                    outcome: Some(result.outcome),
                 });
                 self.hooks.notify(&HookEvent::ToolFinished {
                     id: result.id.to_string(),
                     name: name.clone(),
-                    is_error: result.is_error,
+                    is_error: result.is_error(),
                 });
                 // Verifier stage: judge the call against its contract and record
                 // the verdict durably, so a later claim can be checked against it.
@@ -2995,6 +3500,14 @@ impl SessionRuntime {
                 ));
             }
         }
+    }
+
+    /// A handle on the workspace files this session has touched. Cloned by the
+    /// project-instructions hook so a path-scoped rule can be matched against
+    /// what is actually in play.
+    #[must_use]
+    pub fn paths_in_play(&self) -> crate::PathsInPlay {
+        self.paths_in_play.clone()
     }
 
     /// The handoff for the most recently finished turn, if any — a bounded,
@@ -3029,6 +3542,9 @@ impl SessionRuntime {
             tool_calls: self.turn_tool_calls,
             files_changed: self.turn_files_changed.clone(),
             memory_written: self.turn_memory_written,
+            tool_failures: self.turn_tool_failures,
+            reported_failures: self.turn_reported_failures,
+            stuck_tools: self.turn_stuck_tools.clone(),
         });
         if reason == StopReason::Cancelled {
             self.record_event(SessionEventKind::Cancelled);
@@ -3045,6 +3561,62 @@ impl SessionRuntime {
         self.hooks.notify(&HookEvent::TurnEnded { reason });
         let _ = events.send(RuntimeEvent::Stopped(reason));
         reason
+    }
+
+    /// Answer every not-yet-answered `tool_use` in `calls[from..]` for a graceful
+    /// wind-down, then flush and stop with [`StopReason::Quiesced`].
+    ///
+    /// Each answered call keeps the wire's one-result-per-`tool_use` contract, so
+    /// the persisted history stays valid and a resumed session replays cleanly.
+    /// A **wait-like** tool (one whose whole job is to wait, so re-running it has
+    /// no extra side effect) is answered with a *non-error, resumable* result that
+    /// embeds its original input JSON — the model can re-issue the exact call on
+    /// resume. Every other interrupted tool is answered with a plain interrupted
+    /// result, and every queued-but-unstarted call with a skipped one.
+    ///
+    /// `from` is the index of the first call that has no result yet — the calls
+    /// before it already ran and were answered in earlier iterations.
+    fn quiesce_tool_batch(
+        &mut self,
+        calls: &[(String, String, serde_json::Value, Option<serde_json::Value>)],
+        from: usize,
+        events: &broadcast::Sender<RuntimeEvent>,
+    ) -> StopReason {
+        for (position, (id, name, input, _)) in calls[from..].iter().enumerate() {
+            // The first unanswered call may have been interrupted mid-run; the
+            // rest were never started. Only the first can be a running wait; a
+            // queued call is simply skipped.
+            let running = position == 0;
+            let message = if running && is_resumable_wait_tool(name) {
+                resumable_wait_result(id, name, input)
+            } else if running {
+                tool_error_message(
+                    id,
+                    "interrupted: a graceful shutdown ended the turn before this tool finished",
+                )
+            } else {
+                tool_error_message(
+                    id,
+                    "skipped: a graceful shutdown ended the turn before this tool ran",
+                )
+            };
+            let is_error = message_is_error(&message);
+            self.record_event(SessionEventKind::ToolFinished {
+                id: id.clone(),
+                name: name.clone(),
+                is_error,
+                outcome: Some(if is_error {
+                    ToolOutcome::Unusable
+                } else {
+                    ToolOutcome::Ok
+                }),
+            });
+            self.append(message);
+        }
+        let _ = events.send(RuntimeEvent::Warning(
+            "graceful shutdown: flushing the session and stopping the turn".to_string(),
+        ));
+        self.stop(events, StopReason::Quiesced)
     }
 
     fn persist_recovery(&self, diagnostic: &localpilot_recovery::RecoveryDiagnostic) {
@@ -3067,6 +3639,46 @@ fn tool_error_message(id: &str, output: &str) -> Message {
             localpilot_core::ToolResult::error(ToolUseId::from(id), output),
         )],
     )
+}
+
+/// Whether a tool is *wait-like*: its whole job is to wait for something, so
+/// interrupting it leaves nothing half-done and re-issuing the identical call on
+/// resume simply resumes the wait. These are the tools that get a resumable,
+/// non-error result on a graceful shutdown rather than an interrupted one.
+///
+/// A tool that *changes* something (a write, a shell command, an edit) is
+/// deliberately excluded: re-issuing it would repeat the effect, so an
+/// interrupted result is the honest answer.
+fn is_resumable_wait_tool(name: &str) -> bool {
+    matches!(name, "run_background" | "swarm")
+}
+
+/// A non-error `tool_result` for a wait-like tool interrupted by a graceful
+/// shutdown, embedding the *exact* original input so the model can re-issue the
+/// identical call verbatim on resume. It is deliberately not an error: nothing
+/// failed and nothing was left half-done — the wait was simply cut short.
+fn resumable_wait_result(id: &str, name: &str, input: &serde_json::Value) -> Message {
+    let payload = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let text = format!(
+        "Not an error: this `{name}` call was interrupted by a graceful shutdown before its \
+         wait completed. Nothing failed and nothing was left half-done. To resume, re-issue the \
+         identical call with this input: {payload}"
+    );
+    Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(
+            localpilot_core::ToolResult::success(ToolUseId::from(id), text),
+        )],
+    )
+}
+
+/// Whether a synthesized tool-result message carries an error outcome, for the
+/// `ToolFinished` audit event that accompanies it.
+fn message_is_error(message: &Message) -> bool {
+    message.content.iter().any(|block| match block {
+        ContentBlock::ToolResult(result) => result.is_error(),
+        _ => false,
+    })
 }
 
 /// Replace raw control characters (other than tab, newline, carriage return)
@@ -3228,6 +3840,88 @@ mod tests {
     use localpilot_llm::{FakeProvider, ProviderDeclaration};
     use localpilot_recovery::RecoveryBudget;
     use localpilot_sandbox::{ScriptedApprover, Workspace};
+
+    #[test]
+    fn a_user_soft_interrupt_injects_verbatim_a_system_one_is_labelled() {
+        // A user steer is the user talking, so it is unlabelled; a system or
+        // background-task message is prefixed so it never reads as user input.
+        let user = SoftInterrupt::user("do the thing").into_message();
+        assert_eq!(message_plain_text(&user), "do the thing");
+
+        let system = SoftInterrupt {
+            content: "a notice".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: false,
+        }
+        .into_message();
+        assert_eq!(message_plain_text(&system), "[system] a notice");
+
+        let bg = SoftInterrupt {
+            content: "done".to_string(),
+            source: SoftInterruptSource::BackgroundTask,
+            urgent: false,
+        }
+        .into_message();
+        assert_eq!(message_plain_text(&bg), "[background task] done");
+    }
+
+    #[test]
+    fn the_queue_reports_urgency_and_drains_in_order() {
+        let q = SteerQueue::default();
+        assert!(q.is_empty() && !q.has_urgent());
+        q.push("first");
+        q.push_interrupt(SoftInterrupt {
+            content: "urgent".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: true,
+        });
+        assert!(!q.is_empty() && q.has_urgent());
+        let drained = q.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].content, "first");
+        assert!(drained[1].urgent);
+        assert!(q.is_empty() && !q.has_urgent());
+    }
+
+    #[tokio::test]
+    async fn an_urgent_interrupt_wakes_a_stream_waiter_without_a_lost_signal() {
+        let queue = SteerQueue::default();
+        let waiter = queue.clone();
+        let waiting = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(1), waiter.urgent_notified()).await
+        });
+        tokio::task::yield_now().await;
+        queue.push_interrupt(SoftInterrupt {
+            content: "steer now".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        assert!(waiting.await.expect("wait task").is_ok());
+
+        let already_queued = SteerQueue::default();
+        already_queued.push_interrupt(SoftInterrupt {
+            content: "queued before poll".to_string(),
+            source: SoftInterruptSource::User,
+            urgent: true,
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), already_queued.urgent_notified())
+                .await
+                .is_ok()
+        );
+    }
+
+    fn message_plain_text(message: &Message) -> String {
+        message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 
     /// A fake provider that reports `id` as its declaration id.
     fn fake_with_id(id: &str) -> Arc<dyn ModelProvider> {
@@ -3552,7 +4246,7 @@ mod tests {
         let mut guard = ToolFailureGuard::default();
         guard.record_failure("edit_file");
         guard.record_failure("edit_file");
-        guard.record_success("edit_file");
+        guard.record_working("edit_file");
         // After success the counter is gone: the next failure starts again at one.
         assert_eq!(guard.record_failure("edit_file"), 1);
     }

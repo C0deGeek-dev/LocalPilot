@@ -13,7 +13,9 @@ are not a side channel.
 ## Permission profiles
 
 - **default** — least privilege. Writes, deletes, shell commands, network, and
-  secret-like reads require approval. This is the out-of-box behavior.
+  secret-like reads require approval; a write to a secret-like path (`.env`,
+  keys, `.ssh/`…) prompts even inside a trusted workspace. This is the out-of-box
+  behavior.
 - **relaxed** — a user-defined allowlist auto-approves common safe actions; the
   rest still prompt.
 - **bypass** — a launch mode that approves everything with no prompts. It must be
@@ -34,7 +36,10 @@ Out-of-workspace **reads** are promptable rather than a dead end: every profile
 (including `bypass`) can ask interactively, and `[permissions]
 extra_read_roots` grants standing read-only access to the listed directories in
 every profile, non-interactive runs included. Writes keep the workspace
-boundary and secret-like reads keep their gate. The full model is in
+boundary, and a secret-like path keeps its gate on **both** sides: a secret-like
+read prompts, and a write to a secret-like path prompts even inside a trusted
+workspace (so a trusted workspace can never silently overwrite a credential
+file). The full model is in
 [07-security-and-privacy.md](07-security-and-privacy.md).
 
 ## Secret redaction
