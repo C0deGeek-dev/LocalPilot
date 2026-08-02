@@ -6194,7 +6194,7 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            let keyboard = text.find("<u").expect("keyboard pop");
+            let keyboard = text.find("<1u").expect("keyboard pop");
             let mouse = text.find("?1000l").expect("mouse disable");
             assert!(keyboard < paste && paste < mouse && mouse < alternate);
         }
