@@ -1715,6 +1715,62 @@ async fn execute_fullscreen_slash(
                 "invalid /{command}: {reason}"
             )));
         }
+        SlashAction::LocalBoxAdopt => {
+            match crate::localbox::detect().await {
+                crate::localbox::LocalBoxState::Running { endpoint, model } => {
+                    // The user explicitly typed `/localbox adopt`, so the command
+                    // itself is the consent for this workspace config write; the
+                    // permission engine can still hard-deny it under a Deny policy.
+                    let engine = localpilot_sandbox::PermissionEngine::new(
+                        crate::models_cmd::profile(config),
+                        Vec::new(),
+                    );
+                    let path = localpilot_config::project_config_path(cwd);
+                    let request = localpilot_sandbox::PermissionRequest {
+                        tool: "localbox adopt".to_string(),
+                        effect: localpilot_sandbox::Effect::WritePath {
+                            inside_workspace: true,
+                            overwrite: path.exists(),
+                            secret_like: false,
+                        },
+                        interactivity: localpilot_sandbox::Interactivity::Interactive,
+                        trusted: true,
+                        detail: path.display().to_string(),
+                    };
+                    if matches!(
+                        engine.decide(&request),
+                        localpilot_sandbox::Decision::Deny
+                    ) {
+                        app.apply_runtime(RuntimeUpdate::Notice(
+                            "adopt denied by the permission policy".to_string(),
+                        ));
+                    } else {
+                        match crate::localbox::write_local_provider(
+                            &path,
+                            &endpoint,
+                            model.as_deref(),
+                        ) {
+                            Ok(()) => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                                "adopted LocalBox at {endpoint} — wrote [providers.local]; it applies on the next launch"
+                            ))),
+                            Err(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+                                "adopt failed: {error}"
+                            ))),
+                        }
+                    }
+                }
+                crate::localbox::LocalBoxState::InstalledNotRunning => {
+                    app.apply_runtime(RuntimeUpdate::Notice(
+                        "no running LocalBox server — run `localbox serve <model>` (or `localpilot localbox adopt --serve <model>`) first".to_string(),
+                    ));
+                }
+                crate::localbox::LocalBoxState::NotInstalled => {
+                    app.apply_runtime(RuntimeUpdate::Notice(
+                        "LocalBox is not installed (no `localbox` on PATH)".to_string(),
+                    ));
+                }
+            }
+        }
         SlashAction::Unknown(command) => {
             app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "unknown slash command: /{command}"
