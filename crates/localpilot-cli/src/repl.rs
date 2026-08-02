@@ -342,6 +342,25 @@ impl StartupTimer {
     }
 }
 
+/// The "no usable model" startup error, enriched with an actionable pointer when
+/// LocalBox is available. With no LocalBox (the common case) it is the exact
+/// legacy message, so existing behaviour is unchanged.
+fn no_model_error(offer: crate::localbox::ModelOffer) -> anyhow::Error {
+    let base =
+        "no model: pass --model, or set a default in .localpilot.toml ([providers.<id>] model = \"...\")";
+    match offer {
+        crate::localbox::ModelOffer::NoOffer => anyhow::anyhow!("{base}"),
+        crate::localbox::ModelOffer::Running { endpoint } => anyhow::anyhow!(
+            "{base}\n  a LocalBox server is serving at {endpoint} — add it under \
+             [providers.local] in .localpilot.toml to use it"
+        ),
+        crate::localbox::ModelOffer::InstalledNotRunning => anyhow::anyhow!(
+            "{base}\n  LocalBox is installed — run `localbox serve <model>` to start a \
+             local model, then retry"
+        ),
+    }
+}
+
 pub async fn run_chat(
     model: Option<&str>,
     provider_id: Option<&str>,
@@ -365,15 +384,19 @@ pub async fn run_chat(
     }
 
     timer.mark("store prune");
-    let model = model
+    let model = match model
         .map(str::to_string)
         .or_else(|| config.resolve_model(provider_id))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model: pass --model, or set a default in .localpilot.toml \
-                 ([providers.<id>] model = \"...\")"
-            )
-        })?;
+    {
+        Some(model) => model,
+        None => {
+            // No usable model configured. If LocalBox is available, enrich the
+            // error with an actionable pointer instead of only the bare notice;
+            // when it is absent the message is byte-for-byte the legacy one.
+            let offer = crate::localbox::offer_for(false, crate::localbox::detect().await);
+            return Err(no_model_error(offer));
+        }
+    };
     // Build every configured provider once and keep a shared handle, so `/model`
     // can re-point the live session at another configured provider without
     // rebuilding or re-authenticating it.

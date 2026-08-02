@@ -85,11 +85,79 @@ async fn detect_at(base_url: &str, on_path: Option<PathBuf>) -> LocalBoxState {
     }
 }
 
+/// What to offer a user who has hit a no-usable-model dead-end, given LocalBox
+/// detection. This is the *decision* only — surfacing it (an enriched message at
+/// startup, or a permission-gated prompt in the running session) and acting on it
+/// belong to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelOffer {
+    /// Nothing to offer — the caller shows its existing no-model error unchanged.
+    NoOffer,
+    /// A LocalBox server is already serving at `endpoint`; point the user at it.
+    Running { endpoint: String },
+    /// LocalBox is installed but not serving; suggest starting it.
+    InstalledNotRunning,
+}
+
+/// Decide what to offer at a no-usable-model dead-end. Never overrides a working
+/// model: when `usable_model_present`, the answer is always [`ModelOffer::NoOffer`],
+/// so the offer only ever appears where the user is genuinely stuck.
+pub(crate) fn offer_for(usable_model_present: bool, state: LocalBoxState) -> ModelOffer {
+    if usable_model_present {
+        return ModelOffer::NoOffer;
+    }
+    match state {
+        LocalBoxState::Running { endpoint, .. } => ModelOffer::Running { endpoint },
+        LocalBoxState::InstalledNotRunning => ModelOffer::InstalledNotRunning,
+        LocalBoxState::NotInstalled => ModelOffer::NoOffer,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn offers_only_when_no_usable_model_and_localbox_present() {
+        assert_eq!(
+            offer_for(
+                false,
+                LocalBoxState::Running {
+                    endpoint: "http://127.0.0.1:11435/v1".to_string(),
+                    model: None,
+                },
+            ),
+            ModelOffer::Running {
+                endpoint: "http://127.0.0.1:11435/v1".to_string(),
+            }
+        );
+        assert_eq!(
+            offer_for(false, LocalBoxState::InstalledNotRunning),
+            ModelOffer::InstalledNotRunning
+        );
+        // Not installed → no offer (the caller keeps its exact legacy error).
+        assert_eq!(
+            offer_for(false, LocalBoxState::NotInstalled),
+            ModelOffer::NoOffer
+        );
+    }
+
+    #[test]
+    fn no_offer_when_a_model_is_reachable() {
+        // A usable model already exists — never offer, even if LocalBox is running.
+        assert_eq!(
+            offer_for(
+                true,
+                LocalBoxState::Running {
+                    endpoint: "http://127.0.0.1:11435/v1".to_string(),
+                    model: Some("qwen-coder".to_string()),
+                },
+            ),
+            ModelOffer::NoOffer
+        );
+    }
 
     #[test]
     fn detects_localbox_absent_when_not_on_path() {
