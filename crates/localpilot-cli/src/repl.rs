@@ -26,7 +26,8 @@ use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntim
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
-    Approver, Effect, Interactivity, PermissionEngine, PermissionEngineHandle, PermissionRequest,
+    Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
+    PermissionRequest,
     Profile,
 };
 use localpilot_store::Store;
@@ -1147,7 +1148,11 @@ async fn run_slash(
             run_harness_command(terminal, state, prompts, host, true).await?;
         }
         SlashAction::Model { provider, model } => {
-            run_model_command(state, runtime, host.cwd, provider, model).await;
+            if provider.as_deref() == Some("adopt") {
+                run_localbox_adopt(terminal, state, prompts, host).await?;
+            } else {
+                run_model_command(state, runtime, host.cwd, provider, model).await;
+            }
         }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
@@ -1350,11 +1355,16 @@ async fn list_models(
         ));
         // Same LocalBox pointer the startup path shows, so `/model` on an empty
         // config points the user at a detected local server instead of dead-ending.
-        if let Some(pointer) = crate::localbox::offer_message(&crate::localbox::offer_for(
-            false,
-            crate::localbox::detect().await,
-        )) {
+        let detected = crate::localbox::detect().await;
+        if let Some(pointer) =
+            crate::localbox::offer_message(&crate::localbox::offer_for(false, detected.clone()))
+        {
             state.apply(UiEvent::Notice(pointer));
+        }
+        if matches!(detected, crate::localbox::LocalBoxState::Running { .. }) {
+            state.apply(UiEvent::Notice(
+                "run `/model adopt` to add it and use it on the next launch".to_string(),
+            ));
         }
         return;
     }
@@ -2144,6 +2154,89 @@ async fn run_harness_command(
     let summary = summary.trim();
     if !summary.is_empty() {
         state.apply(UiEvent::Notice(summary.to_string()));
+    }
+    Ok(())
+}
+
+/// `/model adopt`: adopt a running LocalBox server into `.localpilot.toml` from
+/// inside the session. Detection is a cheap read; the config write is gated
+/// through the permission engine, and an `Ask` raises the standard in-session
+/// approval prompt — driven by [`drive_runtime_operation`] so the prompt is
+/// serviced without deadlocking the input loop (the same pattern turns use). The
+/// written provider applies on the next launch; this never silently writes.
+async fn run_localbox_adopt(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    state: &mut AppState,
+    prompts: &mut UserChannels,
+    host: &CommandHost<'_>,
+) -> anyhow::Result<()> {
+    let (endpoint, model) = match crate::localbox::detect().await {
+        crate::localbox::LocalBoxState::Running { endpoint, model } => (endpoint, model),
+        crate::localbox::LocalBoxState::InstalledNotRunning => {
+            state.apply(UiEvent::Notice(
+                "no running LocalBox server found — run `localbox serve <model>` first".to_string(),
+            ));
+            return Ok(());
+        }
+        crate::localbox::LocalBoxState::NotInstalled => {
+            state.apply(UiEvent::Notice(
+                "LocalBox is not installed (no `localbox` on PATH)".to_string(),
+            ));
+            return Ok(());
+        }
+    };
+
+    let path = localpilot_config::project_config_path(host.cwd);
+    let overwrite = path.exists();
+    let profile = sandbox_profile(state.profile);
+    let trusted = state.trusted;
+    let tx = host.approval_tx.clone();
+    let (_events, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+    let cancel = CancellationToken::new();
+    let started = std::time::Instant::now();
+    let write_endpoint = endpoint.clone();
+    let write_path = path.clone();
+    state.busy = true;
+
+    let operation = async move {
+        let engine = PermissionEngine::new(profile, Vec::new());
+        let request = PermissionRequest {
+            tool: "localbox adopt".to_string(),
+            effect: Effect::WritePath {
+                inside_workspace: true,
+                overwrite,
+                secret_like: false,
+            },
+            interactivity: Interactivity::Interactive,
+            trusted,
+            detail: write_path.display().to_string(),
+        };
+        let approved = match engine.decide(&request) {
+            Decision::Allow => true,
+            // An `Ask` raises the standard approval prompt; the driving loop
+            // renders it and feeds the answer back, so this await never deadlocks.
+            Decision::Ask => TuiApprover { tx: tx.clone() }.approve(&request).await,
+            Decision::Deny => false,
+        };
+        if !approved {
+            return Ok::<Option<String>, anyhow::Error>(None);
+        }
+        crate::localbox::write_local_provider(&write_path, &write_endpoint, model.as_deref())?;
+        Ok(Some(write_endpoint))
+    };
+
+    let outcome = drive_runtime_operation(
+        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, operation,
+    )
+    .await;
+    state.busy = false;
+    match outcome? {
+        Some(endpoint) => state.apply(UiEvent::Notice(format!(
+            "adopted LocalBox at {endpoint} — wrote [providers.local]; it applies on the next `localpilot` launch"
+        ))),
+        None => state.apply(UiEvent::Notice(
+            "adopt declined — no config written".to_string(),
+        )),
     }
     Ok(())
 }
