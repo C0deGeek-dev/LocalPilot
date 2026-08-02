@@ -23,6 +23,7 @@ mod ingest_cmd;
 #[cfg(feature = "tui")]
 mod key_input;
 mod learning_cmd;
+mod localbox;
 mod logging;
 mod login_cmd;
 mod mcp;
