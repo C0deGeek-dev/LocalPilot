@@ -348,16 +348,9 @@ impl StartupTimer {
 fn no_model_error(offer: crate::localbox::ModelOffer) -> anyhow::Error {
     let base =
         "no model: pass --model, or set a default in .localpilot.toml ([providers.<id>] model = \"...\")";
-    match offer {
-        crate::localbox::ModelOffer::NoOffer => anyhow::anyhow!("{base}"),
-        crate::localbox::ModelOffer::Running { endpoint } => anyhow::anyhow!(
-            "{base}\n  a LocalBox server is serving at {endpoint} — add it under \
-             [providers.local] in .localpilot.toml to use it"
-        ),
-        crate::localbox::ModelOffer::InstalledNotRunning => anyhow::anyhow!(
-            "{base}\n  LocalBox is installed — run `localbox serve <model>` to start a \
-             local model, then retry"
-        ),
+    match crate::localbox::offer_message(&offer) {
+        None => anyhow::anyhow!("{base}"),
+        Some(pointer) => anyhow::anyhow!("{base}\n  {pointer}"),
     }
 }
 
@@ -1355,6 +1348,14 @@ async fn list_models(
         state.apply(UiEvent::Notice(
             "no providers configured (see .localpilot.toml)".to_string(),
         ));
+        // Same LocalBox pointer the startup path shows, so `/model` on an empty
+        // config points the user at a detected local server instead of dead-ending.
+        if let Some(pointer) = crate::localbox::offer_message(&crate::localbox::offer_for(
+            false,
+            crate::localbox::detect().await,
+        )) {
+            state.apply(UiEvent::Notice(pointer));
+        }
         return;
     }
     let active_provider = runtime.active_provider_id().to_string();

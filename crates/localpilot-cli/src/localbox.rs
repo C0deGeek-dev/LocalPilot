@@ -113,11 +113,40 @@ pub(crate) fn offer_for(usable_model_present: bool, state: LocalBoxState) -> Mod
     }
 }
 
+/// The one-line, actionable pointer for an offer, or `None` when there is
+/// nothing to offer. Single source of the offer wording so the startup error and
+/// the in-session `/model` notice stay identical.
+pub(crate) fn offer_message(offer: &ModelOffer) -> Option<String> {
+    match offer {
+        ModelOffer::NoOffer => None,
+        ModelOffer::Running { endpoint } => Some(format!(
+            "a LocalBox server is serving at {endpoint} — add it under [providers.local] in .localpilot.toml to use it"
+        )),
+        ModelOffer::InstalledNotRunning => Some(
+            "LocalBox is installed — run `localbox serve <model>` to start a local model, then retry"
+                .to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn offer_message_is_actionable_and_none_when_nothing_to_offer() {
+        assert_eq!(offer_message(&ModelOffer::NoOffer), None);
+        assert!(offer_message(&ModelOffer::Running {
+            endpoint: "http://127.0.0.1:11435/v1".to_string(),
+        })
+        .unwrap()
+        .contains("[providers.local]"));
+        assert!(offer_message(&ModelOffer::InstalledNotRunning)
+            .unwrap()
+            .contains("localbox serve"));
+    }
 
     #[test]
     fn offers_only_when_no_usable_model_and_localbox_present() {
