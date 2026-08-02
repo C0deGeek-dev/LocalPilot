@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Self-improvement loop: `localpilot selfimprove status` / `next`.** The four
+  existing self-improvement stages — read-only review, human-gated patch
+  proposal, and the self-dev build/reload — are now wired into one loop by a thin
+  orchestrator. `status` shows the current stage; `next` advances exactly one
+  step: review → propose → **[human approval]** → build → reload. Past the human
+  gate, `next` refuses to promote without an explicit `--approve --reviewer`, and
+  it builds the approved, merged tree — never the proposal worktree. This does
+  **not** enable any autonomous loop: every step is explicit and the unattended
+  self-editing loop stays deferred. See
+  [docs/02-architecture.md](docs/02-architecture.md) and ADR-0138.
+
 - **LocalBox integration: detect a local model server and adopt it.** When no
   usable model is configured, startup, the `/model` command, and
   `localpilot models` now point at a detected LocalBox server (or an

@@ -249,7 +249,7 @@ fn truncate(s: &str) -> String {
 }
 
 /// A safe, collision-resistant branch/worktree id for a proposal.
-fn proposal_branch(finding_rank: usize) -> String {
+pub(crate) fn proposal_branch(finding_rank: usize) -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

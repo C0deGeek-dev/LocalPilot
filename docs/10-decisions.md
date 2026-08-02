@@ -2,6 +2,49 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0138: The Self-Improvement Loop Is A Thin Orchestrator Over Separate Stage Crates
+
+Status: accepted. Builds on ADR-0034 (the human-gated loop) and keeps ADR-0128
+(the unattended autonomous loop) deferred.
+
+LocalPilot's self-improvement stages already ship as separate crates: the
+read-only find (`localpilot-selfreview`), the scope-confined, human-gated source
+mutation (`localpilot-patchgen`), and the binary lifecycle — build, gauntlet,
+immutable store, reload (`localpilot-selfdev`). They are wired into one loop by a
+**thin orchestrator** (`localpilot-selfimprove`) that sequences their existing
+entrypoints and surfaces the loop state — **not** by fusing them into one module.
+
+The stages are kept separate because they have different blast radii. Source
+mutation is guarded by a human-merge gate: the agent may propose a minimal edit
+in an isolated worktree, but promotion to `main` requires an `ApprovalToken` that
+only an explicit human confirmation mints. The binary lifecycle is guarded by a
+build gauntlet (identity, freshness, a real handshake) and a rollback circuit
+breaker, and it is a compiled-artefact concern, not a source-text one. Merging
+the two would couple unrelated concerns and blur the single most important
+property — that a human, not the agent, decides what reaches `main`. The two also
+share no logic worth merging: the only common code is the `executable_name()`
+one-liner, and self-dev's never-overwrite-repoint store is the deliberate
+opposite of the distribution updater's rename-and-replace activation.
+
+The orchestrator therefore holds only sequencing and state. It advances one
+explicit step at a time (`localpilot selfimprove status` / `next`), persists its
+state under `.localpilot/selfimprove/` so a step resumes across processes, and
+stops hard at the `ApprovalToken` gate. It never mints the token: the crossing
+reuses `patchgen`'s structural gate, and the loop's `next` promotes only when the
+human passes `--approve --reviewer`. After approval it builds the **approved,
+merged tree** (the workspace root), never the proposal worktree, and it reuses
+`selfdev`'s existing rollback circuit breaker rather than adding its own. No code
+path auto-mints a token or auto-advances build→reload, so ADR-0128's autonomous
+loop stays deferred by construction, proven by architecture tests over the
+shipped source.
+
+Consequences: a new but thin public surface (`selfimprove status` / `next`,
+wired to the orchestrator); the shared build→gauntlet→promote composition moves
+into `localpilot-selfdev` as `build_gauntlet_promote` so the CLI release surface
+and the orchestrator reuse one definition instead of each re-deriving it. If the
+orchestrator ever starts to hold stage logic, that is design pressure to push it
+back into the owning crate, not to fuse the crates.
+
 ## ADR-0129: Full-Screen Chat Is The Interactive Default
 
 Status: accepted. Advances ADR-0107's transition without yet removing its

@@ -27,6 +27,7 @@ members = [
     "crates/localpilot-render",
     "crates/localpilot-patchgen",
     "crates/localpilot-selfdev",
+    "crates/localpilot-selfimprove",
     "crates/localpilot-selfreview",
     "crates/localpilot-verify",
 ]

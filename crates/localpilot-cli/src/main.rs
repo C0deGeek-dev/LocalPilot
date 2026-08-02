@@ -40,6 +40,7 @@ mod rpc_cmd;
 mod self_review_cmd;
 mod selfdev_cmd;
 mod selfdev_reload;
+mod selfimprove_cmd;
 mod server_cmd;
 mod session_cmd;
 mod skill_discovery;
@@ -150,6 +151,13 @@ enum Command {
     Selfdev {
         #[command(subcommand)]
         command: SelfdevCommand,
+    },
+    /// Drive the human-gated self-improvement loop one step at a time: review →
+    /// propose → [human approval] → build → reload. There is no autonomous loop —
+    /// each step is explicit, and the gate needs a human `--approve` (ADR-0128).
+    Selfimprove {
+        #[command(subcommand)]
+        command: SelfImproveCommand,
     },
     /// Inspect and choose between installed versions.
     Version {
@@ -578,6 +586,37 @@ enum SelfdevCommand {
         #[arg(last = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SelfImproveCommand {
+    /// Show the current loop state: which stage, what is pending, and whether the
+    /// gate is awaiting a human approval token.
+    Status,
+    /// Advance the loop one stage. Past the human gate it refuses to promote
+    /// without an explicit `--approve --reviewer <you>`.
+    Next {
+        /// The 1-based rank of the finding to propose (Found → Proposed step);
+        /// defaults to the top-ranked finding.
+        #[arg(long, default_value_t = 1)]
+        finding: usize,
+        /// The model that authors the proposed edit (needed only for the
+        /// Found → Proposed step).
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id; the default provider is used when omitted.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Cross the human gate: promote the proposed patch. The deliberate human
+        /// act the loop never takes on its own.
+        #[arg(long)]
+        approve: bool,
+        /// The human reviewer recorded on the approval (required with `--approve`).
+        #[arg(long)]
+        reviewer: Option<String>,
+    },
+    /// Clear the loop state so a fresh pass can start.
+    Reset,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -1551,6 +1590,39 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 SelfdevCommand::Reload { target_dir, args } => {
                     // Never returns on success (Unix): the process is replaced.
                     selfdev_cmd::run_reload(&cwd, &selfdev_root, target_dir, &args, &mut stdout)?;
+                }
+            }
+            stdout.flush()?;
+        }
+        Command::Selfimprove { command } => {
+            let cwd = std::env::current_dir()?;
+            let mut stdout = io::stdout().lock();
+            match command {
+                SelfImproveCommand::Status => {
+                    selfimprove_cmd::run_status(&cwd, &mut stdout)?;
+                }
+                SelfImproveCommand::Next {
+                    finding,
+                    model,
+                    provider,
+                    approve,
+                    reviewer,
+                } => {
+                    selfimprove_cmd::run_next(
+                        &cwd,
+                        &selfimprove_cmd::NextArgs {
+                            finding,
+                            model: model.as_deref(),
+                            provider: provider.as_deref(),
+                            approve,
+                            reviewer: reviewer.as_deref(),
+                        },
+                        &mut stdout,
+                    )
+                    .await?;
+                }
+                SelfImproveCommand::Reset => {
+                    selfimprove_cmd::run_reset(&cwd, &mut stdout)?;
                 }
             }
             stdout.flush()?;

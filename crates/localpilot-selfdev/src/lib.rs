@@ -20,6 +20,7 @@ mod gauntlet;
 mod git;
 mod marker;
 mod paths;
+mod publish;
 mod reload;
 mod rollback;
 mod source;
@@ -37,6 +38,7 @@ pub use gauntlet::{
 };
 pub use marker::{BuildMarker, BUILD_MARKER_VERSION};
 pub use paths::default_root;
+pub use publish::build_gauntlet_promote;
 pub use reload::{
     perform_reload, relaunch, relaunch_plan, stage_reload, RelaunchPlan, ReloadIntent,
     ReloadRequest, ReloadStore, RELOAD_INTENT_VERSION,

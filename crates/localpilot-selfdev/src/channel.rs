@@ -143,6 +143,17 @@ impl Channels {
         Some(marker.label)
     }
 
+    /// The labels the built-in channels (`current`, `stable`, `slow`) currently
+    /// resolve to — the set a version sweep must never reclaim, since a channel
+    /// points at each (or a process may be running from it).
+    #[must_use]
+    pub fn active_targets(&self) -> Vec<String> {
+        [CURRENT, STABLE, SLOW]
+            .into_iter()
+            .filter_map(|channel| self.label(channel))
+            .collect()
+    }
+
     /// Resolve `channel` all the way to the immutable stored version it names.
     ///
     /// Returns `None` when the channel is unset, or points at a label that is not
