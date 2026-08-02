@@ -1003,7 +1003,10 @@ mod tests {
     #[test]
     fn localbox_slash_command_parses() {
         assert_eq!(parse_slash("/localbox"), Some(SlashAction::LocalBoxAdopt));
-        assert_eq!(parse_slash("/localbox adopt"), Some(SlashAction::LocalBoxAdopt));
+        assert_eq!(
+            parse_slash("/localbox adopt"),
+            Some(SlashAction::LocalBoxAdopt)
+        );
         assert!(matches!(
             parse_slash("/localbox wat"),
             Some(SlashAction::Invalid { .. })

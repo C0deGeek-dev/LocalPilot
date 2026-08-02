@@ -218,7 +218,9 @@ pub(crate) async fn run_adopt(
             Decision::Allow => true,
             Decision::Ask if stdin_is_tty => crate::models_cmd::confirm(question)?,
             Decision::Ask => {
-                anyhow::bail!("this needs approval — re-run with --yes to proceed non-interactively")
+                anyhow::bail!(
+                    "this needs approval — re-run with --yes to proceed non-interactively"
+                )
             }
             Decision::Deny => false,
         })
@@ -279,7 +281,10 @@ pub(crate) async fn run_adopt(
     };
     if !consent(
         &request,
-        &format!("add [providers.local] for {endpoint} to {}?", path.display()),
+        &format!(
+            "add [providers.local] for {endpoint} to {}?",
+            path.display()
+        ),
     )? {
         anyhow::bail!("declined — no config written");
     }
@@ -351,7 +356,8 @@ api_key_env = \"OPENAI_API_KEY\"
 command = \"npx\"
 ";
         let merged =
-            merge_local_provider(existing, "http://127.0.0.1:11435/v1", Some("qwen-coder")).unwrap();
+            merge_local_provider(existing, "http://127.0.0.1:11435/v1", Some("qwen-coder"))
+                .unwrap();
         let doc: toml_edit::DocumentMut = merged.parse().unwrap();
         // The sibling provider and the MCP table survive untouched.
         assert_eq!(doc["providers"]["openai"]["kind"].as_str(), Some("openai"));
@@ -361,7 +367,10 @@ command = \"npx\"
         );
         assert!(merged.contains("# a hand-added MCP server"));
         // The LocalBox proxy contract is written, and default points at local.
-        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(
+            doc["providers"]["local"]["kind"].as_str(),
+            Some("anthropic")
+        );
         assert_eq!(
             doc["providers"]["local"]["base_url"].as_str(),
             Some("http://127.0.0.1:11435/v1")
@@ -370,7 +379,10 @@ command = \"npx\"
             doc["providers"]["local"]["api_key_env"].as_str(),
             Some("ANTHROPIC_AUTH_TOKEN")
         );
-        assert_eq!(doc["providers"]["local"]["model"].as_str(), Some("qwen-coder"));
+        assert_eq!(
+            doc["providers"]["local"]["model"].as_str(),
+            Some("qwen-coder")
+        );
         assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
     }
 
@@ -384,7 +396,10 @@ command = \"npx\"
             "fresh config should use section headers, got: {merged}"
         );
         let doc: toml_edit::DocumentMut = merged.parse().unwrap();
-        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(
+            doc["providers"]["local"]["kind"].as_str(),
+            Some("anthropic")
+        );
         assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
         assert!(doc["providers"]["local"].get("model").is_none());
     }
@@ -404,7 +419,10 @@ command = \"npx\"
         write_local_provider(&path, "http://127.0.0.1:11435/v1", Some("m")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let doc: toml_edit::DocumentMut = text.parse().unwrap();
-        assert_eq!(doc["providers"]["local"]["kind"].as_str(), Some("anthropic"));
+        assert_eq!(
+            doc["providers"]["local"]["kind"].as_str(),
+            Some("anthropic")
+        );
         assert_eq!(doc["providers"]["openai"]["kind"].as_str(), Some("openai"));
         assert_eq!(doc["provider"]["default"].as_str(), Some("local"));
     }
@@ -416,7 +434,10 @@ command = \"npx\"
         write_local_provider(&path, "http://127.0.0.1:11435/v1", None).unwrap();
         assert!(path.is_file());
         let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(doc["providers"]["local"]["base_url"].as_str(), Some("http://127.0.0.1:11435/v1"));
+        assert_eq!(
+            doc["providers"]["local"]["base_url"].as_str(),
+            Some("http://127.0.0.1:11435/v1")
+        );
     }
 
     #[test]
