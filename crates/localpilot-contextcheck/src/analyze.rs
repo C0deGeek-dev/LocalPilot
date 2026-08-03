@@ -263,9 +263,13 @@ fn negation_differs(a: &str, b: &str) -> bool {
 }
 
 fn has_negation(text: &str) -> bool {
-    const MARKERS: [&str; 7] = ["never", "not", "don't", "dont", "avoid", "no ", "without"];
-    let lower = text.to_ascii_lowercase();
-    MARKERS.iter().any(|m| lower.contains(m))
+    const MARKERS: [&str; 7] = ["never", "not", "don't", "dont", "avoid", "no", "without"];
+    // Word-boundary match, not substring: a substring check reports "note",
+    // "another", and "notice" as negations ("not") and floods conflict findings
+    // with false positives (found by the internal sweep).
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .any(|word| MARKERS.contains(&word))
 }
 
 /// Rank for ordering — higher is more severe.
@@ -334,6 +338,30 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.kind == ContextFindingKind::Conflict));
+    }
+
+    #[test]
+    fn negation_is_matched_at_word_boundaries_not_as_a_substring() {
+        // "note" must not read as the negation "not" — the false-positive the
+        // internal sweep surfaced. Two identical lines are redundant, not a conflict.
+        let inv = ContextInventory {
+            layers: vec![
+                instruction_layer("CLAUDE.md", "See the provenance note in the guide.", 8),
+                instruction_layer("AGENTS.md", "See the provenance note in the guide.", 8),
+            ],
+        };
+        let report = analyze(&inv, &Thresholds::default());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.kind != ContextFindingKind::Conflict),
+            "identical directives containing 'note' must not read as a conflict"
+        );
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == ContextFindingKind::Redundancy));
     }
 
     #[test]
