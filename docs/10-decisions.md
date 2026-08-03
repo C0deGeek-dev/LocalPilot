@@ -204,8 +204,9 @@ endpoints.
 
 Consequences: a crate-internal protocol and driver in the swarm layer beside the
 DAG driver, reusing the one messaging substrate and adding no second transport;
-its public driver/report/progress surface is library-only until a pair host wires
-it to real endpoints; the parser and state internals stay crate-private.
+its public driver/report/progress surface is wired by ADR-0139 to real
+adopted-session endpoints, though no user-runnable pair host or entrypoint ships
+yet; the parser and state internals stay crate-private.
 
 ## ADR-0135: A Swarm Worker's Model Is Verified Before And After The Build; An Unserved Model Is Refused, Never Defaulted
 

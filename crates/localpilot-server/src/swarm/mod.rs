@@ -18,8 +18,8 @@
 //!   proposals and revisions of one artifact until both agree or a bound stops
 //!   them. Not a plan and not a hierarchy — a transport-agnostic bounded protocol,
 //!   designed to run over the existing messaging substrate through an abstract
-//!   endpoint boundary that a production adapter supplies. Library-only until that
-//!   adapter lands.
+//!   endpoint boundary. A production adapter now supplies that boundary over real
+//!   adopted-session hosts; no user-runnable pair entrypoint ships yet.
 //! - [`lifecycle`] is what happens when a worker stops answering: heartbeats,
 //!   salvage, re-election, reparenting, reaping, and durable snapshots.
 //! - [`touches`] records who touched which file recently and tells the peers a
