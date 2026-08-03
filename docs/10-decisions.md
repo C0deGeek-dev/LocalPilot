@@ -155,6 +155,66 @@ and the orchestrator reuse one definition instead of each re-deriving it. If the
 orchestrator ever starts to hold stage logic, that is design pressure to push it
 back into the owning crate, not to fuse the crates.
 
+## ADR-0137: A Pair Uses One Frame With Two Cohesive Session Projections
+
+Status: accepted for the backend-neutral presentation component; no
+user-runnable pair host or entrypoint ships yet. Extends the full-screen terminal
+ownership boundary (ADR-0107) and presents the two ordinary Agent sessions
+adopted by ADR-0139.
+
+A pair does not create two terminal applications. One full-screen application
+shell presents two session projections, keeping geometry, drawing, input, and
+hit-testing under the same authorities that single chat already uses.
+
+- **One shared shell, two cohesive projections.** Theme and terminal
+  capabilities, workspace identity, tabs, composer, dialogs, takeovers, exit
+  state, and pair status are shared. Each session projection owns its provider,
+  model, session identity, timeline and live assistant/reasoning/tool state,
+  work and plan state, usage and context totals, stream accounting, viewport,
+  search, and selection. A shared workspace is rendered once; peer labels carry
+  the per-session identity.
+- **One typed geometry authority.** `FrameLayout` remains the sole source of
+  drawing and hit-test rectangles. Its timeline region is a typed single- or
+  pair-pane layout rather than parallel optional fields. A pane owns its label,
+  timeline content, and scrollbar geometry; a wide pair tiles two panes around
+  one explicit divider. The wide threshold is two supported single-pane widths
+  plus the divider, and a pair label never reduces timeline content below the
+  existing minimum height.
+- **Narrow is defined, never blank.** Before richer responsive reflow is added,
+  a pair below the wide threshold shows the active peer at full width with its
+  textual peer label and the shared composer target. An undersized height keeps
+  the existing resize guidance. A later stacked layout may improve this fallback
+  without changing the state or hit-test model.
+- **Routing is explicit.** Peer-tagged runtime updates enter through one routing
+  seam and can mutate only the named session projection. Accessors select the
+  active or named projection explicitly; there is no dereference trick, duplicate
+  shadow state, or implicit "last rendered" pane. Timeline search stays with its
+  originating projection and resumes unchanged when that peer is selected again.
+- **Drawing and input share one pane contract.** One pane renderer serves single
+  chat, the two wide panes, and the active-only narrow fallback. Hit maps retain
+  a separate timeline/row/scrollbar bundle per visible peer. Keyboard focus uses
+  a legacy-terminal-safe peer toggle; a click selects a peer, pointer scrolling
+  follows the pane under the pointer without retargeting the composer, and drag
+  gestures remain pinned to their origin pane. Text labels identify the active
+  peer without relying on color.
+- **Single chat is the invariant.** With pair presentation off, frame geometry,
+  buffers, event routing, key behavior, mouse behavior, and accessibility remain
+  unchanged. Deterministic component tests compare the single path to its existing
+  output while independently exercising both peer projections and hit maps.
+
+Scope and boundary: this decision owns only backend-neutral terminal state,
+geometry, rendering, and interaction. The executable host still owns Crossterm,
+runtime channels, approvals, questions, and terminal lifecycle. Until that host
+constructs and drives the two projections, these pair-presentation surfaces are
+component-only and do not expose a runnable command.
+
+Consequences: the terminal UI gains typed single/pair timeline geometry, an
+explicit shared-shell/session-projection split, peer-aware rendering and hit maps,
+and a narrow active-peer safety fallback. It gains no provider, transport,
+permission engine, session mode, or second terminal event loop. Public UI enums
+that grow for peer interaction are non-exhaustive; the exact-two peer identity
+itself remains a closed two-value contract.
+
 ## ADR-0136: A Peer Pair Converges Through A Typed Envelope Over Direct One-To-One Messaging, Driver-Scheduled And Finitely Bounded
 
 Status: accepted. Reuses the in-app peer-messaging substrate from ADR-0124..0127
