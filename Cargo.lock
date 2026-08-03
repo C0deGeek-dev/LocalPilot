@@ -1623,6 +1623,7 @@ dependencies = [
  "insta",
  "localpilot-agents",
  "localpilot-config",
+ "localpilot-contextcheck",
  "localpilot-core",
  "localpilot-dist",
  "localpilot-harness",
@@ -1689,6 +1690,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.9",
+]
+
+[[package]]
+name = "localpilot-contextcheck"
+version = "2.7.0"
+dependencies = [
+ "localmind-store",
+ "localpilot-config",
+ "localpilot-core",
+ "localpilot-harness",
+ "localpilot-selfreview",
+ "localpilot-skills",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

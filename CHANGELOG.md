@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Context hygiene: `localpilot doctor --hygiene`.** `doctor` gains an opt-in
+  `--hygiene` flag that inspects the authored context a session assembles from
+  the current directory — the `CLAUDE.md`/`AGENTS.md` instruction files and the
+  skills visible to the project — and reports each layer's token weight plus
+  advisory findings: a directive stated in more than one layer (redundancy),
+  directives that disagree (conflict), and layers large enough to be worth
+  right-sizing. It reads and reports only — never edits — and every quoted
+  snippet passes the same redactor as the rest of `doctor`, so a secret in an
+  instruction file is not echoed. Without the flag, `doctor` output is unchanged.
+  Rides the existing `--format human|json`. See
+  [docs/install.md](docs/install.md) and ADR-0140.
+
 - **Self-improvement loop: `localpilot selfimprove status` / `next`.** The four
   existing self-improvement stages — read-only review, human-gated patch
   proposal, and the self-dev build/reload — are now wired into one loop by a thin

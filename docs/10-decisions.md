@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0140: Context Hygiene Is A Read-Only, Opt-In Section Of `doctor`
+
+Status: accepted. Extends ADR-0050 (the `doctor` report and its `--format`
+contract) and reuses ADR-0056 (instruction-file discovery) and ADR-0103 (the
+composed system prompt).
+
+Anthropic's Claude-5-generation context-engineering guidance (right-size
+`CLAUDE.md` and skills, remove redundancy, keep a single source of truth) is
+worth surfacing to a LocalPilot user — but LocalPilot serves weaker local
+backends, for which an over-specific rule may still be load-bearing. So the
+feature *reports*; it never trims guidance on its own.
+
+Decision: a new library crate, `localpilot-contextcheck`, builds a read-only
+inventory of the statically authored context a session assembles — the
+instruction files (via the existing `ContextDiscovery`), the visible skills, and,
+when a caller supplies it, the composed system prompt — attaches a token estimate
+to each (reusing the harness estimator), and analyzes them into severity-ranked
+advisory findings: redundancy and conflict across layers (reusing the store's
+text-overlap primitives), plus oversized-layer / token-budget signals. Findings
+reuse the self-review `Severity` scale but a local finding taxonomy (the
+self-review `FindingKind` is code-oriented). The CLI surfaces this as an opt-in
+`--hygiene` section of the existing `doctor` command — not a new command and not
+a model-callable tool (ADR-0134): one command, one `--format` vocabulary. The
+`context` field is absent from the report unless `--hygiene` is passed, so the
+established `doctor` output is unchanged.
+
+Boundary: it is **report-only** — it reads and never edits, trims, or reorders
+any file. Every emitted snippet passes the canonical redactor
+(`localpilot-config::redact`), as the instruction-injection path already does, so
+a cleartext secret in an instruction file is not echoed. It stays offline. The
+CLI reports the user-editable layers (instruction files + skills); the
+system-prompt layer needs the live tool registry and is a library capability used
+by the dev-facing sweep. Dynamic per-turn memory/reference injection and the
+reserved harness runtime files (`brief.md`/`PROGRESS.md`/`DECISIONS.md`/
+`LESSONS.md`) are out of scope. Model-tier-conditional prompt assembly
+(strip-for-frontier vs keep-rails-for-local) is deliberately not pursued: it is
+untestable without a frontier backend LocalPilot does not target.
+
 ## ADR-0138: The Self-Improvement Loop Is A Thin Orchestrator Over Separate Stage Crates
 
 Status: accepted. Builds on ADR-0034 (the human-gated loop) and keeps ADR-0128

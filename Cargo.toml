@@ -29,6 +29,7 @@ members = [
     "crates/localpilot-selfdev",
     "crates/localpilot-selfimprove",
     "crates/localpilot-selfreview",
+    "crates/localpilot-contextcheck",
     "crates/localpilot-verify",
 ]
 # The LocalMind engine is vendored as a git submodule and consumed by

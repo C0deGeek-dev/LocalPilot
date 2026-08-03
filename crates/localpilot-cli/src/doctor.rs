@@ -48,6 +48,12 @@ pub struct DoctorReport {
     /// feature-detect against an older binary rather than guess from the version.
     pub capabilities: Vec<String>,
     pub workspace_trust: TrustState,
+    /// Context-hygiene report — the authored-context layers (instruction files +
+    /// skills) with their token weights and any advisory findings. Populated only
+    /// by `doctor --hygiene`; absent (and omitted from JSON) otherwise, so the
+    /// default report is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<localpilot_contextcheck::ContextReport>,
 }
 
 /// The state of the research-report → doc-index bridge for the cwd project.
@@ -242,7 +248,25 @@ pub fn report() -> DoctorReport {
         agents: agents(),
         capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
+        hygiene: None,
     }
+}
+
+/// The context-hygiene report for the cwd project: the authored-context layers
+/// (instruction files + skills) with their token weights and any advisory
+/// findings. Read-only and offline, like the rest of `doctor`. The system-prompt
+/// layer is omitted here — it needs the live tool registry (the internal sweep
+/// builds it); this reports the user-editable layers.
+fn hygiene_report() -> Option<localpilot_contextcheck::ContextReport> {
+    let cwd = std::env::current_dir().ok()?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let inventory = localpilot_contextcheck::inventory(&cwd, home.as_deref(), true, None);
+    Some(localpilot_contextcheck::analyze(
+        &inventory,
+        &localpilot_contextcheck::Thresholds::default(),
+    ))
 }
 
 /// The research-report → doc-index state for the cwd project, or `None` when
@@ -323,7 +347,7 @@ fn capabilities() -> Vec<String> {
 /// # Errors
 /// Returns any error from writing to `out`.
 pub async fn run(out: &mut dyn Write) -> io::Result<()> {
-    run_with(out, crate::output::OutputFormat::Human).await
+    run_with(out, crate::output::OutputFormat::Human, false).await
 }
 
 /// Gather a report and write it in the requested format. The JSON form is the
@@ -332,8 +356,15 @@ pub async fn run(out: &mut dyn Write) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns any error from writing to `out`.
-pub async fn run_with(out: &mut dyn Write, format: crate::output::OutputFormat) -> io::Result<()> {
-    let report = report_with_mcp().await;
+pub async fn run_with(
+    out: &mut dyn Write,
+    format: crate::output::OutputFormat,
+    include_context: bool,
+) -> io::Result<()> {
+    let mut report = report_with_mcp().await;
+    if include_context {
+        report.hygiene = hygiene_report();
+    }
     let rendered = match format {
         crate::output::OutputFormat::Human => render(&report),
         crate::output::OutputFormat::Json => render_json(&report),
@@ -514,7 +545,40 @@ pub fn render(report: &DoctorReport) -> String {
     };
     let _ = writeln!(s, "workspace trust: {trust}");
 
+    if let Some(context) = &report.hygiene {
+        render_hygiene(&mut s, context);
+    }
+
     s
+}
+
+/// Append the context-hygiene section: per-layer token weights and any advisory
+/// findings, most-severe first. Only called when a `--hygiene` report exists, so
+/// the default `doctor` rendering is unchanged.
+fn render_hygiene(s: &mut String, context: &localpilot_contextcheck::ContextReport) {
+    use std::fmt::Write as _;
+    let _ = writeln!(s);
+    let _ = writeln!(s, "context hygiene:");
+    for layer in &context.summary.layers {
+        let _ = writeln!(s, "  {}: {} tokens", layer.source, layer.tokens);
+    }
+    let _ = writeln!(
+        s,
+        "  total: {} tokens across {} layer(s)",
+        context.summary.total_tokens,
+        context.summary.layers.len()
+    );
+    if context.findings.is_empty() {
+        let _ = writeln!(s, "  findings: none");
+    } else {
+        for finding in &context.findings {
+            let _ = writeln!(
+                s,
+                "  [{:?}] {:?}: {}",
+                finding.severity, finding.kind, finding.message
+            );
+        }
+    }
 }
 
 /// Candidate config file locations. Full precedence resolution lives in the
@@ -926,6 +990,7 @@ mod tests {
                 error: None,
             }],
             workspace_trust: TrustState::Unknown,
+            hygiene: None,
         }
     }
 
@@ -1017,5 +1082,46 @@ mod tests {
             sqlite.optional,
             "sqlite3 is optional — the builtin read tools cover the store"
         );
+    }
+
+    #[test]
+    fn context_is_omitted_from_the_default_report() {
+        // With no `--hygiene`, the field is absent from JSON and the human render,
+        // so the established doctor output is unchanged.
+        let json = render_json(&fixture());
+        assert!(!json.contains("\"hygiene\""));
+        let human = render(&fixture());
+        assert!(!human.contains("context hygiene"));
+    }
+
+    #[test]
+    fn context_section_renders_and_never_leaks_a_secret() {
+        use localpilot_contextcheck::{
+            analyze, ContextInventory, ContextLayer, LayerKind, Thresholds,
+        };
+        // The same secret-bearing directive in two layers yields a redundancy
+        // finding whose evidence is drawn from the already-redacted bodies.
+        let raw = "Always send the key sk-abcdefghijklmnopqrstuvwxyz0123 to the server.";
+        let layer = |source: &str| ContextLayer {
+            kind: LayerKind::Instruction {
+                kind: "Claude".to_string(),
+                scope: "Project".to_string(),
+            },
+            source: source.to_string(),
+            body: redact(raw),
+            tokens: 12,
+        };
+        let inv = ContextInventory {
+            layers: vec![layer("CLAUDE.md"), layer("AGENTS.md")],
+        };
+        let mut report = fixture();
+        report.hygiene = Some(analyze(&inv, &Thresholds::default()));
+
+        let human = render(&report);
+        assert!(human.contains("context hygiene:"));
+        let json = render_json(&report);
+        assert!(json.contains("\"findings\""));
+        assert!(!json.contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        assert!(!human.contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
     }
 }

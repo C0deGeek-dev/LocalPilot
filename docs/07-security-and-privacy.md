@@ -137,6 +137,11 @@ no environment variable (ADR-0042). The posture:
 - **Resolution precedence:** stored credential (keychain → file) → `api_key_env`
   environment variable → config. `localpilot doctor` reports the resolved *source*
   (`keychain` / `file` / `env` / `not set`), never the secret.
+- **Context-hygiene snippets are redacted.** `localpilot doctor --hygiene` reads
+  your instruction files, which can hold cleartext secrets. Every layer body is
+  passed through the canonical redactor before analysis, so any quoted evidence
+  snippet is already redacted; the per-layer summary carries token weights only,
+  never body text. Best-effort, like all redaction here (ADR-0140).
 - **To remove:** `localpilot logout <provider>` deletes it from every tier.
 
 ## MCP Server Environments
