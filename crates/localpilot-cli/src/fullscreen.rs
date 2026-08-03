@@ -471,7 +471,7 @@ fn exit_presentation(app: &AppModel, cwd: &Path, elapsed: Duration, print: bool)
         "LocalPilot".to_string(),
         format!("Session: {}", format_elapsed(elapsed)),
     ];
-    if let Some(usage) = app.usage {
+    if let Some(usage) = app.active_usage() {
         summary.push(format!(
             "Tokens: {} input · {} output",
             format_count(usage.input_tokens),
@@ -494,14 +494,14 @@ fn exit_presentation(app: &AppModel, cwd: &Path, elapsed: Duration, print: bool)
     }
     summary.push(format!(
         "Resume: localpilot chat --resume {}",
-        app.header.session_id
+        app.active_session_id()
     ));
     sections.push(summary.join("\n"));
     format!("{}\n", sections.join("\n\n"))
 }
 
 fn visible_transcript(app: &AppModel) -> String {
-    app.timeline
+    app.active_timeline()
         .items()
         .iter()
         .filter_map(|item| {
@@ -693,8 +693,8 @@ fn apply_fullscreen_resume(
         Ok(startup) => {
             app.clear_stashed_draft();
             app.clear_conversation();
-            app.header.session_id = session.to_string();
-            app.header.session_name = name.map(|name| sanitized_session_name(&name));
+            app.set_active_session_id(session.to_string());
+            app.set_active_session_name(name.map(|name| sanitized_session_name(&name)));
             for item in startup {
                 apply_startup_item(app, item);
             }
@@ -1102,7 +1102,7 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         SettingEntry {
             section: "Session".to_string(),
             name: "Provider".to_string(),
-            value: app.header.provider.clone(),
+            value: app.active_provider().to_string(),
             description: "The provider currently serving this conversation.".to_string(),
             edit: None,
             is_default: true,
@@ -1110,7 +1110,7 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         SettingEntry {
             section: "Session".to_string(),
             name: "Model".to_string(),
-            value: app.header.model.clone(),
+            value: app.active_model().to_string(),
             description: "Use /model to choose from configured LocalPilot providers.".to_string(),
             edit: None,
             is_default: true,
@@ -1118,7 +1118,7 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
         SettingEntry {
             section: "Session".to_string(),
             name: "Mode and profile".to_string(),
-            value: format!("{} · {}", app.header.mode, app.header.profile),
+            value: format!("{} · {}", app.shared_mode(), app.shared_profile()),
             description: "The active LocalPilot execution mode and permission profile.".to_string(),
             edit: None,
             is_default: true,
@@ -1603,8 +1603,7 @@ async fn execute_fullscreen_slash(
             model,
         } => {
             let report = switch_model_target(runtime, config, &provider, model).await;
-            app.header.provider = report.provider;
-            app.header.model = report.model;
+            app.set_active_provider_model(report.provider, report.model);
             for notice in report.notices {
                 app.apply_runtime(RuntimeUpdate::Notice(notice));
             }
@@ -1668,7 +1667,7 @@ async fn execute_fullscreen_slash(
             match runtime.store().set_session_name(session, &name) {
                 Ok(()) => {
                     let name = name.trim();
-                    app.header.session_name = Some(sanitized_session_name(name));
+                    app.set_active_session_name(Some(sanitized_session_name(name)));
                     app.apply_runtime(RuntimeUpdate::Notice(format!(
                         "named this session \"{}\"",
                         sanitized_session_name(name)
@@ -1683,8 +1682,8 @@ async fn execute_fullscreen_slash(
             runtime.start_new_session();
             app.clear_stashed_draft();
             app.clear_conversation();
-            app.header.session_id = runtime.session_id().to_string();
-            app.header.session_name = None;
+            app.set_active_session_id(runtime.session_id().to_string());
+            app.set_active_session_name(None);
             let (used, limit) = runtime.context_usage();
             app.apply_runtime(RuntimeUpdate::ContextUsage { used, limit });
             app.apply_runtime(RuntimeUpdate::Notice(format!(
@@ -1697,8 +1696,8 @@ async fn execute_fullscreen_slash(
             match runtime.fork_session(mark_fork) {
                 Ok(id) => {
                     app.clear_stashed_draft();
-                    app.header.session_id = id.to_string();
-                    app.header.session_name = None;
+                    app.set_active_session_id(id.to_string());
+                    app.set_active_session_name(None);
                     let verb = if mark_fork { "forked" } else { "cloned" };
                     app.apply_runtime(RuntimeUpdate::Notice(format!("{verb} into session {id}")));
                 }
@@ -1973,11 +1972,11 @@ async fn run_event_loop(
         }
     }
     if let Some(usage) = crate::repl::stored_session_usage(runtime.store(), runtime.session_id()) {
-        app.usage = Some(UsageTotals {
+        app.set_active_usage(Some(UsageTotals {
             input_tokens: usage.effective_input_tokens(),
             output_tokens: usage.output_tokens,
             cached_input_tokens: usage.cache_read_input_tokens,
-        });
+        }));
     }
     Ok(LoopExit::Normal)
 }
@@ -2760,7 +2759,7 @@ fn handle_mouse_event(
                     hit_map.scrollbar.viewport_rows,
                 );
             } else {
-                app.timeline.scroll_by(
+                app.active_timeline_mut().scroll_by(
                     -WHEEL_SCROLL_ROWS,
                     hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
@@ -2777,7 +2776,7 @@ fn handle_mouse_event(
                     hit_map.scrollbar.viewport_rows,
                 );
             } else {
-                app.timeline.scroll_by(
+                app.active_timeline_mut().scroll_by(
                     WHEEL_SCROLL_ROWS,
                     hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
@@ -2804,7 +2803,7 @@ fn handle_mouse_event(
                                 hit_map.scrollbar.viewport_rows,
                             );
                         } else {
-                            app.timeline.scroll_by(
+                            app.active_timeline_mut().scroll_by(
                                 delta,
                                 hit_map.timeline_wrap_width,
                                 hit_map.timeline.height,
@@ -2838,7 +2837,7 @@ fn handle_mouse_event(
                 .find(|tab| rect_contains(tab.area, mouse.column, mouse.row))
             {
                 app.active_tab = tab.tab;
-                app.timeline.clear_selection();
+                app.active_timeline_mut().clear_selection();
                 return RoutedEvent::Handled;
             }
 
@@ -2848,8 +2847,8 @@ fn handle_mouse_event(
                     && mouse.column < hit.content_x
                     && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
             }) {
-                if app.timeline.toggle_expandable(hit.row.item_id) {
-                    app.timeline.clear_selection();
+                if app.active_timeline_mut().toggle_expandable(hit.row.item_id) {
+                    app.active_timeline_mut().clear_selection();
                     return RoutedEvent::Handled;
                 }
             }
@@ -2866,12 +2865,12 @@ fn handle_mouse_event(
                     mouse.column.saturating_sub(hit_map.composer.x),
                     hit_map.editor_width,
                 );
-                app.timeline.clear_selection();
+                app.active_timeline_mut().clear_selection();
                 return RoutedEvent::Handled;
             }
 
             if let Some((leading, trailing)) = selection_points(hit_map, mouse.column, mouse.row) {
-                app.timeline.start_selection(leading);
+                app.active_timeline_mut().start_selection(leading);
                 mouse_state.selection = Some(SelectionGesture {
                     leading,
                     trailing,
@@ -2880,7 +2879,7 @@ fn handle_mouse_event(
                 });
                 mouse_state.selection_pointer = Some((mouse.column, mouse.row));
             } else {
-                app.timeline.clear_selection();
+                app.active_timeline_mut().clear_selection();
             }
             RoutedEvent::Handled
         }
@@ -2896,7 +2895,7 @@ fn handle_mouse_event(
                             hit_map.scrollbar.viewport_rows,
                         );
                     } else {
-                        app.timeline.scroll_to_row(
+                        app.active_timeline_mut().scroll_to_row(
                             start,
                             hit_map.timeline_wrap_width,
                             hit_map.timeline.height,
@@ -2923,14 +2922,14 @@ fn handle_mouse_event(
             let selecting = mouse_state.selection;
             if let Some(gesture) = selecting {
                 if (mouse.row, mouse.column) == (gesture.origin_row, gesture.origin_column) {
-                    app.timeline.clear_selection();
+                    app.active_timeline_mut().clear_selection();
                 } else {
                     extend_mouse_selection(app, hit_map, mouse_state, mouse.column, mouse.row);
                 }
             }
             mouse_state.reset_gesture();
             if selecting.is_some() && app.copy_on_select() {
-                app.timeline
+                app.active_timeline()
                     .selected_text()
                     .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
             } else {
@@ -2947,7 +2946,7 @@ fn handle_mouse_event(
             }
             if rect_contains(hit_map.timeline, mouse.column, mouse.row) {
                 return app
-                    .timeline
+                    .active_timeline()
                     .selected_text()
                     .map_or(RoutedEvent::Handled, RoutedEvent::Copy);
             }
@@ -2976,11 +2975,17 @@ fn advance_mouse_selection(app: &mut AppModel, hit_map: &HitMap, mouse_state: &M
         return;
     };
     if row < hit_map.timeline.y {
-        app.timeline
-            .scroll_by(-1, hit_map.timeline_wrap_width, hit_map.timeline.height);
+        app.active_timeline_mut().scroll_by(
+            -1,
+            hit_map.timeline_wrap_width,
+            hit_map.timeline.height,
+        );
     } else if row >= hit_map.timeline.bottom() {
-        app.timeline
-            .scroll_by(1, hit_map.timeline_wrap_width, hit_map.timeline.height);
+        app.active_timeline_mut().scroll_by(
+            1,
+            hit_map.timeline_wrap_width,
+            hit_map.timeline.height,
+        );
     }
     extend_mouse_selection(app, hit_map, mouse_state, column, row);
 }
@@ -2999,11 +3004,11 @@ fn extend_mouse_selection(
         return;
     };
     if (row, column) >= (gesture.origin_row, gesture.origin_column) {
-        app.timeline.start_selection(gesture.leading);
-        app.timeline.extend_selection(trailing);
+        app.active_timeline_mut().start_selection(gesture.leading);
+        app.active_timeline_mut().extend_selection(trailing);
     } else {
-        app.timeline.start_selection(gesture.trailing);
-        app.timeline.extend_selection(leading);
+        app.active_timeline_mut().start_selection(gesture.trailing);
+        app.active_timeline_mut().extend_selection(leading);
     }
 }
 
@@ -3047,14 +3052,16 @@ fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation,
     }
     let page = isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
     match navigation {
-        TimelineNavigation::PageUp => {
-            app.timeline
-                .scroll_by(-page, hit_map.timeline_wrap_width, hit_map.timeline.height)
-        }
-        TimelineNavigation::PageDown => {
-            app.timeline
-                .scroll_by(page, hit_map.timeline_wrap_width, hit_map.timeline.height)
-        }
+        TimelineNavigation::PageUp => app.active_timeline_mut().scroll_by(
+            -page,
+            hit_map.timeline_wrap_width,
+            hit_map.timeline.height,
+        ),
+        TimelineNavigation::PageDown => app.active_timeline_mut().scroll_by(
+            page,
+            hit_map.timeline_wrap_width,
+            hit_map.timeline.height,
+        ),
     }
 }
 
@@ -3173,12 +3180,12 @@ fn handle_question_event(
         Event::Mouse(mouse) => {
             app.disarm_exit();
             match mouse.kind {
-                MouseEventKind::ScrollUp => app.timeline.scroll_by(
+                MouseEventKind::ScrollUp => app.active_timeline_mut().scroll_by(
                     -WHEEL_SCROLL_ROWS,
                     hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
                 ),
-                MouseEventKind::ScrollDown => app.timeline.scroll_by(
+                MouseEventKind::ScrollDown => app.active_timeline_mut().scroll_by(
                     WHEEL_SCROLL_ROWS,
                     hit_map.timeline_wrap_width,
                     hit_map.timeline.height,
@@ -3765,7 +3772,7 @@ mod tests {
         let mut invalid = app();
         apply_theme_preference(&mut invalid, Some(OsString::from("brand-theme")));
         assert_eq!(invalid.theme, Theme::Default);
-        assert!(invalid.timeline.items().iter().any(|item| item
+        assert!(invalid.active_timeline().items().iter().any(|item| item
             .text
             .contains("unknown terminal chat theme \"brand-theme\"")));
     }
@@ -3836,7 +3843,7 @@ mod tests {
         let mut app = app();
         for number in 0..100 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
@@ -3856,12 +3863,12 @@ mod tests {
             RoutedEvent::Handled
         );
         assert!(matches!(
-            app.timeline.viewport,
+            app.active_timeline().viewport,
             ViewportAnchor::Held(_) | ViewportAnchor::Top
         ));
         assert!(!app.exit_armed);
 
-        app.timeline.follow_bottom();
+        app.active_timeline_mut().follow_bottom();
         app.begin_work();
         let busy_hit_map = draw_hit_map(&app, 80, 24);
         assert_eq!(
@@ -3878,11 +3885,11 @@ mod tests {
             RoutedEvent::Handled
         );
         assert!(matches!(
-            app.timeline.viewport,
+            app.active_timeline().viewport,
             ViewportAnchor::Held(_) | ViewportAnchor::Top
         ));
 
-        app.timeline.follow_bottom();
+        app.active_timeline_mut().follow_bottom();
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -3893,10 +3900,10 @@ mod tests {
             RoutedEvent::Handled
         );
         assert!(matches!(
-            app.timeline.viewport,
+            app.active_timeline().viewport,
             ViewportAnchor::Held(_) | ViewportAnchor::Top
         ));
-        let held = app.timeline.viewport;
+        let held = app.active_timeline().viewport;
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -3906,7 +3913,7 @@ mod tests {
             ),
             RoutedEvent::Unhandled
         );
-        assert_eq!(app.timeline.viewport, held);
+        assert_eq!(app.active_timeline().viewport, held);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -3916,7 +3923,7 @@ mod tests {
             ),
             RoutedEvent::Unhandled
         );
-        assert_eq!(app.timeline.viewport, held);
+        assert_eq!(app.active_timeline().viewport, held);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4167,10 +4174,10 @@ mod tests {
         app.editor.insert("session-local stash");
         let _ = app.handle_input(InputAction::StashOrPop, 80);
         let original = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "existing conversation")
             .expect("timeline item");
-        let original_session = app.header.session_id.clone();
+        let original_session = app.active_session_id().to_string();
         let target = localpilot_core::SessionId::new();
 
         apply_fullscreen_resume(
@@ -4179,11 +4186,11 @@ mod tests {
             Some("unused name".to_string()),
             Err("resume failed: planted failure".to_string()),
         );
-        assert_eq!(app.header.session_id, original_session);
+        assert_eq!(app.active_session_id(), original_session);
         assert!(app.has_stashed_draft());
-        assert!(app.timeline.item(original).is_some());
+        assert!(app.active_timeline().item(original).is_some());
         assert!(app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .any(|item| item.text.contains("planted failure")));
@@ -4206,16 +4213,16 @@ mod tests {
                 },
             ]),
         );
-        assert_eq!(app.header.session_id, target.to_string());
+        assert_eq!(app.active_session_id(), target.to_string());
         assert!(!app.has_stashed_draft());
-        assert_eq!(app.header.session_name.as_deref(), Some("new name second"));
+        assert_eq!(app.active_session_name(), Some("new name second"));
         assert!(!app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .any(|item| item.text == "existing conversation"));
         assert_eq!(
-            app.usage,
+            app.active_usage(),
             Some(UsageTotals {
                 input_tokens: 11,
                 output_tokens: 7,
@@ -4223,12 +4230,12 @@ mod tests {
             })
         );
         assert!(app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .any(|item| item.text == "restored prompt"));
         assert!(app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .any(|item| item.text == "restored answer"));
@@ -4416,7 +4423,9 @@ mod tests {
     fn mouse_drag_selects_graphemes_and_copy_on_release_persists() {
         let mut app = app();
         app.set_copy_on_select(true);
-        let _ = app.timeline.push(ItemKind::Assistant, "alpha 界 beta");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "alpha 界 beta");
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
             .timeline_rows
@@ -4454,7 +4463,10 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert_eq!(app.timeline.selected_text().as_deref(), Some("alpha 界"));
+        assert_eq!(
+            app.active_timeline().selected_text().as_deref(),
+            Some("alpha 界")
+        );
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4468,7 +4480,10 @@ mod tests {
             ),
             RoutedEvent::Copy("alpha 界".to_string())
         );
-        assert_eq!(app.timeline.selected_text().as_deref(), Some("alpha 界"));
+        assert_eq!(
+            app.active_timeline().selected_text().as_deref(),
+            Some("alpha 界")
+        );
         assert!(mouse_state.selection.is_none());
 
         assert_eq!(
@@ -4497,13 +4512,15 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert!(app.timeline.selected_text().is_none());
+        assert!(app.active_timeline().selected_text().is_none());
     }
 
     #[test]
     fn default_selection_waits_for_explicit_right_click_copy() {
         let mut app = app();
-        let _ = app.timeline.push(ItemKind::Assistant, "copy explicitly");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "copy explicitly");
         assert!(!app.copy_on_select());
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
@@ -4542,7 +4559,10 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert_eq!(app.timeline.selected_text().as_deref(), Some("copy"));
+        assert_eq!(
+            app.active_timeline().selected_text().as_deref(),
+            Some("copy")
+        );
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4557,7 +4577,9 @@ mod tests {
     #[test]
     fn right_click_routes_timeline_copy_composer_paste_and_empty_timeline_inert() {
         let mut app = app();
-        let _ = app.timeline.push(ItemKind::Assistant, "copy explicitly");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "copy explicitly");
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
             .timeline_rows
@@ -4565,9 +4587,9 @@ mod tests {
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("assistant row hit");
         let mut mouse_state = MouseState::default();
-        app.timeline
+        app.active_timeline_mut()
             .start_selection(hit.point_for_column(hit.content_x, false));
-        app.timeline
+        app.active_timeline_mut()
             .extend_selection(hit.point_for_column(hit.content_x + 4, false));
 
         assert_eq!(
@@ -4597,7 +4619,7 @@ mod tests {
             RoutedEvent::PasteClipboard
         );
 
-        app.timeline.clear_selection();
+        app.active_timeline_mut().clear_selection();
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4626,7 +4648,7 @@ mod tests {
             }
             apply_clipboard_text(&mut app, 80, text.clone());
             assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
-            assert!(app.timeline.items().is_empty());
+            assert!(app.active_timeline().items().is_empty());
 
             apply_clipboard_text(&mut app, 80, String::new());
             assert_eq!(app.editor.text(), "[Paste #1 - 12 lines]");
@@ -4636,7 +4658,9 @@ mod tests {
     #[test]
     fn lost_mouse_release_self_heals_on_focus_loss_or_unpressed_motion() {
         let mut app = app();
-        let _ = app.timeline.push(ItemKind::Assistant, "select me");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "select me");
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
             .timeline_rows
@@ -4674,7 +4698,7 @@ mod tests {
         let mut app = app();
         for number in 0..80 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let _ = app.handle_input(InputAction::Insert("?".to_string()), 76);
@@ -4692,7 +4716,7 @@ mod tests {
         );
         assert!(app.dismiss_quick_help());
         assert!(matches!(
-            app.timeline.viewport,
+            app.active_timeline().viewport,
             localpilot_terminal_ui::ViewportAnchor::Held(_)
         ));
     }
@@ -4702,7 +4726,7 @@ mod tests {
         let mut app = app();
         for number in 0..120 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
@@ -4741,7 +4765,7 @@ mod tests {
         let after_stationary_tick = draw_hit_map(&app, 80, 24);
 
         assert!(after_stationary_tick.scrollbar.start < start_after_drag);
-        assert!(app.timeline.selected_text().is_some());
+        assert!(app.active_timeline().selected_text().is_some());
     }
 
     #[test]
@@ -4761,13 +4785,18 @@ mod tests {
             duration_ms: 25,
         });
         let tool = app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .find(|item| item.kind == ItemKind::Tool)
             .expect("tool item")
             .id;
-        assert!(!app.timeline.item(tool).expect("tool item").expanded);
+        assert!(
+            !app.active_timeline()
+                .item(tool)
+                .expect("tool item")
+                .expanded
+        );
         let hit_map = draw_hit_map(&app, 80, 24);
         let hit = hit_map
             .timeline_rows
@@ -4789,8 +4818,13 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert!(app.timeline.item(tool).expect("tool item").expanded);
-        assert!(app.timeline.selection.is_none());
+        assert!(
+            app.active_timeline()
+                .item(tool)
+                .expect("tool item")
+                .expanded
+        );
+        assert!(app.active_timeline().selection.is_none());
     }
 
     #[test]
@@ -4798,7 +4832,7 @@ mod tests {
         let mut app = app();
         for number in 0..120 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
@@ -4832,7 +4866,7 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert_eq!(app.timeline.viewport, ViewportAnchor::Top);
+        assert_eq!(app.active_timeline().viewport, ViewportAnchor::Top);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4848,7 +4882,7 @@ mod tests {
         );
         assert_eq!(mouse_state.scrollbar_grab, None);
 
-        app.timeline.follow_bottom();
+        app.active_timeline_mut().follow_bottom();
         let hit_map = draw_hit_map(&app, 80, 24);
         let thumb = hit_map.scrollbar.thumb.expect("bottom thumb");
         let click_y = thumb.y.saturating_sub(1);
@@ -4866,7 +4900,7 @@ mod tests {
             RoutedEvent::Handled
         );
         assert!(matches!(
-            app.timeline.viewport,
+            app.active_timeline().viewport,
             ViewportAnchor::Held(_) | ViewportAnchor::Top
         ));
     }
@@ -4944,7 +4978,7 @@ mod tests {
     fn theme_picker_mouse_focus_previews_without_touching_the_timeline() {
         let mut app = app();
         let timeline_item = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "underlying conversation")
             .expect("timeline item");
         app.open_theme_picker();
@@ -4971,7 +5005,7 @@ mod tests {
             RoutedEvent::Handled
         );
         assert_eq!(app.theme, Theme::Dim);
-        assert!(app.timeline.item(timeline_item).is_some());
+        assert!(app.active_timeline().item(timeline_item).is_some());
         assert!(app.has_theme_picker());
         let _ = app.handle_input(InputAction::Escape, hit_map.editor_width);
         assert_eq!(app.theme, Theme::Default);
@@ -5007,7 +5041,7 @@ mod tests {
         let mut app = app();
         feed_unbracketed_multiline_paste(&mut app);
 
-        assert!(app.timeline.items().is_empty());
+        assert!(app.active_timeline().items().is_empty());
         let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 76) else {
             panic!("whole paste should submit once");
         };
@@ -5147,7 +5181,7 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.front().expect("queued").prompt().text, "next prompt");
         assert!(
-            app.timeline
+            app.active_timeline()
                 .item(queue.front().expect("queued").item_id())
                 .expect("queued item")
                 .pending
@@ -5199,7 +5233,7 @@ mod tests {
             queued_ids
         );
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -5214,7 +5248,12 @@ mod tests {
                 },
                 &mut pending_steer_items,
             );
-            assert!(!app.timeline.item(item_id).expect("steered row").pending);
+            assert!(
+                !app.active_timeline()
+                    .item(item_id)
+                    .expect("steered row")
+                    .pending
+            );
         }
         assert!(pending_steer_items.is_empty());
     }
@@ -5263,7 +5302,7 @@ mod tests {
         assert_eq!(prompt.text, "ordinary queued prompt");
         assert!(!format!("{queue:?}").contains("SHELL_QUEUE_SECRET"));
         let ordered_ids = app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .filter(|item| item.id == shell.item_id || item.id == prompt.item_id)
@@ -5271,11 +5310,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ordered_ids, vec![shell.item_id, prompt.item_id]);
         assert_eq!(
-            app.timeline.item(shell.item_id).expect("shell row").kind,
+            app.active_timeline()
+                .item(shell.item_id)
+                .expect("shell row")
+                .kind,
             ItemKind::Shell
         );
         assert!(
-            app.timeline
+            app.active_timeline()
                 .item(prompt.item_id)
                 .expect("prompt row")
                 .pending
@@ -5466,21 +5508,21 @@ mod tests {
             apply_startup_item(&mut app, item);
         }
 
-        assert_eq!(app.timeline.items()[0].kind, ItemKind::User);
-        assert_eq!(app.timeline.items()[0].text, "prior prompt");
-        assert_eq!(app.timeline.items()[1].kind, ItemKind::Assistant);
-        assert_eq!(app.timeline.items()[1].text, "prior answer");
+        assert_eq!(app.active_timeline().items()[0].kind, ItemKind::User);
+        assert_eq!(app.active_timeline().items()[0].text, "prior prompt");
+        assert_eq!(app.active_timeline().items()[1].kind, ItemKind::Assistant);
+        assert_eq!(app.active_timeline().items()[1].text, "prior answer");
         assert_eq!(
-            app.usage,
+            app.active_usage(),
             Some(UsageTotals {
                 input_tokens: 100,
                 output_tokens: 25,
                 cached_input_tokens: 0,
             })
         );
-        assert_eq!(app.context_usage, Some((300, 4_000)));
+        assert_eq!(app.active_context_usage(), Some((300, 4_000)));
         assert_eq!(
-            app.timeline.items().last().expect("notice").kind,
+            app.active_timeline().items().last().expect("notice").kind,
             ItemKind::Notice
         );
     }
@@ -5511,7 +5553,7 @@ mod tests {
         assert!(queue.is_empty());
         assert!(!cancel.is_cancelled());
         assert!(history.load().is_empty());
-        assert!(app.timeline.items().iter().any(|item| {
+        assert!(app.active_timeline().items().iter().any(|item| {
             item.kind == ItemKind::Notice
                 && item.text.contains("when the current operation is idle")
         }));
@@ -5672,14 +5714,17 @@ mod tests {
                 panic!("image content block");
             };
             assert_eq!(data, secret);
-            let timeline_prompt = app.timeline.item(queued.item_id).expect("timeline prompt");
+            let timeline_prompt = app
+                .active_timeline()
+                .item(queued.item_id)
+                .expect("timeline prompt");
             assert!(timeline_prompt.text.contains(&placeholder));
         }
 
         assert_eq!(queue.len(), 2);
         assert!(!format!("{queue:?}").contains("IMAGE_SECRET"));
         assert_eq!(
-            app.timeline
+            app.active_timeline()
                 .items()
                 .iter()
                 .filter(|item| item.text == "sending 1 image(s) with this prompt")
@@ -5742,7 +5787,7 @@ mod tests {
 
         let mut app = app();
         attach_clipboard_image_with_capability(&mut app, &image_capability(false), false);
-        assert!(app.timeline.items().iter().any(|item| item
+        assert!(app.active_timeline().items().iter().any(|item| item
             .text
             .contains("current model is not known to accept images")));
     }
@@ -5804,14 +5849,14 @@ mod tests {
     fn selected_text_keeps_first_ctrl_c_copy_precedence_during_approval() {
         let mut app = app();
         let item = app
-            .timeline
+            .active_timeline_mut()
             .push(localpilot_terminal_ui::ItemKind::Assistant, "copy me")
             .expect("timeline item");
-        app.timeline.start_selection(ContentPoint {
+        app.active_timeline_mut().start_selection(ContentPoint {
             item_id: item,
             byte: 0,
         });
-        app.timeline.extend_selection(ContentPoint {
+        app.active_timeline_mut().extend_selection(ContentPoint {
             item_id: item,
             byte: 4,
         });
@@ -6376,36 +6421,39 @@ mod tests {
         for event in script() {
             following.apply_runtime(map_runtime_event(event));
         }
-        let bottom = following.timeline.view(40, 8);
+        let bottom = following.active_timeline().view(40, 8);
         assert!(bottom.rows.iter().any(|row| row.text == "STREAM_TAIL"));
         assert!(bottom
             .rows
             .iter()
             .any(|row| row.text == "inspect completed · 2 lines · 25 ms"));
         assert_eq!(
-            following.usage,
+            following.active_usage(),
             Some(UsageTotals {
                 input_tokens: 12,
                 output_tokens: 34,
                 cached_input_tokens: 0,
             })
         );
-        assert_eq!(following.work, WorkState::Idle);
+        assert_eq!(following.active_work(), WorkState::Idle);
 
         let mut held = seed;
-        held.timeline.scroll_by(-12, 40, 8);
-        let ViewportAnchor::Held(anchor) = held.timeline.viewport else {
+        held.active_timeline_mut().scroll_by(-12, 40, 8);
+        let ViewportAnchor::Held(anchor) = held.active_timeline().viewport else {
             panic!("seed must be held away from bottom");
         };
         held.begin_work();
         for event in script() {
             held.apply_runtime(map_runtime_event(event));
         }
-        let held_view = held.timeline.view(31, 6);
+        let held_view = held.active_timeline().view(31, 6);
         assert_eq!(
             held_view.rows.first().map(|row| row.item_id),
             Some(anchor.item_id)
         );
-        assert_eq!(held.timeline.viewport, ViewportAnchor::Held(anchor));
+        assert_eq!(
+            held.active_timeline().viewport,
+            ViewportAnchor::Held(anchor)
+        );
     }
 }

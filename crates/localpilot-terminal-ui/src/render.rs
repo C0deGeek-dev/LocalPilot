@@ -1456,11 +1456,11 @@ fn render_timeline(
 ) -> (ScrollbarGeometry, Vec<TimelineRowHit>) {
     let area = timeline.content;
     let wrap_width = timeline_wrap_width(area.width, app);
-    let view = app.timeline.view(wrap_width, area.height.max(1));
+    let view = app.active_timeline().view(wrap_width, area.height.max(1));
     let banner_visible = view.pinned.is_none()
         && view.start == 0
         && (view.total_rows.saturating_add(usize::from(BANNER_ROWS)) <= usize::from(area.height)
-            || matches!(app.timeline.viewport, crate::ViewportAnchor::Top));
+            || matches!(app.active_timeline().viewport, crate::ViewportAnchor::Top));
     let content_offset = if banner_visible {
         render_idle_banner(frame, area, app);
         BANNER_ROWS
@@ -1538,14 +1538,13 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
         let rows = [
             format!(
                 "{APP_NAME} v{} uses AI.",
-                app.header
-                    .version
+                app.shared_version()
                     .strip_prefix('v')
-                    .unwrap_or(&app.header.version)
+                    .unwrap_or(app.shared_version())
             ),
             "Check important results.".to_string(),
             String::new(),
-            format!("{} · {}", app.header.provider, app.header.model),
+            format!("{} · {}", app.active_provider(), app.active_model()),
             "Tip: press ? for shortcuts".to_string(),
             "Type / to browse commands".to_string(),
         ];
@@ -1564,10 +1563,9 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
             Span::styled(
                 format!(
                     "  {APP_NAME} v{}",
-                    app.header
-                        .version
+                    app.shared_version()
                         .strip_prefix('v')
-                        .unwrap_or(&app.header.version)
+                        .unwrap_or(app.shared_version())
                 ),
                 theme.ui(UiRole::Foreground),
             ),
@@ -1575,7 +1573,7 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
         Line::from(vec![
             Span::styled("│ >_ ● │", mark),
             Span::styled(
-                format!("  {} · {}", app.header.provider, app.header.model),
+                format!("  {} · {}", app.active_provider(), app.active_model()),
                 theme.ui(UiRole::Muted),
             ),
         ]),
@@ -1702,9 +1700,9 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
         for (offset, grapheme) in row.text[relative_start..relative_end].grapheme_indices(true) {
             let start = visual_span.start_byte + offset;
             let end = start + grapheme.len();
-            let selected = app
-                .timeline
-                .selection_contains_grapheme(row.item_id, start, end);
+            let selected =
+                app.active_timeline()
+                    .selection_contains_grapheme(row.item_id, start, end);
             let mut style = if row.kind == ItemKind::User {
                 theme.text(visual_span.style.bold())
             } else {
@@ -1933,14 +1931,14 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
 }
 
 fn status_left(app: &AppModel) -> String {
-    app.header.branch.as_ref().map_or_else(
-        || app.header.workspace.clone(),
+    app.shared_branch().map_or_else(
+        || app.shared_workspace().to_string(),
         |branch| {
             format!(
                 "{} [{}{}]",
-                app.header.workspace,
+                app.shared_workspace(),
                 branch,
-                if app.header.workspace_dirty == Some(true) {
+                if app.shared_workspace_dirty() == Some(true) {
                     "*"
                 } else {
                     ""
@@ -1951,12 +1949,12 @@ fn status_left(app: &AppModel) -> String {
 }
 
 fn status_right(app: &AppModel) -> String {
-    let usage = app.usage.unwrap_or_default();
+    let usage = app.active_usage().unwrap_or_default();
     let mut parts = vec![format!("{} tokens", usage.total())];
     if usage.cached_input_tokens > 0 {
         parts.push(format!("{} cached", usage.cached_input_tokens));
     }
-    if let Some((used, limit)) = app.context_usage {
+    if let Some((used, limit)) = app.active_context_usage() {
         let percentage = if limit == 0 {
             0
         } else {
@@ -2637,12 +2635,14 @@ fn framed_composer_rule(
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
     let state = footer_state(app);
     let shortcuts = "? help · / commands";
-    let context = if matches!(app.work, crate::WorkState::Busy { .. }) {
-        app.header.model.clone()
+    let context = if matches!(app.active_work(), crate::WorkState::Busy { .. }) {
+        app.active_model().to_string()
     } else {
         format!(
             "{} · {} → {}",
-            app.header.mode, app.header.profile, app.header.model
+            app.shared_mode(),
+            app.shared_profile(),
+            app.active_model()
         )
     };
     let context = if app.has_stashed_draft() {
@@ -2650,7 +2650,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
     } else {
         context
     };
-    let busy = matches!(app.work, crate::WorkState::Busy { .. });
+    let busy = matches!(app.active_work(), crate::WorkState::Busy { .. });
     let theme = theme(app);
     let text = if narrow {
         format!(
@@ -2679,8 +2679,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
 }
 
 fn footer_state(app: &AppModel) -> String {
-    let held = !matches!(app.timeline.viewport, crate::ViewportAnchor::FollowBottom);
-    let new_output = app.timeline.has_new_content();
+    let held = !matches!(
+        app.active_timeline().viewport,
+        crate::ViewportAnchor::FollowBottom
+    );
+    let new_output = app.active_timeline().has_new_content();
     if app.exit_armed {
         return "press Ctrl+C again to exit".to_string();
     }
@@ -2706,7 +2709,7 @@ fn footer_state(app: &AppModel) -> String {
             .map_or(fallback, |item| item.description.as_str());
         return format!("{detail} · ↑↓ navigate · Enter/Tab accept · Esc close");
     }
-    if app.timeline.selected_text().is_some() {
+    if app.active_timeline().selected_text().is_some() {
         return if app.capabilities.clipboard_write {
             "selection · Ctrl+C / right-click copy".to_string()
         } else {
@@ -2716,7 +2719,7 @@ fn footer_state(app: &AppModel) -> String {
     if app.shell_mode() {
         return "shell mode · Esc exit shell mode".to_string();
     }
-    match (app.work, app.exit_armed) {
+    match (app.active_work(), app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
         (crate::WorkState::Idle, false) if held && new_output => {
             "↓ new output · timeline held · Ctrl+C twice to exit".to_string()
@@ -2733,7 +2736,7 @@ fn footer_state(app: &AppModel) -> String {
         ) if held && new_output => {
             format!(
                 "↓ new output · ● Working · {} · {}",
-                format_stream_size(app.stream_bytes),
+                format_stream_size(app.active_stream_bytes()),
                 working_input_actions(app)
             )
         }
@@ -2744,7 +2747,7 @@ fn footer_state(app: &AppModel) -> String {
             false,
         ) if held => format!(
             "timeline held · ● Working · {} · {}",
-            format_stream_size(app.stream_bytes),
+            format_stream_size(app.active_stream_bytes()),
             working_input_actions(app)
         ),
         (
@@ -2754,7 +2757,7 @@ fn footer_state(app: &AppModel) -> String {
             false,
         ) => format!(
             "● Working · {} · {}",
-            format_stream_size(app.stream_bytes),
+            format_stream_size(app.active_stream_bytes()),
             working_input_actions(app)
         ),
         (
@@ -2892,22 +2895,23 @@ mod tests {
     }
     use crate::{ColorSupport, Header, ItemKind, TerminalCapabilities, Theme};
 
+    fn header() -> Header {
+        Header {
+            version: "0".to_string(),
+            provider: "provider".to_string(),
+            model: "model".to_string(),
+            workspace: "workspace".to_string(),
+            branch: Some("main".to_string()),
+            workspace_dirty: Some(false),
+            mode: "agent".to_string(),
+            profile: "default".to_string(),
+            session_id: "session".to_string(),
+            session_name: None,
+        }
+    }
+
     fn model() -> AppModel {
-        AppModel::new(
-            Header {
-                version: "0".to_string(),
-                provider: "provider".to_string(),
-                model: "model".to_string(),
-                workspace: "workspace".to_string(),
-                branch: Some("main".to_string()),
-                workspace_dirty: Some(false),
-                mode: "agent".to_string(),
-                profile: "default".to_string(),
-                session_id: "session".to_string(),
-                session_name: None,
-            },
-            TerminalCapabilities::default(),
-        )
+        AppModel::new(header(), TerminalCapabilities::default())
     }
 
     #[test]
@@ -2947,7 +2951,7 @@ mod tests {
     fn help_takeover_replaces_chat_chrome_and_owns_its_scrollbar() {
         let mut app = model();
         let _ = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "HIDDEN_TIMELINE_MARKER");
         app.set_command_catalog([
             crate::CompletionCommand {
@@ -3229,7 +3233,7 @@ mod tests {
         let mut app = model();
         for number in 0..20 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("timeline row {number}"));
         }
         let _ = app.handle_input(crate::InputAction::Insert("?".to_string()), 76);
@@ -3512,7 +3516,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = model();
         let _ = app.append_prompt("first prompt", Some("12:34".to_string()), false);
-        let _ = app.timeline.push(ItemKind::Assistant, "short response");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "short response");
         terminal
             .draw(|frame| {
                 let _ = render(frame, &app);
@@ -3525,10 +3531,10 @@ mod tests {
 
         for number in 0..60 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:02}"));
         }
-        app.timeline.scroll_by(-10_000, 76, 16);
+        app.active_timeline_mut().scroll_by(-10_000, 76, 16);
         let mut hit_map = None;
         terminal
             .draw(|frame| hit_map = Some(render(frame, &app)))
@@ -3538,7 +3544,7 @@ mod tests {
         assert!(rendered.contains("first prompt"));
         let hit_map = hit_map.expect("hit map");
         let layout = hit_map.frame.expect("layout");
-        let view = app.timeline.view(
+        let view = app.active_timeline().view(
             single_timeline(layout).content.width,
             single_timeline(layout).content.height,
         );
@@ -3560,7 +3566,7 @@ mod tests {
         let mut app = model();
         for number in 0..100 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let mut hit_map = None;
@@ -3582,10 +3588,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = model();
         let prompt = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::User, "current prompt")
             .expect("prompt");
-        assert!(app.timeline.set_pending(prompt, true));
+        assert!(app.active_timeline_mut().set_pending(prompt, true));
         let mut hit_map = None;
         terminal
             .draw(|frame| hit_map = Some(render(frame, &app)))
@@ -3613,10 +3619,12 @@ mod tests {
         assert_eq!(buffer[(timeline.x, prompt_y + 2)].symbol(), "▀");
 
         let mut app = model();
-        let _ = app.timeline.push(ItemKind::User, "pinned prompt");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "pinned prompt");
         for number in 0..80 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let mut hit_map = None;
@@ -3700,8 +3708,10 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = model();
-        let _ = app.timeline.push(ItemKind::User, "prompt");
-        let _ = app.timeline.push(ItemKind::Assistant, "alpha 界 beta");
+        let _ = app.active_timeline_mut().push(ItemKind::User, "prompt");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "alpha 界 beta");
         let mut hit_map = None;
         terminal
             .draw(|frame| hit_map = Some(render(frame, &app)))
@@ -3765,7 +3775,7 @@ mod tests {
             app.editor.insert("draft");
             for number in 0..80 {
                 let _ = app
-                    .timeline
+                    .active_timeline_mut()
                     .push(ItemKind::Assistant, format!("response {number:03}"));
             }
             let mut hit_map = None;
@@ -3812,8 +3822,10 @@ mod tests {
             TabId::Activity,
             TabId::Settings,
         ]);
-        let _ = app.timeline.push(ItemKind::User, "Review this change");
-        let _ = app.timeline.push(ItemKind::Assistant, "Ready");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "Review this change");
+        let _ = app.active_timeline_mut().push(ItemKind::Assistant, "Ready");
         app.apply_runtime(crate::RuntimeUpdate::Reasoning("Checking context".into()));
         app.apply_runtime(crate::RuntimeUpdate::ToolStarted {
             id: "tool-1".into(),
@@ -3829,11 +3841,11 @@ mod tests {
             duration_ms: 25,
         });
         let shell = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Shell, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             .expect("shell row");
         let _ = app
-            .timeline
+            .active_timeline_mut()
             .set_activity(shell, Some(ActivityState::Success));
 
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
@@ -3862,7 +3874,7 @@ mod tests {
 
         for number in 0..80 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         terminal
@@ -4001,8 +4013,12 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = model();
-        let _ = app.timeline.push(ItemKind::User, "marker marker");
-        let _ = app.timeline.push(ItemKind::Assistant, "new MARKER");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "marker marker");
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "new MARKER");
         let _ = app.handle_input(crate::InputAction::Insert("/search marker".to_string()), 76);
         let _ = app.handle_input(crate::InputAction::Submit, 76);
         let mut hit_map = None;
@@ -4166,18 +4182,19 @@ mod tests {
         for (width, height) in [(120, 30), (40, 20)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal");
-            let mut app = model();
-            app.header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
-            app.header.branch = Some("terminal-chat-experience".to_string());
-            app.header.workspace_dirty = Some(true);
-            app.header.mode = "agent".to_string();
-            app.header.profile = "relaxed".to_string();
-            app.usage = Some(crate::UsageTotals {
+            let mut header = header();
+            header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
+            header.branch = Some("terminal-chat-experience".to_string());
+            header.workspace_dirty = Some(true);
+            header.mode = "agent".to_string();
+            header.profile = "relaxed".to_string();
+            let mut app = AppModel::new(header, TerminalCapabilities::default());
+            app.set_active_usage(Some(crate::UsageTotals {
                 input_tokens: 12,
                 output_tokens: 34,
                 cached_input_tokens: 0,
-            });
-            app.context_usage = Some((2_500, 10_000));
+            }));
+            app.set_active_context_usage(Some((2_500, 10_000)));
             let mut hit_map = None;
             terminal
                 .draw(|frame| hit_map = Some(render(frame, &app)))
@@ -4264,17 +4281,19 @@ mod tests {
     fn selected_text_footer_exposes_available_copy_action() {
         let mut app = model();
         let item = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "copy this")
             .expect("timeline item");
-        app.timeline.start_selection(crate::ContentPoint {
-            item_id: item,
-            byte: 0,
-        });
-        app.timeline.extend_selection(crate::ContentPoint {
-            item_id: item,
-            byte: 4,
-        });
+        app.active_timeline_mut()
+            .start_selection(crate::ContentPoint {
+                item_id: item,
+                byte: 0,
+            });
+        app.active_timeline_mut()
+            .extend_selection(crate::ContentPoint {
+                item_id: item,
+                byte: 4,
+            });
 
         assert_eq!(footer_state(&app), "selection · clipboard unavailable");
         app.capabilities.clipboard_write = true;
@@ -4288,21 +4307,24 @@ mod tests {
         let mut app = model();
         for number in 0..40 {
             let _ = app
-                .timeline
+                .active_timeline_mut()
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
-        app.timeline.scroll_by(-20, 70, 12);
-        let crate::ViewportAnchor::Held(anchor) = app.timeline.viewport else {
+        app.active_timeline_mut().scroll_by(-20, 70, 12);
+        let crate::ViewportAnchor::Held(anchor) = app.active_timeline().viewport else {
             panic!("timeline must be held");
         };
-        let tail = app.timeline.items().last().expect("tail").id;
-        assert!(app.timeline.append_text(tail, " streamed"));
+        let tail = app.active_timeline().items().last().expect("tail").id;
+        assert!(app.active_timeline_mut().append_text(tail, " streamed"));
         terminal
             .draw(|frame| {
                 let _ = render(frame, &app);
             })
             .expect("draw held stream");
-        assert_eq!(app.timeline.viewport, crate::ViewportAnchor::Held(anchor));
+        assert_eq!(
+            app.active_timeline().viewport,
+            crate::ViewportAnchor::Held(anchor)
+        );
         assert!(terminal.backend().to_string().contains("new output"));
     }
 

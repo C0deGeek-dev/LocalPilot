@@ -986,23 +986,23 @@ impl fmt::Debug for ActiveTool {
 
 #[derive(Debug, Clone)]
 pub struct AppModel {
-    pub header: Header,
+    header: Header,
     pub capabilities: TerminalCapabilities,
     pub theme: Theme,
     pub tabs: Vec<TabId>,
     pub active_tab: TabId,
-    pub timeline: Timeline,
+    timeline: Timeline,
     pub editor: Editor,
     pub focus: Focus,
-    pub work: WorkState,
+    work: WorkState,
     pub exit_armed: bool,
     pub exit_requested: bool,
     escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
-    pub plan: Vec<PlanEntry>,
-    pub usage: Option<UsageTotals>,
-    pub context_usage: Option<(usize, usize)>,
-    pub stream_bytes: usize,
+    plan: Vec<PlanEntry>,
+    usage: Option<UsageTotals>,
+    context_usage: Option<(usize, usize)>,
+    stream_bytes: usize,
     copy_on_select: bool,
     default_copy_on_select: bool,
     default_theme: Theme,
@@ -1075,6 +1075,111 @@ impl AppModel {
             active_tools: BTreeMap::new(),
             active_insert_before: None,
         }
+    }
+
+    #[must_use]
+    pub fn shared_version(&self) -> &str {
+        &self.header.version
+    }
+
+    #[must_use]
+    pub fn shared_workspace(&self) -> &str {
+        &self.header.workspace
+    }
+
+    #[must_use]
+    pub fn shared_branch(&self) -> Option<&str> {
+        self.header.branch.as_deref()
+    }
+
+    #[must_use]
+    pub const fn shared_workspace_dirty(&self) -> Option<bool> {
+        self.header.workspace_dirty
+    }
+
+    #[must_use]
+    pub fn shared_mode(&self) -> &str {
+        &self.header.mode
+    }
+
+    #[must_use]
+    pub fn shared_profile(&self) -> &str {
+        &self.header.profile
+    }
+
+    #[must_use]
+    pub fn active_provider(&self) -> &str {
+        &self.header.provider
+    }
+
+    #[must_use]
+    pub fn active_model(&self) -> &str {
+        &self.header.model
+    }
+
+    #[must_use]
+    pub fn active_session_id(&self) -> &str {
+        &self.header.session_id
+    }
+
+    #[must_use]
+    pub fn active_session_name(&self) -> Option<&str> {
+        self.header.session_name.as_deref()
+    }
+
+    pub fn set_active_provider_model(&mut self, provider: String, model: String) {
+        self.header.provider = provider;
+        self.header.model = model;
+    }
+
+    pub fn set_active_session_id(&mut self, session_id: String) {
+        self.header.session_id = session_id;
+    }
+
+    pub fn set_active_session_name(&mut self, session_name: Option<String>) {
+        self.header.session_name = session_name;
+    }
+
+    #[must_use]
+    pub const fn active_timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    pub fn active_timeline_mut(&mut self) -> &mut Timeline {
+        &mut self.timeline
+    }
+
+    #[must_use]
+    pub const fn active_work(&self) -> WorkState {
+        self.work
+    }
+
+    #[must_use]
+    pub fn active_plan(&self) -> &[PlanEntry] {
+        &self.plan
+    }
+
+    #[must_use]
+    pub const fn active_usage(&self) -> Option<UsageTotals> {
+        self.usage
+    }
+
+    pub fn set_active_usage(&mut self, usage: Option<UsageTotals>) {
+        self.usage = usage;
+    }
+
+    #[must_use]
+    pub const fn active_context_usage(&self) -> Option<(usize, usize)> {
+        self.context_usage
+    }
+
+    pub fn set_active_context_usage(&mut self, context_usage: Option<(usize, usize)>) {
+        self.context_usage = context_usage;
+    }
+
+    #[must_use]
+    pub const fn active_stream_bytes(&self) -> usize {
+        self.stream_bytes
     }
 
     /// Installs only tabs backed by a real LocalPilot surface, preserving the
@@ -3699,6 +3804,53 @@ mod tests {
     }
 
     #[test]
+    fn explicit_accessors_project_the_existing_single_state_without_transformation() {
+        let mut app = model();
+        assert_eq!(app.shared_version(), "0");
+        assert_eq!(app.shared_workspace(), "workspace");
+        assert_eq!(app.shared_branch(), Some("main"));
+        assert_eq!(app.shared_workspace_dirty(), Some(false));
+        assert_eq!(app.shared_mode(), "agent");
+        assert_eq!(app.shared_profile(), "default");
+
+        app.set_active_provider_model("provider\nraw".to_string(), "model\traw".to_string());
+        app.set_active_session_id("session/raw".to_string());
+        app.set_active_session_name(Some("name\nraw".to_string()));
+        assert_eq!(app.active_provider(), "provider\nraw");
+        assert_eq!(app.active_model(), "model\traw");
+        assert_eq!(app.active_session_id(), "session/raw");
+        assert_eq!(app.active_session_name(), Some("name\nraw"));
+
+        let item = app
+            .active_timeline_mut()
+            .push(ItemKind::Notice, "existing projection")
+            .expect("timeline item");
+        assert!(app.active_timeline().item(item).is_some());
+        app.begin_work();
+        assert_eq!(
+            app.active_work(),
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        app.apply_runtime(RuntimeUpdate::Plan(vec![PlanEntry {
+            title: "step".to_string(),
+            status: "pending".to_string(),
+        }]));
+        assert_eq!(app.active_plan()[0].title, "step");
+        app.set_active_usage(Some(UsageTotals {
+            input_tokens: 3,
+            output_tokens: 2,
+            cached_input_tokens: 1,
+        }));
+        app.set_active_context_usage(Some((5, 8)));
+        assert_eq!(app.active_usage().expect("usage").total(), 5);
+        assert_eq!(app.active_context_usage(), Some((5, 8)));
+        app.apply_runtime(RuntimeUpdate::Text("bytes".to_string()));
+        assert_eq!(app.active_stream_bytes(), 5);
+    }
+
+    #[test]
     fn usage_updates_accumulate_for_the_whole_session() {
         let mut app = model();
         app.apply_runtime(RuntimeUpdate::Usage {
@@ -3712,7 +3864,7 @@ mod tests {
             cached_input_tokens: 5,
         });
         assert_eq!(
-            app.usage,
+            app.active_usage(),
             Some(UsageTotals {
                 input_tokens: 107,
                 output_tokens: 23,
@@ -3754,7 +3906,7 @@ mod tests {
             AppCommand::CancelWork
         );
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: true
             }
@@ -3769,17 +3921,19 @@ mod tests {
     fn ctrl_c_copies_a_selection_then_a_second_press_exits() {
         let mut app = model();
         let id = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "copy this")
             .expect("timeline id");
-        app.timeline.start_selection(crate::ContentPoint {
-            item_id: id,
-            byte: 0,
-        });
-        app.timeline.extend_selection(crate::ContentPoint {
-            item_id: id,
-            byte: 4,
-        });
+        app.active_timeline_mut()
+            .start_selection(crate::ContentPoint {
+                item_id: id,
+                byte: 0,
+            });
+        app.active_timeline_mut()
+            .extend_selection(crate::ContentPoint {
+                item_id: id,
+                byte: 4,
+            });
 
         assert_eq!(
             app.handle_input(InputAction::CancelOrExit, 80),
@@ -3828,12 +3982,12 @@ mod tests {
         let mut app = model();
         app.begin_work();
         app.apply_runtime(RuntimeUpdate::Text("hello ".to_string()));
-        let id = app.timeline.items()[0].id;
+        let id = app.active_timeline().items()[0].id;
         app.apply_runtime(RuntimeUpdate::Text("world".to_string()));
-        assert_eq!(app.timeline.items().len(), 1);
-        assert_eq!(app.timeline.items()[0].id, id);
-        assert_eq!(app.timeline.items()[0].text, "hello world");
-        assert_eq!(app.stream_bytes, "hello world".len());
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert_eq!(app.active_timeline().items()[0].id, id);
+        assert_eq!(app.active_timeline().items()[0].text, "hello world");
+        assert_eq!(app.active_stream_bytes(), "hello world".len());
     }
 
     #[test]
@@ -3847,7 +4001,7 @@ mod tests {
         );
         assert!(!app.exit_armed);
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: true
             }
@@ -4054,7 +4208,7 @@ mod tests {
 
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -4268,7 +4422,7 @@ mod tests {
             AppCommand::None
         );
         assert_eq!(image.editor.text(), "/clear[image #1 · PNG 128 B]");
-        assert!(image.timeline.items().iter().any(|item| {
+        assert!(image.active_timeline().items().iter().any(|item| {
             item.kind == ItemKind::Notice && item.text.contains("remove image attachments")
         }));
     }
@@ -4282,7 +4436,7 @@ mod tests {
         ]);
         app.seed_history(vec!["ordinary prompt".to_string()]);
         let existing = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "conversation remains underneath")
             .expect("timeline item");
         app.begin_work();
@@ -4292,12 +4446,12 @@ mod tests {
         assert!(app.has_takeover());
         assert!(app.editor.text().is_empty());
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
         );
-        assert!(app.timeline.item(existing).is_some());
+        assert!(app.active_timeline().item(existing).is_some());
         assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_none());
         assert_eq!(
             app.handle_input(InputAction::MoveDown, 80),
@@ -4308,13 +4462,13 @@ mod tests {
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert!(!app.has_takeover());
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
         );
         assert!(app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .any(|item| item.text.contains("streamed behind help")));
@@ -4521,7 +4675,7 @@ mod tests {
     fn diff_takeover_routes_content_file_and_tree_focus_without_touching_chat() {
         let mut app = model();
         let existing = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "conversation")
             .expect("timeline item");
         let file = |path: &str| DiffFile {
@@ -4570,7 +4724,7 @@ mod tests {
         assert!(!view.tree_visible);
         assert_eq!(view.diff_pane, DiffPane::Content);
         let _ = app.handle_input(InputAction::Escape, 80);
-        assert!(app.timeline.item(existing).is_some());
+        assert!(app.active_timeline().item(existing).is_some());
         assert!(!app.has_takeover());
     }
 
@@ -4604,14 +4758,14 @@ mod tests {
     fn quick_help_does_not_preempt_selection_copy() {
         let mut app = model();
         let item = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "copy me")
             .expect("timeline item");
-        app.timeline.start_selection(ContentPoint {
+        app.active_timeline_mut().start_selection(ContentPoint {
             item_id: item,
             byte: 0,
         });
-        app.timeline.extend_selection(ContentPoint {
+        app.active_timeline_mut().extend_selection(ContentPoint {
             item_id: item,
             byte: "copy".len(),
         });
@@ -4642,7 +4796,7 @@ mod tests {
         assert!(!app.has_theme_picker());
         assert_eq!(app.theme, Theme::Default);
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -4683,7 +4837,7 @@ mod tests {
         assert!(app.has_input_overlay());
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -4757,11 +4911,11 @@ mod tests {
         let id = app
             .append_prompt(submitted.display.clone(), None, false)
             .expect("prompt");
-        app.timeline.start_selection(ContentPoint {
+        app.active_timeline_mut().start_selection(ContentPoint {
             item_id: id,
             byte: 0,
         });
-        app.timeline.extend_selection(ContentPoint {
+        app.active_timeline_mut().extend_selection(ContentPoint {
             item_id: id,
             byte: submitted.display.len(),
         });
@@ -4883,7 +5037,7 @@ mod tests {
         assert_eq!(app.handle_input(InputAction::Escape, 80), AppCommand::None);
         assert_eq!(app.editor.text(), "echo @sample SHELL_SECRET");
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -4944,12 +5098,15 @@ mod tests {
             .expect("shell timeline item");
         assert!(app.activate_shell(item));
         assert_eq!(
-            app.timeline.item(item).expect("running shell").activity,
+            app.active_timeline()
+                .item(item)
+                .expect("running shell")
+                .activity,
             Some(ActivityState::Running)
         );
         let output = UserShellOutput::captured(0, "marker\n", "");
         assert!(app.finish_shell(item, &command, &output));
-        let item = app.timeline.item(item).expect("finished shell");
+        let item = app.active_timeline().item(item).expect("finished shell");
         assert_eq!(item.kind, ItemKind::Shell);
         assert_eq!(item.text, "Shell echo marker 1 line\nmarker");
         assert_eq!(item.activity, Some(ActivityState::Success));
@@ -4965,7 +5122,7 @@ mod tests {
         let item = app.append_shell(&command, false).expect("shell item");
         let output = UserShellOutput::captured(5, "first\nsecond\n", "stderr only\n");
         assert!(app.finish_shell(item, &command, &output));
-        let item = app.timeline.item(item).expect("finished shell");
+        let item = app.active_timeline().item(item).expect("finished shell");
         assert_eq!(item.kind, ItemKind::Shell);
         assert_eq!(
             item.text,
@@ -4984,7 +5141,11 @@ mod tests {
             .expect("empty shell item");
         assert!(empty.finish_shell(item, &command, &UserShellOutput::captured(0, "", "")));
         assert_eq!(
-            empty.timeline.item(item).expect("empty result").text,
+            empty
+                .active_timeline()
+                .item(item)
+                .expect("empty result")
+                .text,
             "Shell true 0 lines"
         );
     }
@@ -5020,11 +5181,11 @@ mod tests {
     fn timeline_search_command_counts_messages_and_starts_at_the_newest() {
         let mut app = model();
         let older = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::User, "marker appears twice: marker")
             .expect("older");
         let newer = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "newer MARKER")
             .expect("newer");
         let _ = app.handle_input(InputAction::Insert("/search marker".to_string()), 80);
@@ -5039,14 +5200,14 @@ mod tests {
                 total: 2,
             })
         );
-        let ViewportAnchor::Held(point) = app.timeline.viewport else {
+        let ViewportAnchor::Held(point) = app.active_timeline().viewport else {
             panic!("search should hold the selected match");
         };
         assert_eq!(point.item_id, newer);
 
         let _ = app.handle_input(InputAction::MoveUp, 80);
         assert_eq!(app.timeline_search().expect("search").current, 1);
-        let ViewportAnchor::Held(point) = app.timeline.viewport else {
+        let ViewportAnchor::Held(point) = app.active_timeline().viewport else {
             panic!("search should hold the older match");
         };
         assert_eq!(point.item_id, older);
@@ -5096,7 +5257,7 @@ mod tests {
         );
         assert!(!app.exit_armed);
         assert_eq!(
-            app.work,
+            app.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -5118,7 +5279,7 @@ mod tests {
         assert_eq!(command.editor.text(), "");
         assert!(!command.exit_armed);
         assert_eq!(
-            command.work,
+            command.active_work(),
             WorkState::Busy {
                 cancellation_requested: false
             }
@@ -5133,20 +5294,20 @@ mod tests {
     fn timeline_search_refresh_preserves_identity_then_uses_nearest_newer_match() {
         let mut app = model();
         let older = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::User, "targetx older")
             .expect("older");
         let middle = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Assistant, "target middle")
             .expect("middle");
         let newer = app
-            .timeline
+            .active_timeline_mut()
             .push(ItemKind::Notice, "targetx newer")
             .expect("newer");
         app.open_timeline_search("target".to_string());
         let _ = app.handle_input(InputAction::MoveUp, 80);
-        let selected = match app.timeline.viewport {
+        let selected = match app.active_timeline().viewport {
             ViewportAnchor::Held(point) => point.item_id,
             _ => panic!("held search result"),
         };
@@ -5155,7 +5316,7 @@ mod tests {
         // The selected item no longer matches. Equidistant survivors prefer the
         // newer item so refresh does not jump unpredictably.
         let _ = app.handle_input(InputAction::Insert("x".to_string()), 80);
-        let selected = match app.timeline.viewport {
+        let selected = match app.active_timeline().viewport {
             ViewportAnchor::Held(point) => point.item_id,
             _ => panic!("held fallback result"),
         };
@@ -5164,7 +5325,7 @@ mod tests {
 
         // Appending a new matching item keeps the existing selected identity.
         app.apply_runtime(RuntimeUpdate::Warning("targetx newest".to_string()));
-        let selected_after_stream = match app.timeline.viewport {
+        let selected_after_stream = match app.active_timeline().viewport {
             ViewportAnchor::Held(point) => point.item_id,
             _ => panic!("held preserved result"),
         };
@@ -5202,28 +5363,33 @@ mod tests {
         app.open_timeline_search("absent".to_string());
         assert_eq!(app.timeline_search().expect("search").current, 0);
         assert_eq!(app.timeline_search().expect("search").total, 0);
-        let viewport = app.timeline.viewport;
+        let viewport = app.active_timeline().viewport;
         let _ = app.handle_input(InputAction::MoveUp, 80);
         let _ = app.handle_input(InputAction::MoveDown, 80);
         let _ = app.handle_input(InputAction::Submit, 80);
-        assert_eq!(app.timeline.viewport, viewport);
+        assert_eq!(app.active_timeline().viewport, viewport);
         assert!(app.has_input_overlay());
     }
 
     #[test]
     fn prompt_submission_reanchors_and_pending_state_clears_in_place() {
         let mut app = model();
-        let _ = app.timeline.push(ItemKind::Assistant, "old response");
-        app.timeline.scroll_by(-1, 20, 1);
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "old response");
+        app.active_timeline_mut().scroll_by(-1, 20, 1);
         let prompt = app
             .append_prompt("queued", Some("12:34".to_string()), true)
             .expect("prompt");
-        assert_eq!(app.timeline.viewport, crate::ViewportAnchor::FollowBottom);
-        assert!(app.timeline.item(prompt).expect("prompt").pending);
-        assert!(app.activate_prompt(prompt));
-        assert!(!app.timeline.item(prompt).expect("prompt").pending);
         assert_eq!(
-            app.timeline
+            app.active_timeline().viewport,
+            crate::ViewportAnchor::FollowBottom
+        );
+        assert!(app.active_timeline().item(prompt).expect("prompt").pending);
+        assert!(app.activate_prompt(prompt));
+        assert!(!app.active_timeline().item(prompt).expect("prompt").pending);
+        assert_eq!(
+            app.active_timeline()
                 .item(prompt)
                 .expect("prompt")
                 .trailing
@@ -5254,21 +5420,21 @@ mod tests {
         });
 
         let ids = app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .map(|item| item.id)
             .collect::<Vec<_>>();
         assert_eq!(ids[0], active);
         assert_eq!(ids[ids.len() - 2..], [queued_a, queued_b]);
-        assert_eq!(app.timeline.items()[1].text, "first response");
+        assert_eq!(app.active_timeline().items()[1].text, "first response");
 
         app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
         assert!(app.activate_prompt(queued_a));
         app.begin_work_before(Some(queued_b));
         app.apply_runtime(RuntimeUpdate::Text("answer a".to_string()));
         let texts = app
-            .timeline
+            .active_timeline()
             .items()
             .iter()
             .map(|item| item.text.as_str())
@@ -5425,7 +5591,7 @@ mod tests {
         });
         app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
 
-        let assistant = &app.timeline.items()[0];
+        let assistant = &app.active_timeline().items()[0];
         assert!(assistant
             .styles
             .iter()
@@ -5434,11 +5600,11 @@ mod tests {
             .styles
             .iter()
             .any(|span| span.style.role == SemanticRole::Code));
-        let tool = &app.timeline.items()[1];
+        let tool = &app.active_timeline().items()[1];
         assert_eq!(tool.activity, Some(ActivityState::Success));
         assert!(!tool.expanded);
         assert_eq!(
-            app.timeline.rows(80)[2].text,
+            app.active_timeline().rows(80)[2].text,
             "inspect completed · 2 lines · 1.2 s"
         );
         assert!(tool.text.contains("src/main.rs"));
@@ -5462,10 +5628,10 @@ mod tests {
             duration_ms: 750,
         });
 
-        let tool = &app.timeline.items()[0];
+        let tool = &app.active_timeline().items()[0];
         assert_eq!(tool.activity, Some(ActivityState::Cancelled));
         assert_eq!(
-            app.timeline.rows(80)[0].text,
+            app.active_timeline().rows(80)[0].text,
             "run_shell cancelled · 1 line · 750 ms"
         );
     }
@@ -5502,7 +5668,10 @@ mod tests {
                 duration_ms: 10,
             });
             assert_eq!(
-                app.timeline.rows(80).last().map(|row| row.text.as_str()),
+                app.active_timeline()
+                    .rows(80)
+                    .last()
+                    .map(|row| row.text.as_str()),
                 Some(expected)
             );
         }
@@ -5604,9 +5773,9 @@ mod tests {
             name: "ask_user".to_string(),
             detail: "Do you prefer Red or Blue?".to_string(),
         });
-        assert_eq!(app.timeline.items()[0].kind, ItemKind::Question);
+        assert_eq!(app.active_timeline().items()[0].kind, ItemKind::Question);
         assert_eq!(
-            app.timeline.items()[0].text,
+            app.active_timeline().items()[0].text,
             "Asking user Do you prefer Red or Blue?"
         );
         app.apply_runtime(RuntimeUpdate::ToolFinished {
@@ -5617,13 +5786,13 @@ mod tests {
             output: "tool: ask_user\nstatus: success\noutput:\nUser selected: Blue".to_string(),
             duration_ms: 100,
         });
-        assert_eq!(app.timeline.items().len(), 1);
+        assert_eq!(app.active_timeline().items().len(), 1);
         assert_eq!(
-            app.timeline.items()[0].text,
+            app.active_timeline().items()[0].text,
             "Asked user Do you prefer Red or Blue?\nUser selected: Blue"
         );
         assert_eq!(
-            app.timeline.items()[0].activity,
+            app.active_timeline().items()[0].activity,
             Some(ActivityState::Success)
         );
     }
