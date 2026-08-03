@@ -50,10 +50,10 @@ pub struct DoctorReport {
     pub workspace_trust: TrustState,
     /// Context-hygiene report — the authored-context layers (instruction files +
     /// skills) with their token weights and any advisory findings. Populated only
-    /// by `doctor --context`; absent (and omitted from JSON) otherwise, so the
+    /// by `doctor --hygiene`; absent (and omitted from JSON) otherwise, so the
     /// default report is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<localpilot_contextcheck::ContextReport>,
+    pub hygiene: Option<localpilot_contextcheck::ContextReport>,
 }
 
 /// The state of the research-report → doc-index bridge for the cwd project.
@@ -248,7 +248,7 @@ pub fn report() -> DoctorReport {
         agents: agents(),
         capabilities: capabilities(),
         workspace_trust: TrustState::Unknown,
-        context: None,
+        hygiene: None,
     }
 }
 
@@ -257,7 +257,7 @@ pub fn report() -> DoctorReport {
 /// findings. Read-only and offline, like the rest of `doctor`. The system-prompt
 /// layer is omitted here — it needs the live tool registry (the internal sweep
 /// builds it); this reports the user-editable layers.
-fn context_report() -> Option<localpilot_contextcheck::ContextReport> {
+fn hygiene_report() -> Option<localpilot_contextcheck::ContextReport> {
     let cwd = std::env::current_dir().ok()?;
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -363,7 +363,7 @@ pub async fn run_with(
 ) -> io::Result<()> {
     let mut report = report_with_mcp().await;
     if include_context {
-        report.context = context_report();
+        report.hygiene = hygiene_report();
     }
     let rendered = match format {
         crate::output::OutputFormat::Human => render(&report),
@@ -545,17 +545,17 @@ pub fn render(report: &DoctorReport) -> String {
     };
     let _ = writeln!(s, "workspace trust: {trust}");
 
-    if let Some(context) = &report.context {
-        render_context(&mut s, context);
+    if let Some(context) = &report.hygiene {
+        render_hygiene(&mut s, context);
     }
 
     s
 }
 
 /// Append the context-hygiene section: per-layer token weights and any advisory
-/// findings, most-severe first. Only called when a `--context` report exists, so
+/// findings, most-severe first. Only called when a `--hygiene` report exists, so
 /// the default `doctor` rendering is unchanged.
-fn render_context(s: &mut String, context: &localpilot_contextcheck::ContextReport) {
+fn render_hygiene(s: &mut String, context: &localpilot_contextcheck::ContextReport) {
     use std::fmt::Write as _;
     let _ = writeln!(s);
     let _ = writeln!(s, "context hygiene:");
@@ -990,7 +990,7 @@ mod tests {
                 error: None,
             }],
             workspace_trust: TrustState::Unknown,
-            context: None,
+            hygiene: None,
         }
     }
 
@@ -1086,10 +1086,10 @@ mod tests {
 
     #[test]
     fn context_is_omitted_from_the_default_report() {
-        // With no `--context`, the field is absent from JSON and the human render,
+        // With no `--hygiene`, the field is absent from JSON and the human render,
         // so the established doctor output is unchanged.
         let json = render_json(&fixture());
-        assert!(!json.contains("\"context\""));
+        assert!(!json.contains("\"hygiene\""));
         let human = render(&fixture());
         assert!(!human.contains("context hygiene"));
     }
@@ -1115,7 +1115,7 @@ mod tests {
             layers: vec![layer("CLAUDE.md"), layer("AGENTS.md")],
         };
         let mut report = fixture();
-        report.context = Some(analyze(&inv, &Thresholds::default()));
+        report.hygiene = Some(analyze(&inv, &Thresholds::default()));
 
         let human = render(&report);
         assert!(human.contains("context hygiene:"));

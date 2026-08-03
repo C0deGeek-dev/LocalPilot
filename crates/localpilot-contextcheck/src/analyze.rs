@@ -9,7 +9,7 @@
 //! over-specific may still be load-bearing for a weaker local backend, so the
 //! finding recommends review, never removal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use localmind_store::{similarity, token_set};
 use localpilot_selfreview::Severity;
@@ -133,6 +133,7 @@ fn directives_of(source: &str, body: &str) -> Vec<Directive> {
                 .to_string()
         })
         .filter(|line| !line.is_empty())
+        .filter(|line| !is_cross_reference(line))
         .filter_map(|text| {
             let tokens = comparison_tokens(&text);
             (tokens.len() >= MIN_DIRECTIVE_TOKENS).then_some(Directive {
@@ -142,6 +143,15 @@ fn directives_of(source: &str, body: &str) -> Vec<Directive> {
             })
         })
         .collect()
+}
+
+/// Whether a line is a cross-reference — a `[[wiki-link]]` or a "(see …)"
+/// parenthetical — rather than an authored directive. Skills share these link
+/// slugs (e.g. `(see [[clean-room-guard]])`) across many files, so counting them
+/// as directives floods redundancy findings with noise.
+fn is_cross_reference(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("[[") || trimmed.starts_with("(see") || trimmed.starts_with("(See")
 }
 
 /// The substantive token set of a directive with polarity/quantifier words
@@ -171,7 +181,11 @@ fn cross_layer_findings(
         }
     }
 
+    // Conflicts are reported per directive-pair (rare and specific); redundancy
+    // is collapsed to one finding per unordered layer-pair (a shared convention
+    // restated N times between the same two layers is one issue, not N).
     let mut findings = Vec::new();
+    let mut redundant: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
     for i in 0..directives.len() {
         for j in (i + 1)..directives.len() {
             let (a, b) = (&directives[i], &directives[j]);
@@ -181,25 +195,38 @@ fn cross_layer_findings(
             if similarity(&a.tokens, &b.tokens) < thresholds.redundancy_similarity {
                 continue;
             }
-            let layers = vec![a.source.clone(), b.source.clone()];
             if negation_differs(&a.text, &b.text) {
                 findings.push(ContextFinding {
                     kind: ContextFindingKind::Conflict,
                     severity: Severity::Medium,
-                    layers,
+                    layers: vec![a.source.clone(), b.source.clone()],
                     message: "Two near-identical directives disagree across layers.".to_string(),
                     evidence: Some(format!("{}  ⇄  {}", a.text, b.text)),
                 });
             } else {
-                findings.push(ContextFinding {
-                    kind: ContextFindingKind::Redundancy,
-                    severity: Severity::Low,
-                    layers,
-                    message: "The same directive is stated in more than one layer.".to_string(),
-                    evidence: Some(a.text.clone()),
-                });
+                let key = if a.source <= b.source {
+                    (a.source.clone(), b.source.clone())
+                } else {
+                    (b.source.clone(), a.source.clone())
+                };
+                let entry = redundant.entry(key).or_insert((0, a.text.clone()));
+                entry.0 += 1;
             }
         }
+    }
+    for ((a, b), (count, evidence)) in redundant {
+        let message = if count == 1 {
+            "The same directive is stated in more than one layer.".to_string()
+        } else {
+            format!("{count} directives are repeated across these two layers.")
+        };
+        findings.push(ContextFinding {
+            kind: ContextFindingKind::Redundancy,
+            severity: Severity::Low,
+            layers: vec![a, b],
+            message,
+            evidence: Some(evidence),
+        });
     }
     findings
 }
@@ -315,6 +342,54 @@ mod tests {
             .collect();
         assert_eq!(redundancies.len(), 1);
         assert_eq!(redundancies[0].layers.len(), 2);
+    }
+
+    #[test]
+    fn cross_reference_lines_are_not_treated_as_directives() {
+        // A `(see [[...]])` cross-reference shared across layers must not become a
+        // redundancy finding — the noise the precision pass removes.
+        let inv = ContextInventory {
+            layers: vec![
+                instruction_layer(
+                    "CLAUDE.md",
+                    "Follow the policy (see [[clean-room-guard]]).",
+                    8,
+                ),
+                instruction_layer(
+                    "AGENTS.md",
+                    "Follow the policy (see [[clean-room-guard]]).",
+                    8,
+                ),
+            ],
+        };
+        let report = analyze(&inv, &Thresholds::default());
+        assert!(
+            report.findings.is_empty(),
+            "cross-reference lines must not produce findings"
+        );
+    }
+
+    #[test]
+    fn redundancy_is_collapsed_to_one_finding_per_layer_pair() {
+        let body = "Always write tests for new code.\nPrefer small focused functions.";
+        let inv = ContextInventory {
+            layers: vec![
+                instruction_layer("CLAUDE.md", body, 12),
+                instruction_layer("AGENTS.md", body, 12),
+            ],
+        };
+        let report = analyze(&inv, &Thresholds::default());
+        let redundancies: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == ContextFindingKind::Redundancy)
+            .collect();
+        assert_eq!(
+            redundancies.len(),
+            1,
+            "two shared directives across one layer-pair is one finding"
+        );
+        assert!(redundancies[0].message.contains("2 directives"));
     }
 
     #[test]

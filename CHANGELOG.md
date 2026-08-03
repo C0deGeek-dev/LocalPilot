@@ -6,8 +6,8 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
-- **Context hygiene: `localpilot doctor --context`.** `doctor` gains an opt-in
-  `--context` flag that inspects the authored context a session assembles from
+- **Context hygiene: `localpilot doctor --hygiene`.** `doctor` gains an opt-in
+  `--hygiene` flag that inspects the authored context a session assembles from
   the current directory — the `CLAUDE.md`/`AGENTS.md` instruction files and the
   skills visible to the project — and reports each layer's token weight plus
   advisory findings: a directive stated in more than one layer (redundancy),

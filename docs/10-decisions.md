@@ -23,9 +23,9 @@ advisory findings: redundancy and conflict across layers (reusing the store's
 text-overlap primitives), plus oversized-layer / token-budget signals. Findings
 reuse the self-review `Severity` scale but a local finding taxonomy (the
 self-review `FindingKind` is code-oriented). The CLI surfaces this as an opt-in
-`--context` section of the existing `doctor` command — not a new command and not
+`--hygiene` section of the existing `doctor` command — not a new command and not
 a model-callable tool (ADR-0134): one command, one `--format` vocabulary. The
-`context` field is absent from the report unless `--context` is passed, so the
+`context` field is absent from the report unless `--hygiene` is passed, so the
 established `doctor` output is unchanged.
 
 Boundary: it is **report-only** — it reads and never edits, trims, or reorders

@@ -214,7 +214,7 @@ fn report() -> DoctorReport {
             "print-turn-timeout".to_string(),
         ],
         workspace_trust: TrustState::Unknown,
-        context: None,
+        hygiene: None,
     }
 }
 

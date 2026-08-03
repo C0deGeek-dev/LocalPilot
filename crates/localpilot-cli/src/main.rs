@@ -121,7 +121,7 @@ enum Command {
         /// Also report context hygiene: the authored-context layers (instruction
         /// files + skills), their token weights, and advisory findings.
         #[arg(long)]
-        context: bool,
+        hygiene: bool,
     },
     /// Store an API key for a provider (bring-your-own-key): deep-link to the key
     /// page, paste, validate, and save it in the OS keychain (or a 0600 file).
@@ -1481,12 +1481,12 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Doctor {
             format,
             json,
-            context,
+            hygiene,
         } => {
             let is_tty = io::stdout().is_terminal();
             let resolved = output::resolve_format(format, json, is_tty);
             let mut stdout = io::stdout().lock();
-            doctor::run_with(&mut stdout, resolved, context).await?;
+            doctor::run_with(&mut stdout, resolved, hygiene).await?;
             stdout.flush()?;
         }
         Command::Models {

@@ -243,7 +243,7 @@ localpilot doctor
 credentials are present (never their values), tool availability, and workspace
 trust state.
 
-Add `--context` to also report **context hygiene** — the authored context a
+Add `--hygiene` to also report **context hygiene** — the authored context a
 session assembles from the current directory (your `CLAUDE.md`/`AGENTS.md`
 instruction files and the skills visible to the project), each with a token
 estimate, plus advisory findings: the same directive stated in more than one
@@ -254,8 +254,8 @@ secret in an instruction file is not echoed. It rides the shared `--format
 human|json`:
 
 ```sh
-localpilot doctor --context
-localpilot doctor --context --format json
+localpilot doctor --hygiene
+localpilot doctor --hygiene --format json
 ```
 
 ### Build features
