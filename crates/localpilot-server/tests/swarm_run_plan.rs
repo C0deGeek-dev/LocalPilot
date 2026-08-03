@@ -141,7 +141,7 @@ async fn plan_of(host: &SwarmHost, lead: SessionId, mode: PlanMode, specs: &[Nod
     let owner = ActorId::new(lead.to_string());
     let mut plan = TaskPlan::new("make the suite green", mode, owner.clone());
     seed(&mut plan, &owner, "seed-1", specs).unwrap();
-    host.swarms().set_plan(&swarm(), plan).await;
+    host.swarms().set_plan(&swarm(), plan).await.unwrap();
 }
 
 fn fast() -> DriverConfig {

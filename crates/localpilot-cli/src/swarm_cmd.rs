@@ -247,7 +247,7 @@ async fn drive(
     let owner = ActorId::new(coordinator.to_string());
     let mut plan = TaskPlan::new(plan_file.objective, plan_file.mode, owner.clone());
     seed(&mut plan, &owner, SEED_KEY, &plan_file.nodes)?;
-    host.swarms().set_plan(swarm, plan).await;
+    host.swarms().set_plan(swarm, plan).await?;
     Ok(run_plan(host, swarm, coordinator, config).await)
 }
 

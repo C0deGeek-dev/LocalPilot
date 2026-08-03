@@ -220,6 +220,7 @@ impl SwarmPeers for SessionPeers {
                     role: match member.role {
                         MemberRole::Coordinator => "coordinator".to_string(),
                         MemberRole::Worker => "worker".to_string(),
+                        MemberRole::Peer => "peer".to_string(),
                     },
                     status: status_word(&member.status),
                     in_my_subtree: mine.contains(&member.session),
