@@ -14,12 +14,19 @@
 //!   uses.
 //! - [`driver`] runs a plan: dispatch what is ready, refill as workers finish,
 //!   stop when nothing can move.
+//! - [`converge`] is the sibling driver for a *symmetric pair*: two peers exchange
+//!   proposals and revisions of one artifact until both agree or a bound stops
+//!   them. Not a plan and not a hierarchy — a transport-agnostic bounded protocol,
+//!   designed to run over the existing messaging substrate through an abstract
+//!   endpoint boundary that a production adapter supplies. Library-only until that
+//!   adapter lands.
 //! - [`lifecycle`] is what happens when a worker stops answering: heartbeats,
 //!   salvage, re-election, reparenting, reaping, and durable snapshots.
 //! - [`touches`] records who touched which file recently and tells the peers a
 //!   change affects. Advisory only: nothing is locked and nothing is rolled
 //!   back.
 
+pub mod converge;
 pub mod driver;
 pub mod lifecycle;
 pub mod messaging;
@@ -28,6 +35,11 @@ pub mod scope;
 pub mod spawn;
 pub mod touches;
 
+pub use converge::{
+    pair_session_directive, CandidateSnapshot, EndpointError, NotifyReply, PairAbort, PairBounds,
+    PairDriver, PairEndpoints, PairOutcome, PairProgress, PairProgressRx, PairReport,
+    PairSetupError, TurnReply,
+};
 pub use driver::{run_plan, DriverConfig, RunReport};
 pub use lifecycle::{reap_terminal, salvage, sweep, Salvaged, SnapshotStore, SwarmSnapshot};
 pub use messaging::SessionPeers;
@@ -36,5 +48,7 @@ pub use registry::{
     SwarmRegistry,
 };
 pub use scope::{git_common_dir, swarm_id_for_dir, SwarmId, SWARM_ID_ENV};
-pub use spawn::{SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory, WorkerReport};
+pub use spawn::{
+    AdoptedPair, SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory, WorkerReport,
+};
 pub use touches::{announce, Collision, TouchIndex};

@@ -53,7 +53,7 @@ pub struct PeerSummary {
     pub session: String,
     /// The peer's name.
     pub name: String,
-    /// `coordinator` or `worker`.
+    /// `coordinator`, `worker`, or `peer`.
     pub role: String,
     /// Where the peer is in its life, in a word.
     pub status: String,

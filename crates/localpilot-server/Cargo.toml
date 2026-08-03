@@ -26,6 +26,10 @@ localpilot-tools = { path = "../localpilot-tools" }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# SHA-256 for the pair-convergence candidate digest: two peers must agree on the
+# same digest for the same canonical artifact bytes. An existing pinned workspace
+# dep, added here for the convergence protocol.
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # `net` (additive over the workspace features) is required for the local IPC
@@ -57,4 +61,12 @@ localpilot-sandbox = { path = "../localpilot-sandbox" }
 # workspace dep, added here for tests only.
 async-trait = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread", "time"] }
+# `test-util` gives paused-time control so the convergence driver's slot-timeout
+# and cancellation paths are tested deterministically without real waiting.
+tokio = { workspace = true, features = [
+    "net",
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "test-util",
+] }

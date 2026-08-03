@@ -371,8 +371,16 @@ impl SnapshotStore {
         }
     }
 
-    /// Put a snapshot back into a live registry.
-    pub async fn restore(&self, host: &SwarmHost, snapshot: SwarmSnapshot) {
+    /// Put a hierarchical snapshot back into a live registry.
+    ///
+    /// # Errors
+    /// Returns a registry error if restoring would mix a snapshot with a live
+    /// symmetric pair or reuse a session owned by another swarm.
+    pub async fn restore(
+        &self,
+        host: &SwarmHost,
+        snapshot: SwarmSnapshot,
+    ) -> Result<(), super::registry::SwarmError> {
         host.swarms()
             .restore(
                 &snapshot.swarm,
@@ -380,7 +388,7 @@ impl SnapshotStore {
                 snapshot.coordinator,
                 snapshot.plan,
             )
-            .await;
+            .await
     }
 }
 

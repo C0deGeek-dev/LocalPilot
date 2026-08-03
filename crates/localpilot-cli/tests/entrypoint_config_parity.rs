@@ -1,7 +1,8 @@
 //! Pins config parity across the session entry points: the interactive chat
-//! driver (`repl.rs`), the headless session runner (`session_cmd.rs`), and the
-//! shared builder that the wire client (`rpc_cmd.rs`) and the opt-in server
-//! (`serve`/`connect`) both construct through (`server_cmd.rs`). A config key
+//! builder (`interactive_session.rs`), the headless session runner
+//! (`session_cmd.rs`), and the shared builder that the wire client (`rpc_cmd.rs`)
+//! and the opt-in server (`serve`/`connect`) both construct through
+//! (`server_cmd.rs`). A config key
 //! wired into one but not the others silently no-ops on the missing paths —
 //! exactly how `verify_before_done` was once honored in `session` while chat
 //! and rpc ignored it. The check is on source text (the constructions are
@@ -14,7 +15,7 @@
 //! reads the same keys behind a `self.config` prefix; the check tolerates
 //! either prefix so it holds across all three constructions.
 
-const REPL_SRC: &str = include_str!("../src/repl.rs");
+const INTERACTIVE_SRC: &str = include_str!("../src/interactive_session.rs");
 const SESSION_SRC: &str = include_str!("../src/session_cmd.rs");
 const SERVER_SRC: &str = include_str!("../src/server_cmd.rs");
 
@@ -40,7 +41,7 @@ fn wires(source: &str, key: &str) -> bool {
 #[test]
 fn chat_session_and_the_shared_builder_thread_the_same_harness_config_keys() {
     for (name, source) in [
-        ("repl.rs (chat)", REPL_SRC),
+        ("interactive_session.rs (chat)", INTERACTIVE_SRC),
         ("session_cmd.rs (session)", SESSION_SRC),
         ("server_cmd.rs (rpc + serve)", SERVER_SRC),
     ] {

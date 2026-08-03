@@ -65,11 +65,14 @@ impl Default for SwarmLimits {
 /// What a member is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemberRole {
     /// Owns the plan and may address the whole swarm.
     Coordinator,
     /// Does the work it is given.
     Worker,
+    /// Collaborates as one half of a symmetric pair.
+    Peer,
 }
 
 /// Where a member is in its life.
@@ -104,7 +107,7 @@ pub struct SwarmMember {
     pub session: SessionId,
     /// A short name a peer can address it by, when it is unambiguous.
     pub name: String,
-    /// Coordinator or worker.
+    /// Coordinator, worker, or symmetric peer.
     pub role: MemberRole,
     /// Where it is in its life.
     pub status: MemberStatus,
@@ -203,11 +206,47 @@ pub enum SwarmError {
     /// or belongs to a swarm that no longer exists.
     #[error("that spawn slot is no longer outstanding")]
     StaleReservation,
+    /// The operation would combine the symmetric pair topology with the
+    /// coordinator/worker hierarchy.
+    #[error("cannot mix pair and hierarchical membership in the same swarm")]
+    MixedTopology,
+    /// A session may belong to only one swarm at a time.
+    #[error("session {session} already belongs to swarm {swarm}")]
+    AlreadyInSwarm {
+        /// The session that is already a member.
+        session: SessionId,
+        /// The swarm that already contains it.
+        swarm: SwarmId,
+    },
+    /// Both halves of a pair named the same session.
+    #[error("a pair needs two distinct sessions")]
+    DuplicatePairSessions,
+    /// A pair member was given an empty display name.
+    #[error("pair member names cannot be empty")]
+    EmptyPairName,
+    /// Pair member names must resolve unambiguously.
+    #[error("a pair needs two distinct member names")]
+    DuplicatePairNames,
+    /// A retry did not describe the exact pair already admitted.
+    #[error("this swarm already contains a different or incomplete pair")]
+    PairMismatch,
+}
+
+/// The mutually exclusive collaboration shapes a swarm entry can take.
+///
+/// `None` on [`Swarm::topology`] means the entry is genuinely unassigned. Once
+/// an admission or plan chooses a shape, operations from the other shape are
+/// refused instead of silently inventing a coordinator or report edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwarmTopology {
+    Hierarchical,
+    Pair,
 }
 
 /// One swarm's state.
 #[derive(Debug, Default)]
 struct Swarm {
+    topology: Option<SwarmTopology>,
     members: HashMap<SessionId, SwarmMember>,
     /// Slots taken by spawns that have not finished building.
     reservations: HashMap<u64, Option<String>>,
@@ -234,6 +273,20 @@ impl Swarm {
             .filter(|m| m.status.is_active())
             .count()
             + self.reservations.len()
+    }
+
+    /// Whether this entry carries no state that has chosen a collaboration
+    /// shape. Kept explicit so pair admission never treats a malformed partial
+    /// entry as a fresh one.
+    fn is_unassigned(&self) -> bool {
+        self.topology.is_none()
+            && self.members.is_empty()
+            && self.reservations.is_empty()
+            && self.settled_keys.is_empty()
+            && self.admitted == 0
+            && self.coordinator.is_none()
+            && self.plan.is_none()
+            && self.heartbeats.is_empty()
     }
 }
 
@@ -294,13 +347,25 @@ impl SwarmRegistry {
     ) -> Result<MemberRole, SwarmError> {
         let mut guard = self.inner.write().await;
         let limits = guard.limits;
+        if let Some(existing) = guard.by_session.get(&session) {
+            if existing != swarm {
+                return Err(SwarmError::AlreadyInSwarm {
+                    session,
+                    swarm: existing.clone(),
+                });
+            }
+        }
         let entry = guard.swarms.entry(swarm.clone()).or_default();
+        if entry.topology == Some(SwarmTopology::Pair) {
+            return Err(SwarmError::MixedTopology);
+        }
         // An already-registered session is a re-join, not a new member: it must
         // not consume a second slot.
         if let Some(existing) = entry.members.get(&session) {
             return Ok(existing.role);
         }
-        check_caps(entry, limits)?;
+        check_caps(entry, limits, 1)?;
+        entry.topology = Some(SwarmTopology::Hierarchical);
         let role = if entry.coordinator.is_none() {
             entry.coordinator = Some(session);
             MemberRole::Coordinator
@@ -323,6 +388,106 @@ impl SwarmRegistry {
         Ok(role)
     }
 
+    /// Atomically admit exactly two symmetric peers.
+    ///
+    /// The pair has no coordinator and no report-back edges. Validation,
+    /// two-slot capacity accounting, and both insertions happen under one write
+    /// lock, so callers can never observe or retain a half-admitted pair. A
+    /// retry is idempotent only when it names the same session-to-name mapping;
+    /// tuple order does not matter.
+    ///
+    /// # Errors
+    /// Returns a pair-validation, capacity, membership, or topology error. Every
+    /// error leaves the registry unchanged.
+    pub async fn join_as_pair(
+        &self,
+        swarm: &SwarmId,
+        first: (SessionId, impl Into<String>),
+        second: (SessionId, impl Into<String>),
+    ) -> Result<(), SwarmError> {
+        let (first_session, first_name) = (first.0, first.1.into().trim().to_string());
+        let (second_session, second_name) = (second.0, second.1.into().trim().to_string());
+        let mut guard = self.inner.write().await;
+
+        if first_session == second_session {
+            return Err(SwarmError::DuplicatePairSessions);
+        }
+        if first_name.is_empty() || second_name.is_empty() {
+            return Err(SwarmError::EmptyPairName);
+        }
+        if first_name.eq_ignore_ascii_case(&second_name) {
+            return Err(SwarmError::DuplicatePairNames);
+        }
+
+        let mut mapped_to_target = false;
+        for session in [first_session, second_session] {
+            if let Some(existing) = guard.by_session.get(&session) {
+                if existing != swarm {
+                    return Err(SwarmError::AlreadyInSwarm {
+                        session,
+                        swarm: existing.clone(),
+                    });
+                }
+                mapped_to_target = true;
+            }
+        }
+
+        if let Some(entry) = guard.swarms.get(swarm) {
+            match entry.topology {
+                Some(SwarmTopology::Hierarchical) => return Err(SwarmError::MixedTopology),
+                Some(SwarmTopology::Pair) => {
+                    let exact = entry.members.len() == 2
+                        && entry.admitted == 2
+                        && entry.reservations.is_empty()
+                        && entry.settled_keys.is_empty()
+                        && entry.coordinator.is_none()
+                        && entry.plan.is_none()
+                        && pair_member_matches(entry, first_session, &first_name)
+                        && pair_member_matches(entry, second_session, &second_name)
+                        && guard.by_session.get(&first_session) == Some(swarm)
+                        && guard.by_session.get(&second_session) == Some(swarm);
+                    return if exact {
+                        Ok(())
+                    } else {
+                        Err(SwarmError::PairMismatch)
+                    };
+                }
+                None if mapped_to_target || !entry.is_unassigned() => {
+                    return Err(SwarmError::PairMismatch)
+                }
+                None => {}
+            }
+        } else if mapped_to_target {
+            return Err(SwarmError::PairMismatch);
+        }
+
+        let empty = Swarm::default();
+        let capacity = guard.swarms.get(swarm).unwrap_or(&empty);
+        check_caps(capacity, guard.limits, 2)?;
+
+        {
+            let entry = guard.swarms.entry(swarm.clone()).or_default();
+            entry.topology = Some(SwarmTopology::Pair);
+            entry.admitted = 2;
+            for (session, name) in [(first_session, first_name), (second_session, second_name)] {
+                entry.members.insert(
+                    session,
+                    SwarmMember {
+                        session,
+                        name,
+                        role: MemberRole::Peer,
+                        status: MemberStatus::Active,
+                        report_back_to: None,
+                        completion: None,
+                    },
+                );
+            }
+        }
+        guard.by_session.insert(first_session, swarm.clone());
+        guard.by_session.insert(second_session, swarm.clone());
+        Ok(())
+    }
+
     /// Take a slot for a spawn that is about to start.
     ///
     /// The caps are checked and the slot is taken under one write lock, so
@@ -343,6 +508,10 @@ impl SwarmRegistry {
         let id = guard.next_reservation;
         let entry = guard.swarms.entry(swarm.clone()).or_default();
 
+        if entry.topology == Some(SwarmTopology::Pair) {
+            return Err(SwarmError::MixedTopology);
+        }
+
         if let Some(key) = idempotency_key {
             if let Some(session) = entry.settled_keys.get(key) {
                 return Ok(Admission::Existing(*session));
@@ -355,7 +524,8 @@ impl SwarmRegistry {
                 return Ok(Admission::InFlight);
             }
         }
-        check_caps(entry, limits)?;
+        check_caps(entry, limits, 1)?;
+        entry.topology = Some(SwarmTopology::Hierarchical);
         entry
             .reservations
             .insert(id, idempotency_key.map(ToOwned::to_owned));
@@ -377,10 +547,25 @@ impl SwarmRegistry {
     ) -> Result<(), SwarmError> {
         let mut guard = self.inner.write().await;
         let swarm = reservation.swarm.clone();
+        if member.role == MemberRole::Peer {
+            return Err(SwarmError::MixedTopology);
+        }
+        if let Some(existing) = guard.by_session.get(&member.session) {
+            return Err(SwarmError::AlreadyInSwarm {
+                session: member.session,
+                swarm: existing.clone(),
+            });
+        }
         let entry = guard
             .swarms
             .get_mut(&swarm)
             .ok_or(SwarmError::StaleReservation)?;
+        if entry.topology != Some(SwarmTopology::Hierarchical) {
+            return Err(SwarmError::MixedTopology);
+        }
+        if !entry.reservations.contains_key(&reservation.id) {
+            return Err(SwarmError::StaleReservation);
+        }
         let key = entry
             .reservations
             .remove(&reservation.id)
@@ -517,6 +702,9 @@ impl SwarmRegistry {
     pub async fn elect_coordinator(&self, swarm: &SwarmId) -> Option<SessionId> {
         let mut guard = self.inner.write().await;
         let entry = guard.swarms.get_mut(swarm)?;
+        if entry.topology == Some(SwarmTopology::Pair) {
+            return None;
+        }
         if entry
             .coordinator
             .is_some_and(|id| entry.members.get(&id).is_some_and(|m| m.status.is_active()))
@@ -599,28 +787,68 @@ impl SwarmRegistry {
         out
     }
 
-    /// Replace this swarm's members and plan wholesale — the restore path.
+    /// Replace this hierarchical swarm's members and plan wholesale — the
+    /// restore path.
+    ///
+    /// # Errors
+    /// [`SwarmError::MixedTopology`] if either side is a symmetric pair, or
+    /// [`SwarmError::AlreadyInSwarm`] if a restored session belongs elsewhere.
     pub async fn restore(
         &self,
         swarm: &SwarmId,
         members: Vec<SwarmMember>,
         coordinator: Option<SessionId>,
         plan: Option<TaskPlan>,
-    ) {
+    ) -> Result<(), SwarmError> {
         let mut guard = self.inner.write().await;
+        if guard
+            .swarms
+            .get(swarm)
+            .is_some_and(|entry| entry.topology == Some(SwarmTopology::Pair))
+            || members.iter().any(|member| member.role == MemberRole::Peer)
+        {
+            return Err(SwarmError::MixedTopology);
+        }
+        for member in &members {
+            if let Some(existing) = guard.by_session.get(&member.session) {
+                if existing != swarm {
+                    return Err(SwarmError::AlreadyInSwarm {
+                        session: member.session,
+                        swarm: existing.clone(),
+                    });
+                }
+            }
+        }
+
         let admitted = members.len();
         let mut map = HashMap::new();
         for member in members {
-            guard.by_session.insert(member.session, swarm.clone());
             map.insert(member.session, member);
         }
-        let entry = guard.swarms.entry(swarm.clone()).or_default();
-        entry.members = map;
-        entry.coordinator = coordinator;
-        entry.plan = plan;
-        // A restored swarm has already spent those admissions; resetting the
-        // count would hand a recovered coordinator a fresh budget to burn.
-        entry.admitted = entry.admitted.max(admitted);
+        let previous: Vec<SessionId> = guard
+            .swarms
+            .get(swarm)
+            .map(|entry| entry.members.keys().copied().collect())
+            .unwrap_or_default();
+        for session in previous {
+            if guard.by_session.get(&session) == Some(swarm) {
+                guard.by_session.remove(&session);
+            }
+        }
+        for session in map.keys() {
+            guard.by_session.insert(*session, swarm.clone());
+        }
+        {
+            let entry = guard.swarms.entry(swarm.clone()).or_default();
+            entry.topology = Some(SwarmTopology::Hierarchical);
+            entry.members = map;
+            entry.coordinator = coordinator;
+            entry.plan = plan;
+            // A restored swarm has already spent those admissions; resetting the
+            // count would hand a recovered coordinator a fresh budget to burn.
+            entry.admitted = entry.admitted.max(admitted);
+        }
+        Ok(())
     }
 
     /// Move a member to a new status.
@@ -769,10 +997,19 @@ impl SwarmRegistry {
         out
     }
 
-    /// Store a swarm's plan, replacing any earlier one.
-    pub async fn set_plan(&self, swarm: &SwarmId, plan: TaskPlan) {
+    /// Store a hierarchical swarm's plan, replacing any earlier one.
+    ///
+    /// # Errors
+    /// [`SwarmError::MixedTopology`] if this is a symmetric pair.
+    pub async fn set_plan(&self, swarm: &SwarmId, plan: TaskPlan) -> Result<(), SwarmError> {
         let mut guard = self.inner.write().await;
-        guard.swarms.entry(swarm.clone()).or_default().plan = Some(plan);
+        let entry = guard.swarms.entry(swarm.clone()).or_default();
+        if entry.topology == Some(SwarmTopology::Pair) {
+            return Err(SwarmError::MixedTopology);
+        }
+        entry.topology = Some(SwarmTopology::Hierarchical);
+        entry.plan = Some(plan);
+        Ok(())
     }
 
     /// A copy of a swarm's plan.
@@ -800,10 +1037,16 @@ impl SwarmRegistry {
         mutate: impl FnOnce(&mut TaskPlan) -> T,
     ) -> Result<T, SwarmError> {
         let mut guard = self.inner.write().await;
-        let plan = guard
+        let entry = guard
             .swarms
             .get_mut(swarm)
-            .and_then(|entry| entry.plan.as_mut())
+            .ok_or_else(|| SwarmError::UnknownSwarm(swarm.clone()))?;
+        if entry.topology == Some(SwarmTopology::Pair) {
+            return Err(SwarmError::MixedTopology);
+        }
+        let plan = entry
+            .plan
+            .as_mut()
             .ok_or_else(|| SwarmError::UnknownSwarm(swarm.clone()))?;
         Ok(mutate(plan))
     }
@@ -838,15 +1081,36 @@ impl SwarmRegistry {
     }
 }
 
-/// Both caps, checked together so a caller cannot pass one and be surprised by
-/// the other after doing the expensive part.
-fn check_caps(entry: &Swarm, limits: SwarmLimits) -> Result<(), SwarmError> {
-    if entry.admitted + entry.reservations.len() >= limits.max_members {
+/// Whether one stored member is exactly the active symmetric peer requested.
+fn pair_member_matches(entry: &Swarm, session: SessionId, name: &str) -> bool {
+    entry.members.get(&session).is_some_and(|member| {
+        member.name == name
+            && member.role == MemberRole::Peer
+            && member.status == MemberStatus::Active
+            && member.report_back_to.is_none()
+            && member.completion.is_none()
+    })
+}
+
+/// Both caps, checked for a whole admission under the caller's write lock.
+///
+/// `addition` is two for an atomic pair and one for a root or reservation. A
+/// checked overflow is treated as a reached cap, never as spare capacity.
+fn check_caps(entry: &Swarm, limits: SwarmLimits, addition: usize) -> Result<(), SwarmError> {
+    let lifetime = entry.admitted.checked_add(entry.reservations.len());
+    if lifetime
+        .and_then(|used| used.checked_add(addition))
+        .is_none_or(|needed| needed > limits.max_members)
+    {
         return Err(SwarmError::MemberCapReached {
             cap: limits.max_members,
         });
     }
-    if entry.in_use() >= limits.max_active {
+    if entry
+        .in_use()
+        .checked_add(addition)
+        .is_none_or(|needed| needed > limits.max_active)
+    {
         return Err(SwarmError::ConcurrencyReached {
             cap: limits.max_active,
         });
@@ -878,6 +1142,245 @@ mod tests {
             .await
             .unwrap();
         session
+    }
+
+    async fn pair(registry: &SwarmRegistry, swarm: &SwarmId) -> (SessionId, SessionId) {
+        let first = SessionId::new();
+        let second = SessionId::new();
+        registry
+            .join_as_pair(swarm, (first, "alpha"), (second, "beta"))
+            .await
+            .unwrap();
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn a_pair_is_admitted_atomically_without_a_coordinator_or_edges() {
+        let registry = SwarmRegistry::with_limits(SwarmLimits {
+            max_members: 2,
+            max_active: 2,
+        });
+        let (first, second) = pair(&registry, &swarm()).await;
+
+        let members = registry.members(&swarm()).await;
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|member| {
+            member.role == MemberRole::Peer
+                && member.status == MemberStatus::Active
+                && member.report_back_to.is_none()
+        }));
+        assert_eq!(registry.coordinator(&swarm()).await, None);
+        assert!(!registry.is_coordinator(&swarm(), first).await);
+        assert!(!registry.is_coordinator(&swarm(), second).await);
+        assert_eq!(registry.swarm_of(first).await, Some(swarm()));
+        assert_eq!(registry.swarm_of(second).await, Some(swarm()));
+    }
+
+    #[tokio::test]
+    async fn pair_validation_fails_without_creating_a_swarm() {
+        let registry = SwarmRegistry::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+
+        assert_eq!(
+            registry
+                .join_as_pair(&swarm(), (first, "alpha"), (first, "beta"))
+                .await,
+            Err(SwarmError::DuplicatePairSessions)
+        );
+        assert_eq!(
+            registry
+                .join_as_pair(&swarm(), (first, "  "), (second, "beta"))
+                .await,
+            Err(SwarmError::EmptyPairName)
+        );
+        assert_eq!(
+            registry
+                .join_as_pair(&swarm(), (first, "Reviewer"), (second, "reviewer"))
+                .await,
+            Err(SwarmError::DuplicatePairNames)
+        );
+        assert!(registry.swarms().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pair_reserves_both_capacity_slots_or_neither() {
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let lifetime_limited = SwarmRegistry::with_limits(SwarmLimits {
+            max_members: 1,
+            max_active: 2,
+        });
+        assert_eq!(
+            lifetime_limited
+                .join_as_pair(&swarm(), (first, "alpha"), (second, "beta"))
+                .await,
+            Err(SwarmError::MemberCapReached { cap: 1 })
+        );
+        assert!(lifetime_limited.swarms().await.is_empty());
+
+        let active_limited = SwarmRegistry::with_limits(SwarmLimits {
+            max_members: 2,
+            max_active: 1,
+        });
+        assert_eq!(
+            active_limited
+                .join_as_pair(&swarm(), (first, "alpha"), (second, "beta"))
+                .await,
+            Err(SwarmError::ConcurrencyReached { cap: 1 })
+        );
+        assert!(active_limited.swarms().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_the_exact_pair_retry_is_idempotent() {
+        let registry = SwarmRegistry::new();
+        let (first, second) = pair(&registry, &swarm()).await;
+
+        registry
+            .join_as_pair(&swarm(), (second, "beta"), (first, "alpha"))
+            .await
+            .unwrap();
+        let before = registry.members(&swarm()).await;
+        assert_eq!(
+            registry
+                .join_as_pair(&swarm(), (first, "changed"), (second, "beta"))
+                .await,
+            Err(SwarmError::PairMismatch)
+        );
+        assert_eq!(registry.members(&swarm()).await, before);
+    }
+
+    #[tokio::test]
+    async fn a_partial_pair_retry_is_refused_without_repairing_it() {
+        let registry = SwarmRegistry::new();
+        let (first, second) = pair(&registry, &swarm()).await;
+        registry.remove(&swarm(), second).await.unwrap();
+        let before = registry.members(&swarm()).await;
+
+        assert_eq!(
+            registry
+                .join_as_pair(&swarm(), (first, "alpha"), (second, "beta"))
+                .await,
+            Err(SwarmError::PairMismatch)
+        );
+        assert_eq!(registry.members(&swarm()).await, before);
+        assert_eq!(registry.swarm_of(second).await, None);
+    }
+
+    #[tokio::test]
+    async fn pair_and_hierarchy_operations_cannot_mix() {
+        use localpilot_taskgraph::{ActorId, PlanMode, TaskPlan};
+
+        let registry = SwarmRegistry::new();
+        let (first, _second) = pair(&registry, &swarm()).await;
+        assert_eq!(
+            registry
+                .join_as_root(&swarm(), SessionId::new(), "root")
+                .await,
+            Err(SwarmError::MixedTopology)
+        );
+        assert_eq!(
+            registry.reserve(&swarm(), None).await,
+            Err(SwarmError::MixedTopology)
+        );
+        assert_eq!(
+            registry
+                .set_plan(
+                    &swarm(),
+                    TaskPlan::new("work", PlanMode::Light, ActorId::new("owner")),
+                )
+                .await,
+            Err(SwarmError::MixedTopology)
+        );
+        assert_eq!(
+            registry.restore(&swarm(), Vec::new(), None, None).await,
+            Err(SwarmError::MixedTopology)
+        );
+        assert_eq!(registry.elect_coordinator(&swarm()).await, None);
+        assert_eq!(
+            registry.member(&swarm(), first).await.unwrap().role,
+            MemberRole::Peer
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hierarchy_refuses_pair_admission_without_mutation() {
+        let registry = SwarmRegistry::new();
+        let root = SessionId::new();
+        registry.join_as_root(&swarm(), root, "lead").await.unwrap();
+        let before = registry.members(&swarm()).await;
+
+        assert_eq!(
+            registry
+                .join_as_pair(
+                    &swarm(),
+                    (SessionId::new(), "alpha"),
+                    (SessionId::new(), "beta"),
+                )
+                .await,
+            Err(SwarmError::MixedTopology)
+        );
+        assert_eq!(registry.members(&swarm()).await, before);
+    }
+
+    #[tokio::test]
+    async fn a_session_cannot_cross_from_one_swarm_to_another() {
+        let registry = SwarmRegistry::new();
+        let first_swarm = SwarmId::new("first");
+        let second_swarm = SwarmId::new("second");
+        let (first, second) = pair(&registry, &first_swarm).await;
+
+        assert_eq!(
+            registry.join_as_root(&second_swarm, first, "root").await,
+            Err(SwarmError::AlreadyInSwarm {
+                session: first,
+                swarm: first_swarm.clone(),
+            })
+        );
+        assert_eq!(
+            registry
+                .join_as_pair(&second_swarm, (second, "alpha"), (SessionId::new(), "beta"),)
+                .await,
+            Err(SwarmError::AlreadyInSwarm {
+                session: second,
+                swarm: first_swarm.clone(),
+            })
+        );
+        assert!(!registry.swarms().await.contains(&second_swarm));
+    }
+
+    #[tokio::test]
+    async fn a_failed_cross_swarm_confirm_does_not_consume_its_reservation() {
+        let registry = SwarmRegistry::new();
+        let first_swarm = SwarmId::new("first");
+        let second_swarm = SwarmId::new("second");
+        let session = SessionId::new();
+        registry
+            .join_as_root(&first_swarm, session, "lead")
+            .await
+            .unwrap();
+        let Admission::Reserved(slot) = registry.reserve(&second_swarm, None).await.unwrap() else {
+            panic!("a fresh hierarchy reserves");
+        };
+
+        assert_eq!(
+            registry
+                .confirm(
+                    Reservation {
+                        id: slot.id,
+                        swarm: slot.swarm.clone(),
+                    },
+                    SwarmMember::worker(session, "worker", SessionId::new()),
+                )
+                .await,
+            Err(SwarmError::AlreadyInSwarm {
+                session,
+                swarm: first_swarm,
+            })
+        );
+        assert!(registry.release(slot).await);
+        assert!(registry.members(&second_swarm).await.is_empty());
     }
 
     #[tokio::test]
@@ -1201,7 +1704,8 @@ mod tests {
                 &swarm(),
                 TaskPlan::new("ship it", PlanMode::Light, lead.clone()),
             )
-            .await;
+            .await
+            .unwrap();
 
         let seeded = registry
             .with_plan(&swarm(), |plan| {

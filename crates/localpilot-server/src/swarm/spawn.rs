@@ -28,8 +28,8 @@
 //! [`WorkerFactory`] keeps this crate off that path and lets the tests drive the
 //! whole lifecycle with a session that has no provider at all.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{hash_map::Entry, HashMap};
+use std::sync::{Arc, Weak};
 
 use localpilot_core::SessionId;
 use localpilot_harness::{
@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 use super::registry::{Admission, MemberStatus, SwarmError, SwarmMember, SwarmRegistry};
 use super::scope::SwarmId;
 use crate::host::SessionHost;
-use crate::registry::{RegistryError, SessionRegistry};
+use crate::registry::{RegistryError, SessionHandle, SessionRegistry};
 
 /// How much of a worker's answer travels back to its spawner.
 ///
@@ -219,6 +219,57 @@ pub struct WorkerReport {
     pub delivered_to: Option<SessionId>,
 }
 
+/// Two already-registered sessions atomically adopted as a symmetric pair.
+///
+/// The arrays retain the caller's order. Each messaging view is the same
+/// concrete [`SessionPeers`](super::messaging::SessionPeers) binding installed
+/// on that session runtime, so a convergence adapter cannot accidentally send
+/// as the other peer or through a reconstructed topology.
+pub struct AdoptedPair {
+    swarm: SwarmId,
+    sessions: [SessionId; 2],
+    hosts: [Arc<SessionHost>; 2],
+    messaging: [Arc<super::messaging::SessionPeers>; 2],
+}
+
+impl AdoptedPair {
+    /// The swarm carrying this pair topology.
+    #[must_use]
+    pub fn swarm(&self) -> &SwarmId {
+        &self.swarm
+    }
+
+    /// The two peer sessions, in caller order.
+    #[must_use]
+    pub fn sessions(&self) -> [SessionId; 2] {
+        self.sessions
+    }
+
+    /// The two session hosts, in caller order.
+    #[must_use]
+    pub fn hosts(&self) -> [Arc<SessionHost>; 2] {
+        [Arc::clone(&self.hosts[0]), Arc::clone(&self.hosts[1])]
+    }
+
+    /// The host for one member of this pair.
+    #[must_use]
+    pub fn host(&self, session: SessionId) -> Option<Arc<SessionHost>> {
+        self.sessions
+            .iter()
+            .position(|candidate| *candidate == session)
+            .map(|index| Arc::clone(&self.hosts[index]))
+    }
+
+    /// The bound messaging view for one member of this pair.
+    #[must_use]
+    pub fn messaging(&self, session: SessionId) -> Option<Arc<super::messaging::SessionPeers>> {
+        self.sessions
+            .iter()
+            .position(|candidate| *candidate == session)
+            .map(|index| Arc::clone(&self.messaging[index]))
+    }
+}
+
 /// The swarm's side of the server: session hosting plus swarm membership, and
 /// the spawn path that joins them.
 ///
@@ -232,6 +283,10 @@ pub struct SwarmHost {
     /// because a host is a *serving* concern: a session hosted for nobody needs
     /// none.
     hosts: Arc<RwLock<HashMap<SessionId, Arc<SessionHost>>>>,
+    /// Stable concrete messaging views, weakly indexed so exact adoption
+    /// retries return the binding already installed on the runtime without
+    /// adding another strong cycle to the existing host/session relationship.
+    peer_bindings: Arc<RwLock<HashMap<SessionId, Weak<super::messaging::SessionPeers>>>>,
     factory: Arc<dyn WorkerFactory>,
     /// Who touched which file recently. Shared across the swarm, because the
     /// whole point is that one member's edit is visible to another.
@@ -250,6 +305,7 @@ impl SwarmHost {
             sessions,
             swarms,
             hosts: Arc::new(RwLock::new(HashMap::new())),
+            peer_bindings: Arc::new(RwLock::new(HashMap::new())),
             factory,
             touches: super::touches::TouchIndex::default(),
         }
@@ -308,10 +364,78 @@ impl SwarmHost {
                 .await
                 .append_system_prompt(localpilot_harness::swarm_coordinator_directive(depth));
         }
-        let host = self.host_for(session, handle).await;
-        self.bind_peers(swarm, session).await;
-        self.watch_touches(swarm, session, &host);
+        let (host, inserted) = self.host_for(session, handle.clone()).await;
+        self.bind_peers(swarm, session, &handle).await;
+        if inserted {
+            self.watch_touches(swarm, session, &host);
+        }
         Ok(host)
+    }
+
+    /// Adopt two already-registered sessions as a symmetric pair.
+    ///
+    /// Both session handles are resolved before membership changes. Pair
+    /// admission itself is atomic in [`SwarmRegistry::join_as_pair`]; everything
+    /// after it is infallible and idempotent: host creation, installing the
+    /// stable bound messaging views, and one touch watcher per newly hosted
+    /// session. Unlike [`adopt_root`](Self::adopt_root), this appends no
+    /// coordinator guidance because neither peer is a coordinator.
+    ///
+    /// The caller owns this startup future and the pair's ephemeral registry as
+    /// one lifetime. Dropping the future after admission can skip the remaining
+    /// hosting steps, which is safe only when that caller then drops the whole
+    /// registry. A shared or persistent registry must await adoption to
+    /// completion; supporting cancellable adoption there would require an
+    /// explicit rollback or completion guard.
+    ///
+    /// # Errors
+    /// [`SpawnError::Registry`] if either session is absent, or
+    /// [`SpawnError::Admission`] if pair validation, capacity, membership, or
+    /// topology refuses the join. No host or partial pair is created on error.
+    pub async fn adopt_pair(
+        &self,
+        swarm: &SwarmId,
+        first: (SessionId, impl Into<String>),
+        second: (SessionId, impl Into<String>),
+    ) -> Result<AdoptedPair, SpawnError> {
+        let first = (first.0, first.1.into());
+        let second = (second.0, second.1.into());
+        let first_handle = self
+            .sessions
+            .get(first.0)
+            .await
+            .ok_or_else(|| SpawnError::Registry(RegistryError::NotFound.to_string()))?;
+        let second_handle = self
+            .sessions
+            .get(second.0)
+            .await
+            .ok_or_else(|| SpawnError::Registry(RegistryError::NotFound.to_string()))?;
+
+        self.swarms
+            .join_as_pair(
+                swarm,
+                (first.0, first.1.clone()),
+                (second.0, second.1.clone()),
+            )
+            .await?;
+
+        let (first_host, first_inserted) = self.host_for(first.0, first_handle.clone()).await;
+        let (second_host, second_inserted) = self.host_for(second.0, second_handle.clone()).await;
+        let first_messaging = self.bind_peers(swarm, first.0, &first_handle).await;
+        let second_messaging = self.bind_peers(swarm, second.0, &second_handle).await;
+        if first_inserted {
+            self.watch_touches(swarm, first.0, &first_host);
+        }
+        if second_inserted {
+            self.watch_touches(swarm, second.0, &second_host);
+        }
+
+        Ok(AdoptedPair {
+            swarm: swarm.clone(),
+            sessions: [first.0, second.0],
+            hosts: [first_host, second_host],
+            messaging: [first_messaging, second_messaging],
+        })
     }
 
     /// The host for a session, if this swarm host is serving it.
@@ -392,9 +516,11 @@ impl SwarmHost {
                 SwarmMember::worker(session, request.name.clone(), request.parent),
             )
             .await?;
-        let host = self.host_for(session, handle).await;
-        self.bind_peers(&request.swarm, session).await;
-        self.watch_touches(&request.swarm, session, &host);
+        let (host, inserted) = self.host_for(session, handle.clone()).await;
+        self.bind_peers(&request.swarm, session, &handle).await;
+        if inserted {
+            self.watch_touches(&request.swarm, session, &host);
+        }
         Ok(Spawned::Started { session })
     }
 
@@ -548,6 +674,7 @@ impl SwarmHost {
         // Its touches go with it: a departed agent should not keep generating
         // alerts about files nobody is holding.
         self.touches.forget(session).await;
+        self.peer_bindings.write().await.remove(&session);
         self.hosts.write().await.remove(&session)
     }
 
@@ -585,11 +712,37 @@ impl SwarmHost {
     ///
     /// Done here rather than in the factory because the view has to name the
     /// session, and the session id does not exist until the runtime is built.
-    async fn bind_peers(&self, swarm: &SwarmId, session: SessionId) {
-        if let Some(handle) = self.sessions.get(session).await {
-            let peers = super::messaging::SessionPeers::new(self.clone(), swarm.clone(), session);
-            handle.lock().await.set_peers(Arc::new(peers));
-        }
+    async fn bind_peers(
+        &self,
+        swarm: &SwarmId,
+        session: SessionId,
+        handle: &SessionHandle,
+    ) -> Arc<super::messaging::SessionPeers> {
+        let existing = {
+            let bindings = self.peer_bindings.read().await;
+            bindings.get(&session).and_then(Weak::upgrade)
+        };
+        let peers = match existing {
+            Some(existing) => existing,
+            None => {
+                let candidate = Arc::new(super::messaging::SessionPeers::new(
+                    self.clone(),
+                    swarm.clone(),
+                    session,
+                ));
+                let mut bindings = self.peer_bindings.write().await;
+                match bindings.get(&session).and_then(Weak::upgrade) {
+                    Some(existing) => existing,
+                    None => {
+                        bindings.insert(session, Arc::downgrade(&candidate));
+                        candidate
+                    }
+                }
+            }
+        };
+        let installed: Arc<dyn localpilot_tools::SwarmPeers> = peers.clone();
+        handle.lock().await.set_peers(installed);
+        peers
     }
 
     /// The host for `session`, creating it if this is the first time.
@@ -597,9 +750,9 @@ impl SwarmHost {
         &self,
         session: SessionId,
         handle: crate::registry::SessionHandle,
-    ) -> Arc<SessionHost> {
+    ) -> (Arc<SessionHost>, bool) {
         if let Some(existing) = self.hosts.read().await.get(&session) {
-            return Arc::clone(existing);
+            return (Arc::clone(existing), false);
         }
         let host = Arc::new(SessionHost::new(handle).await);
         let mut guard = self.hosts.write().await;
@@ -607,7 +760,10 @@ impl SwarmHost {
         // every holder of a host for this session holds the *same* one — two
         // hosts would mean two turn-token slots and a cancel that reaches
         // neither.
-        Arc::clone(guard.entry(session).or_insert(host))
+        match guard.entry(session) {
+            Entry::Occupied(existing) => (Arc::clone(existing.get()), false),
+            Entry::Vacant(entry) => (Arc::clone(entry.insert(host)), true),
+        }
     }
 }
 

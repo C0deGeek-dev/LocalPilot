@@ -122,7 +122,7 @@ async fn plan_assigned_to(host: &SwarmHost, lead: SessionId, worker: SessionId) 
     for node in ready_nodes(&plan) {
         dispatch(&mut plan, node, &assignee).unwrap();
     }
-    host.swarms().set_plan(&swarm(), plan).await;
+    host.swarms().set_plan(&swarm(), plan).await.unwrap();
 }
 
 async fn pending(host: &SwarmHost, session: SessionId) -> bool {
@@ -352,7 +352,7 @@ async fn a_plan_and_its_membership_survive_a_restart() {
     assert!(restarted.swarms().plan(&swarm()).await.is_none());
 
     let snapshot = store.load(&swarm()).await.unwrap().unwrap();
-    store.restore(&restarted, snapshot).await;
+    store.restore(&restarted, snapshot).await.unwrap();
 
     let after = restarted.swarms().plan(&swarm()).await.unwrap();
     assert_eq!(after, before, "the plan came back exactly");
