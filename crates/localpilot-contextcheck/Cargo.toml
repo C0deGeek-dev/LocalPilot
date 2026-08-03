@@ -13,6 +13,8 @@ localpilot-config = { path = "../localpilot-config" }
 localpilot-core = { path = "../localpilot-core" }
 localpilot-harness = { path = "../localpilot-harness" }
 localpilot-skills = { path = "../localpilot-skills" }
+localmind-store = { path = "../../external/localmind/crates/localmind-store" }
+localpilot-selfreview = { path = "../localpilot-selfreview" }
 serde = { workspace = true }
 
 [dev-dependencies]

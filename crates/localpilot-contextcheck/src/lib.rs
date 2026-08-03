@@ -29,6 +29,9 @@ use localpilot_harness::estimate_tokens;
 use localpilot_skills::{discovery_roots, SkillSet};
 use serde::Serialize;
 
+pub mod analyze;
+pub use analyze::{analyze, ContextFinding, ContextFindingKind, ContextReport, Thresholds};
+
 /// Which authored context layer a piece of text belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "layer", rename_all = "snake_case")]
