@@ -1444,7 +1444,7 @@ pub(crate) async fn switch_model_target(
             ));
             // Don't dead-end when LocalBox is available: a local model is one
             // `/localbox adopt` away. Point at the dedicated command rather than
-            // overloading `/model` with the start logic (see the LocalBox handoff).
+            // overloading `/model` with the start logic.
             match crate::localbox::detect().await {
                 crate::localbox::LocalBoxState::Running { .. } => notices.push(
                     "a LocalBox server is running — `/localbox adopt` adds it as the `local` provider"

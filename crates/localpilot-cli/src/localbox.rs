@@ -295,7 +295,7 @@ pub(crate) async fn run_adopt(
 /// output so the user sees the model-load progress. `localbox serve` blocks until
 /// the model is ready (it runs its own reply check) and then returns, leaving the
 /// server running as its own detached process — LocalPilot does not own or reap
-/// it; `localbox stop` is LocalBox's teardown (D003 leave-running).
+/// it (nothing to kill), and `localbox stop` is LocalBox's own teardown.
 fn start_localbox_serve(model: &str) -> anyhow::Result<()> {
     println!("starting LocalBox serving {model} (loading a model can take a few minutes)…");
     let status = std::process::Command::new("localbox")
@@ -396,7 +396,7 @@ command = \"npx\"
 
     #[test]
     fn write_local_provider_merges_into_the_project_config_preserving_siblings() {
-        // The shared write half (06.1): reached only after consent, it writes the
+        // The shared write half: reached only after consent, it writes the
         // merged config to disk and preserves the user's other providers.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".localpilot.toml");
