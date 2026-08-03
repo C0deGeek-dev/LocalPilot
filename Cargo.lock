@@ -1623,6 +1623,7 @@ dependencies = [
  "insta",
  "localpilot-agents",
  "localpilot-config",
+ "localpilot-contextcheck",
  "localpilot-core",
  "localpilot-dist",
  "localpilot-harness",

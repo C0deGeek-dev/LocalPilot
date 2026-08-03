@@ -118,6 +118,10 @@ enum Command {
         /// Alias for `--format json`.
         #[arg(long)]
         json: bool,
+        /// Also report context hygiene: the authored-context layers (instruction
+        /// files + skills), their token weights, and advisory findings.
+        #[arg(long)]
+        context: bool,
     },
     /// Store an API key for a provider (bring-your-own-key): deep-link to the key
     /// page, paste, validate, and save it in the OS keychain (or a 0600 file).
@@ -1474,11 +1478,15 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
     let mut exit_code = std::process::ExitCode::SUCCESS;
 
     match command {
-        Command::Doctor { format, json } => {
+        Command::Doctor {
+            format,
+            json,
+            context,
+        } => {
             let is_tty = io::stdout().is_terminal();
             let resolved = output::resolve_format(format, json, is_tty);
             let mut stdout = io::stdout().lock();
-            doctor::run_with(&mut stdout, resolved).await?;
+            doctor::run_with(&mut stdout, resolved, context).await?;
             stdout.flush()?;
         }
         Command::Models {
