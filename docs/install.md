@@ -243,6 +243,21 @@ localpilot doctor
 credentials are present (never their values), tool availability, and workspace
 trust state.
 
+Add `--context` to also report **context hygiene** — the authored context a
+session assembles from the current directory (your `CLAUDE.md`/`AGENTS.md`
+instruction files and the skills visible to the project), each with a token
+estimate, plus advisory findings: the same directive stated in more than one
+layer (redundancy), directives that disagree (conflict), and layers large enough
+to be worth right-sizing. It reads and reports only — it never edits your files —
+and every quoted snippet passes the same redactor as the rest of `doctor`, so a
+secret in an instruction file is not echoed. It rides the shared `--format
+human|json`:
+
+```sh
+localpilot doctor --context
+localpilot doctor --context --format json
+```
+
 ### Build features
 
 The default binary includes LocalMind-backed learning and memory. The installers
