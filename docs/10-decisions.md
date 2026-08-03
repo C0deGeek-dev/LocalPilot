@@ -44,6 +44,59 @@ into `localpilot-selfdev` as `build_gauntlet_promote` so the CLI release surface
 and the orchestrator reuse one definition instead of each re-deriving it. If the
 orchestrator ever starts to hold stage logic, that is design pressure to push it
 back into the owning crate, not to fuse the crates.
+
+## ADR-0136: A Peer Pair Converges Through A Typed Envelope Over Direct One-To-One Messaging, Driver-Scheduled And Finitely Bounded
+
+Status: accepted. Reuses the in-app peer-messaging substrate from ADR-0124..0127
+(the `SessionPeers` soft-interrupt transport and its coordinator-only-broadcast
+rule).
+
+Two *symmetric* peers work one shared artifact and converge — or a bound stops
+them. The convergence protocol is a pure state core plus a transport-agnostic
+driver behind an endpoint trait, so it runs identically over deterministic test
+fakes and, in a production integration, over real session-host and peer-messaging
+endpoints.
+
+- **One typed boundary.** A peer speaks through an original, versioned JSON
+  envelope parsed exactly once into a typed action (propose, revise, agree). No
+  part of the driver scans prose to decide what happened, and an envelope that
+  tries to name a peer is ignored: the acting identity is whichever peer the
+  driver scheduled, never anything the envelope claims.
+- **Direct addressing, no broadcast, no wake.** Protocol traffic reaches the
+  other peer as a one-to-one notify over the existing soft-interrupt substrate;
+  whole-swarm broadcast stays unavailable to a pair, and nothing but the driver's
+  own scheduled drive starts a turn — the wake path is never used for protocol
+  traffic. Exactly one peer turn is in flight at a time.
+- **Driver-owned candidate.** The driver, not a peer, owns the shared candidate:
+  canonical artifact bytes (line endings normalised so two platforms agree on one
+  digest), a monotonic, never-reused revision, and a SHA-256 digest. An agreement
+  must name the current revision *and* digest; any proposal or revision installs a
+  new revision and clears every prior agreement, so a stale agreement can never
+  pass for a live one. Convergence is both scheduled peer identities agreeing the
+  same current candidate.
+- **Finite by construction.** A per-slot wall-clock deadline and a per-slot token
+  budget together cover delivery, the primary drive, and one same-slot repair — a
+  repair resets neither. A hard round cap and an always-available user abort bound
+  the whole run. Cancellation is *observed*: the endpoint is handed a token it
+  awaits and tears its turn down cleanly, never a dropped in-flight future, and at
+  a hard boundary the deadline wins deterministically. Every exit is one of a
+  finite typed terminal set — converged, cap reached, aborted, timed out, peer
+  failed, provider error, protocol error, budget exceeded, or no progress — and
+  the timed-out, budget-exceeded, and no-progress reasons also carry through the
+  underlying session's own runtime stops rather than fabricating them.
+- **Diagnosable outcome.** A single report carries the typed terminal reason plus
+  immutable snapshots: both peer identities, each peer's latest raw response
+  (recorded before any parse, budget, or terminal decision discards it), and one
+  atomic snapshot of the last valid candidate. A read-only progress view — a
+  nonblocking latest snapshot plus an asynchronous wait for the next update —
+  reports round versus cap, the next scheduled peer or none at termination, the
+  candidate, and per-peer agreement in stable order while the run is live.
+
+Consequences: a crate-internal protocol and driver in the swarm layer beside the
+DAG driver, reusing the one messaging substrate and adding no second transport;
+its public driver/report/progress surface is library-only until a pair host wires
+it to real endpoints; the parser and state internals stay crate-private.
+
 ## ADR-0135: A Swarm Worker's Model Is Verified Before And After The Build; An Unserved Model Is Refused, Never Defaulted
 
 Status: accepted. Extends ADR-0124..0127 (the swarm substrate); complements the
