@@ -302,4 +302,21 @@ mod tests {
         let skill = skill.expect("the demo skill should be inventoried as a layer");
         assert!(skill.tokens > 0);
     }
+
+    #[test]
+    fn instruction_bodies_are_redacted_at_construction() {
+        let dir = TempDir::new().unwrap();
+        write(
+            &dir.path().join("CLAUDE.md"),
+            "Use sk-abcdefghijklmnopqrstuvwxyz0123 as the key.",
+        );
+        let inv = inventory(dir.path(), None, true, None);
+        let layer = inv
+            .layers
+            .iter()
+            .find(|l| l.source.contains("CLAUDE.md"))
+            .expect("the instruction layer");
+        assert!(!layer.body.contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        assert!(layer.body.contains("[REDACTED]"));
+    }
 }
