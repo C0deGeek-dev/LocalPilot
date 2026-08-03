@@ -33,7 +33,10 @@ pub use app::{
     UserShellOutput, WorkState,
 };
 pub use editor::{Editor, EditorRow, ImageAttachment, PasteUnit, SubmittedInput};
-pub use layout::{FrameLayout, MINIMUM_HEIGHT, MINIMUM_WIDTH};
+pub use layout::{
+    FrameLayout, PairTimelineLayout, TimelineLayout, TimelinePaneLayout, MINIMUM_HEIGHT,
+    MINIMUM_WIDTH, PAIR_MINIMUM_HEIGHT, PAIR_WIDE_MINIMUM_WIDTH,
+};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,
     TimelineRowHit, TrustHit, TrustPathHit,

@@ -8,8 +8,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView};
 use crate::{
     ActivityState, AppModel, ColorSupport, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt,
-    TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, UiRole, VisualRow, VisualRowPart,
-    APP_NAME, MINIMUM_HEIGHT, MINIMUM_WIDTH,
+    TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, TimelineLayout, TimelinePaneLayout,
+    UiRole, VisualRow, VisualRowPart, APP_NAME, MINIMUM_HEIGHT, MINIMUM_WIDTH,
 };
 
 /// Six banner lines plus one deliberate blank line before the first prompt.
@@ -280,11 +280,17 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         };
     };
 
+    let timeline = match layout.timeline {
+        TimelineLayout::Single(timeline) => timeline,
+        // `render` uses the ordinary single-chat constructor. Keep this local
+        // bridge total until pane-generic rendering consumes both pair panes.
+        TimelineLayout::Pair(pair) => pair.first,
+    };
     let tabs = render_tabs(frame, layout.tabs, app);
-    let timeline_wrap_width = timeline_wrap_width(layout.timeline_content.width, app);
-    let (scrollbar, mut timeline_rows) = render_timeline(frame, layout, app);
-    let quick_help_area = render_quick_help(frame, layout.timeline_content, app);
-    let (completion_area, completion_rows) = render_completion(frame, layout.timeline_content, app);
+    let timeline_wrap_width = timeline_wrap_width(timeline.content.width, app);
+    let (scrollbar, mut timeline_rows) = render_timeline(frame, timeline, app);
+    let quick_help_area = render_quick_help(frame, timeline.content, app);
+    let (completion_area, completion_rows) = render_completion(frame, timeline.content, app);
     if let Some(overlay_area) = completion_area.or(quick_help_area) {
         timeline_rows.retain(|hit| hit.y < overlay_area.y);
     }
@@ -292,12 +298,12 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
-    let dialog_hits = render_dialog(frame, area, layout.timeline_content, app);
+    let dialog_hits = render_dialog(frame, area, timeline.content, app);
     HitMap {
         takeover: false,
         frame: Some(layout),
         tabs,
-        timeline: layout.timeline_content,
+        timeline: timeline.content,
         timeline_wrap_width,
         timeline_rows,
         completion_rows,
@@ -1445,10 +1451,10 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Vec<TabHit>
 
 fn render_timeline(
     frame: &mut Frame<'_>,
-    layout: FrameLayout,
+    timeline: TimelinePaneLayout,
     app: &AppModel,
 ) -> (ScrollbarGeometry, Vec<TimelineRowHit>) {
-    let area = layout.timeline_content;
+    let area = timeline.content;
     let wrap_width = timeline_wrap_width(area.width, app);
     let view = app.timeline.view(wrap_width, area.height.max(1));
     let banner_visible = view.pinned.is_none()
@@ -1508,7 +1514,7 @@ fn render_timeline(
         if app.capabilities.screen_reader {
             Rect::default()
         } else {
-            layout.scrollbar
+            timeline.scrollbar
         },
         view.start,
         view.total_rows,
@@ -2877,6 +2883,13 @@ mod tests {
     use ratatui::Terminal;
 
     use super::*;
+
+    fn single_timeline(layout: FrameLayout) -> TimelinePaneLayout {
+        let TimelineLayout::Single(timeline) = layout.timeline else {
+            panic!("ordinary render must use a single timeline")
+        };
+        timeline
+    }
     use crate::{ColorSupport, Header, ItemKind, TerminalCapabilities, Theme};
 
     fn model() -> AppModel {
@@ -3325,7 +3338,7 @@ mod tests {
             .expect("draw trust dialog");
         let rendered = terminal.backend().to_string();
         let hit_map = hit_map.expect("trust hit map");
-        let timeline = hit_map.frame.expect("frame layout").timeline_content;
+        let timeline = single_timeline(hit_map.frame.expect("frame layout")).content;
         assert!(rendered.contains("Trust this workspace?"));
         assert!(rendered.contains("D:\\workspace"));
         assert!(rendered.contains("❯ 1. Yes"));
@@ -3526,13 +3539,13 @@ mod tests {
         let hit_map = hit_map.expect("hit map");
         let layout = hit_map.frame.expect("layout");
         let view = app.timeline.view(
-            layout.timeline_content.width,
-            layout.timeline_content.height,
+            single_timeline(layout).content.width,
+            single_timeline(layout).content.height,
         );
         assert_eq!(
             hit_map.scrollbar,
             ScrollbarGeometry::calculate(
-                layout.scrollbar,
+                single_timeline(layout).scrollbar,
                 view.start,
                 view.total_rows,
                 view.viewport_rows.saturating_sub(usize::from(BANNER_ROWS)),
@@ -3579,29 +3592,25 @@ mod tests {
             .expect("draw in-flow prompt");
         let layout = hit_map.expect("hit map").frame.expect("layout");
         let buffer = terminal.backend().buffer();
-        let prompt_y = layout.timeline_content.y + BANNER_ROWS;
-        assert_eq!(buffer[(layout.timeline_content.x, prompt_y)].symbol(), "▄");
+        let timeline = single_timeline(layout).content;
+        let prompt_y = timeline.y + BANNER_ROWS;
+        assert_eq!(buffer[(timeline.x, prompt_y)].symbol(), "▄");
         assert!(buffer_line(buffer, prompt_y + 1).contains("current prompt (pending)"));
         assert_eq!(
-            buffer[(layout.timeline_content.x, prompt_y + 1)].symbol(),
+            buffer[(timeline.x, prompt_y + 1)].symbol(),
             " ",
             "prompt surfaces must not draw a visible side bar"
         );
         assert_eq!(
-            buffer[(layout.timeline_content.right() - 1, prompt_y + 1)].symbol(),
+            buffer[(timeline.right() - 1, prompt_y + 1)].symbol(),
             " ",
             "prompt surfaces must not draw a visible side bar"
         );
         assert_eq!(
-            buffer[(layout.timeline_content.x + 1, prompt_y + 1)]
-                .style()
-                .bg,
+            buffer[(timeline.x + 1, prompt_y + 1)].style().bg,
             resolver.ui(UiRole::Surface).bg
         );
-        assert_eq!(
-            buffer[(layout.timeline_content.x, prompt_y + 2)].symbol(),
-            "▀"
-        );
+        assert_eq!(buffer[(timeline.x, prompt_y + 2)].symbol(), "▀");
 
         let mut app = model();
         let _ = app.timeline.push(ItemKind::User, "pinned prompt");
@@ -3615,17 +3624,12 @@ mod tests {
             .draw(|frame| hit_map = Some(render(frame, &app)))
             .expect("draw pinned prompt");
         let layout = hit_map.expect("hit map").frame.expect("layout");
+        let timeline = single_timeline(layout).content;
         let buffer = terminal.backend().buffer();
-        assert_eq!(
-            buffer[(layout.timeline_content.x, layout.timeline_content.y)].symbol(),
-            "▄"
-        );
-        assert!(buffer_line(buffer, layout.timeline_content.y + 1).contains("pinned prompt"));
-        assert_eq!(
-            buffer[(layout.timeline_content.x, layout.timeline_content.y + 2)].symbol(),
-            "▀"
-        );
-        assert!(buffer_line(buffer, layout.timeline_content.y + 3).contains("response"));
+        assert_eq!(buffer[(timeline.x, timeline.y)].symbol(), "▄");
+        assert!(buffer_line(buffer, timeline.y + 1).contains("pinned prompt"));
+        assert_eq!(buffer[(timeline.x, timeline.y + 2)].symbol(), "▀");
+        assert!(buffer_line(buffer, timeline.y + 3).contains("response"));
     }
 
     #[test]
@@ -3779,7 +3783,11 @@ mod tests {
                 "▀"
             );
             assert_eq!(
-                buffer[(layout.scrollbar.x, layout.scrollbar.y)].symbol(),
+                buffer[(
+                    single_timeline(layout).scrollbar.x,
+                    single_timeline(layout).scrollbar.y
+                )]
+                    .symbol(),
                 "│"
             );
             assert!(buffer_line(buffer, layout.status.y).contains("workspace"));
