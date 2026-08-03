@@ -330,8 +330,8 @@ mod tests {
         (dir, setup)
     }
 
-    /// 01.1/01.2: the factory builds a worker on the requested model, and on the
-    /// session default when the request names none.
+    /// The factory builds a worker on the requested model, and on the session
+    /// default when the request names none.
     #[test]
     fn the_factory_builds_a_worker_on_the_requested_model() {
         let (_dir, setup) = setup_on("default-model");
@@ -418,10 +418,10 @@ mod tests {
         }
     }
 
-    /// 03.4 (and the 04.4 runtime-flavour guard): the entrypoint runs a small
-    /// plan to completion over fake providers, a worker spawns per task via the
-    /// production factory, and each node's model reaches its spawn request *and*
-    /// the session actually built. Deliberately on the **current-thread** runtime
+    /// The entrypoint runs a small plan to completion over fake providers, a
+    /// worker spawns per task via the production factory, and each node's model
+    /// reaches its spawn request *and* the session actually built. Deliberately
+    /// on the **current-thread** runtime
     /// (`#[tokio::test]` default): if any part of the swarm path called
     /// `block_in_place`, this would panic instead of pass.
     #[tokio::test]
@@ -491,7 +491,7 @@ mod tests {
         );
     }
 
-    /// 04.2: routing resolves each model to the provider that advertises it, and
+    /// Routing resolves each model to the provider that advertises it, and
     /// availability follows the same table — a served model passes, an unserved
     /// one is refused with a message that names the configured models.
     #[test]
@@ -524,10 +524,10 @@ mod tests {
         assert!(err.contains("default-model"), "{err}");
     }
 
-    /// 04.3 (with the 04.1 refusal folded in): two workers run on two models
-    /// served by two different providers, each built on the model its node
-    /// asked for; a third node names a model no provider serves and is refused
-    /// before any build rather than silently running on the default.
+    /// Two workers run on two models served by two different providers, each
+    /// built on the model its node asked for; a third node names a model no
+    /// provider serves and is refused before any build rather than silently
+    /// running on the default.
     #[tokio::test]
     async fn two_providers_serve_two_models_and_an_unserved_model_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -592,7 +592,7 @@ mod tests {
         );
     }
 
-    /// 05.1: the concurrency bound is wired through and honoured — a low bound
+    /// The concurrency bound is wired through and honoured — a low bound
     /// serialises the fan-out (never more than one worker, and so one model, in
     /// flight at once) yet the plan still completes. The active budget is the
     /// concurrency plus one for the coordinator's own slot; `max_active: 2` here
