@@ -10,14 +10,16 @@
 use std::sync::Arc;
 
 use localpilot_core::SessionId;
-use localpilot_harness::{SessionConfig, SessionRuntime};
+use localpilot_harness::{SessionConfig, SessionRuntime, SoftInterrupt, SoftInterruptSource};
 use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_server::registry::{RegistryError, SessionFactory, SessionRegistry};
 use localpilot_server::swarm::registry::SwarmRegistry;
 use localpilot_server::swarm::scope::SwarmId;
-use localpilot_server::swarm::spawn::{SpawnRequest, Spawned, SwarmHost, WorkerFactory};
+use localpilot_server::swarm::spawn::{
+    AdoptedPair, SpawnRequest, Spawned, SwarmHost, WorkerFactory,
+};
 use localpilot_store::Store;
 use tempfile::TempDir;
 
@@ -119,6 +121,17 @@ async fn pending(host: &SwarmHost, session: SessionId) -> bool {
         .is_empty()
 }
 
+async fn pending_interrupts(host: &SwarmHost, session: SessionId) -> Vec<SoftInterrupt> {
+    host.sessions()
+        .get(session)
+        .await
+        .unwrap()
+        .lock()
+        .await
+        .steer_queue()
+        .snapshot()
+}
+
 /// Twenty lines, so two edits can be near or far apart.
 fn seed_file(root: &std::path::Path, name: &str) {
     let body: String = (1..=20)
@@ -155,6 +168,30 @@ async fn pair(
     sessions.queue(bob_script);
     let bob = spawn(&host, lead, "bob").await;
     (host, lead, alice, bob)
+}
+
+/// Two ordinary sessions adopted directly into the symmetric topology.
+async fn symmetric_pair(
+    sessions: &Arc<Sessions>,
+    alice_script: FakeProvider,
+    bob_script: FakeProvider,
+) -> (SwarmHost, AdoptedPair) {
+    let registry = SessionRegistry::new();
+    let factory = Arc::clone(sessions) as Arc<dyn SessionFactory>;
+    sessions.queue(alice_script);
+    let alice = registry.open_new(&*factory).await.unwrap();
+    sessions.queue(bob_script);
+    let bob = registry.open_new(&*factory).await.unwrap();
+    let host = SwarmHost::new(
+        registry,
+        SwarmRegistry::new(),
+        Arc::clone(sessions) as Arc<dyn WorkerFactory>,
+    );
+    let pair = host
+        .adopt_pair(&swarm(), (alice, "alice"), (bob, "bob"))
+        .await
+        .unwrap();
+    (host, pair)
 }
 
 async fn spawn(host: &SwarmHost, parent: SessionId, name: &str) -> SessionId {
@@ -211,13 +248,117 @@ async fn two_agents_editing_the_same_lines_both_get_an_advisory_alert() {
     .await;
 
     host.run(&swarm(), bob, "make your edit").await.unwrap();
-    wait_for("alice to be told", || pending(&host, alice)).await;
+    wait_for("both writers to be told", || async {
+        pending(&host, alice).await && pending(&host, bob).await
+    })
+    .await;
+
+    let alice_alerts = pending_interrupts(&host, alice).await;
+    let bob_alerts = pending_interrupts(&host, bob).await;
+    assert_advisory(&alice_alerts, "bob", "lines 4-6");
+    assert_advisory(&bob_alerts, "alice", "lines 3-5");
 
     // Advisory only: both edits are on disk. Nothing was locked or rolled back,
     // which is the honest guarantee this mechanism makes.
     let content = std::fs::read_to_string(sessions.root().join("shared.txt")).unwrap();
     assert!(content.contains("alice 3"), "{content}");
     assert!(content.contains("bob 4"), "{content}");
+}
+
+#[tokio::test]
+async fn an_adopted_pair_gets_symmetric_advisories_without_blocking_either_edit() {
+    let sessions = Sessions::new();
+    seed_file(sessions.root(), "shared.txt");
+    let (host, pair) = symmetric_pair(
+        &sessions,
+        edits(
+            "shared.txt",
+            "line 3\nline 4\nline 5",
+            "alice 3\nalice 4\nalice 5",
+        ),
+        edits(
+            "shared.txt",
+            "alice 4\nalice 5\nline 6",
+            "bob 4\nbob 5\nbob 6",
+        ),
+    )
+    .await;
+    let [alice, bob] = pair.sessions();
+
+    let alice_stop = pair.host(alice).unwrap().drive("make your edit").await;
+    assert_eq!(alice_stop, localpilot_harness::StopReason::Done);
+    wait_for("alice's pair touch to be recorded", || async {
+        !host.touches().is_empty(std::time::Instant::now()).await
+    })
+    .await;
+
+    let bob_stop = pair.host(bob).unwrap().drive("make your edit").await;
+    assert_eq!(bob_stop, localpilot_harness::StopReason::Done);
+    wait_for("both pair writers to be told", || async {
+        pending(&host, alice).await && pending(&host, bob).await
+    })
+    .await;
+
+    let alice_alerts = pending_interrupts(&host, alice).await;
+    let bob_alerts = pending_interrupts(&host, bob).await;
+    assert_advisory(&alice_alerts, "bob", "lines 4-6");
+    assert_advisory(&bob_alerts, "alice", "lines 3-5");
+
+    // Both successful tool results reached disk. The notices advise the peers;
+    // they neither lock the workspace nor cancel or roll back either turn.
+    let content = std::fs::read_to_string(sessions.root().join("shared.txt")).unwrap();
+    assert!(content.contains("alice 3"), "{content}");
+    assert!(content.contains("bob 4"), "{content}");
+}
+
+fn assert_advisory(alerts: &[SoftInterrupt], peer: &str, range: &str) {
+    assert_eq!(alerts.len(), 1, "one advisory per colliding peer");
+    let alert = &alerts[0];
+    assert_eq!(alert.source, SoftInterruptSource::System);
+    assert!(!alert.urgent, "advisories never cut a tool batch short");
+    assert!(alert.content.contains(peer), "{}", alert.content);
+    assert!(alert.content.contains(range), "{}", alert.content);
+    assert!(
+        alert
+            .content
+            .contains("Nothing was locked or rolled back — you both wrote"),
+        "{}",
+        alert.content
+    );
+    assert!(alert.content.contains("Re-read"), "{}", alert.content);
+}
+
+#[tokio::test]
+async fn non_overlapping_edits_in_an_adopted_pair_remain_quiet() {
+    let sessions = Sessions::new();
+    seed_file(sessions.root(), "shared.txt");
+    let (host, pair) = symmetric_pair(
+        &sessions,
+        edits("shared.txt", "line 2\nline 3", "alice 2\nline 3"),
+        edits("shared.txt", "line 18\nline 19", "line 18\nbob 19"),
+    )
+    .await;
+    let [alice, bob] = pair.sessions();
+
+    assert_eq!(
+        pair.host(alice).unwrap().drive("edit the top").await,
+        localpilot_harness::StopReason::Done
+    );
+    wait_for("alice's pair touch to be recorded", || async {
+        !host.touches().is_empty(std::time::Instant::now()).await
+    })
+    .await;
+    assert_eq!(
+        pair.host(bob).unwrap().drive("edit the bottom").await,
+        localpilot_harness::StopReason::Done
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!pending(&host, alice).await);
+    assert!(!pending(&host, bob).await);
+    let content = std::fs::read_to_string(sessions.root().join("shared.txt")).unwrap();
+    assert!(content.contains("alice 2"), "{content}");
+    assert!(content.contains("bob 19"), "{content}");
 }
 
 #[tokio::test]
@@ -260,6 +401,7 @@ bob 19",
         "two agents working in different parts of one file is ordinary, and interrupting them \
          about it would make the mechanism the problem"
     );
+    assert!(!pending(&host, bob).await);
 }
 
 #[tokio::test]
@@ -282,6 +424,7 @@ async fn an_edit_to_a_different_file_reaches_nobody() {
 
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(!pending(&host, alice).await);
+    assert!(!pending(&host, bob).await);
 }
 
 #[tokio::test]
@@ -309,4 +452,8 @@ async fn a_prior_reader_is_told_when_the_ground_moves_under_it() {
 
     host.run(&swarm(), bob, "edit the file").await.unwrap();
     wait_for("the reader to be told", || pending(&host, alice)).await;
+    assert!(
+        !pending(&host, bob).await,
+        "a writer is not interrupted merely because a peer had read the file"
+    );
 }

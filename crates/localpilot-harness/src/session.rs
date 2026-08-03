@@ -459,6 +459,20 @@ impl SteerQueue {
         self.0.queue.lock().map(|q| q.is_empty()).unwrap_or(true)
     }
 
+    /// A non-consuming view of the interrupts waiting for the next safe point.
+    ///
+    /// Presentation layers use this to show pending notices without racing the
+    /// runtime for ownership of them. Delivery remains exclusively owned by the
+    /// runtime's private drain path.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<SoftInterrupt> {
+        self.0
+            .queue
+            .lock()
+            .map(|queue| queue.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Whether an *urgent* interrupt is queued (admitted between tool calls).
     #[must_use]
     fn has_urgent(&self) -> bool {
@@ -3876,6 +3890,11 @@ mod tests {
             urgent: true,
         });
         assert!(!q.is_empty() && q.has_urgent());
+        let snapshot = q.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].content, "first");
+        assert!(snapshot[1].urgent);
+        assert!(!q.is_empty(), "a snapshot must not consume delivery");
         let drained = q.drain();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].content, "first");

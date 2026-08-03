@@ -52,8 +52,10 @@ struct Access {
 pub struct Collision {
     /// The peer to tell.
     pub peer: SessionId,
-    /// What that peer had done to the file.
-    pub theirs: TouchOp,
+    /// What that peer had done to the file. Retaining the actual touch, rather
+    /// than only its operation, lets a reciprocal alert name that peer's true
+    /// path and range.
+    pub their_touch: FileTouch,
     /// Whether the two touches actually overlap, rather than merely sharing a
     /// file. The recipient reads a different sentence for each.
     pub overlapping: bool,
@@ -128,7 +130,7 @@ impl TouchIndex {
                 }
                 seen.push(Collision {
                     peer: access.session,
-                    theirs: access.touch.op,
+                    their_touch: access.touch.clone(),
                     overlapping: overlapping(&access.touch, touch),
                 });
             }
@@ -213,11 +215,7 @@ pub async fn announce(
     if collisions.is_empty() {
         return Vec::new();
     }
-    let who = host
-        .swarms()
-        .member(swarm, session)
-        .await
-        .map_or_else(|| session.to_string(), |member| member.name);
+    let who = member_name(host, swarm, session).await;
 
     let mut notified = Vec::new();
     for collision in collisions {
@@ -225,15 +223,44 @@ pub async fn announce(
             continue;
         };
         peer_host.inject(SoftInterrupt {
-            content: alert(&who, touch, &collision),
+            content: alert(&who, touch, collision.their_touch.op, collision.overlapping),
             source: SoftInterruptSource::System,
             // Not urgent: this is advice, and cutting a peer's tool batch in
             // half to deliver advice would make the mechanism the problem.
             urgent: false,
         });
         notified.push(collision.peer);
+
+        // A prior writer needs the landing writer's change, and the landing
+        // writer equally needs to know about the prior write it overlapped.
+        // Readers remain one-directional: their knowledge went stale, while the
+        // writer has no lost work to recover. This is topology-agnostic so the
+        // shared-worktree guarantee is identical for pairs and hierarchies.
+        if collision.their_touch.op.is_mutation() {
+            let Some(current_host) = host.host(session).await else {
+                continue;
+            };
+            let peer_name = member_name(host, swarm, collision.peer).await;
+            current_host.inject(SoftInterrupt {
+                content: alert(
+                    &peer_name,
+                    &collision.their_touch,
+                    touch.op,
+                    collision.overlapping,
+                ),
+                source: SoftInterruptSource::System,
+                urgent: false,
+            });
+        }
     }
     notified
+}
+
+async fn member_name(host: &SwarmHost, swarm: &SwarmId, session: SessionId) -> String {
+    host.swarms()
+        .member(swarm, session)
+        .await
+        .map_or_else(|| session.to_string(), |member| member.name)
 }
 
 /// The sentence a peer reads.
@@ -242,18 +269,18 @@ pub async fn announce(
 /// stale. Those are different problems and deserve different sentences — a
 /// reader handed "your edit may have been overwritten" would go looking for an
 /// edit it never made.
-fn alert(who: &str, touch: &FileTouch, collision: &Collision) -> String {
+fn alert(who: &str, touch: &FileTouch, theirs: TouchOp, overlapping: bool) -> String {
     let where_ = touch
         .lines
         .map_or_else(|| "the whole file".to_string(), |lines| lines.to_string());
     let path = touch.path.display();
-    let scope = if collision.overlapping {
+    let scope = if overlapping {
         "overlapping the part you were working on"
     } else {
         "elsewhere in a file you have open"
     };
 
-    if collision.theirs.is_mutation() {
+    if theirs.is_mutation() {
         format!(
             "{who} just {} {path} ({where_}), {scope}. Nothing was locked or rolled back — you \
              both wrote. Re-read the file before your next edit to it, and message {who} if you \
@@ -346,9 +373,14 @@ mod tests {
         let collisions = index.record(writer, &edit("src/lib.rs", 10, 20), now).await;
 
         assert_eq!(collisions.len(), 1);
-        assert_eq!(collisions[0].theirs, TouchOp::Read);
+        assert_eq!(collisions[0].their_touch.op, TouchOp::Read);
 
-        let message = alert("writer", &edit("src/lib.rs", 10, 20), &collisions[0]);
+        let message = alert(
+            "writer",
+            &edit("src/lib.rs", 10, 20),
+            collisions[0].their_touch.op,
+            collisions[0].overlapping,
+        );
         assert!(message.contains("out of date"), "{message}");
         assert!(
             !message.contains("overwritten"),
@@ -464,12 +496,12 @@ mod tests {
 
     #[test]
     fn a_writers_alert_says_plainly_that_nothing_was_locked() {
-        let collision = Collision {
-            peer: SessionId::new(),
-            theirs: TouchOp::Modified,
-            overlapping: true,
-        };
-        let message = alert("alpha", &edit("src/lib.rs", 10, 20), &collision);
+        let message = alert(
+            "alpha",
+            &edit("src/lib.rs", 10, 20),
+            TouchOp::Modified,
+            true,
+        );
         assert!(
             message.contains("Nothing was locked or rolled back"),
             "{message}"
@@ -480,12 +512,12 @@ mod tests {
 
     #[test]
     fn a_non_overlapping_alert_says_so_rather_than_implying_a_clash() {
-        let collision = Collision {
-            peer: SessionId::new(),
-            theirs: TouchOp::Modified,
-            overlapping: false,
-        };
-        let message = alert("alpha", &edit("src/lib.rs", 10, 20), &collision);
+        let message = alert(
+            "alpha",
+            &edit("src/lib.rs", 10, 20),
+            TouchOp::Modified,
+            false,
+        );
         assert!(
             message.contains("elsewhere in a file you have open"),
             "{message}"
