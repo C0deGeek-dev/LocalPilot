@@ -6,6 +6,22 @@
 use super::*;
 
 #[test]
+fn session_directive_uses_the_parsers_version_and_preserves_identity_and_task() {
+    let task = "  preserve these task bytes\r\nincluding the edges  ";
+    let directive = pair_session_directive("A", "B", task);
+
+    assert!(directive.starts_with("You are peer A in a symmetric two-peer collaboration."));
+    assert!(directive.contains("Peer B is working on the same original task."));
+    assert!(directive.contains(&format!(
+        "{{\"v\":{PROTOCOL_VERSION},\"action\":\"propose\""
+    )));
+    assert!(directive.contains(&format!("{{\"v\":{PROTOCOL_VERSION},\"action\":\"revise\"")));
+    assert!(directive.contains(&format!("{{\"v\":{PROTOCOL_VERSION},\"action\":\"agree\"")));
+    assert!(directive.contains(&format!("Original task:\n{task}\n\nOn every scheduled")));
+    assert!(!directive.contains("coordinator"));
+}
+
+#[test]
 fn a_well_formed_envelope_parses_to_each_action() {
     assert_eq!(
         parse_action(r#"{"v":1,"action":"propose","artifact":"first cut"}"#).unwrap(),

@@ -44,11 +44,12 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::interactive_session::{resolved_image_support, ApprovalCall, QuestionCall};
 use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
     may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
-use crate::repl::{switch_model_target, ApprovalCall, ClipboardImageRead, QuestionCall};
+use crate::repl::{switch_model_target, ClipboardImageRead};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
@@ -1235,7 +1236,7 @@ async fn attach_clipboard_image_idle(
     }
     let provider_id = runtime.active_provider_id().to_string();
     if !runtime.active_accepts_images() {
-        let resolved = crate::repl::resolved_image_support(config, Some(&provider_id)).await;
+        let resolved = resolved_image_support(config, Some(&provider_id)).await;
         runtime.set_image_support_override(resolved);
     }
     let capability = ImageCapabilitySnapshot {

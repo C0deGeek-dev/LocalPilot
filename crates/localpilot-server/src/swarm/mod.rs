@@ -36,9 +36,9 @@ pub mod spawn;
 pub mod touches;
 
 pub use converge::{
-    CandidateSnapshot, EndpointError, NotifyReply, PairAbort, PairBounds, PairDriver,
-    PairEndpoints, PairOutcome, PairProgress, PairProgressRx, PairReport, PairSetupError,
-    TurnReply,
+    pair_session_directive, CandidateSnapshot, EndpointError, NotifyReply, PairAbort, PairBounds,
+    PairDriver, PairEndpoints, PairOutcome, PairProgress, PairProgressRx, PairReport,
+    PairSetupError, TurnReply,
 };
 pub use driver::{run_plan, DriverConfig, RunReport};
 pub use lifecycle::{reap_terminal, salvage, sweep, Salvaged, SnapshotStore, SwarmSnapshot};

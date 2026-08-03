@@ -9,7 +9,6 @@
 
 use std::future::Future;
 use std::io::{self, Stdout};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,20 +21,18 @@ use crossterm::event::{
 use crossterm::{execute, terminal};
 use localpilot_config::{CliOverrides, ConfigPaths};
 use localpilot_core::{ContentBlock, TokenUsage};
-use localpilot_harness::{ModelHealth, RuntimeEvent, SessionConfig, SessionRuntime, SwitchError};
-use localpilot_llm::ProviderRegistry;
-use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
+use localpilot_harness::{ModelHealth, RuntimeEvent, SessionRuntime, SwitchError};
 use localpilot_sandbox::{
     Approver, Decision, Effect, Interactivity, PermissionEngine, PermissionEngineHandle,
     PermissionRequest, Profile,
 };
 use localpilot_store::Store;
-use localpilot_tools::{BackgroundProcesses, UserAnswer, UserPrompter, UserQuestion};
+use localpilot_tools::{BackgroundProcesses, UserAnswer, UserQuestion};
 use localpilot_tui::{
     banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
-    AppInput, AppState, ApprovalRequest, BackgroundCommand, BackgroundProcess, Header,
-    ImageAttachment, IngestAction, Key, Mode, PlanItem, Profile as UiProfile, QuestionPrompt,
-    SlashAction, TrustPrompt, UiEvent,
+    AppInput, AppState, BackgroundCommand, BackgroundProcess, Header, ImageAttachment,
+    IngestAction, Key, Mode, PlanItem, Profile as UiProfile, QuestionPrompt, SlashAction,
+    TrustPrompt, UiEvent,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::text::Text;
@@ -44,6 +41,10 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::interactive_session::{
+    resolved_image_support, ApprovalCall, InteractiveSessionBundle, InteractiveSessionSetup,
+    QuestionCall, TuiApprover,
+};
 use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, is_newline, is_submit,
     is_unbracketed_paste_newline_key, may_be_unbracketed_paste_key, PasteAction, PasteBurst,
@@ -113,21 +114,6 @@ fn selected_chat_ui(value: Option<&std::ffi::OsStr>) -> anyhow::Result<ChatUi> {
             "invalid {CHAT_UI_ENV} value `{value}`; expected `inline` or `fullscreen`"
         )),
     }
-}
-
-/// A pending approval handed from the [`TuiApprover`] (running inside the turn)
-/// to the event loop, which raises the modal and replies with the user's answer.
-pub(crate) struct ApprovalCall {
-    pub(crate) request: ApprovalRequest,
-    pub(crate) reply: oneshot::Sender<bool>,
-}
-
-/// A pending set of questions handed from the [`TuiPrompter`] (running inside
-/// the turn) to the event loop, which asks them one at a time and replies with
-/// the user's answers.
-pub(crate) struct QuestionCall {
-    pub(crate) questions: Vec<UserQuestion>,
-    pub(crate) reply: oneshot::Sender<Vec<UserAnswer>>,
 }
 
 /// A question set part-way through being answered.
@@ -207,80 +193,6 @@ struct CommandHost<'a> {
     /// Loaded config, used to re-resolve the active provider's vision capability
     /// when the user pastes an image (config wins, else a best-effort probe).
     config: &'a localpilot_config::Config,
-}
-
-/// An [`Approver`] that suspends the turn and asks the user through the TUI.
-struct TuiApprover {
-    tx: mpsc::UnboundedSender<ApprovalCall>,
-}
-
-impl Approver for TuiApprover {
-    fn approve<'a>(
-        &'a self,
-        request: &'a PermissionRequest,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        let (reply, answer) = oneshot::channel();
-        let sent = self.tx.send(ApprovalCall {
-            request: describe(request),
-            reply,
-        });
-        Box::pin(async move {
-            // A closed channel (UI gone) is a denial, never a silent approval.
-            if sent.is_err() {
-                return false;
-            }
-            answer.await.unwrap_or(false)
-        })
-    }
-}
-
-/// A [`UserPrompter`] that suspends the turn and asks the user through the TUI.
-struct TuiPrompter {
-    tx: mpsc::UnboundedSender<QuestionCall>,
-}
-
-impl UserPrompter for TuiPrompter {
-    fn ask<'a>(
-        &'a self,
-        questions: &'a [UserQuestion],
-    ) -> Pin<Box<dyn Future<Output = Vec<UserAnswer>> + Send + 'a>> {
-        let (reply, answer) = oneshot::channel();
-        let sent = self.tx.send(QuestionCall {
-            questions: questions.to_vec(),
-            reply,
-        });
-        let count = questions.len();
-        Box::pin(async move {
-            // A closed channel (UI gone) is a dismissal, never an invented
-            // answer — the same rule the approver follows for a denial.
-            if sent.is_err() {
-                return vec![UserAnswer::Dismissed; count];
-            }
-            answer
-                .await
-                .unwrap_or_else(|_| vec![UserAnswer::Dismissed; count])
-        })
-    }
-}
-
-/// Map a permission request into the UI's approval view model.
-fn describe(request: &PermissionRequest) -> ApprovalRequest {
-    let target_kind = match request.effect {
-        Effect::ReadPath { .. } | Effect::WritePath { .. } => "path",
-        Effect::RunCommand(_) => "command",
-        Effect::Network => "network",
-    };
-    let risk_class = request.effect.risk_label();
-    let target = if request.detail.is_empty() {
-        format!("({target_kind})")
-    } else {
-        request.detail.clone()
-    };
-    ApprovalRequest {
-        tool: request.tool.to_string(),
-        target,
-        risk_class: risk_class.to_string(),
-    }
 }
 
 /// Launch the interactive REPL.
@@ -390,117 +302,20 @@ pub async fn run_chat(
             return Err(no_model_error(offer));
         }
     };
-    // Build every configured provider once and keep a shared handle, so `/model`
-    // can re-point the live session at another configured provider without
-    // rebuilding or re-authenticating it.
-    let provider_registry = std::sync::Arc::new(ProviderRegistry::from_config(&config)?);
-    let provider = match provider_id {
-        Some(id) => provider_registry.get(id),
-        None => provider_registry.default_provider(),
-    }
-    .cloned()
-    .ok_or_else(|| anyhow::anyhow!("no provider is configured"))?;
-
-    // The real context window: per-provider config first, then best-effort
-    // discovery from the local server's model listing. Failure means falling
-    // back to the configured global budget, never an error.
-    timer.mark("provider registry");
-    let mut context_window = provider.declaration().max_context_tokens;
-    if context_window.is_none() {
-        context_window = discovered_window(&config, provider_id, &model).await;
-    }
-    timer.mark("context-window discovery");
-
-    // Ask-gated actions suspend the turn and prompt in the TUI; the user's
-    // y/n answer flows back through this channel to the permission engine.
-    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
-    // `ask_user` suspends the turn the same way, and the user's choice flows
-    // back through this one.
-    let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
-    let mut registry = crate::mcp::McpTools::load(&config).await.registry();
-    let broker = crate::mcp::install_broker(&config.tools, &mut registry);
-    timer.mark("mcp servers + tools");
-    // Interactive session: apply the built-in safety rails so an unconfigured
-    // project still bounds a runaway tool loop (ADR-0055). The interactive profile
-    // uses a higher tool-call ceiling and no default wall-clock — a long
-    // interactive turn is legitimate and the user can cancel it. Explicit
-    // `[harness]` values win inside `resolved_rails`.
-    let rails = config.harness.resolved_rails(true);
-    let prompter = Arc::new(TuiPrompter {
-        tx: question_tx.clone(),
-    });
-    let mut runtime = SessionRuntime::new(
-        provider,
-        registry,
-        PermissionEngine::new(profile, Vec::new()),
-        Box::new(TuiApprover {
-            tx: approval_tx.clone(),
-        }),
-        Store::open(&cwd),
-        crate::session_cmd::workspace_with_read_roots(&cwd, &config)?,
-        RecoveryEngine::new(RecoveryBudget::default()),
-        SessionConfig {
-            model: model.to_string(),
-            interactivity: Interactivity::Interactive,
-            trusted: matches!(profile, Profile::Bypass | Profile::Unrestricted),
-            context_token_limit: localpilot_harness::effective_context_limit(
-                context_window,
-                config.harness.context_token_limit,
-            ),
-            compaction_mode: compaction_mode(config.compaction.mode),
-            summarizer_tuning: localpilot_harness::SummarizerTuning::from_config(
-                &config.compaction,
-            ),
-            tool_call_budget: rails.tool_call_budget,
-            tool_call_budget_max: rails.tool_call_budget_max,
-            tool_budget_explicit: rails.budget_explicit,
-            rules: config.harness.rules.clone(),
-            enforce_claim_gate: config.harness.claim_gate.is_enabled(),
-            tool_marker_enabled: config.tools.marker,
-            enforce_readable_errors: config.tools.readable_errors,
-            repair_mode: config.tools.repair,
-            elide_seen_reads: config.tools.elide_seen_reads,
-            turn_timeout: rails.turn_timeout_secs.map(std::time::Duration::from_secs),
-            verify_before_done: config.harness.verify_before_done,
-            verify_command: config.harness.verify_command.clone(),
-            ..SessionConfig::default()
-        },
-        Vec::new(),
-    );
-    timer.mark("runtime (store + workspace)");
-    runtime.set_broker(broker);
-    // The REPL is the one surface with a human on it, so it is the one that
-    // wires the prompter. Every headless caller leaves it unset and `ask_user`
-    // reports itself unavailable instead of waiting.
-    runtime.set_prompter(prompter);
-    if let Some(agents) = crate::agents_cmd::session_agents(&cwd) {
-        runtime.set_agents(agents);
-    }
-    // Hand the runtime the built provider map so `/model` switches are a lookup.
-    runtime.set_registry(provider_registry);
-    // Best-effort: resolve the active provider's image-input capability (config
-    // wins, else a read-only `/props` probe) so the image-attach preflight honours
-    // an undeclared-but-vision-capable local server. Default-off probe (a declared
-    // provider is not probed); failure leaves the provider's declaration as the gate.
-    runtime.set_image_support_override(resolved_image_support(&config, provider_id).await);
-    timer.mark("vision /props probe");
-    localpilot_harness::register_project_analysis_context(
-        &cwd,
-        config.context.project_analysis,
-        config.docs.lookup_policy,
-        &mut runtime,
-    );
-    localpilot_harness::register_project_instructions_context(
-        &cwd,
-        config.context.inject_instructions,
-        config.context.instruction_char_budget,
-        &mut runtime,
-    );
-    // Relevant accepted LocalMind memory is contributed per turn through the
-    // context-hook fabric; ingested folder knowledge is pulled on demand via the
-    // knowledge_search tool rather than seeded here.
-    localpilot_localmind::register_context_hook(&cwd, &mut runtime);
-    timer.mark("context hooks");
+    let selected_provider_id = provider_id.unwrap_or(&config.provider.default).to_string();
+    let setup = InteractiveSessionSetup::resolve(cwd, config, profile).await?;
+    timer.mark("provider registry + mcp servers + tools");
+    let InteractiveSessionBundle {
+        mut runtime,
+        approval_tx,
+        approvals: mut approval_rx,
+        questions: mut question_rx,
+    } = setup.build(&selected_provider_id, &model).await?;
+    timer.mark("runtime + discovery + context hooks");
+    // Keep the setup alive for the whole chat: it owns the shared MCP transports
+    // used by the runtime's per-session tool registry.
+    let cwd = setup.cwd().to_path_buf();
+    let config = setup.config();
 
     let fullscreen_startup = if chat_ui == ChatUi::Fullscreen {
         resume
@@ -524,7 +339,7 @@ pub async fn run_chat(
         .and_then(|entry| entry.name);
     let header = Header {
         version: env!("LOCALPILOT_VERSION").to_string(),
-        provider: provider_id.unwrap_or(&config.provider.default).to_string(),
+        provider: selected_provider_id,
         model: model.to_string(),
         workspace: cwd
             .file_name()
@@ -577,7 +392,7 @@ pub async fn run_chat(
                 cwd: &cwd,
                 history: &history,
                 ingest: &config.ingest,
-                config: &config,
+                config,
                 trust_required,
             },
         )
@@ -663,7 +478,7 @@ pub async fn run_chat(
                     model: &model,
                     provider_id,
                     history: &history,
-                    config: &config,
+                    config,
                 },
             )
             .await
@@ -2126,7 +1941,7 @@ async fn run_harness_command(
             profile,
             interactivity: Interactivity::Interactive,
             trusted,
-            approver: move || Box::new(TuiApprover { tx: tx.clone() }) as Box<dyn Approver>,
+            approver: move || Box::new(TuiApprover::new(tx.clone())) as Box<dyn Approver>,
         };
         if wait_resume {
             crate::harness_cmd::wait_resume_with_events(
@@ -2227,7 +2042,7 @@ async fn run_localbox_adopt(
             Decision::Allow => true,
             // An `Ask` raises the standard approval prompt; the driving loop
             // renders it and feeds the answer back, so this await never deadlocks.
-            Decision::Ask => TuiApprover { tx: tx.clone() }.approve(&request).await,
+            Decision::Ask => TuiApprover::new(tx.clone()).approve(&request).await,
             Decision::Deny => false,
         };
         if !approved {
@@ -3022,67 +2837,6 @@ fn sandbox_profile(profile: UiProfile) -> Profile {
     }
 }
 
-/// Best-effort context window for `model` from the provider's own model
-/// listing, when the provider speaks the OpenAI-compatible protocol and a base
-/// URL is known. Silent on failure: discovery is metadata, not a gate.
-/// The probe-resolved image-input capability for the active provider — config
-/// `supports_vision` wins, else a best-effort read-only `/props` probe, else
-/// false — recorded on the runtime so the image-attach preflight honours an
-/// undeclared-but-vision-capable local server. Returns `None` (leave the
-/// declaration as the sole gate) when no such provider is configured. The probe
-/// runs only when `[discovery] vision_probe` is on **and** config did not already
-/// declare the capability (a declaration wins, so no probe is needed).
-pub(crate) async fn resolved_image_support(
-    config: &localpilot_config::Config,
-    provider_id: Option<&str>,
-) -> Option<bool> {
-    let id = provider_id.unwrap_or(&config.provider.default);
-    let entry = config.providers.get(id)?;
-    let declared = entry.supports_vision;
-    let probed = if declared.is_none() && config.discovery.vision_probe {
-        match crate::models_cmd::listing_base_url(entry) {
-            Some(base_url) => {
-                crate::models_cmd::probe_vision_for_provider(config, id, &base_url).await
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-    Some(localpilot_llm::resolve_vision(declared, probed))
-}
-
-async fn discovered_window(
-    config: &localpilot_config::Config,
-    provider_id: Option<&str>,
-    model: &str,
-) -> Option<u64> {
-    let id = provider_id.unwrap_or(&config.provider.default);
-    let entry = config.providers.get(id)?;
-    if entry.kind == "anthropic" {
-        return None;
-    }
-    let base_url = crate::models_cmd::listing_base_url(entry)?;
-    let models = crate::models_cmd::discover_models_for_provider(config, id, &base_url)
-        .await
-        .ok()?;
-    models
-        .into_iter()
-        .find(|m| m.id == model)
-        .and_then(|m| m.context_window)
-}
-
-fn compaction_mode(mode: localpilot_config::CompactionMode) -> localpilot_harness::CompactionMode {
-    match mode {
-        localpilot_config::CompactionMode::Deterministic => {
-            localpilot_harness::CompactionMode::Deterministic
-        }
-        localpilot_config::CompactionMode::SmartWithFallback => {
-            localpilot_harness::CompactionMode::SmartWithFallback
-        }
-    }
-}
-
 fn harness_compaction_mode_label(mode: localpilot_harness::CompactionMode) -> &'static str {
     match mode {
         localpilot_harness::CompactionMode::Deterministic => "deterministic",
@@ -3764,15 +3518,6 @@ mod tests {
         assert!(cancel.is_cancelled(), "Ctrl-C cancels the turn");
         // The waiting tool call still resolves rather than hanging.
         assert_eq!(answer.await.unwrap(), vec![UserAnswer::Dismissed]);
-    }
-
-    #[tokio::test]
-    async fn a_closed_channel_yields_dismissed_never_an_invented_answer() {
-        let (tx, rx) = mpsc::unbounded_channel::<QuestionCall>();
-        drop(rx);
-        let prompter = TuiPrompter { tx };
-        let answers = prompter.ask(&one_question()).await;
-        assert_eq!(answers, vec![UserAnswer::Dismissed]);
     }
 
     /// Unwrap the question arm of a pending ask, for tests that only drive that

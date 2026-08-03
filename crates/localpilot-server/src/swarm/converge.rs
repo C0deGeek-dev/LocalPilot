@@ -32,6 +32,30 @@ use tokio_util::sync::CancellationToken;
 /// version is refused loudly rather than misread as this one.
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 
+/// Render the system-prompt contract for one member of a symmetric pair.
+///
+/// The convergence parser owns this wording because it owns the accepted JSON
+/// envelope. Rendering the version from [`PROTOCOL_VERSION`] keeps the model's
+/// advertised contract and the parser's contract from drifting apart.
+#[must_use]
+pub fn pair_session_directive(self_label: &str, other_label: &str, task: &str) -> String {
+    format!(
+        "You are peer {self_label} in a symmetric two-peer collaboration. The host assigned this \
+identity; never claim or infer a different peer identity. Peer {other_label} is working on the \
+same original task.\n\n\
+Original task:\n\
+{task}\n\n\
+On every scheduled pair turn, reply with exactly one JSON object and no surrounding prose. Use \
+one of:\n\
+{{\"v\":{PROTOCOL_VERSION},\"action\":\"propose\",\"artifact\":\"...\"}}\n\
+{{\"v\":{PROTOCOL_VERSION},\"action\":\"revise\",\"artifact\":\"...\"}}\n\
+{{\"v\":{PROTOCOL_VERSION},\"action\":\"agree\",\"revision\":1,\"digest\":\"...\"}}\n\
+Use propose or revise for the complete candidate artifact. Agree only to the current revision and \
+digest supplied by the host. You remain an ordinary interactive Agent-mode session: tools, \
+approvals, questions, and direct peer messages stay available."
+    )
+}
+
 /// What a peer did on its turn, as the protocol core sees it — the typed result
 /// of parsing one envelope.
 ///
