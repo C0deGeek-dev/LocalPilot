@@ -2,6 +2,39 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0130: LocalPilot Adopts a Running or Startable LocalBox Server
+
+Status: accepted.
+
+LocalPilot detects LocalBox and can put a local model behind its `[providers.local]`
+provider without the user hand-editing config, closing what was a one-directional
+handoff (LocalBox wrote LocalPilot's config; LocalPilot knew nothing of LocalBox).
+
+Detection is a `PATH` lookup plus a read-only probe of LocalBox's documented
+default no-think proxy endpoint (`GET :11435/v1/models`, which the proxy forwards
+to the backend). The **endpoint probe is the authoritative "serving" signal** —
+`localbox status` prints prose for humans, not a machine contract, so LocalPilot
+does not parse it. The action is exposed by a **dedicated surface** — the CLI
+`localpilot localbox adopt [--serve <model>]` and the in-session `/localbox adopt`
+— never by overloading `/model`; a failed `/model` switch only *points* at
+`/localbox` when LocalBox is present. `--serve` starts a stopped server via
+`localbox serve <model>`, which blocks until the model is ready and then returns,
+leaving the server as its own detached process: LocalPilot never owns or reaps a
+LocalBox server (`localbox stop` is LocalBox's teardown).
+
+Writing config **upserts only `[providers.local]`** (and points `[provider] default`
+at it), preserving every other provider, `[mcp.servers.*]` table, and comment —
+deliberately unlike LocalBox's own emitter, which owns and wholesale-replaces the
+`providers` table. The written fields **mirror** LocalBox's proxied-route contract
+(`kind = "anthropic"`, `api_key_env = "ANTHROPIC_AUTH_TOKEN"`, `base_url` ending
+`/v1`) rather than importing them; LocalBox and LocalPilot are the same coordinated
+release train, so that contract is stable-by-governance and any breaking change
+warrants its own plan. Every side effect (starting a server, writing config) passes
+the permission engine; in the full-screen chat host an explicit user-typed
+`/localbox adopt` is itself the consent for the workspace config write, and the
+engine still hard-denies under a `Deny` policy. No new runtime dependencies
+(`toml_edit` was already in the tree via `toml`).
+
 ## ADR-0129: Full-Screen Chat Is The Interactive Default
 
 Status: accepted. Advances ADR-0107's transition without yet removing its
