@@ -40,6 +40,78 @@ reserved harness runtime files (`brief.md`/`PROGRESS.md`/`DECISIONS.md`/
 (strip-for-frontier vs keep-rails-for-local) is deliberately not pursued: it is
 untestable without a frontier backend LocalPilot does not target.
 
+## ADR-0139: A Pair Is Two Ordinary Agent Sessions Adopted Into A Symmetric Exact-Two Swarm Topology
+
+Status: accepted for the substrate; the interactive host that constructs and runs
+a pair for a user is the planned consumer and completes this decision in a later
+step. Builds on the convergence protocol (ADR-0136) and reuses the swarm
+membership, one-to-one messaging, and advisory-conflict substrate
+(ADR-0124..0127, ADR-0126).
+
+A pair is not a new session mode. Two peers are ordinary interactive Agent-mode
+sessions — the same construction as a solo chat, with tools, approvals,
+questions, and per-peer model selection intact — placed into a symmetric
+two-member swarm topology so the convergence driver can schedule and address them
+with no protocol change.
+
+- **Symmetric topology, exactly two, atomic.** Swarm membership gains a `Peer`
+  role and a private, mutually exclusive topology: a swarm is hierarchical
+  (coordinator plus workers) or a pair, never both. The two topologies refuse each
+  other's operations — a pair rejects the hierarchy-only paths (root admission,
+  reservation, confirmation, coordinator election, plan restore and set, spawning,
+  and dispatch) and a hierarchy rejects pair mixing — and the public `MemberRole`
+  enum is marked non-exhaustive as it gains `Peer`, so the role set can grow
+  without breaking callers. A pair is admitted in one write-locked step that
+  requires exactly two distinct peers, takes no coordinator
+  and builds no spawn edges, checks both capacity slots together, is
+  order-independent and exact-retry idempotent, and mutates nothing on any failure
+  (duplicate, capacity, mixed topology, or already in another swarm). A session
+  belongs to at most one swarm.
+- **Two fresh sessions, one workspace, shared only capability sources.** The two
+  peers are built from one construction seam that creates two independent runtimes
+  — each with its own tool registry, permission engine, and approval and question
+  channels — over one validated shared workspace and the one exact original task,
+  with an explicit per-peer provider and model. It shares only cloneable capability
+  sources (the provider and MCP transports and the resolved agent set), never
+  runtime, tool, permission, or channel state, and installs the protocol context on
+  both peers before either takes its first turn.
+- **A pair addresses only its partner.** Neither peer is a coordinator, so
+  whole-swarm broadcast is refused; the only messaging a pair uses is the direct
+  one-to-one notify between its two members that the convergence protocol requires
+  (ADR-0136).
+- **Bound hosting, no reconstructed transport.** Adopting the pair yields, per
+  side, the exact session host and the exact messaging view already installed on
+  that runtime. The convergence driver runs over the adopted pair through an
+  endpoint adapter implemented directly on that adopted value — no wrapper type and
+  no new public server type — so a peer reaches its partner only through the
+  binding it was adopted with, and can never send as the other or through a rebuilt
+  topology.
+- **Shared-workspace edits stay advisory.** Adoption installs the existing
+  file-touch watchers on both peers; when the two write overlapping lines in the
+  shared workspace both are told, and neither write is locked, owned, rolled back,
+  or cancelled (ADR-0126).
+- **Exact turn output, read from the runtime.** A driven turn's protocol envelope
+  and token cost are the turn's own final assistant message and summed usage,
+  captured in the runtime and read under the drive lock — never a concatenation of
+  streamed deltas across a turn's several provider iterations, and absent rather
+  than a prior turn's when a turn produces none. The driver's per-slot cancellation
+  is carried to the session's lock-free cancel and the torn-down turn is awaited.
+
+Scope and boundary: this decision covers the shipped substrate — the topology,
+atomic admission, bound hosting, and the adapter that wires the ADR-0136 driver to
+real sessions. It does **not** ship a runnable pair; the interactive host and its
+entrypoint command that construct and run a pair for a user are the planned
+consumer of this substrate and will amend and complete this ADR when they land.
+The architecture decision of whether a pair is its own mode therefore spans this
+substrate step and that later host step; the answer recorded here is that the
+substrate needs no new mode.
+
+Consequences: the swarm layer gains a peer role, a private pair topology, atomic
+pair admission and hosting, and a private endpoint adapter binding the ADR-0136
+driver to real sessions; the runtime gains a narrow, protocol-neutral pair of
+turn-capture getters; the CLI-private pair construction surface stays staged until
+the interactive host consumes it.
+
 ## ADR-0138: The Self-Improvement Loop Is A Thin Orchestrator Over Separate Stage Crates
 
 Status: accepted. Builds on ADR-0034 (the human-gated loop) and keeps ADR-0128
