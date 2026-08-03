@@ -33,7 +33,7 @@
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
-use localpilot_core::SessionId;
+use localpilot_core::{SessionId, TokenUsage};
 use localpilot_harness::{RuntimeEvent, SoftInterrupt, SteerQueue, StopReason};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +74,17 @@ pub struct SessionHost {
     last_active: Mutex<Instant>,
     /// The hosted session's id, read once at construction.
     id: SessionId,
+}
+
+/// The exact per-turn output captured by
+/// [`drive_captured`](SessionHost::drive_captured): why the turn stopped, the
+/// assistant text it produced (`None` when the turn produced none — never a
+/// stale prior turn's), and the tokens it spent. What that text *means* is the
+/// caller's concern; this host layer stays free of any protocol reading of it.
+pub(crate) struct DriveCapture {
+    pub(crate) reason: StopReason,
+    pub(crate) assistant_text: Option<String>,
+    pub(crate) usage: TokenUsage,
 }
 
 impl SessionHost {
@@ -139,6 +150,21 @@ impl SessionHost {
     /// though this method holds the runtime mutex — since they read only the
     /// short token slot and the steer queue, never the runtime mutex.
     pub async fn drive(&self, input: &str) -> StopReason {
+        self.drive_captured(input).await.reason
+    }
+
+    /// Drive one turn and capture its exact assistant text and token spend, read
+    /// from the runtime **before** the turn's lock is released.
+    ///
+    /// Same lock/token lifecycle as [`drive`](Self::drive): the fresh
+    /// [`CancellationToken`] is published into
+    /// [`turn_cancel`](Self::turn_cancel) *before* the `.await` and cleared on
+    /// return, so [`cancel`](Self::cancel) and [`steer`](Self::steer) reach the
+    /// turn the whole time it runs. The capture is read under the same runtime
+    /// guard, so it is *this* turn's output — never a later turn's, and (because
+    /// the runtime scopes the capture to the turn) never a stale prior message
+    /// when this turn produced no assistant text.
+    pub(crate) async fn drive_captured(&self, input: &str) -> DriveCapture {
         self.touch();
         let token = CancellationToken::new();
         // Acquire the runtime mutex first, then publish this turn's token, so the
@@ -147,8 +173,14 @@ impl SessionHost {
         let mut runtime = self.runtime.lock().await;
         self.set_turn_token(Some(token.clone()));
         let reason = runtime.run_turn(input, &self.events, &token).await;
+        let assistant_text = runtime.current_turn_assistant_text();
+        let usage = runtime.current_turn_usage();
         self.set_turn_token(None);
-        reason
+        DriveCapture {
+            reason,
+            assistant_text,
+            usage,
+        }
     }
 
     /// Cancel the in-flight turn, if any, without taking the runtime mutex.

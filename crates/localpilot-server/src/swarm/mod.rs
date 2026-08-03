@@ -30,6 +30,9 @@ pub mod converge;
 pub mod driver;
 pub mod lifecycle;
 pub mod messaging;
+/// The real `PairEndpoints` adapter for an adopted pair. Private: it registers
+/// the trait impl on `AdoptedPair`, which needs no name of its own.
+mod pair_endpoints;
 pub mod registry;
 pub mod scope;
 pub mod spawn;

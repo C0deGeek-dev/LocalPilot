@@ -892,6 +892,17 @@ pub struct SessionRuntime {
     /// Workspace files written/edited/deleted in the current turn (best-effort,
     /// by file-write tool path argument). Reset at each turn start.
     turn_files_changed: Vec<String>,
+    /// The text of the current turn's most recent assistant message, or `None`
+    /// when this turn has produced no assistant text. Reset at each turn start
+    /// and set only from messages appended during the turn, so a turn that ends
+    /// without an assistant answer reads `None` here rather than a prior turn's
+    /// stale text — a distinction the event stream cannot make, since it cannot
+    /// tell one turn's final message from the concatenation of a turn's several
+    /// provider iterations.
+    turn_assistant_text: Option<String>,
+    /// Tokens accumulated across the current turn's provider iterations, summed
+    /// as each usage report arrives. Reset at each turn start.
+    turn_usage: TokenUsage,
     /// Whether the current turn persisted learning to memory. Reset at each turn
     /// start; the run-turn path only reads memory, so it stays `false` here.
     turn_memory_written: bool,
@@ -979,6 +990,8 @@ impl SessionRuntime {
             turn_in_flight: false,
             turn_tool_calls: 0,
             turn_files_changed: Vec::new(),
+            turn_assistant_text: None,
+            turn_usage: TokenUsage::default(),
             turn_memory_written: false,
             turn_tool_failures: 0,
             turn_reported_failures: 0,
@@ -2191,23 +2204,41 @@ impl SessionRuntime {
             .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
-            .map(|m| {
-                m.content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(
-                        "
-",
-                    )
-            })
-            .filter(|text| !text.trim().is_empty())
+            .and_then(assistant_text_of)
+    }
+
+    /// The current turn's most recent assistant text, scoped to this turn.
+    ///
+    /// Unlike [`last_assistant_text`](Self::last_assistant_text), which returns
+    /// the most recent assistant message anywhere in history, this is reset at
+    /// each turn start and set only from messages appended during the turn. A
+    /// turn that produced no assistant text reads `None` here rather than a
+    /// prior turn's answer. A paired-convergence host reads it as the exact
+    /// envelope a driven turn emitted.
+    #[must_use]
+    pub fn current_turn_assistant_text(&self) -> Option<String> {
+        self.turn_assistant_text.clone()
+    }
+
+    /// The tokens the current turn has spent, summed across its provider
+    /// iterations. Reset at each turn start. A paired-convergence host counts
+    /// this against the driven slot's token budget.
+    #[must_use]
+    pub fn current_turn_usage(&self) -> TokenUsage {
+        self.turn_usage
     }
 
     fn append(&mut self, message: Message) {
+        // Capture this turn's latest assistant text before the message is moved
+        // into history. A pair-convergence drive reads it back as the exact
+        // envelope the turn emitted: scoping it to the turn (guarded by
+        // `turn_in_flight`) keeps it absent — not stale — when a turn ends
+        // without assistant text, and reading the *message* rather than the
+        // event stream keeps it exact across a turn's several provider
+        // iterations.
+        if self.turn_in_flight && message.role == Role::Assistant {
+            self.turn_assistant_text = assistant_text_of(&message);
+        }
         // Persist (redacting) before keeping it in memory; a write failure is
         // logged but does not crash the loop.
         if let Err(err) = self.store.append_message(self.session_id, &message) {
@@ -2346,6 +2377,8 @@ impl SessionRuntime {
         self.turn_in_flight = true;
         self.turn_tool_calls = 0;
         self.turn_files_changed.clear();
+        self.turn_assistant_text = None;
+        self.turn_usage = TokenUsage::default();
         self.turn_memory_written = false;
         self.turn_tool_failures = 0;
         self.turn_reported_failures = 0;
@@ -2573,6 +2606,7 @@ impl SessionRuntime {
                             calls.push((id, name, input_json, provider_metadata));
                         }
                         Some(Ok(ModelEvent::Usage(usage))) => {
+                            self.turn_usage.accumulate(usage);
                             let _ = events.send(RuntimeEvent::Usage(usage));
                             self.record_event(SessionEventKind::UsageReported {
                                 input_tokens: usage.input_tokens,
@@ -3653,6 +3687,22 @@ fn tool_error_message(id: &str, output: &str) -> Message {
             localpilot_core::ToolResult::error(ToolUseId::from(id), output),
         )],
     )
+}
+
+/// The concatenated text of a message's final-answer blocks, or `None` when it
+/// carries none (a tool-only or empty assistant message). Reasoning blocks are
+/// excluded — they are metadata, never the final answer.
+fn assistant_text_of(message: &Message) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Whether a tool is *wait-like*: its whole job is to wait for something, so
