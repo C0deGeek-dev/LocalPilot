@@ -1692,6 +1692,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-contextcheck"
+version = "2.7.0"
+dependencies = [
+ "localpilot-config",
+ "localpilot-core",
+ "localpilot-harness",
+ "localpilot-skills",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "localpilot-core"
 version = "2.7.0"
 dependencies = [
