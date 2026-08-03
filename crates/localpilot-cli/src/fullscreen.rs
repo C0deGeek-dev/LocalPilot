@@ -1737,10 +1737,7 @@ async fn execute_fullscreen_slash(
                         trusted: true,
                         detail: path.display().to_string(),
                     };
-                    if matches!(
-                        engine.decide(&request),
-                        localpilot_sandbox::Decision::Deny
-                    ) {
+                    if matches!(engine.decide(&request), localpilot_sandbox::Decision::Deny) {
                         app.apply_runtime(RuntimeUpdate::Notice(
                             "adopt denied by the permission policy".to_string(),
                         ));
