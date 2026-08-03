@@ -48,5 +48,7 @@ pub use registry::{
     SwarmRegistry,
 };
 pub use scope::{git_common_dir, swarm_id_for_dir, SwarmId, SWARM_ID_ENV};
-pub use spawn::{SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory, WorkerReport};
+pub use spawn::{
+    AdoptedPair, SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory, WorkerReport,
+};
 pub use touches::{announce, Collision, TouchIndex};

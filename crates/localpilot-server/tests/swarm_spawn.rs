@@ -16,13 +16,13 @@ use localpilot_llm::FakeProvider;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{Interactivity, PermissionEngine, Profile, ScriptedApprover, Workspace};
 use localpilot_server::registry::{RegistryError, SessionFactory, SessionRegistry};
-use localpilot_server::swarm::registry::{MemberStatus, SwarmLimits, SwarmRegistry};
+use localpilot_server::swarm::registry::{MemberRole, MemberStatus, SwarmLimits, SwarmRegistry};
 use localpilot_server::swarm::scope::SwarmId;
 use localpilot_server::swarm::spawn::{
-    SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory,
+    AdoptedPair, SpawnError, SpawnRequest, Spawned, SwarmHost, WorkerFactory,
 };
 use localpilot_store::Store;
-use localpilot_tools::ToolRegistry;
+use localpilot_tools::{Audience, Delivery, PeerMessage, SwarmPeers, ToolRegistry};
 use tempfile::TempDir;
 
 /// Builds sessions over one shared temp-dir store, each with its own scripted
@@ -34,6 +34,7 @@ struct Sessions {
     /// Model reported by the built session, so the override check is testable
     /// without a real provider.
     model: std::sync::Mutex<String>,
+    builds: std::sync::atomic::AtomicUsize,
 }
 
 impl Sessions {
@@ -42,6 +43,7 @@ impl Sessions {
             dir: Arc::new(tempfile::tempdir().unwrap()),
             answer: std::sync::Mutex::new(Vec::new()),
             model: std::sync::Mutex::new(SessionConfig::default().model),
+            builds: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -55,6 +57,8 @@ impl Sessions {
     }
 
     fn build(&self) -> Result<SessionRuntime, String> {
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let root = self.dir.path();
         let workspace = Workspace::new(root).map_err(|err| err.to_string())?;
         let mut queued = self.answer.lock().unwrap();
@@ -80,6 +84,10 @@ impl Sessions {
             },
             Vec::new(),
         ))
+    }
+
+    fn builds(&self) -> usize {
+        self.builds.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -116,6 +124,235 @@ async fn coordinated(limits: SwarmLimits) -> (SwarmHost, Arc<Sessions>, SessionI
         .await
         .unwrap();
     (host, sessions, coordinator)
+}
+
+/// A host with two registered ordinary sessions, not yet adopted.
+async fn pair_ready(limits: SwarmLimits) -> (SwarmHost, Arc<Sessions>, SessionId, SessionId) {
+    let sessions = Sessions::new();
+    let registry = SessionRegistry::new();
+    let factory = Arc::clone(&sessions) as Arc<dyn SessionFactory>;
+    let first = registry.open_new(&*factory).await.unwrap();
+    let second = registry.open_new(&*factory).await.unwrap();
+    let host = SwarmHost::new(
+        registry,
+        SwarmRegistry::with_limits(limits),
+        Arc::clone(&sessions) as Arc<dyn WorkerFactory>,
+    );
+    (host, sessions, first, second)
+}
+
+async fn adopted_pair() -> (SwarmHost, Arc<Sessions>, AdoptedPair) {
+    let (host, sessions, first, second) = pair_ready(SwarmLimits::default()).await;
+    let pair = host
+        .adopt_pair(&swarm(), (first, "alpha"), (second, "beta"))
+        .await
+        .unwrap();
+    (host, sessions, pair)
+}
+
+#[tokio::test]
+async fn pair_adoption_validates_both_handles_before_mutating_any_host_state() {
+    let sessions = Sessions::new();
+    let registry = SessionRegistry::new();
+    let first = registry
+        .open_new(&*(Arc::clone(&sessions) as Arc<dyn SessionFactory>))
+        .await
+        .unwrap();
+    let missing = SessionId::new();
+    let host = SwarmHost::new(
+        registry,
+        SwarmRegistry::new(),
+        Arc::clone(&sessions) as Arc<dyn WorkerFactory>,
+    );
+
+    assert!(matches!(
+        host.adopt_pair(&swarm(), (first, "alpha"), (missing, "beta"))
+            .await,
+        Err(SpawnError::Registry(_))
+    ));
+    assert!(host.swarms().members(&swarm()).await.is_empty());
+    assert!(host.host(first).await.is_none());
+    assert!(host.host(missing).await.is_none());
+}
+
+#[tokio::test]
+async fn an_adopted_pair_has_two_prompt_neutral_bound_peers_and_no_coordinator() {
+    let (host, _sessions, first, second) = pair_ready(SwarmLimits::default()).await;
+    let first_before = host
+        .sessions()
+        .get(first)
+        .await
+        .unwrap()
+        .lock()
+        .await
+        .system_prompt_text();
+    let second_before = host
+        .sessions()
+        .get(second)
+        .await
+        .unwrap()
+        .lock()
+        .await
+        .system_prompt_text();
+
+    let pair = host
+        .adopt_pair(&swarm(), (first, "alpha"), (second, "beta"))
+        .await
+        .unwrap();
+
+    assert_eq!(pair.swarm(), &swarm());
+    assert_eq!(pair.sessions(), [first, second]);
+    assert_eq!(pair.hosts()[0].id(), first);
+    assert_eq!(pair.hosts()[1].id(), second);
+    assert!(pair.host(SessionId::new()).is_none());
+    assert_eq!(host.swarms().coordinator(&swarm()).await, None);
+    let members = host.swarms().members(&swarm()).await;
+    assert_eq!(members.len(), 2);
+    assert!(members.iter().all(|member| {
+        member.role == MemberRole::Peer
+            && member.status == MemberStatus::Active
+            && member.report_back_to.is_none()
+    }));
+    assert_eq!(pair.host(first).unwrap().subscriber_count(), 1);
+    assert_eq!(pair.host(second).unwrap().subscriber_count(), 1);
+
+    let first_after = host
+        .sessions()
+        .get(first)
+        .await
+        .unwrap()
+        .lock()
+        .await
+        .system_prompt_text();
+    let second_after = host
+        .sessions()
+        .get(second)
+        .await
+        .unwrap()
+        .lock()
+        .await
+        .system_prompt_text();
+    assert_eq!(first_after, first_before);
+    assert_eq!(second_after, second_before);
+
+    let first_view = pair.messaging(first).unwrap();
+    let second_view = pair.messaging(second).unwrap();
+    assert!(!first_view.identity().await.is_coordinator);
+    assert!(!second_view.identity().await.is_coordinator);
+    assert_eq!(first_view.roster().await[0].role, "peer");
+    assert_eq!(second_view.roster().await[0].role, "peer");
+
+    let broadcast = PeerMessage {
+        audience: Audience::Swarm,
+        tldr: None,
+        body: "not allowed".to_string(),
+        delivery: Delivery::Notify,
+    };
+    assert!(first_view.send(&broadcast).await.is_err());
+    assert!(second_view.send(&broadcast).await.is_err());
+
+    let direct = |target: SessionId, body: &str| PeerMessage {
+        audience: Audience::One(target.to_string()),
+        tldr: None,
+        body: body.to_string(),
+        delivery: Delivery::Notify,
+    };
+    assert_eq!(
+        first_view
+            .send(&direct(second, "from alpha"))
+            .await
+            .unwrap()
+            .reached,
+        1
+    );
+    assert_eq!(
+        second_view
+            .send(&direct(first, "from beta"))
+            .await
+            .unwrap()
+            .reached,
+        1
+    );
+    for session in [first, second] {
+        assert!(
+            !host
+                .sessions()
+                .get(session)
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .steer_queue()
+                .is_empty(),
+            "each direct notification is queued on its intended peer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_and_concurrent_pair_retries_reuse_hosts_bindings_and_watchers() {
+    let (host, _sessions, initial) = adopted_pair().await;
+    let [first, second] = initial.sessions();
+    let initial_hosts = initial.hosts();
+    let initial_first_view = initial.messaging(first).unwrap();
+    let initial_second_view = initial.messaging(second).unwrap();
+    let pair_swarm = swarm();
+
+    let sequential = host
+        .adopt_pair(&pair_swarm, (second, "beta"), (first, "alpha"))
+        .await
+        .unwrap();
+    let (left, right) = tokio::join!(
+        host.adopt_pair(&pair_swarm, (first, "alpha"), (second, "beta")),
+        host.adopt_pair(&pair_swarm, (second, "beta"), (first, "alpha")),
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+
+    for retried in [&sequential, &left, &right] {
+        assert!(Arc::ptr_eq(
+            &retried.host(first).unwrap(),
+            &initial_hosts[0]
+        ));
+        assert!(Arc::ptr_eq(
+            &retried.host(second).unwrap(),
+            &initial_hosts[1]
+        ));
+        assert!(Arc::ptr_eq(
+            &retried.messaging(first).unwrap(),
+            &initial_first_view
+        ));
+        assert!(Arc::ptr_eq(
+            &retried.messaging(second).unwrap(),
+            &initial_second_view
+        ));
+    }
+    assert_eq!(initial_hosts[0].subscriber_count(), 1);
+    assert_eq!(initial_hosts[1].subscriber_count(), 1);
+    assert_eq!(host.swarms().members(&swarm()).await.len(), 2);
+}
+
+#[tokio::test]
+async fn pair_topology_refuses_spawn_and_dispatch_before_the_factory() {
+    let (host, sessions, pair) = adopted_pair().await;
+    let [first, _second] = pair.sessions();
+    let builds_before = sessions.builds();
+    let request = SpawnRequest::new(swarm(), first, "third", "must not run");
+
+    assert!(matches!(
+        host.spawn(&request).await,
+        Err(SpawnError::Admission(
+            localpilot_server::swarm::SwarmError::MixedTopology
+        ))
+    ));
+    assert!(matches!(
+        host.dispatch(request).await,
+        Err(SpawnError::Admission(
+            localpilot_server::swarm::SwarmError::MixedTopology
+        ))
+    ));
+    assert_eq!(sessions.builds(), builds_before);
+    assert_eq!(host.swarms().members(&swarm()).await.len(), 2);
 }
 
 #[tokio::test]
