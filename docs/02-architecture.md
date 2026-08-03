@@ -422,6 +422,41 @@ patch-generating half lives in `localpilot-patchgen` and publication is
 `ApprovalToken`-gated in the CLI. Prior lessons are injected by the host, so
 the crate carries no memory dependency.
 
+### `localpilot-selfimprove`
+
+Owns the **thin orchestrator** that wires the three stage crates above into one
+human-gated loop, without merging them (ADR-0138). It sequences their existing
+entrypoints in a fixed order and surfaces the loop state; it holds only
+sequencing and state, no stage logic:
+
+```text
+review ─▶ propose ─▶ [ human ApprovalToken gate ] ─▶ promote ─▶ build+gauntlet ─▶ reload
+Found  ─▶ Proposed ─▶            (hard stop)        ─▶ Approved ─▶    Built     ─▶ Reloaded
+```
+
+- a `contract` of five linear states, each bound to the *existing* entrypoint
+  that produces it, with the Proposed→Approved crossing representable **only**
+  with an `ApprovalToken` — so "no autonomous advance past the gate" is a
+  property of the types, not a convention
+- an `Orchestrator` that advances one step at a time, persists the loop state
+  under `.localpilot/selfimprove/` (git-ignored, resume-safe across processes),
+  and after approval builds the **approved, merged tree** — never the patchgen
+  proposal worktree
+- a `SelfDevStage` seam whose real implementation delegates to
+  `localpilot-selfdev` (`build_gauntlet_promote`, `relaunch`) and reuses the
+  existing rollback circuit breaker; a failed self-dev advance drives that
+  breaker, and the orchestrator adds no rollback logic of its own
+
+The stages stay separate because they have different blast radii: source
+mutation with a human-merge gate (`patchgen`) versus a compiled-binary lifecycle
+with a build gauntlet and rollback breaker (`selfdev`). Merging them would couple
+two unrelated concerns and blur the human gate (ADR-0138).
+
+Must not own: minting the `ApprovalToken` (only the human `--approve` path
+does), and any autonomous build→reload path — the unattended loop stays deferred
+(ADR-0128). It is surfaced by `localpilot selfimprove status` / `next`, which
+advance one explicit step and hard-stop at the gate.
+
 ### `localpilot-verify`
 
 Owns deterministic verification of executed tool calls against their

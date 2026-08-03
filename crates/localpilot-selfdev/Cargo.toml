@@ -13,6 +13,10 @@ localpilot-dist = { path = "../localpilot-dist" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# A scratch directory for the publish gauntlet's throwaway smoke config
+# (`build_gauntlet_promote`). Used on a non-test code path, so it is a normal
+# dependency, and reused by the tests below.
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

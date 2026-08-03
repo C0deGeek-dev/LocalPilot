@@ -16,28 +16,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use localpilot_selfdev::{
-    build, executable_name, relaunch, relaunch_plan, vet, AutoReloadBreaker, BuildMarker,
-    BuildOptions, ChannelName, Channels, SourceState, StoredVersion, VersionStore, CURRENT,
-    DEFAULT_HANDSHAKE_TIMEOUT, SLOW, STABLE,
+    build, build_gauntlet_promote, relaunch, relaunch_plan, AutoReloadBreaker, BuildOptions,
+    ChannelName, Channels, SourceState, VersionStore, CURRENT, SLOW, STABLE,
 };
 
 /// How many failed auto-reloads the breaker tolerates. Reported by `status`; the
 /// autonomous loop that would consume it is deferred (ADR-0128).
 const AUTO_RELOAD_LIMIT: u32 = 3;
-
-/// How many recent self-dev versions a publish keeps around; older ones are swept
-/// so a copy-in store does not grow without bound. Channel-referenced versions are
-/// always kept regardless of this count.
-const KEEP_VERSIONS: usize = 5;
-
-/// The set of version labels no sweep may remove: whatever each channel currently
-/// resolves to.
-fn protected_labels(channels: &Channels) -> Vec<String> {
-    [CURRENT, STABLE, SLOW]
-        .into_iter()
-        .filter_map(|channel| channels.label(channel))
-        .collect()
-}
 
 /// `selfdev build`: fingerprint the working tree and build it, reporting the
 /// source label and where the binary landed.
@@ -150,60 +135,6 @@ pub fn run_reload(
     }
 }
 
-/// Build the working tree, run it through the gauntlet, install it immutably,
-/// promote `channel` to it, and sweep old versions. Shared by `publish` and
-/// `reload`.
-fn build_gauntlet_promote(
-    workspace: &Path,
-    selfdev_root: &Path,
-    channel: ChannelName,
-    target_dir: Option<PathBuf>,
-    out: &mut dyn Write,
-) -> anyhow::Result<StoredVersion> {
-    let source = SourceState::read(workspace).context("reading the source tree")?;
-    let target = target_dir.unwrap_or_else(|| localpilot_selfdev::default_target_dir(selfdev_root));
-
-    writeln!(out, "building {}...", source.version_label)?;
-    let built = build(&source, &BuildOptions::new(&target)).context("building the candidate")?;
-
-    writeln!(
-        out,
-        "vetting the candidate (identity, freshness, handshake)..."
-    )?;
-    let scratch = tempfile::tempdir().context("scratch dir for the gauntlet")?;
-    let reported = vet(
-        &built.executable,
-        &source,
-        scratch.path(),
-        DEFAULT_HANDSHAKE_TIMEOUT,
-    )
-    .context("the candidate did not pass the publish gauntlet")?;
-
-    let store = VersionStore::new(selfdev_root);
-    let channels = Channels::new(selfdev_root);
-    let marker = BuildMarker::new(
-        source.version_label.clone(),
-        source.embedded_hash(),
-        source.fingerprint.clone(),
-        source.dirty,
-        reported.version,
-        executable_name(),
-    );
-    let installed = store
-        .install(&source.version_label, &built.executable, &marker)
-        .context("installing the vetted binary")?;
-    channels
-        .set(channel, &installed.label)
-        .context("promoting the channel")?;
-
-    // Reclaim disk: keep the recent versions plus everything a channel points at.
-    let reclaimed = store.sweep(KEEP_VERSIONS, &protected_labels(&channels));
-    if !reclaimed.is_empty() {
-        writeln!(out, "reclaimed {} old version(s)", reclaimed.len())?;
-    }
-    Ok(installed)
-}
-
 /// `selfdev gc`: reclaim disk by removing self-dev versions beyond the `keep` most
 /// recent, never touching one a channel points at.
 ///
@@ -212,7 +143,7 @@ fn build_gauntlet_promote(
 pub fn run_gc(selfdev_root: &Path, keep: usize, out: &mut dyn Write) -> anyhow::Result<()> {
     let store = VersionStore::new(selfdev_root);
     let channels = Channels::new(selfdev_root);
-    let reclaimed = store.sweep(keep, &protected_labels(&channels));
+    let reclaimed = store.sweep(keep, &channels.active_targets());
     if reclaimed.is_empty() {
         writeln!(out, "nothing to reclaim")?;
     } else {
@@ -275,6 +206,7 @@ pub fn run_status(selfdev_root: &Path, out: &mut dyn Write) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use localpilot_selfdev::{executable_name, BuildMarker};
 
     #[test]
     fn status_of_an_empty_root_reports_nothing_installed_and_unset_channels() {

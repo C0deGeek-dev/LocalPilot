@@ -1637,6 +1637,7 @@ dependencies = [
  "localpilot-rpc",
  "localpilot-sandbox",
  "localpilot-selfdev",
+ "localpilot-selfimprove",
  "localpilot-selfreview",
  "localpilot-server",
  "localpilot-skills",
@@ -1944,6 +1945,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+ "thiserror 2.0.9",
+]
+
+[[package]]
+name = "localpilot-selfimprove"
+version = "2.7.0"
+dependencies = [
+ "localpilot-patchgen",
+ "localpilot-selfdev",
+ "localpilot-selfreview",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.9",
 ]
