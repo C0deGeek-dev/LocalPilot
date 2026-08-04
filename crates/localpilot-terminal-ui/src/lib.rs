@@ -18,6 +18,7 @@ mod app;
 mod editor;
 mod layout;
 mod presentation;
+mod projection;
 mod render;
 mod sanitize;
 mod text;
@@ -37,6 +38,7 @@ pub use layout::{
     FrameLayout, PairTimelineLayout, TimelineLayout, TimelinePaneLayout, MINIMUM_HEIGHT,
     MINIMUM_WIDTH, PAIR_MINIMUM_HEIGHT, PAIR_WIDE_MINIMUM_WIDTH,
 };
+pub use projection::{PeerPane, SessionHeader};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,
     TimelineRowHit, TrustHit, TrustPathHit,

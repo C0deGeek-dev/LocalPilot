@@ -5,9 +5,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
+use crate::projection::{ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState};
 use crate::{
-    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, SemanticRole,
-    StyledRange, TextStyle, Theme, Timeline,
+    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, SemanticRole,
+    SessionHeader, StyledRange, TextStyle, Theme, Timeline,
 };
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
@@ -47,6 +48,16 @@ pub struct Header {
     pub profile: String,
     pub session_id: String,
     pub session_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SharedHeader {
+    version: String,
+    workspace: String,
+    branch: Option<String>,
+    workspace_dirty: Option<bool>,
+    mode: String,
+    profile: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +143,6 @@ pub enum InputAction {
 enum InputOverlay {
     ReverseHistory(ReverseHistoryState),
     Completion(CompletionState),
-    TimelineSearch(TimelineSearchState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,14 +585,6 @@ pub(crate) struct ReverseSearchView<'a> {
     pub has_match: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimelineSearchState {
-    query: String,
-    matches: Vec<ContentPoint>,
-    selected: Option<usize>,
-    original_draft: EditorSnapshot,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TimelineSearchView<'a> {
     pub query: &'a str,
@@ -965,44 +967,20 @@ pub enum RuntimeUpdate {
     Stopped(StopState),
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct ActiveTool {
-    item_id: ItemId,
-    detail: String,
-}
-
-impl fmt::Debug for ActiveTool {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ActiveTool")
-            .field("item_id", &self.item_id)
-            .field(
-                "detail",
-                &format_args!("<{} bytes redacted>", self.detail.len()),
-            )
-            .finish()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AppModel {
-    header: Header,
+    header: SharedHeader,
+    projections: ProjectionSet,
     pub capabilities: TerminalCapabilities,
     pub theme: Theme,
     pub tabs: Vec<TabId>,
     pub active_tab: TabId,
-    timeline: Timeline,
     pub editor: Editor,
     pub focus: Focus,
-    work: WorkState,
     pub exit_armed: bool,
     pub exit_requested: bool,
     escape_armed_at: Option<Instant>,
     print_transcript_on_exit: bool,
-    plan: Vec<PlanEntry>,
-    usage: Option<UsageTotals>,
-    context_usage: Option<(usize, usize)>,
-    stream_bytes: usize,
     copy_on_select: bool,
     default_copy_on_select: bool,
     default_theme: Theme,
@@ -1017,45 +995,98 @@ pub struct AppModel {
     command_values: BTreeMap<String, Vec<CompletionItem>>,
     workspace_files: Vec<String>,
     workspace_files_ready: bool,
-    active_assistant: Option<ItemId>,
-    active_reasoning: Option<ItemId>,
-    active_tools: BTreeMap<String, ActiveTool>,
-    active_insert_before: Option<ItemId>,
 }
 
 impl AppModel {
     #[must_use]
     pub fn new(header: Header, capabilities: TerminalCapabilities) -> Self {
-        let header = Header {
-            version: sanitize_text(&header.version),
+        let (header, session) = Self::split_header(header);
+        Self::with_projections(
+            header,
+            ProjectionSet::single(SessionProjection::new(session)),
+            capabilities,
+        )
+    }
+
+    /// Builds the backend-neutral state for two session projections in one
+    /// shared terminal shell. The executable host remains responsible for
+    /// driving both sessions and routing their events.
+    #[must_use]
+    pub fn new_pair(
+        primary: Header,
+        secondary: SessionHeader,
+        capabilities: TerminalCapabilities,
+    ) -> Self {
+        let (header, primary) = Self::split_header(primary);
+        let secondary = Self::sanitize_session_header(secondary);
+        Self::with_projections(
+            header,
+            ProjectionSet::pair(
+                SessionProjection::new(primary),
+                SessionProjection::new(secondary),
+            ),
+            capabilities,
+        )
+    }
+
+    fn split_header(header: Header) -> (SharedHeader, SessionHeader) {
+        let Header {
+            version,
+            provider,
+            model,
+            workspace,
+            branch,
+            workspace_dirty,
+            mode,
+            profile,
+            session_id,
+            session_name,
+        } = header;
+        (
+            SharedHeader {
+                version: sanitize_text(&version),
+                workspace: sanitize_text(&workspace),
+                branch: branch.map(|branch| sanitize_text(&branch)),
+                workspace_dirty,
+                mode: sanitize_text(&mode),
+                profile: sanitize_text(&profile),
+            },
+            Self::sanitize_session_header(SessionHeader {
+                provider,
+                model,
+                session_id,
+                session_name,
+            }),
+        )
+    }
+
+    fn sanitize_session_header(header: SessionHeader) -> SessionHeader {
+        SessionHeader {
             provider: sanitize_text(&header.provider),
             model: sanitize_text(&header.model),
-            workspace: sanitize_text(&header.workspace),
-            branch: header.branch.map(|branch| sanitize_text(&branch)),
-            workspace_dirty: header.workspace_dirty,
-            mode: sanitize_text(&header.mode),
-            profile: sanitize_text(&header.profile),
             session_id: sanitize_inline(&header.session_id),
             session_name: header.session_name.map(|name| sanitize_inline(&name)),
-        };
+        }
+    }
+
+    fn with_projections(
+        header: SharedHeader,
+        projections: ProjectionSet,
+        capabilities: TerminalCapabilities,
+    ) -> Self {
         Self {
             header,
+            projections,
             capabilities,
             theme: Theme::Default,
             tabs: vec![TabId::Session],
             active_tab: TabId::Session,
-            timeline: Timeline::new(),
             editor: Editor::default(),
             focus: Focus::Composer,
-            work: WorkState::Idle,
             exit_armed: false,
             exit_requested: false,
             escape_armed_at: None,
             print_transcript_on_exit: false,
-            plan: Vec::new(),
-            usage: None,
-            context_usage: None,
-            stream_bytes: 0,
             copy_on_select: false,
             default_copy_on_select: false,
             default_theme: Theme::Default,
@@ -1070,11 +1101,17 @@ impl AppModel {
             command_values: BTreeMap::new(),
             workspace_files: Vec::new(),
             workspace_files_ready: false,
-            active_assistant: None,
-            active_reasoning: None,
-            active_tools: BTreeMap::new(),
-            active_insert_before: None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_pair(&self) -> bool {
+        self.projections.is_pair()
+    }
+
+    #[must_use]
+    pub const fn active_pair_pane(&self) -> Option<PeerPane> {
+        self.projections.active_pair_pane()
     }
 
     #[must_use]
@@ -1109,77 +1146,78 @@ impl AppModel {
 
     #[must_use]
     pub fn active_provider(&self) -> &str {
-        &self.header.provider
+        &self.projections.active().header.provider
     }
 
     #[must_use]
     pub fn active_model(&self) -> &str {
-        &self.header.model
+        &self.projections.active().header.model
     }
 
     #[must_use]
     pub fn active_session_id(&self) -> &str {
-        &self.header.session_id
+        &self.projections.active().header.session_id
     }
 
     #[must_use]
     pub fn active_session_name(&self) -> Option<&str> {
-        self.header.session_name.as_deref()
+        self.projections.active().header.session_name.as_deref()
     }
 
     pub fn set_active_provider_model(&mut self, provider: String, model: String) {
-        self.header.provider = provider;
-        self.header.model = model;
+        let header = &mut self.projections.active_mut().header;
+        header.provider = provider;
+        header.model = model;
     }
 
     pub fn set_active_session_id(&mut self, session_id: String) {
-        self.header.session_id = session_id;
+        self.projections.active_mut().header.session_id = session_id;
     }
 
     pub fn set_active_session_name(&mut self, session_name: Option<String>) {
-        self.header.session_name = session_name;
+        self.projections.active_mut().header.session_name = session_name;
     }
 
     #[must_use]
     pub const fn active_timeline(&self) -> &Timeline {
-        &self.timeline
+        &self.projections.active().timeline
     }
 
     pub fn active_timeline_mut(&mut self) -> &mut Timeline {
-        &mut self.timeline
+        &mut self.projections.active_mut().timeline
     }
 
     #[must_use]
     pub const fn active_work(&self) -> WorkState {
-        self.work
+        self.projections.active().work
     }
 
     #[must_use]
     pub fn active_plan(&self) -> &[PlanEntry] {
-        &self.plan
+        &self.projections.active().plan
     }
 
     #[must_use]
     pub const fn active_usage(&self) -> Option<UsageTotals> {
-        self.usage
+        self.projections.active().usage
     }
 
     pub fn set_active_usage(&mut self, usage: Option<UsageTotals>) {
-        self.usage = usage;
+        self.projections.active_mut().usage = usage;
     }
 
     #[must_use]
     pub const fn active_context_usage(&self) -> Option<(usize, usize)> {
-        self.context_usage
+        self.projections.active().context_usage
     }
 
     pub fn set_active_context_usage(&mut self, context_usage: Option<(usize, usize)>) {
-        self.context_usage = context_usage;
+        self.projections.active_mut().context_usage = context_usage;
     }
 
     #[must_use]
     pub const fn active_stream_bytes(&self) -> usize {
-        self.stream_bytes
+        self.projections.active().stream_bytes
     }
 
     /// Installs only tabs backed by a real LocalPilot surface, preserving the
@@ -1218,7 +1256,7 @@ impl AppModel {
                 || self.theme_picker.is_some()
                 || self.quick_help
                 || self.takeover.is_some()
-                || self.input_overlay.is_some()
+                || self.has_input_overlay()
                 || self.editor.is_shell_mode())
         {
             self.escape_armed_at = None;
@@ -1237,7 +1275,7 @@ impl AppModel {
         }
         if matches!(action, InputAction::CancelOrExit)
             && self.quick_help
-            && self.timeline.selected_text().is_none()
+            && self.projections.active().timeline.selected_text().is_none()
         {
             self.exit_armed = false;
             self.quick_help = false;
@@ -1248,7 +1286,7 @@ impl AppModel {
             self.takeover = None;
             return AppCommand::None;
         }
-        if matches!(action, InputAction::CancelOrExit) && self.input_overlay.is_some() {
+        if matches!(action, InputAction::CancelOrExit) && self.has_input_overlay() {
             self.exit_armed = false;
             self.cancel_input_overlay();
             return AppCommand::None;
@@ -1265,7 +1303,7 @@ impl AppModel {
         if self.takeover.is_some() {
             return self.handle_takeover_input(action);
         }
-        if self.input_overlay.is_some() {
+        if self.has_input_overlay() {
             return self.handle_overlay_input(action);
         }
         if self.quick_help {
@@ -1305,7 +1343,7 @@ impl AppModel {
                 if text == "?"
                     && self.editor.text().is_empty()
                     && !self.editor.is_shell_mode()
-                    && self.work == WorkState::Idle
+                    && self.projections.active().work == WorkState::Idle
                 {
                     self.quick_help = true;
                     return AppCommand::None;
@@ -1406,7 +1444,8 @@ impl AppModel {
                 AppCommand::None
             }
             InputAction::OpenExternalEditor
-                if self.focus == Focus::Composer && self.work == WorkState::Idle =>
+                if self.focus == Focus::Composer
+                    && self.projections.active().work == WorkState::Idle =>
             {
                 self.external_edit_snapshot = Some(self.editor.snapshot());
                 AppCommand::OpenExternalEditor
@@ -1472,15 +1511,25 @@ impl AppModel {
     pub fn apply_runtime(&mut self, update: RuntimeUpdate) {
         match update {
             RuntimeUpdate::Text(text) => {
-                self.stream_bytes = self.stream_bytes.saturating_add(text.len());
-                if !self.append_active(self.active_assistant, &text) {
-                    self.active_assistant = self.push_runtime_item(ItemKind::Assistant, text);
+                self.projections.active_mut().stream_bytes = self
+                    .projections
+                    .active()
+                    .stream_bytes
+                    .saturating_add(text.len());
+                if !self.append_active(self.projections.active().active_assistant, &text) {
+                    self.projections.active_mut().active_assistant =
+                        self.push_runtime_item(ItemKind::Assistant, text);
                 }
             }
             RuntimeUpdate::Reasoning(text) => {
-                self.stream_bytes = self.stream_bytes.saturating_add(text.len());
-                if !self.append_active(self.active_reasoning, &text) {
-                    self.active_reasoning = self.push_runtime_item(ItemKind::Reasoning, text);
+                self.projections.active_mut().stream_bytes = self
+                    .projections
+                    .active()
+                    .stream_bytes
+                    .saturating_add(text.len());
+                if !self.append_active(self.projections.active().active_reasoning, &text) {
+                    self.projections.active_mut().active_reasoning =
+                        self.push_runtime_item(ItemKind::Reasoning, text);
                 }
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
@@ -1502,9 +1551,11 @@ impl AppModel {
                 };
                 if let Some(item) = self.push_runtime_item(kind, text) {
                     let _ = self
+                        .projections
+                        .active_mut()
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
-                    self.active_tools.insert(
+                    self.projections.active_mut().active_tools.insert(
                         id,
                         ActiveTool {
                             item_id: item,
@@ -1524,13 +1575,17 @@ impl AppModel {
                 if name == "ask_user" {
                     let output =
                         bounded_inline_text(tool_output_body(&output), MAX_TOOL_DETAIL_BYTES);
-                    if let Some(active) = self.active_tools.remove(&id) {
+                    if let Some(active) = self.projections.active_mut().active_tools.remove(&id) {
                         let mut text = format!("Asked user {}", active.detail);
                         if !output.is_empty() {
                             text.push('\n');
                             text.push_str(&output);
                         }
-                        let _ = self.timeline.replace_text(active.item_id, text);
+                        let _ = self
+                            .projections
+                            .active_mut()
+                            .timeline
+                            .replace_text(active.item_id, text);
                         let activity = if cancelled {
                             ActivityState::Cancelled
                         } else if is_error {
@@ -1538,7 +1593,11 @@ impl AppModel {
                         } else {
                             ActivityState::Success
                         };
-                        let _ = self.timeline.set_activity(active.item_id, Some(activity));
+                        let _ = self
+                            .projections
+                            .active_mut()
+                            .timeline
+                            .set_activity(active.item_id, Some(activity));
                         self.style_activity(active.item_id, activity);
                     } else {
                         let mut text = "Asked user".to_string();
@@ -1548,7 +1607,7 @@ impl AppModel {
                         }
                         let _ = self.push_runtime_item(ItemKind::Question, text);
                     }
-                    if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+                    if self.projections.active().timeline_search.is_some() {
                         self.refresh_timeline_search();
                     }
                     return;
@@ -1572,7 +1631,7 @@ impl AppModel {
                     format_tool_duration(duration_ms)
                 );
                 let output = bounded_view_text(&output, MAX_TOOL_OUTPUT_BYTES);
-                if let Some(active) = self.active_tools.remove(&id) {
+                if let Some(active) = self.projections.active_mut().active_tools.remove(&id) {
                     if !active.detail.is_empty() {
                         text.push('\n');
                         text.push_str(&active.detail);
@@ -1581,7 +1640,11 @@ impl AppModel {
                         text.push('\n');
                         text.push_str(&output);
                     }
-                    let _ = self.timeline.replace_text(active.item_id, text);
+                    let _ = self
+                        .projections
+                        .active_mut()
+                        .timeline
+                        .replace_text(active.item_id, text);
                     let activity = if cancelled {
                         ActivityState::Cancelled
                     } else if is_error {
@@ -1589,7 +1652,11 @@ impl AppModel {
                     } else {
                         ActivityState::Success
                     };
-                    let _ = self.timeline.set_activity(active.item_id, Some(activity));
+                    let _ = self
+                        .projections
+                        .active_mut()
+                        .timeline
+                        .set_activity(active.item_id, Some(activity));
                     self.style_activity(active.item_id, activity);
                 } else if let Some(item) = self.push_runtime_item(ItemKind::Tool, {
                     if !output.is_empty() {
@@ -1605,7 +1672,11 @@ impl AppModel {
                     } else {
                         ActivityState::Success
                     };
-                    let _ = self.timeline.set_activity(item, Some(activity));
+                    let _ = self
+                        .projections
+                        .active_mut()
+                        .timeline
+                        .set_activity(item, Some(activity));
                     self.style_activity(item, activity);
                 }
             }
@@ -1614,16 +1685,16 @@ impl AppModel {
                 output_tokens,
                 cached_input_tokens,
             } => {
-                let mut usage = self.usage.unwrap_or_default();
+                let mut usage = self.projections.active().usage.unwrap_or_default();
                 usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
                 usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
                 usage.cached_input_tokens = usage
                     .cached_input_tokens
                     .saturating_add(cached_input_tokens);
-                self.usage = Some(usage);
+                self.projections.active_mut().usage = Some(usage);
             }
             RuntimeUpdate::ContextUsage { used, limit } => {
-                self.context_usage = Some((used, limit));
+                self.projections.active_mut().context_usage = Some((used, limit));
             }
             RuntimeUpdate::Notice(message)
             | RuntimeUpdate::Warning(message)
@@ -1631,7 +1702,7 @@ impl AppModel {
                 let _ = self.push_runtime_item(ItemKind::Notice, message);
             }
             RuntimeUpdate::Plan(plan) => {
-                self.plan = plan
+                self.projections.active_mut().plan = plan
                     .into_iter()
                     .map(|entry| PlanEntry {
                         title: sanitize_text(&entry.title),
@@ -1654,44 +1725,44 @@ impl AppModel {
             RuntimeUpdate::FilesTouched => {}
             RuntimeUpdate::SoftInterruptInjected => {
                 self.style_active_transcript();
-                self.active_assistant = None;
-                self.active_reasoning = None;
-                self.active_tools.clear();
-                self.active_insert_before = None;
+                self.projections.active_mut().active_assistant = None;
+                self.projections.active_mut().active_reasoning = None;
+                self.projections.active_mut().active_tools.clear();
+                self.projections.active_mut().active_insert_before = None;
             }
             RuntimeUpdate::Stopped(_) => {
                 self.style_active_transcript();
-                self.work = WorkState::Idle;
-                self.active_assistant = None;
-                self.active_reasoning = None;
-                self.active_tools.clear();
-                self.active_insert_before = None;
+                self.projections.active_mut().work = WorkState::Idle;
+                self.projections.active_mut().active_assistant = None;
+                self.projections.active_mut().active_reasoning = None;
+                self.projections.active_mut().active_tools.clear();
+                self.projections.active_mut().active_insert_before = None;
             }
         }
-        if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+        if self.projections.active().timeline_search.is_some() {
             self.refresh_timeline_search();
         }
     }
 
     pub fn begin_work(&mut self) {
-        self.work = WorkState::Busy {
+        self.projections.active_mut().work = WorkState::Busy {
             cancellation_requested: false,
         };
-        self.active_assistant = None;
-        self.active_reasoning = None;
-        self.active_tools.clear();
-        self.stream_bytes = 0;
-        self.active_insert_before = None;
+        self.projections.active_mut().active_assistant = None;
+        self.projections.active_mut().active_reasoning = None;
+        self.projections.active_mut().active_tools.clear();
+        self.projections.active_mut().stream_bytes = 0;
+        self.projections.active_mut().active_insert_before = None;
     }
 
     pub fn begin_work_before(&mut self, item: Option<ItemId>) {
         self.begin_work();
-        self.active_insert_before = item;
+        self.projections.active_mut().active_insert_before = item;
     }
 
     pub fn clear_cancellation_request(&mut self) {
-        if matches!(self.work, WorkState::Busy { .. }) {
-            self.work = WorkState::Busy {
+        if matches!(self.projections.active().work, WorkState::Busy { .. }) {
+            self.projections.active_mut().work = WorkState::Busy {
                 cancellation_requested: false,
             };
         }
@@ -1710,9 +1781,7 @@ impl AppModel {
 
     #[must_use]
     pub(crate) fn timeline_search(&self) -> Option<TimelineSearchView<'_>> {
-        let Some(InputOverlay::TimelineSearch(state)) = &self.input_overlay else {
-            return None;
-        };
+        let state = self.projections.active().timeline_search.as_ref()?;
         Some(TimelineSearchView {
             query: &state.query,
             current: state
@@ -1724,7 +1793,7 @@ impl AppModel {
 
     #[must_use]
     pub const fn has_input_overlay(&self) -> bool {
-        self.input_overlay.is_some()
+        self.input_overlay.is_some() || self.projections.active().timeline_search.is_some()
     }
 
     #[must_use]
@@ -2154,12 +2223,18 @@ impl AppModel {
     }
 
     fn dismiss_input_overlay(&mut self) {
-        self.input_overlay = None;
+        if self.projections.active().timeline_search.is_some() {
+            self.projections.active_mut().timeline_search = None;
+        } else {
+            self.input_overlay = None;
+        }
     }
 
     fn cancel_input_overlay(&mut self) {
-        if let Some(InputOverlay::TimelineSearch(state)) = self.input_overlay.take() {
+        if let Some(state) = self.projections.active_mut().timeline_search.take() {
             self.editor.restore_snapshot(state.original_draft);
+        } else {
+            self.input_overlay = None;
         }
     }
 
@@ -2172,20 +2247,11 @@ impl AppModel {
     pub fn clear_conversation(&mut self) {
         self.close_theme_picker(true);
         self.escape_armed_at = None;
-        self.timeline = Timeline::new();
-        self.work = WorkState::Idle;
-        self.stream_bytes = 0;
-        self.usage = None;
-        self.context_usage = None;
-        self.plan.clear();
+        self.projections.active_mut().clear_conversation();
         self.takeover = None;
         self.quick_help = false;
         self.input_overlay = None;
         self.external_edit_snapshot = None;
-        self.active_assistant = None;
-        self.active_reasoning = None;
-        self.active_tools.clear();
-        self.active_insert_before = None;
     }
 
     #[must_use]
@@ -2269,7 +2335,7 @@ impl AppModel {
             || self.dialog.is_some()
             || self.takeover.is_some()
             || self.theme_picker.is_some()
-            || self.input_overlay.is_some()
+            || self.has_input_overlay()
             || self.shell_mode()
         {
             return None;
@@ -2325,43 +2391,63 @@ impl AppModel {
         trailing: Option<String>,
         pending: bool,
     ) -> Option<ItemId> {
-        self.timeline.follow_bottom();
-        let id = self.timeline.push(ItemKind::User, text)?;
-        let _ = self.timeline.set_trailing(id, trailing);
-        let _ = self.timeline.set_pending(id, pending);
+        self.projections.active_mut().timeline.follow_bottom();
+        let id = self
+            .projections
+            .active_mut()
+            .timeline
+            .push(ItemKind::User, text)?;
+        let _ = self
+            .projections
+            .active_mut()
+            .timeline
+            .set_trailing(id, trailing);
+        let _ = self
+            .projections
+            .active_mut()
+            .timeline
+            .set_pending(id, pending);
         if pending
-            && matches!(self.work, WorkState::Busy { .. })
-            && self.active_insert_before.is_none()
+            && matches!(self.projections.active().work, WorkState::Busy { .. })
+            && self.projections.active().active_insert_before.is_none()
         {
-            self.active_insert_before = Some(id);
+            self.projections.active_mut().active_insert_before = Some(id);
         }
         Some(id)
     }
 
     pub fn activate_prompt(&mut self, id: ItemId) -> bool {
-        self.timeline.follow_bottom();
-        self.timeline.set_pending(id, false)
+        self.projections.active_mut().timeline.follow_bottom();
+        self.projections
+            .active_mut()
+            .timeline
+            .set_pending(id, false)
     }
 
     /// Insert a stable compact user-shell row. Pending rows intentionally carry
     /// no running activity until their ordered queue position activates.
     pub fn append_shell(&mut self, command: &UserShellCommand, pending: bool) -> Option<ItemId> {
-        self.timeline.follow_bottom();
+        self.projections.active_mut().timeline.follow_bottom();
         let id = self
+            .projections
+            .active_mut()
             .timeline
             .push(ItemKind::Shell, format!("Shell {}", command.as_str()))?;
         if pending
-            && matches!(self.work, WorkState::Busy { .. })
-            && self.active_insert_before.is_none()
+            && matches!(self.projections.active().work, WorkState::Busy { .. })
+            && self.projections.active().active_insert_before.is_none()
         {
-            self.active_insert_before = Some(id);
+            self.projections.active_mut().active_insert_before = Some(id);
         }
         Some(id)
     }
 
     pub fn activate_shell(&mut self, id: ItemId) -> bool {
-        self.timeline.follow_bottom();
-        self.timeline.set_activity(id, Some(ActivityState::Running))
+        self.projections.active_mut().timeline.follow_bottom();
+        self.projections
+            .active_mut()
+            .timeline
+            .set_activity(id, Some(ActivityState::Running))
     }
 
     pub fn finish_shell(
@@ -2378,10 +2464,15 @@ impl AppModel {
             text.push('\n');
             text.push_str(line);
         }
-        if !self.timeline.replace_text(id, text) {
+        if !self
+            .projections
+            .active_mut()
+            .timeline
+            .replace_text(id, text)
+        {
             return false;
         }
-        self.timeline.set_activity(
+        self.projections.active_mut().timeline.set_activity(
             id,
             Some(if output.success {
                 ActivityState::Success
@@ -2714,7 +2805,7 @@ impl AppModel {
             self.close_theme_picker(true);
         }
         self.takeover = None;
-        if self.input_overlay.is_some() {
+        if self.has_input_overlay() {
             self.cancel_input_overlay();
         }
     }
@@ -2789,12 +2880,12 @@ impl AppModel {
         self.quick_help = false;
         let original_draft = self.editor.snapshot();
         self.editor.replace_draft(String::new());
-        self.input_overlay = Some(InputOverlay::TimelineSearch(TimelineSearchState {
+        self.projections.active_mut().timeline_search = Some(TimelineSearchState {
             query: sanitize_text(&query).replace(['\r', '\n'], " "),
             matches: Vec::new(),
             selected: None,
             original_draft,
-        }));
+        });
         self.refresh_timeline_search();
     }
 
@@ -2802,7 +2893,7 @@ impl AppModel {
         if matches!(self.input_overlay, Some(InputOverlay::Completion(_))) {
             return self.handle_completion_input(action);
         }
-        if matches!(self.input_overlay, Some(InputOverlay::TimelineSearch(_))) {
+        if self.projections.active().timeline_search.is_some() {
             return self.handle_timeline_search_input(action);
         }
         match action {
@@ -3116,13 +3207,13 @@ impl AppModel {
             InputAction::MoveUp => self.move_timeline_search(-1),
             InputAction::Insert(text) | InputAction::Paste(text) => {
                 let text = sanitize_text(&text).replace(['\r', '\n'], " ");
-                if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+                if let Some(state) = &mut self.projections.active_mut().timeline_search {
                     state.query.push_str(&text);
                 }
                 self.refresh_timeline_search();
             }
             InputAction::Backspace => {
-                if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+                if let Some(state) = &mut self.projections.active_mut().timeline_search {
                     if let Some((byte, _)) = state.query.grapheme_indices(true).next_back() {
                         state.query.truncate(byte);
                     }
@@ -3155,7 +3246,8 @@ impl AppModel {
     }
 
     fn refresh_timeline_search(&mut self) {
-        let Some(InputOverlay::TimelineSearch(state)) = &self.input_overlay else {
+        let projection = self.projections.active_mut();
+        let Some(state) = &projection.timeline_search else {
             return;
         };
         let query = state.query.clone();
@@ -3164,12 +3256,13 @@ impl AppModel {
             .and_then(|selected| state.matches.get(selected))
             .copied();
         let previous_order = previous.and_then(|point| {
-            self.timeline
+            projection
+                .timeline
                 .items()
                 .iter()
                 .position(|item| item.id == point.item_id)
         });
-        let matches = timeline_search_matches(&self.timeline, &query);
+        let matches = timeline_search_matches(&projection.timeline, &query);
         let selected = if matches.is_empty() {
             None
         } else if let Some(previous) = previous {
@@ -3182,7 +3275,8 @@ impl AppModel {
                             .iter()
                             .enumerate()
                             .filter_map(|(match_index, point)| {
-                                self.timeline
+                                projection
+                                    .timeline
                                     .items()
                                     .iter()
                                     .position(|item| item.id == point.item_id)
@@ -3203,18 +3297,19 @@ impl AppModel {
             matches.len().checked_sub(1)
         };
         let point = selected.and_then(|selected| matches.get(selected)).copied();
-        if let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay {
+        if let Some(state) = &mut projection.timeline_search {
             state.matches = matches;
             state.selected = selected;
         }
         if let Some(point) = point {
-            let _ = self.timeline.hold_at(point);
+            let _ = projection.timeline.hold_at(point);
         }
     }
 
     fn move_timeline_search(&mut self, delta: isize) {
+        let projection = self.projections.active_mut();
         let point = {
-            let Some(InputOverlay::TimelineSearch(state)) = &mut self.input_overlay else {
+            let Some(state) = &mut projection.timeline_search else {
                 return;
             };
             let len = state.matches.len();
@@ -3230,7 +3325,7 @@ impl AppModel {
             state.selected = Some(next);
             state.matches[next]
         };
-        let _ = self.timeline.hold_at(point);
+        let _ = projection.timeline.hold_at(point);
     }
 
     fn refresh_or_open_completion(&mut self) {
@@ -3510,36 +3605,59 @@ impl AppModel {
     }
 
     fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
-        active.is_some_and(|id| self.timeline.append_text(id, text))
+        active.is_some_and(|id| self.projections.active_mut().timeline.append_text(id, text))
     }
 
     fn push_runtime_item(&mut self, kind: ItemKind, text: impl Into<String>) -> Option<ItemId> {
         let text = text.into();
-        if let Some(before) = self.active_insert_before {
-            self.timeline.insert_before(before, kind, text)
+        if let Some(before) = self.projections.active().active_insert_before {
+            self.projections
+                .active_mut()
+                .timeline
+                .insert_before(before, kind, text)
         } else {
-            self.timeline.push(kind, text)
+            self.projections.active_mut().timeline.push(kind, text)
         }
     }
 
     fn style_active_transcript(&mut self) {
-        for id in [self.active_assistant, self.active_reasoning]
-            .into_iter()
-            .flatten()
+        for id in [
+            self.projections.active().active_assistant,
+            self.projections.active().active_reasoning,
+        ]
+        .into_iter()
+        .flatten()
         {
-            let Some(item) = self.timeline.item(id) else {
+            let Some(item) = self.projections.active().timeline.item(id) else {
                 continue;
             };
             let styles = semantic_ranges(item.kind, &item.text);
-            let _ = self.timeline.set_styles(id, styles);
+            let _ = self
+                .projections
+                .active_mut()
+                .timeline
+                .set_styles(id, styles);
         }
     }
 
     fn style_activity(&mut self, id: ItemId, activity: ActivityState) {
-        let Some(end_byte) = self.timeline.item(id).map(|item| item.text.len()) else {
+        let Some(end_byte) = self
+            .projections
+            .active()
+            .timeline
+            .item(id)
+            .map(|item| item.text.len())
+        else {
             return;
         };
-        let role = match (self.timeline.item(id).map(|item| item.kind), activity) {
+        let role = match (
+            self.projections
+                .active()
+                .timeline
+                .item(id)
+                .map(|item| item.kind),
+            activity,
+        ) {
             (Some(ItemKind::Question), ActivityState::Running | ActivityState::Success) => {
                 SemanticRole::Tool
             }
@@ -3559,7 +3677,11 @@ impl AppModel {
             })
             .into_iter()
             .collect();
-        let _ = self.timeline.set_styles(id, styles);
+        let _ = self
+            .projections
+            .active_mut()
+            .timeline
+            .set_styles(id, styles);
     }
 
     fn cancel_or_exit(&mut self) -> AppCommand {
@@ -3572,16 +3694,16 @@ impl AppModel {
         if let Some(text) = self.trust_selected_text() {
             return AppCommand::Copy(text);
         }
-        if let Some(text) = self.timeline.selected_text() {
+        if let Some(text) = self.projections.active().timeline.selected_text() {
             return AppCommand::Copy(text);
         }
 
-        match self.work {
+        match self.projections.active().work {
             WorkState::Idle => AppCommand::None,
             WorkState::Busy {
                 cancellation_requested: false,
             } => {
-                self.work = WorkState::Busy {
+                self.projections.active_mut().work = WorkState::Busy {
                     cancellation_requested: true,
                 };
                 AppCommand::CancelWork
@@ -3604,7 +3726,7 @@ impl AppModel {
     }
 
     fn escape_or_interrupt(&mut self, now: Instant) -> AppCommand {
-        if !matches!(self.work, WorkState::Idle) {
+        if !matches!(self.projections.active().work, WorkState::Idle) {
             self.escape_armed_at = None;
             return self.interrupt_work();
         }
@@ -3626,11 +3748,11 @@ impl AppModel {
     }
 
     fn interrupt_work(&mut self) -> AppCommand {
-        match self.work {
+        match self.projections.active().work {
             WorkState::Busy {
                 cancellation_requested: false,
             } => {
-                self.work = WorkState::Busy {
+                self.projections.active_mut().work = WorkState::Busy {
                     cancellation_requested: true,
                 };
                 AppCommand::CancelWork
@@ -3848,6 +3970,212 @@ mod tests {
         assert_eq!(app.active_context_usage(), Some((5, 8)));
         app.apply_runtime(RuntimeUpdate::Text("bytes".to_string()));
         assert_eq!(app.active_stream_bytes(), 5);
+    }
+
+    #[test]
+    fn paired_session_projections_isolate_live_state_and_retain_searches() {
+        let mut app = AppModel::new_pair(
+            Header {
+                version: "0".to_string(),
+                provider: "provider-a".to_string(),
+                model: "model-a".to_string(),
+                workspace: "workspace".to_string(),
+                branch: Some("main".to_string()),
+                workspace_dirty: Some(false),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
+                session_id: "session-a".to_string(),
+                session_name: Some("Alpha".to_string()),
+            },
+            SessionHeader {
+                provider: "provider-b\x1b[2J".to_string(),
+                model: "model-b\rnext".to_string(),
+                session_id: "session-b\nnext".to_string(),
+                session_name: Some("Beta\tName".to_string()),
+            },
+            TerminalCapabilities::default(),
+        );
+        assert!(app.is_pair());
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert_eq!(app.shared_workspace(), "workspace");
+
+        app.editor.insert("draft-a");
+        let a_insert = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "queued alpha")
+            .expect("A insertion point");
+        app.begin_work_before(Some(a_insert));
+        app.apply_runtime(RuntimeUpdate::Text("alpha response".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("alpha reasoning".to_string()));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-a".to_string(),
+            name: "inspect".to_string(),
+            detail: "alpha detail".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::Plan(vec![PlanEntry {
+            title: "alpha step".to_string(),
+            status: "pending".to_string(),
+        }]));
+        app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens: 3,
+            output_tokens: 2,
+            cached_input_tokens: 1,
+        });
+        app.apply_runtime(RuntimeUpdate::ContextUsage { used: 5, limit: 8 });
+        let selected = app.active_timeline().items()[0].id;
+        app.active_timeline_mut().start_selection(ContentPoint {
+            item_id: selected,
+            byte: 0,
+        });
+        app.active_timeline_mut().extend_selection(ContentPoint {
+            item_id: selected,
+            byte: 5,
+        });
+        app.open_timeline_search("alpha".to_string());
+        let a_viewport = app.active_timeline().viewport;
+
+        let b = app
+            .projections
+            .projection(PeerPane::B)
+            .expect("peer B projection");
+        assert!(b.timeline.items().is_empty());
+        assert_eq!(b.work, WorkState::Idle);
+        assert!(b.plan.is_empty());
+        assert_eq!(b.usage, None);
+        assert_eq!(b.context_usage, None);
+        assert_eq!(b.stream_bytes, 0);
+        assert!(b.timeline_search.is_none());
+        assert!(b.active_assistant.is_none());
+        assert!(b.active_reasoning.is_none());
+        assert!(b.active_tools.is_empty());
+        assert!(b.active_insert_before.is_none());
+        assert!(b.timeline.selection.is_none());
+
+        app.projections.select(PeerPane::B);
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_eq!(app.active_provider(), "provider-b");
+        assert_eq!(app.active_model(), "model-b\nnext");
+        assert_eq!(app.active_session_id(), "session-b next");
+        assert_eq!(app.active_session_name(), Some("Beta Name"));
+        app.set_active_provider_model("provider-b-raw\n".to_string(), "model-b\t".to_string());
+        app.set_active_session_name(Some("Beta raw\n".to_string()));
+        app.editor.insert("draft-b");
+        app.begin_work();
+        app.apply_runtime(RuntimeUpdate::Text("beta response".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("beta reasoning".to_string()));
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool-b".to_string(),
+            name: "inspect".to_string(),
+            detail: "beta detail".to_string(),
+        });
+        app.apply_runtime(RuntimeUpdate::Plan(vec![PlanEntry {
+            title: "beta step".to_string(),
+            status: "active".to_string(),
+        }]));
+        app.apply_runtime(RuntimeUpdate::Usage {
+            input_tokens: 11,
+            output_tokens: 7,
+            cached_input_tokens: 4,
+        });
+        app.apply_runtime(RuntimeUpdate::ContextUsage {
+            used: 13,
+            limit: 21,
+        });
+        app.open_timeline_search("beta".to_string());
+
+        let a = app
+            .projections
+            .projection(PeerPane::A)
+            .expect("peer A projection");
+        assert_eq!(a.header.provider, "provider-a");
+        assert_eq!(a.header.model, "model-a");
+        assert_eq!(a.header.session_id, "session-a");
+        assert_eq!(a.header.session_name.as_deref(), Some("Alpha"));
+        assert_eq!(
+            a.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(a.plan[0].title, "alpha step");
+        assert_eq!(a.usage.expect("A usage").total(), 5);
+        assert_eq!(a.context_usage, Some((5, 8)));
+        assert_eq!(a.stream_bytes, "alpha responsealpha reasoning".len());
+        assert!(a.active_assistant.is_some());
+        assert!(a.active_reasoning.is_some());
+        assert!(a.active_tools.contains_key("tool-a"));
+        assert_eq!(a.active_insert_before, Some(a_insert));
+        assert_eq!(a.timeline.selected_text().as_deref(), Some("alpha"));
+        assert_eq!(a.timeline.viewport, a_viewport);
+        assert_eq!(
+            a.timeline_search.as_ref().map(|state| state.query.as_str()),
+            Some("alpha")
+        );
+
+        let b = app
+            .projections
+            .projection(PeerPane::B)
+            .expect("peer B projection");
+        assert_eq!(b.header.provider, "provider-b-raw\n");
+        assert_eq!(b.header.model, "model-b\t");
+        assert_eq!(b.header.session_id, "session-b next");
+        assert_eq!(b.header.session_name.as_deref(), Some("Beta raw\n"));
+        assert_eq!(
+            b.work,
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+        assert_eq!(b.plan[0].title, "beta step");
+        assert_eq!(b.usage.expect("B usage").total(), 18);
+        assert_eq!(b.context_usage, Some((13, 21)));
+        assert_eq!(b.stream_bytes, "beta responsebeta reasoning".len());
+        assert!(b.active_assistant.is_some());
+        assert!(b.active_reasoning.is_some());
+        assert!(b.active_tools.contains_key("tool-b"));
+        assert!(b.timeline.selection.is_none());
+        assert_eq!(
+            b.timeline_search.as_ref().map(|state| state.query.as_str()),
+            Some("beta")
+        );
+
+        app.projections.select(PeerPane::A);
+        app.cancel_input_overlay();
+        assert_eq!(app.editor.text(), "draft-a");
+        assert!(app.timeline_search().is_none());
+        app.editor.clear_all();
+        app.projections.select(PeerPane::B);
+        app.cancel_input_overlay();
+        assert_eq!(app.editor.text(), "draft-b");
+        assert!(app.timeline_search().is_none());
+        app.request_approval("shared tool", "shared target", "ask");
+        assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
+        app.projections.select(PeerPane::A);
+        assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
+
+        app.clear_conversation();
+        let a = app
+            .projections
+            .projection(PeerPane::A)
+            .expect("peer A projection");
+        assert!(a.timeline.items().is_empty());
+        assert_eq!(a.work, WorkState::Idle);
+        assert!(a.plan.is_empty());
+        assert_eq!(a.usage, None);
+        assert_eq!(a.context_usage, None);
+        assert_eq!(a.stream_bytes, 0);
+        let b = app
+            .projections
+            .projection(PeerPane::B)
+            .expect("peer B projection");
+        assert!(b
+            .timeline
+            .items()
+            .iter()
+            .any(|item| item.text == "beta response"));
+        assert_eq!(b.plan[0].title, "beta step");
+        assert_eq!(b.usage.expect("B usage remains").total(), 18);
+        assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
     }
 
     #[test]
