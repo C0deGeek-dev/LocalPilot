@@ -157,11 +157,15 @@ impl ProjectionSet {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn select(&mut self, peer: PeerPane) {
-        if let Self::Pair { active, .. } = self {
-            *active = peer;
+    pub(super) fn select(&mut self, peer: PeerPane) -> bool {
+        let Self::Pair { active, .. } = self else {
+            return false;
+        };
+        if *active == peer {
+            return false;
         }
+        *active = peer;
+        true
     }
 
     pub(super) fn projection(&self, peer: PeerPane) -> Option<&SessionProjection> {

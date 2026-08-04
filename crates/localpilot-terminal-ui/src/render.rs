@@ -526,7 +526,12 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         ]
     };
     let wide = area.width >= 70;
-    let requested = if wide { 7 } else { 13 };
+    let pair_rows = u16::from(app.is_pair());
+    let requested = if wide {
+        7_u16.saturating_add(pair_rows)
+    } else {
+        13_u16.saturating_add(pair_rows)
+    };
     let height = requested.min(area.height);
     let help = Rect::new(
         area.x,
@@ -565,15 +570,30 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
                 ),
             );
         }
+        if app.is_pair() {
+            let y = help.y.saturating_add(7);
+            if y < help.bottom() {
+                frame.render_widget(
+                    Paragraph::new("F6          switch peer").style(theme.ui(UiRole::Foreground)),
+                    Rect::new(help.x.saturating_add(2), y, column_width, 1),
+                );
+            }
+        }
     } else {
-        for (index, text) in left.iter().chain(right.iter()).enumerate() {
+        for (index, text) in left
+            .iter()
+            .copied()
+            .chain(app.is_pair().then_some("F6          switch peer"))
+            .chain(right.iter().copied())
+            .enumerate()
+        {
             let row = u16::try_from(index).unwrap_or(u16::MAX);
             let y = help.y.saturating_add(1).saturating_add(row);
             if y >= help.bottom() {
                 break;
             }
             frame.render_widget(
-                Paragraph::new(*text).style(theme.ui(UiRole::Foreground)),
+                Paragraph::new(text).style(theme.ui(UiRole::Foreground)),
                 Rect::new(help.x.saturating_add(2), y, help.width.saturating_sub(4), 1),
             );
         }
@@ -1631,14 +1651,16 @@ fn render_peer_label(
     let (Some(label), Some(peer)) = (timeline.label, peer) else {
         return;
     };
-    let peer = match peer {
+    let peer_name = match peer {
         PeerPane::A => "A",
         PeerPane::B => "B",
     };
     let provider = sanitize_inline(&projection.header.provider);
     let model = sanitize_inline(&projection.header.model);
-    Paragraph::new(format!(" Peer {peer} · {provider} · {model}"))
-        .style(theme(app).ui(UiRole::Muted))
+    let active = app.active_pair_pane() == Some(peer);
+    let marker = if active { " [active]" } else { "" };
+    Paragraph::new(format!(" Peer {peer_name}{marker} · {provider} · {model}"))
+        .style(theme(app).ui(if active { UiRole::Focus } else { UiRole::Muted }))
         .render(label, frame.buffer_mut());
 }
 
@@ -2375,7 +2397,10 @@ fn render_dialog(
         } => vec![
             Line::from(vec![
                 Span::styled("● ", theme.ui(UiRole::Warning)),
-                Span::styled("Permission required", theme.ui(UiRole::Prompt)),
+                Span::styled(
+                    dialog_heading(app, "Permission required"),
+                    theme.ui(UiRole::Prompt),
+                ),
             ]),
             Line::styled(
                 format!("{tool} · {risk_class}"),
@@ -2393,6 +2418,19 @@ fn render_dialog(
         inner,
     );
     DialogHits::default()
+}
+
+fn dialog_heading(app: &AppModel, heading: &str) -> String {
+    app.dialog_peer().map_or_else(
+        || heading.to_string(),
+        |peer| {
+            let peer = match peer {
+                PeerPane::A => "A",
+                PeerPane::B => "B",
+            };
+            format!("Peer {peer} · {heading}")
+        },
+    )
 }
 
 fn render_trust_dialog(
@@ -2625,7 +2663,10 @@ fn render_screen_reader_dialog(
             target,
             risk_class,
         } => vec![
-            Line::styled("Permission required", theme.ui(UiRole::Prompt)),
+            Line::styled(
+                dialog_heading(app, "Permission required"),
+                theme.ui(UiRole::Prompt),
+            ),
             Line::styled(
                 format!("{tool} · {risk_class}"),
                 theme.ui(UiRole::Foreground),
@@ -2717,6 +2758,7 @@ fn render_question_dialog(
         (None, true) => format!("Question {}/{}", question.index, question.total),
         (None, false) => "Question".to_string(),
     };
+    let heading = dialog_heading(app, &heading);
     frame.render_widget(
         Paragraph::new(truncate_end(&heading, content_width)).style(theme.ui(UiRole::Prompt)),
         Rect::new(left, inner.y, content_width, 1),
@@ -2857,7 +2899,11 @@ fn framed_composer_rule(
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
     let state = footer_state(app);
-    let shortcuts = "? help · / commands";
+    let shortcuts = if app.is_pair() {
+        "F6 peer · ? help · / commands"
+    } else {
+        "? help · / commands"
+    };
     let context = if matches!(app.active_work(), crate::WorkState::Busy { .. }) {
         app.active_model().to_string()
     } else {
@@ -2876,14 +2922,27 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
     let busy = matches!(app.active_work(), crate::WorkState::Busy { .. });
     let theme = theme(app);
     let text = if narrow {
+        let shortcuts = if busy {
+            if app.is_pair() {
+                "F6 peer"
+            } else {
+                ""
+            }
+        } else {
+            shortcuts
+        };
         format!(
             "{}\n{}",
             truncate_end(&state, area.width),
-            two_sided(if busy { "" } else { shortcuts }, &context, area.width)
+            two_sided(shortcuts, &context, area.width)
         )
     } else {
         let left = if busy {
-            state.clone()
+            if app.is_pair() {
+                format!("{state} · F6 peer")
+            } else {
+                state.clone()
+            }
         } else {
             format!("{state} · {shortcuts}")
         };
@@ -3259,12 +3318,13 @@ mod tests {
         );
         let a_text = rect_text(terminal.backend().buffer(), a_area);
         let b_text = rect_text(terminal.backend().buffer(), b_area);
-        assert!(a_text.contains("Peer A · provider · model"));
+        assert!(a_text.contains("Peer A [active] · provider · model"));
         assert!(a_text.contains("ALPHA_ONLY"));
         assert!(!a_text.contains("BETA_ONLY"));
         assert!(b_text.contains("Peer B · provider-b next · model-b variant"));
         assert!(b_text.contains("BETA_ONLY"));
         assert!(!b_text.contains("ALPHA_ONLY"));
+        assert!(terminal.backend().to_string().contains("F6 peer"));
         assert_eq!(
             timelines
                 .at(a.timeline.x, a.timeline.y)
@@ -3272,6 +3332,12 @@ mod tests {
             Some(PeerPane::A)
         );
         let a_label = a.label.expect("peer A label");
+        assert_eq!(
+            terminal.backend().buffer()[(a_label.x, a_label.y)]
+                .style()
+                .fg,
+            theme(&app).ui(UiRole::Focus).fg
+        );
         assert_eq!(
             timelines
                 .at(a_label.x, a_label.y)
@@ -3290,6 +3356,30 @@ mod tests {
 
         let a_rows = a.rows.len();
         let b_rows = b.rows.len();
+        assert!(app.select_pair_pane(PeerPane::B));
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw pair focused B");
+        let focused = terminal.backend().to_string();
+        assert!(focused.contains("Peer A · provider · model"));
+        assert!(focused.contains("Peer B [active] · provider-b next"));
+        assert_eq!(
+            terminal.backend().buffer()[(a_label.x, a_label.y)]
+                .style()
+                .fg,
+            theme(&app).ui(UiRole::Muted).fg
+        );
+        assert!(app.select_pair_pane(PeerPane::A));
+        app.begin_work();
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw busy pair footer");
+        assert!(terminal.backend().to_string().contains("F6 peer"));
+        app.apply_runtime(crate::RuntimeUpdate::Stopped(crate::StopState::Done));
         let _ = app.handle_input(crate::InputAction::Insert("?".to_string()), 46);
         let mut quick_hit_map = None;
         terminal
@@ -3302,11 +3392,15 @@ mod tests {
             timelines.for_peer(PeerPane::B).expect("B").rows.len(),
             b_rows
         );
+        assert!(terminal
+            .backend()
+            .to_string()
+            .contains("F6          switch peer"));
     }
 
     #[test]
     fn narrow_pair_reports_only_the_active_named_pane() {
-        let app = AppModel::new_pair(
+        let mut app = AppModel::new_pair(
             header(),
             crate::SessionHeader {
                 provider: "provider-b".to_string(),
@@ -3331,6 +3425,84 @@ mod tests {
         assert_eq!(timelines.for_peer(PeerPane::A), Some(active));
         assert!(timelines.for_peer(PeerPane::B).is_none());
         assert!(timelines.active(None).is_none());
+
+        assert_eq!(
+            app.handle_input(crate::InputAction::CyclePeer, 58),
+            crate::AppCommand::None
+        );
+        let mut b_hit_map = None;
+        terminal
+            .draw(|frame| b_hit_map = Some(render(frame, &app)))
+            .expect("draw narrow peer B");
+        let b_hit_map = b_hit_map.expect("narrow B hit map");
+        let timelines = b_hit_map.timelines.as_ref().expect("visible B timeline");
+        assert!(timelines.for_peer(PeerPane::A).is_none());
+        assert_eq!(
+            timelines
+                .active(Some(PeerPane::B))
+                .and_then(|timeline| timeline.peer),
+            Some(PeerPane::B)
+        );
+        assert!(terminal.backend().to_string().contains("Peer B [active]"));
+        assert!(app.cycle_pair_pane());
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+    }
+
+    #[test]
+    fn pair_dialog_headings_name_the_requesting_peer_for_both_render_modes() {
+        let secondary = crate::SessionHeader {
+            provider: "provider-b".to_string(),
+            model: "model-b".to_string(),
+            session_id: "session-b".to_string(),
+            session_name: None,
+        };
+        let mut app =
+            AppModel::new_pair(header(), secondary.clone(), TerminalCapabilities::default());
+        assert!(app.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw approval");
+        assert!(terminal
+            .backend()
+            .to_string()
+            .contains("Peer B · Permission required"));
+
+        let mut screen_reader = AppModel::new_pair(
+            header(),
+            secondary,
+            TerminalCapabilities {
+                screen_reader: true,
+                ..TerminalCapabilities::default()
+            },
+        );
+        assert!(screen_reader.request_question_for(
+            PeerPane::B,
+            None,
+            "Continue?",
+            [
+                crate::QuestionOption {
+                    label: "Yes".to_string(),
+                    description: None,
+                },
+                crate::QuestionOption {
+                    label: "No".to_string(),
+                    description: None,
+                },
+            ],
+            false,
+            1,
+            1,
+        ));
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &screen_reader);
+            })
+            .expect("draw screen-reader question");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("Peer B · Question"), "{rendered}");
     }
 
     #[test]

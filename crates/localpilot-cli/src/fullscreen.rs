@@ -31,10 +31,11 @@ use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PlanEntry, QuestionOption as UiQuestionOption, QuestionResponse,
+    KeyboardSupport, PeerPane, PlanEntry, QuestionOption as UiQuestionOption, QuestionResponse,
     RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
-    StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
-    TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
+    StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, Timeline,
+    TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput,
+    VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -264,24 +265,37 @@ struct ImageCapabilitySnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionGesture {
+    peer: Option<PeerPane>,
     leading: ContentPoint,
     trailing: ContentPoint,
     origin_column: u16,
     origin_row: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollbarTarget {
+    Takeover,
+    Timeline(Option<PeerPane>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScrollbarGesture {
+    target: ScrollbarTarget,
+    grab: u16,
+}
+
 #[derive(Debug, Default)]
 struct MouseState {
     selection: Option<SelectionGesture>,
     selection_pointer: Option<(u16, u16)>,
-    scrollbar_grab: Option<u16>,
+    scrollbar: Option<ScrollbarGesture>,
 }
 
 impl MouseState {
     fn reset_gesture(&mut self) {
         self.selection = None;
         self.selection_pointer = None;
-        self.scrollbar_grab = None;
+        self.scrollbar = None;
     }
 }
 
@@ -2711,6 +2725,33 @@ fn active_timeline_hits<'a>(app: &AppModel, hit_map: &'a HitMap) -> Option<&'a T
     hit_map.timelines.as_ref()?.active(app.active_pair_pane())
 }
 
+fn timeline_hits_for_peer(hit_map: &HitMap, peer: Option<PeerPane>) -> Option<&TimelinePaneHits> {
+    match peer {
+        Some(peer) => hit_map.timelines.as_ref()?.for_peer(peer),
+        None => hit_map.timelines.as_ref()?.active(None),
+    }
+}
+
+fn timeline_for_peer(app: &AppModel, peer: Option<PeerPane>) -> Option<&Timeline> {
+    match peer {
+        Some(peer) => app.timeline_for(peer),
+        None if !app.is_pair() => Some(app.active_timeline()),
+        None => None,
+    }
+}
+
+fn timeline_for_peer_mut(app: &mut AppModel, peer: Option<PeerPane>) -> Option<&mut Timeline> {
+    match peer {
+        Some(peer) => app.timeline_for_mut(peer),
+        None if !app.is_pair() => Some(app.active_timeline_mut()),
+        None => None,
+    }
+}
+
+fn pointer_timeline_hits(hit_map: &HitMap, column: u16, row: u16) -> Option<&TimelinePaneHits> {
+    hit_map.timelines.as_ref()?.at(column, row)
+}
+
 fn handle_mouse_event(
     app: &mut AppModel,
     mouse: MouseEvent,
@@ -2762,6 +2803,16 @@ fn handle_mouse_event(
                     hit_map.takeover_scrollbar.total_rows,
                     hit_map.takeover_scrollbar.viewport_rows,
                 );
+            } else if app.is_pair() {
+                if let Some(timeline) = pointer_timeline_hits(hit_map, mouse.column, mouse.row) {
+                    if let Some(target) = timeline_for_peer_mut(app, timeline.peer) {
+                        target.scroll_by(
+                            -WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
             } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
                 app.active_timeline_mut().scroll_by(
                     -WHEEL_SCROLL_ROWS,
@@ -2779,6 +2830,16 @@ fn handle_mouse_event(
                     hit_map.takeover_scrollbar.total_rows,
                     hit_map.takeover_scrollbar.viewport_rows,
                 );
+            } else if app.is_pair() {
+                if let Some(timeline) = pointer_timeline_hits(hit_map, mouse.column, mouse.row) {
+                    if let Some(target) = timeline_for_peer_mut(app, timeline.peer) {
+                        target.scroll_by(
+                            WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
             } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
                 app.active_timeline_mut().scroll_by(
                     WHEEL_SCROLL_ROWS,
@@ -2792,22 +2853,40 @@ fn handle_mouse_event(
             app.disarm_exit();
             mouse_state.reset_gesture();
 
-            let active_timeline = active_timeline_hits(app, hit_map);
-            let scrollbar = if hit_map.takeover {
-                Some(&hit_map.takeover_scrollbar)
+            let clicked_timeline = (!hit_map.takeover)
+                .then(|| pointer_timeline_hits(hit_map, mouse.column, mouse.row))
+                .flatten();
+            if let Some(peer) = clicked_timeline.and_then(|timeline| timeline.peer) {
+                let _ = app.select_pair_pane(peer);
+            }
+            let input_timeline = if app.is_pair() {
+                clicked_timeline
             } else {
-                active_timeline.map(|timeline| &timeline.scrollbar)
+                active_timeline_hits(app, hit_map)
             };
-            if let Some(scrollbar) = scrollbar {
+            let scrollbar = if hit_map.takeover {
+                Some((ScrollbarTarget::Takeover, &hit_map.takeover_scrollbar))
+            } else {
+                input_timeline.map(|timeline| {
+                    (
+                        ScrollbarTarget::Timeline(timeline.peer),
+                        &timeline.scrollbar,
+                    )
+                })
+            };
+            if let Some((target, scrollbar)) = scrollbar {
                 if rect_contains(scrollbar.track, mouse.column, mouse.row) {
                     if let Some(thumb) = scrollbar.thumb {
                         if rect_contains(thumb, mouse.column, mouse.row) {
-                            mouse_state.scrollbar_grab = Some(mouse.row.saturating_sub(thumb.y));
+                            mouse_state.scrollbar = Some(ScrollbarGesture {
+                                target,
+                                grab: mouse.row.saturating_sub(thumb.y),
+                            });
                         } else {
                             let viewport_height = if hit_map.takeover {
                                 usize::from(hit_map.takeover_content.height.max(1))
                             } else {
-                                active_timeline.map_or(1, |timeline| {
+                                input_timeline.map_or(1, |timeline| {
                                     usize::from(timeline.timeline.height.max(1))
                                 })
                             };
@@ -2819,12 +2898,14 @@ fn handle_mouse_event(
                                     scrollbar.total_rows,
                                     scrollbar.viewport_rows,
                                 );
-                            } else if let Some(timeline) = active_timeline {
-                                app.active_timeline_mut().scroll_by(
-                                    delta,
-                                    timeline.wrap_width,
-                                    timeline.timeline.height,
-                                );
+                            } else if let Some(timeline) = input_timeline {
+                                if let Some(target) = timeline_for_peer_mut(app, timeline.peer) {
+                                    target.scroll_by(
+                                        delta,
+                                        timeline.wrap_width,
+                                        timeline.timeline.height,
+                                    );
+                                }
                             }
                         }
                     }
@@ -2859,16 +2940,26 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
 
-            if let Some(timeline) = active_timeline_hits(app, hit_map) {
+            if input_timeline.is_some_and(|timeline| {
+                timeline
+                    .label
+                    .is_some_and(|label| rect_contains(label, mouse.column, mouse.row))
+            }) {
+                return RoutedEvent::Handled;
+            }
+
+            if let Some(timeline) = input_timeline {
                 if let Some(hit) = timeline.rows.iter().find(|hit| {
                     hit.y == mouse.row
                         && mouse.column >= timeline.timeline.x
                         && mouse.column < hit.content_x
                         && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
                 }) {
-                    if app.active_timeline_mut().toggle_expandable(hit.row.item_id) {
-                        app.active_timeline_mut().clear_selection();
-                        return RoutedEvent::Handled;
+                    if let Some(target) = timeline_for_peer_mut(app, timeline.peer) {
+                        if target.toggle_expandable(hit.row.item_id) {
+                            target.clear_selection();
+                            return RoutedEvent::Handled;
+                        }
                     }
                 }
             }
@@ -2889,44 +2980,66 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
 
-            if let Some((leading, trailing)) =
-                selection_points(app, hit_map, mouse.column, mouse.row)
-            {
-                app.active_timeline_mut().start_selection(leading);
+            if app.is_pair() && input_timeline.is_none() {
+                return RoutedEvent::Handled;
+            }
+
+            if let Some((leading, trailing)) = selection_points(
+                hit_map,
+                input_timeline.and_then(|timeline| timeline.peer),
+                mouse.column,
+                mouse.row,
+            ) {
+                let peer = input_timeline.and_then(|timeline| timeline.peer);
+                if let Some(target) = timeline_for_peer_mut(app, peer) {
+                    target.start_selection(leading);
+                }
                 mouse_state.selection = Some(SelectionGesture {
+                    peer,
                     leading,
                     trailing,
                     origin_column: mouse.column,
                     origin_row: mouse.row,
                 });
                 mouse_state.selection_pointer = Some((mouse.column, mouse.row));
-            } else {
-                app.active_timeline_mut().clear_selection();
+            } else if let Some(peer) = input_timeline.map(|timeline| timeline.peer) {
+                if let Some(target) = timeline_for_peer_mut(app, peer) {
+                    target.clear_selection();
+                }
             }
             RoutedEvent::Handled
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             app.disarm_exit();
-            if let Some(grab) = mouse_state.scrollbar_grab {
-                let thumb_top = mouse.row.saturating_sub(grab);
-                if hit_map.takeover {
-                    if let Some(start) = hit_map
-                        .takeover_scrollbar
-                        .content_start_for_thumb_top(thumb_top)
-                    {
-                        app.scroll_takeover_to(
-                            start,
-                            hit_map.takeover_scrollbar.total_rows,
-                            hit_map.takeover_scrollbar.viewport_rows,
-                        );
+            if let Some(gesture) = mouse_state.scrollbar {
+                let thumb_top = mouse.row.saturating_sub(gesture.grab);
+                match gesture.target {
+                    ScrollbarTarget::Takeover => {
+                        if let Some(start) = hit_map
+                            .takeover_scrollbar
+                            .content_start_for_thumb_top(thumb_top)
+                        {
+                            app.scroll_takeover_to(
+                                start,
+                                hit_map.takeover_scrollbar.total_rows,
+                                hit_map.takeover_scrollbar.viewport_rows,
+                            );
+                        }
                     }
-                } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
-                    if let Some(start) = timeline.scrollbar.content_start_for_thumb_top(thumb_top) {
-                        app.active_timeline_mut().scroll_to_row(
-                            start,
-                            timeline.wrap_width,
-                            timeline.timeline.height,
-                        );
+                    ScrollbarTarget::Timeline(peer) => {
+                        if let Some(timeline) = timeline_hits_for_peer(hit_map, peer) {
+                            if let Some(start) =
+                                timeline.scrollbar.content_start_for_thumb_top(thumb_top)
+                            {
+                                if let Some(target) = timeline_for_peer_mut(app, peer) {
+                                    target.scroll_to_row(
+                                        start,
+                                        timeline.wrap_width,
+                                        timeline.timeline.height,
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 return RoutedEvent::Handled;
@@ -2942,22 +3055,25 @@ fn handle_mouse_event(
         }
         MouseEventKind::Up(MouseButton::Left) => {
             app.disarm_exit();
-            if mouse_state.scrollbar_grab.is_some() {
+            if mouse_state.scrollbar.is_some() {
                 mouse_state.reset_gesture();
                 return RoutedEvent::Handled;
             }
             let selecting = mouse_state.selection;
             if let Some(gesture) = selecting {
                 if (mouse.row, mouse.column) == (gesture.origin_row, gesture.origin_column) {
-                    app.active_timeline_mut().clear_selection();
+                    if let Some(target) = timeline_for_peer_mut(app, gesture.peer) {
+                        target.clear_selection();
+                    }
                 } else {
                     extend_mouse_selection(app, hit_map, mouse_state, mouse.column, mouse.row);
                 }
             }
             mouse_state.reset_gesture();
             if selecting.is_some() && app.copy_on_select() {
-                app.active_timeline()
-                    .selected_text()
+                selecting
+                    .and_then(|gesture| timeline_for_peer(app, gesture.peer))
+                    .and_then(Timeline::selected_text)
                     .map_or(RoutedEvent::Handled, RoutedEvent::Copy)
             } else {
                 RoutedEvent::Handled
@@ -2971,12 +3087,11 @@ fn handle_mouse_event(
             if rect_contains(hit_map.composer, mouse.column, mouse.row) {
                 return RoutedEvent::PasteClipboard;
             }
-            if active_timeline_hits(app, hit_map)
-                .is_some_and(|timeline| rect_contains(timeline.timeline, mouse.column, mouse.row))
+            if let Some(timeline) = pointer_timeline_hits(hit_map, mouse.column, mouse.row)
+                .filter(|timeline| rect_contains(timeline.timeline, mouse.column, mouse.row))
             {
-                return app
-                    .active_timeline()
-                    .selected_text()
+                return timeline_for_peer(app, timeline.peer)
+                    .and_then(Timeline::selected_text)
                     .map_or(RoutedEvent::Handled, RoutedEvent::Copy);
             }
             RoutedEvent::Handled
@@ -3003,15 +3118,20 @@ fn advance_mouse_selection(app: &mut AppModel, hit_map: &HitMap, mouse_state: &M
     let Some((column, row)) = mouse_state.selection_pointer else {
         return;
     };
-    let Some(timeline) = active_timeline_hits(app, hit_map) else {
+    let Some(gesture) = mouse_state.selection else {
+        return;
+    };
+    let Some(timeline) = timeline_hits_for_peer(hit_map, gesture.peer) else {
         return;
     };
     if row < timeline.timeline.y {
-        app.active_timeline_mut()
-            .scroll_by(-1, timeline.wrap_width, timeline.timeline.height);
+        if let Some(target) = timeline_for_peer_mut(app, gesture.peer) {
+            target.scroll_by(-1, timeline.wrap_width, timeline.timeline.height);
+        }
     } else if row >= timeline.timeline.bottom() {
-        app.active_timeline_mut()
-            .scroll_by(1, timeline.wrap_width, timeline.timeline.height);
+        if let Some(target) = timeline_for_peer_mut(app, gesture.peer) {
+            target.scroll_by(1, timeline.wrap_width, timeline.timeline.height);
+        }
     }
     extend_mouse_selection(app, hit_map, mouse_state, column, row);
 }
@@ -3026,25 +3146,29 @@ fn extend_mouse_selection(
     let Some(gesture) = mouse_state.selection else {
         return;
     };
-    let Some((leading, trailing)) = selection_points_nearest(app, hit_map, column, row) else {
+    let Some((leading, trailing)) = selection_points_nearest(hit_map, gesture.peer, column, row)
+    else {
+        return;
+    };
+    let Some(target) = timeline_for_peer_mut(app, gesture.peer) else {
         return;
     };
     if (row, column) >= (gesture.origin_row, gesture.origin_column) {
-        app.active_timeline_mut().start_selection(gesture.leading);
-        app.active_timeline_mut().extend_selection(trailing);
+        target.start_selection(gesture.leading);
+        target.extend_selection(trailing);
     } else {
-        app.active_timeline_mut().start_selection(gesture.trailing);
-        app.active_timeline_mut().extend_selection(leading);
+        target.start_selection(gesture.trailing);
+        target.extend_selection(leading);
     }
 }
 
 fn selection_points(
-    app: &AppModel,
     hit_map: &HitMap,
+    peer: Option<PeerPane>,
     column: u16,
     row: u16,
 ) -> Option<(ContentPoint, ContentPoint)> {
-    let hit = active_timeline_hits(app, hit_map)?
+    let hit = timeline_hits_for_peer(hit_map, peer)?
         .rows
         .iter()
         .find(|hit| hit.y == row)?;
@@ -3055,13 +3179,13 @@ fn selection_points(
 }
 
 fn selection_points_nearest(
-    app: &AppModel,
     hit_map: &HitMap,
+    peer: Option<PeerPane>,
     column: u16,
     row: u16,
 ) -> Option<(ContentPoint, ContentPoint)> {
-    selection_points(app, hit_map, column, row).or_else(|| {
-        let hit = active_timeline_hits(app, hit_map)?
+    selection_points(hit_map, peer, column, row).or_else(|| {
+        let hit = timeline_hits_for_peer(hit_map, peer)?
             .rows
             .iter()
             .min_by_key(|hit| hit.y.abs_diff(row))?;
@@ -3441,6 +3565,7 @@ fn map_key(key: KeyEvent) -> Option<InputAction> {
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
+        KeyCode::F(6) if !ctrl && !alt && !shift => Some(InputAction::CyclePeer),
         KeyCode::PageUp => Some(InputAction::NavigateTimeline(TimelineNavigation::PageUp)),
         KeyCode::PageDown => Some(InputAction::NavigateTimeline(TimelineNavigation::PageDown)),
         KeyCode::Home if ctrl && !alt => Some(InputAction::MoveTextStart),
@@ -3809,6 +3934,41 @@ mod tests {
         )
     }
 
+    fn pair_app() -> AppModel {
+        AppModel::new_pair(
+            Header {
+                version: "0".to_string(),
+                provider: "provider-a".to_string(),
+                model: "model-a".to_string(),
+                workspace: "fixture-workspace".to_string(),
+                branch: Some("fixture-branch".to_string()),
+                workspace_dirty: Some(true),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
+                session_id: "session-a".to_string(),
+                session_name: Some("Alpha".to_string()),
+            },
+            localpilot_terminal_ui::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: Some("Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        )
+    }
+
+    fn fill_pair_timelines(app: &mut AppModel, rows: usize) {
+        for number in 0..rows {
+            let _ = app.timeline_for_mut(PeerPane::A).and_then(|timeline| {
+                timeline.push(ItemKind::Assistant, format!("alpha response {number:03}"))
+            });
+            let _ = app.timeline_for_mut(PeerPane::B).and_then(|timeline| {
+                timeline.push(ItemKind::Assistant, format!("beta response {number:03}"))
+            });
+        }
+    }
+
     #[test]
     fn theme_host_preference_is_opt_in_and_invalid_values_keep_the_default() {
         let mut unset = app();
@@ -3886,6 +4046,11 @@ mod tests {
             map_key(press(KeyCode::Enter, KeyModifiers::SHIFT)),
             Some(InputAction::Insert("\n".to_string()))
         );
+        assert_eq!(
+            map_key(press(KeyCode::F(6), KeyModifiers::NONE)),
+            Some(InputAction::CyclePeer)
+        );
+        assert_eq!(map_key(press(KeyCode::F(6), KeyModifiers::SHIFT)), None);
     }
 
     #[test]
@@ -3984,6 +4149,411 @@ mod tests {
                 &mut mouse_state,
             ),
             RoutedEvent::Unhandled
+        );
+    }
+
+    #[test]
+    fn single_pointer_routing_keeps_outside_wheel_and_click_behavior() {
+        let mut app = app();
+        for number in 0..40 {
+            let _ = app
+                .active_timeline_mut()
+                .push(ItemKind::Assistant, format!("response {number:03}"));
+        }
+        let first = app.active_timeline().items()[0].id;
+        app.active_timeline_mut().start_selection(ContentPoint {
+            item_id: first,
+            byte: 0,
+        });
+        app.active_timeline_mut().extend_selection(ContentPoint {
+            item_id: first,
+            byte: 4,
+        });
+        let hit_map = draw_hit_map(&app, 80, 24);
+        let mut mouse_state = MouseState::default();
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::ScrollUp,
+                    hit_map.composer.x,
+                    hit_map.composer.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_ne!(app.active_timeline().viewport, ViewportAnchor::FollowBottom);
+
+        let footer = hit_map.frame.expect("frame").footer;
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    footer.x,
+                    footer.y
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert!(app.active_timeline().selection.is_none());
+    }
+
+    #[test]
+    fn pair_pointer_focus_wheel_copy_and_miss_routing_are_peer_exact() {
+        let mut app = pair_app();
+        fill_pair_timelines(&mut app, 50);
+        let b_item = app.timeline_for(PeerPane::B).expect("B").items()[0].id;
+        let b = app.timeline_for_mut(PeerPane::B).expect("B");
+        b.start_selection(ContentPoint {
+            item_id: b_item,
+            byte: 0,
+        });
+        b.extend_selection(ContentPoint {
+            item_id: b_item,
+            byte: 4,
+        });
+
+        let hit_map = draw_hit_map(&app, 100, 24);
+        let timelines = hit_map.timelines.as_ref().expect("pair timelines");
+        let b_hits = timelines.for_peer(PeerPane::B).expect("B hits");
+        let b_label = b_hits.label.expect("B label");
+        let divider = timelines.divider().expect("divider");
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    b_label.x,
+                    b_label.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_eq!(
+            app.timeline_for(PeerPane::B)
+                .and_then(Timeline::selected_text)
+                .as_deref(),
+            Some("beta")
+        );
+
+        assert!(app.select_pair_pane(PeerPane::A));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::ScrollUp,
+                    b_hits.timeline.x,
+                    b_hits.timeline.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert_eq!(
+            app.timeline_for(PeerPane::A).expect("A").viewport,
+            ViewportAnchor::FollowBottom
+        );
+        assert_ne!(
+            app.timeline_for(PeerPane::B).expect("B").viewport,
+            ViewportAnchor::FollowBottom
+        );
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    b_hits.timeline.x,
+                    b_hits.timeline.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Copy("beta".to_string())
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+
+        let a_before = app.timeline_for(PeerPane::A).expect("A").viewport;
+        let b_before = app.timeline_for(PeerPane::B).expect("B").viewport;
+        for (column, row) in [
+            (divider.x, divider.y),
+            (
+                hit_map.frame.expect("frame").footer.x,
+                hit_map.frame.expect("frame").footer.y,
+            ),
+        ] {
+            assert_eq!(
+                route_pointer_or_navigation(
+                    &mut app,
+                    &Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row,)),
+                    &hit_map,
+                    &mut mouse_state,
+                ),
+                RoutedEvent::Handled
+            );
+        }
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert_eq!(app.timeline_for(PeerPane::A).expect("A").viewport, a_before);
+        assert_eq!(app.timeline_for(PeerPane::B).expect("B").viewport, b_before);
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .expect("A")
+            .selection
+            .is_none());
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .expect("B")
+            .selection
+            .is_some());
+
+        let hit = b_hits.rows.first().expect("B row");
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hit.content_x,
+                    hit.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_eq!(
+            mouse_state.selection.expect("selection").peer,
+            Some(PeerPane::B)
+        );
+    }
+
+    #[test]
+    fn pair_selection_and_scrollbar_drags_remain_on_their_origin_peer() {
+        let mut app = pair_app();
+        fill_pair_timelines(&mut app, 120);
+        app.set_copy_on_select(true);
+        let hit_map = draw_hit_map(&app, 100, 24);
+        let timelines = hit_map.timelines.as_ref().expect("pair timelines");
+        let a_hits = timelines.for_peer(PeerPane::A).expect("A hits");
+        let b_hits = timelines.for_peer(PeerPane::B).expect("B hits");
+        let start = b_hits.rows.first().expect("B start row");
+        let end = b_hits.rows.get(1).unwrap_or(start);
+        let mut mouse_state = MouseState::default();
+
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    start.content_x.saturating_add(3),
+                    start.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            mouse_state.selection.expect("gesture").peer,
+            Some(PeerPane::B)
+        );
+        assert!(app.select_pair_pane(PeerPane::A));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    a_hits.timeline.x,
+                    end.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        let expected_copy = app
+            .timeline_for(PeerPane::B)
+            .and_then(Timeline::selected_text)
+            .expect("B selection after drag");
+        let copied = route_pointer_or_navigation(
+            &mut app,
+            &Event::Mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                a_hits.timeline.x,
+                end.y,
+            )),
+            &hit_map,
+            &mut mouse_state,
+        );
+        assert_eq!(copied, RoutedEvent::Copy(expected_copy));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .expect("A")
+            .selection
+            .is_none());
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .expect("B")
+            .selection
+            .is_some());
+
+        app.timeline_for_mut(PeerPane::A)
+            .expect("A")
+            .follow_bottom();
+        app.timeline_for_mut(PeerPane::B)
+            .expect("B")
+            .follow_bottom();
+        let hit_map = draw_hit_map(&app, 100, 24);
+        let timelines = hit_map.timelines.as_ref().expect("pair timelines");
+        let a_hits = timelines.for_peer(PeerPane::A).expect("A hits");
+        let b_hits = timelines.for_peer(PeerPane::B).expect("B hits");
+        let thumb = b_hits.scrollbar.thumb.expect("B thumb");
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    thumb.x,
+                    thumb.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            mouse_state.scrollbar.expect("scrollbar").target,
+            ScrollbarTarget::Timeline(Some(PeerPane::B))
+        );
+        assert!(app.select_pair_pane(PeerPane::A));
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    a_hits.scrollbar.track.x,
+                    b_hits.scrollbar.track.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(
+            app.timeline_for(PeerPane::A).expect("A").viewport,
+            ViewportAnchor::FollowBottom
+        );
+        assert_eq!(
+            app.timeline_for(PeerPane::B).expect("B").viewport,
+            ViewportAnchor::Top
+        );
+        let _ = route_pointer_or_navigation(
+            &mut app,
+            &Event::Mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                a_hits.scrollbar.track.x,
+                b_hits.scrollbar.track.y,
+            )),
+            &hit_map,
+            &mut mouse_state,
+        );
+
+        app.timeline_for_mut(PeerPane::B)
+            .expect("B")
+            .follow_bottom();
+        let hit_map = draw_hit_map(&app, 100, 24);
+        let b_hits = hit_map
+            .timelines
+            .as_ref()
+            .and_then(|timelines| timelines.for_peer(PeerPane::B))
+            .expect("B hits");
+        assert_eq!(
+            route_pointer_or_navigation(
+                &mut app,
+                &Event::Mouse(mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    b_hits.scrollbar.track.x,
+                    b_hits.scrollbar.track.y,
+                )),
+                &hit_map,
+                &mut mouse_state,
+            ),
+            RoutedEvent::Handled
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_ne!(
+            app.timeline_for(PeerPane::B).expect("B").viewport,
+            ViewportAnchor::FollowBottom
+        );
+    }
+
+    #[test]
+    fn narrow_pair_wheel_scrolls_only_the_visible_peer() {
+        let mut app = pair_app();
+        fill_pair_timelines(&mut app, 50);
+        let hit_map = draw_hit_map(&app, 60, 24);
+        let visible = hit_map
+            .timelines
+            .as_ref()
+            .and_then(|timelines| timelines.active(Some(PeerPane::A)))
+            .expect("visible A");
+        let mut mouse_state = MouseState::default();
+        let _ = route_pointer_or_navigation(
+            &mut app,
+            &Event::Mouse(mouse(
+                MouseEventKind::ScrollUp,
+                visible.timeline.x,
+                visible.timeline.y,
+            )),
+            &hit_map,
+            &mut mouse_state,
+        );
+        let a_viewport = app.timeline_for(PeerPane::A).expect("A").viewport;
+        assert_ne!(a_viewport, ViewportAnchor::FollowBottom);
+        assert_eq!(
+            app.timeline_for(PeerPane::B).expect("B").viewport,
+            ViewportAnchor::FollowBottom
+        );
+
+        assert_eq!(
+            app.handle_input(InputAction::CyclePeer, hit_map.editor_width),
+            AppCommand::None
+        );
+        let hit_map = draw_hit_map(&app, 60, 24);
+        let visible = hit_map
+            .timelines
+            .as_ref()
+            .and_then(|timelines| timelines.active(Some(PeerPane::B)))
+            .expect("visible B");
+        let _ = route_pointer_or_navigation(
+            &mut app,
+            &Event::Mouse(mouse(
+                MouseEventKind::ScrollUp,
+                visible.timeline.x,
+                visible.timeline.y,
+            )),
+            &hit_map,
+            &mut mouse_state,
+        );
+        assert_eq!(
+            app.timeline_for(PeerPane::A).expect("A").viewport,
+            a_viewport
+        );
+        assert_ne!(
+            app.timeline_for(PeerPane::B).expect("B").viewport,
+            ViewportAnchor::FollowBottom
         );
     }
 
@@ -4910,7 +5480,13 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert_eq!(mouse_state.scrollbar_grab, Some(0));
+        assert_eq!(
+            mouse_state.scrollbar,
+            Some(ScrollbarGesture {
+                target: ScrollbarTarget::Timeline(None),
+                grab: 0,
+            })
+        );
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4938,7 +5514,7 @@ mod tests {
             ),
             RoutedEvent::Handled
         );
-        assert_eq!(mouse_state.scrollbar_grab, None);
+        assert_eq!(mouse_state.scrollbar, None);
 
         app.active_timeline_mut().follow_bottom();
         let hit_map = draw_hit_map(&app, 80, 24);

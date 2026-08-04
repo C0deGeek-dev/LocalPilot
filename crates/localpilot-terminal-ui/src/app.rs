@@ -108,11 +108,13 @@ pub enum WorkState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InputAction {
     CancelOrExit,
     Escape,
     OpenReverseHistory,
     StashOrPop,
+    CyclePeer,
     NavigateTimeline(TimelineNavigation),
     Insert(String),
     Paste(String),
@@ -985,6 +987,7 @@ pub struct AppModel {
     default_copy_on_select: bool,
     default_theme: Theme,
     pub dialog: Option<DialogState>,
+    dialog_peer: Option<PeerPane>,
     takeover: Option<TakeoverState>,
     theme_picker: Option<ThemePickerState>,
     quick_help: bool,
@@ -1091,6 +1094,7 @@ impl AppModel {
             default_copy_on_select: false,
             default_theme: Theme::Default,
             dialog: None,
+            dialog_peer: None,
             takeover: None,
             theme_picker: None,
             quick_help: false,
@@ -1112,6 +1116,29 @@ impl AppModel {
     #[must_use]
     pub const fn active_pair_pane(&self) -> Option<PeerPane> {
         self.projections.active_pair_pane()
+    }
+
+    /// Selects one peer as the target of keyboard input and the shared composer.
+    /// Returns `false` for a single session, an already-active peer, or while a
+    /// shared dialog owns focus.
+    #[must_use]
+    pub fn select_pair_pane(&mut self, peer: PeerPane) -> bool {
+        if self.dialog.is_some() {
+            return false;
+        }
+        self.projections.select(peer)
+    }
+
+    /// Selects the other peer without changing any shared or per-peer surface
+    /// state. Returns `false` when peer switching is unavailable.
+    #[must_use]
+    pub fn cycle_pair_pane(&mut self) -> bool {
+        let peer = match self.active_pair_pane() {
+            Some(PeerPane::A) => PeerPane::B,
+            Some(PeerPane::B) => PeerPane::A,
+            None => return false,
+        };
+        self.select_pair_pane(peer)
     }
 
     pub(crate) const fn active_projection(&self) -> &SessionProjection {
@@ -1195,6 +1222,23 @@ impl AppModel {
         &mut self.projections.active_mut().timeline
     }
 
+    /// Returns the named peer timeline, or `None` for an ordinary single
+    /// session.
+    #[must_use]
+    pub fn timeline_for(&self, peer: PeerPane) -> Option<&Timeline> {
+        self.projections
+            .projection(peer)
+            .map(|projection| &projection.timeline)
+    }
+
+    /// Returns the named peer timeline mutably, or `None` for an ordinary
+    /// single session.
+    pub fn timeline_for_mut(&mut self, peer: PeerPane) -> Option<&mut Timeline> {
+        self.projections
+            .projection_mut(peer)
+            .map(|projection| &mut projection.timeline)
+    }
+
     #[must_use]
     pub const fn active_work(&self) -> WorkState {
         self.projections.active().work
@@ -1275,6 +1319,11 @@ impl AppModel {
                 return AppCommand::None;
             }
             return self.cancel_or_exit();
+        }
+        if matches!(action, InputAction::CyclePeer) {
+            self.exit_armed = false;
+            let _ = self.cycle_pair_pane();
+            return AppCommand::None;
         }
         if matches!(action, InputAction::CancelOrExit) && self.theme_picker.is_some() {
             self.exit_armed = false;
@@ -1493,6 +1542,7 @@ impl AppModel {
             | InputAction::Paste(_)
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::Backspace
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -2485,6 +2535,7 @@ impl AppModel {
 
     pub fn require_workspace_trust(&mut self, path: impl Into<String>) {
         self.claim_dialog_focus();
+        self.dialog_peer = None;
         self.dialog = Some(DialogState::Trust(TrustDialog {
             path: bounded_inline_text(&path.into(), MAX_TOOL_DETAIL_BYTES),
             selected: 0,
@@ -2610,7 +2661,40 @@ impl AppModel {
         target: impl Into<String>,
         risk_class: impl Into<String>,
     ) {
+        let peer = self.active_pair_pane();
+        self.install_approval(peer, tool, target, risk_class);
+    }
+
+    /// Opens an approval attributed to one named peer and makes that peer the
+    /// shared composer target. Returns `false` for a single session or while a
+    /// dialog is already open.
+    #[must_use]
+    pub fn request_approval_for(
+        &mut self,
+        peer: PeerPane,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+    ) -> bool {
+        if self.dialog.is_some() || self.projections.projection(peer).is_none() {
+            return false;
+        }
+        if self.active_pair_pane() != Some(peer) && !self.select_pair_pane(peer) {
+            return false;
+        }
+        self.install_approval(Some(peer), tool, target, risk_class);
+        true
+    }
+
+    fn install_approval(
+        &mut self,
+        peer: Option<PeerPane>,
+        tool: impl Into<String>,
+        target: impl Into<String>,
+        risk_class: impl Into<String>,
+    ) {
         self.claim_dialog_focus();
+        self.dialog_peer = peer;
         self.dialog = Some(DialogState::Approval {
             tool: sanitize_inline(&tool.into()),
             target: sanitize_inline(&target.into()),
@@ -2627,7 +2711,56 @@ impl AppModel {
         index: usize,
         total: usize,
     ) {
+        let peer = self.active_pair_pane();
+        self.install_question(peer, header, question, options, multi_select, index, total);
+    }
+
+    /// Opens a question attributed to one named peer and makes that peer the
+    /// shared composer target. Returns `false` for a single session or while a
+    /// dialog is already open.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_question_for(
+        &mut self,
+        peer: PeerPane,
+        header: Option<String>,
+        question: impl Into<String>,
+        options: impl IntoIterator<Item = QuestionOption>,
+        multi_select: bool,
+        index: usize,
+        total: usize,
+    ) -> bool {
+        if self.dialog.is_some() || self.projections.projection(peer).is_none() {
+            return false;
+        }
+        if self.active_pair_pane() != Some(peer) && !self.select_pair_pane(peer) {
+            return false;
+        }
+        self.install_question(
+            Some(peer),
+            header,
+            question,
+            options,
+            multi_select,
+            index,
+            total,
+        );
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_question(
+        &mut self,
+        peer: Option<PeerPane>,
+        header: Option<String>,
+        question: impl Into<String>,
+        options: impl IntoIterator<Item = QuestionOption>,
+        multi_select: bool,
+        index: usize,
+        total: usize,
+    ) {
         self.claim_dialog_focus();
+        self.dialog_peer = peer;
         let options = options
             .into_iter()
             .map(|option| QuestionOption {
@@ -2797,6 +2930,13 @@ impl AppModel {
 
     pub fn clear_dialog(&mut self) {
         self.dialog = None;
+        self.dialog_peer = None;
+    }
+
+    /// Returns the immutable peer attribution of the current dialog.
+    #[must_use]
+    pub const fn dialog_peer(&self) -> Option<PeerPane> {
+        self.dialog_peer
     }
 
     fn claim_dialog_focus(&mut self) {
@@ -2927,6 +3067,7 @@ impl AppModel {
             }
             InputAction::CancelOrExit
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -3052,6 +3193,7 @@ impl AppModel {
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::Insert(_)
             | InputAction::Paste(_)
             | InputAction::Backspace
@@ -3081,6 +3223,7 @@ impl AppModel {
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::NavigateTimeline(_)
             | InputAction::Insert(_)
             | InputAction::Paste(_)
@@ -3186,6 +3329,7 @@ impl AppModel {
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::NavigateTimeline(_)
             | InputAction::MoveVisualStart
             | InputAction::MoveVisualEnd
@@ -3224,6 +3368,7 @@ impl AppModel {
             InputAction::CancelOrExit
             | InputAction::OpenReverseHistory
             | InputAction::StashOrPop
+            | InputAction::CyclePeer
             | InputAction::NavigateTimeline(_)
             | InputAction::Delete
             | InputAction::MoveLeft
@@ -3914,6 +4059,30 @@ mod tests {
         )
     }
 
+    fn pair_model() -> AppModel {
+        AppModel::new_pair(
+            Header {
+                version: "0".to_string(),
+                provider: "provider-a".to_string(),
+                model: "model-a".to_string(),
+                workspace: "workspace".to_string(),
+                branch: Some("main".to_string()),
+                workspace_dirty: Some(false),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
+                session_id: "session-a".to_string(),
+                session_name: Some("Alpha".to_string()),
+            },
+            SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: Some("Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        )
+    }
+
     #[test]
     fn explicit_accessors_project_the_existing_single_state_without_transformation() {
         let mut app = model();
@@ -3959,6 +4128,118 @@ mod tests {
         assert_eq!(app.active_context_usage(), Some((5, 8)));
         app.apply_runtime(RuntimeUpdate::Text("bytes".to_string()));
         assert_eq!(app.active_stream_bytes(), 5);
+    }
+
+    #[test]
+    fn peer_switching_preserves_shared_surfaces_and_resumes_named_searches() {
+        let mut app = pair_model();
+        app.active_timeline_mut()
+            .push(ItemKind::User, "alpha marker")
+            .expect("A item");
+        app.open_timeline_search("alpha".to_string());
+        assert!(app.select_pair_pane(PeerPane::B));
+        app.active_timeline_mut()
+            .push(ItemKind::User, "beta marker")
+            .expect("B item");
+        app.open_timeline_search("beta".to_string());
+
+        assert!(app.select_pair_pane(PeerPane::A));
+        assert_eq!(app.timeline_search().expect("A search").query, "alpha");
+        assert_eq!(
+            app.handle_input(InputAction::CyclePeer, 80),
+            AppCommand::None
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_eq!(app.timeline_search().expect("B search").query, "beta");
+        assert_eq!(
+            app.handle_input(InputAction::CyclePeer, 80),
+            AppCommand::None
+        );
+        assert_eq!(
+            app.timeline_search().expect("A search again").query,
+            "alpha"
+        );
+
+        app.projections.active_mut().timeline_search = None;
+        app.editor.replace_draft("/mo");
+        app.set_command_catalog([CompletionCommand {
+            name: "model".to_string(),
+            description: "switch model".to_string(),
+        }]);
+        app.refresh_or_open_completion();
+        app.quick_help = true;
+        assert!(app.completion().is_some());
+        assert_eq!(
+            app.handle_input(InputAction::CyclePeer, 80),
+            AppCommand::None
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert!(app.completion().is_some());
+        assert!(app.quick_help());
+
+        let mut takeover = pair_model();
+        takeover.open_help();
+        assert_eq!(
+            takeover.handle_input(InputAction::CyclePeer, 80),
+            AppCommand::None
+        );
+        assert_eq!(takeover.active_pair_pane(), Some(PeerPane::B));
+        assert!(takeover.has_takeover());
+
+        let mut theme = pair_model();
+        theme.open_theme_picker();
+        assert_eq!(
+            theme.handle_input(InputAction::CyclePeer, 80),
+            AppCommand::None
+        );
+        assert_eq!(theme.active_pair_pane(), Some(PeerPane::B));
+        assert!(theme.has_theme_picker());
+
+        let mut single = model();
+        assert!(!single.select_pair_pane(PeerPane::A));
+        assert!(!single.cycle_pair_pane());
+    }
+
+    #[test]
+    fn named_dialogs_lock_and_retain_the_requesting_peer() {
+        let mut app = pair_model();
+        assert!(app.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert_eq!(app.dialog_peer(), Some(PeerPane::B));
+        assert!(!app.select_pair_pane(PeerPane::A));
+        assert!(!app.cycle_pair_pane());
+        assert!(!app.request_question_for(
+            PeerPane::A,
+            None,
+            "replace?",
+            Vec::<QuestionOption>::new(),
+            false,
+            1,
+            1,
+        ));
+        assert_eq!(app.dialog_peer(), Some(PeerPane::B));
+
+        app.clear_dialog();
+        assert_eq!(app.dialog_peer(), None);
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert!(app.cycle_pair_pane());
+        app.request_question(
+            None,
+            "continue?",
+            [QuestionOption {
+                label: "Yes".to_string(),
+                description: None,
+            }],
+            false,
+            1,
+            1,
+        );
+        assert_eq!(app.dialog_peer(), Some(PeerPane::A));
+
+        let mut single = model();
+        assert!(!single.request_approval_for(PeerPane::A, "write", "target", "ask"));
+        assert_eq!(single.dialog, None);
+        assert_eq!(single.dialog_peer(), None);
     }
 
     #[test]
@@ -4137,9 +4418,12 @@ mod tests {
         app.cancel_input_overlay();
         assert_eq!(app.editor.text(), "draft-b");
         assert!(app.timeline_search().is_none());
+        assert!(app.select_pair_pane(PeerPane::A));
         app.request_approval("shared tool", "shared target", "ask");
         assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
-        app.projections.select(PeerPane::A);
+        assert_eq!(app.dialog_peer(), Some(PeerPane::A));
+        assert!(!app.select_pair_pane(PeerPane::B));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
         assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
 
         app.clear_conversation();
