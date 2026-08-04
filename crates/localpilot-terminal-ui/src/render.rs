@@ -3192,6 +3192,21 @@ mod tests {
         }
     }
 
+    fn snapshot_header() -> Header {
+        Header {
+            version: "snapshot-version".to_string(),
+            provider: "snapshot-provider".to_string(),
+            model: "snapshot-model".to_string(),
+            workspace: "snapshot-workspace".to_string(),
+            branch: Some("snapshot-branch".to_string()),
+            workspace_dirty: Some(false),
+            mode: "agent".to_string(),
+            profile: "snapshot-profile".to_string(),
+            session_id: "snapshot-session-a".to_string(),
+            session_name: Some("Snapshot Alpha".to_string()),
+        }
+    }
+
     fn model() -> AppModel {
         AppModel::new(header(), TerminalCapabilities::default())
     }
@@ -3213,6 +3228,81 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    // These snapshots intentionally freeze character cells and geometry only.
+    // Focus and muted styles stay covered by targeted cell-style assertions.
+    fn character_cell_snapshot(buffer: &Buffer) -> String {
+        let mut snapshot = String::new();
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                match buffer[(x, y)].symbol() {
+                    "" => snapshot.push('∅'),
+                    " " => snapshot.push('␠'),
+                    symbol => snapshot.push_str(symbol),
+                }
+            }
+            snapshot.push('\n');
+        }
+        snapshot
+    }
+
+    fn render_test_frame(app: &AppModel, width: u16, height: u16) -> (Buffer, HitMap) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, app)))
+            .expect("draw test frame");
+        (
+            terminal.backend().buffer().clone(),
+            hit_map.expect("test hit map"),
+        )
+    }
+
+    fn add_snapshot_peer_turn(app: &mut AppModel, peer: PeerPane, marker: &str, turn: usize) {
+        let _ = app
+            .timeline_for_mut(peer)
+            .expect("named peer timeline")
+            .push(
+                ItemKind::User,
+                format!("{marker}_PROMPT_{turn:02} inspect the requested module"),
+            );
+        assert!(app.apply_runtime_for(
+            peer,
+            crate::RuntimeUpdate::Reasoning(format!(
+                "{marker}_REASONING_{turn:02} checking context"
+            )),
+        ));
+        if turn == 4 {
+            let id = format!("snapshot-{marker}-{turn}");
+            let name = format!("{marker}_TOOL");
+            assert!(app.apply_runtime_for(
+                peer,
+                crate::RuntimeUpdate::ToolStarted {
+                    id: id.clone(),
+                    name: name.clone(),
+                    detail: format!("{marker}_TARGET.rs"),
+                },
+            ));
+            assert!(app.apply_runtime_for(
+                peer,
+                crate::RuntimeUpdate::ToolFinished {
+                    id,
+                    name,
+                    is_error: false,
+                    cancelled: false,
+                    output: format!("{marker}_OUTPUT_ONE\n{marker}_OUTPUT_TWO\n"),
+                    duration_ms: 250,
+                },
+            ));
+        }
+        assert!(app.apply_runtime_for(
+            peer,
+            crate::RuntimeUpdate::Text(format!(
+                "{marker}_ANSWER_{turn:02} completed the requested review"
+            )),
+        ));
+        assert!(app.apply_runtime_for(peer, crate::RuntimeUpdate::Stopped(crate::StopState::Done),));
     }
 
     #[test]
@@ -3396,6 +3486,104 @@ mod tests {
             .backend()
             .to_string()
             .contains("F6          switch peer"));
+    }
+
+    #[test]
+    fn peer_frame_snapshot_preserves_focus_and_independent_scroll_positions() {
+        let mut app = AppModel::new_pair(
+            snapshot_header(),
+            crate::SessionHeader {
+                provider: "snapshot-provider-b".to_string(),
+                model: "snapshot-model-b".to_string(),
+                session_id: "snapshot-session-b".to_string(),
+                session_name: Some("Snapshot Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        );
+        for turn in 0..14 {
+            add_snapshot_peer_turn(&mut app, PeerPane::A, "ALPHA", turn);
+            add_snapshot_peer_turn(&mut app, PeerPane::B, "BETA", turn);
+        }
+
+        let (_, initial_hits) = render_test_frame(&app, 120, 30);
+        let timelines = initial_hits.timelines.as_ref().expect("wide timelines");
+        let initial_a = timelines.for_peer(PeerPane::A).expect("peer A").clone();
+        let initial_b = timelines.for_peer(PeerPane::B).expect("peer B").clone();
+        app.timeline_for_mut(PeerPane::A)
+            .expect("peer A timeline")
+            .scroll_to_row(6, initial_a.timeline.width, initial_a.timeline.height);
+        app.timeline_for_mut(PeerPane::B)
+            .expect("peer B timeline")
+            .scroll_to_row(19, initial_b.timeline.width, initial_b.timeline.height);
+        let starts_before_focus = (
+            app.timeline_for(PeerPane::A)
+                .expect("peer A timeline")
+                .view(initial_a.timeline.width, initial_a.timeline.height)
+                .start,
+            app.timeline_for(PeerPane::B)
+                .expect("peer B timeline")
+                .view(initial_b.timeline.width, initial_b.timeline.height)
+                .start,
+        );
+        assert_eq!(starts_before_focus, (6, 19));
+        assert_eq!(
+            app.handle_input(crate::InputAction::CyclePeer, initial_hits.composer.width),
+            crate::AppCommand::None
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+
+        let (wide_buffer, wide_hits) = render_test_frame(&app, 120, 30);
+        let wide_timelines = wide_hits.timelines.as_ref().expect("wide timelines");
+        let wide_a = wide_timelines.for_peer(PeerPane::A).expect("peer A");
+        let wide_b = wide_timelines.for_peer(PeerPane::B).expect("peer B");
+        assert_eq!(wide_a.peer, Some(PeerPane::A));
+        assert_eq!(wide_b.peer, Some(PeerPane::B));
+        assert_eq!(wide_a.timeline, initial_a.timeline);
+        assert_eq!(wide_b.timeline, initial_b.timeline);
+        let starts_after_focus = (
+            app.timeline_for(PeerPane::A)
+                .expect("peer A timeline")
+                .view(wide_a.timeline.width, wide_a.timeline.height)
+                .start,
+            app.timeline_for(PeerPane::B)
+                .expect("peer B timeline")
+                .view(wide_b.timeline.width, wide_b.timeline.height)
+                .start,
+        );
+        assert_eq!(starts_after_focus, starts_before_focus);
+        let wide_a_text = rect_text(&wide_buffer, wide_a.timeline);
+        let wide_b_text = rect_text(&wide_buffer, wide_b.timeline);
+        assert!(wide_a_text.contains("ALPHA_"));
+        assert!(!wide_a_text.contains("BETA_"));
+        assert!(wide_b_text.contains("BETA_"));
+        assert!(!wide_b_text.contains("ALPHA_"));
+        let wide_text = rect_text(&wide_buffer, wide_buffer.area);
+        assert!(wide_text.contains("Peer B [active]"));
+        assert!(!wide_text.contains("Peer A [active]"));
+
+        let (narrow_buffer, narrow_hits) = render_test_frame(&app, 60, 24);
+        let narrow_timelines = narrow_hits.timelines.as_ref().expect("narrow timeline");
+        assert!(narrow_timelines.for_peer(PeerPane::A).is_none());
+        assert_eq!(
+            narrow_timelines
+                .for_peer(PeerPane::B)
+                .and_then(|timeline| timeline.peer),
+            Some(PeerPane::B)
+        );
+        let narrow_text = rect_text(&narrow_buffer, narrow_buffer.area);
+        assert!(narrow_text.contains("Peer B [active]"));
+        assert!(!narrow_text.contains("Peer A"));
+
+        let wide_snapshot = character_cell_snapshot(&wide_buffer);
+        let narrow_snapshot = character_cell_snapshot(&narrow_buffer);
+        assert_eq!(
+            wide_snapshot,
+            include_str!("fixtures/peer_wide_120x30.cells")
+        );
+        assert_eq!(
+            narrow_snapshot,
+            include_str!("fixtures/peer_narrow_60x24.cells")
+        );
     }
 
     #[test]
@@ -4326,18 +4514,19 @@ mod tests {
         for (width, height) in [(120, 30), (80, 24), (40, 20)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal");
-            let mut app = model();
+            let mut app = AppModel::new(snapshot_header(), TerminalCapabilities::default());
             app.set_tabs([
                 TabId::Session,
                 TabId::Plan,
                 TabId::Activity,
                 TabId::Settings,
             ]);
-            app.editor.insert("draft");
+            app.editor.insert("snapshot draft");
             for number in 0..80 {
-                let _ = app
-                    .active_timeline_mut()
-                    .push(ItemKind::Assistant, format!("response {number:03}"));
+                let _ = app.active_timeline_mut().push(
+                    ItemKind::Assistant,
+                    format!("snapshot response {number:03}"),
+                );
             }
             let mut hit_map = None;
             terminal
@@ -4363,6 +4552,14 @@ mod tests {
             );
             assert!(buffer_line(buffer, layout.status.y).contains("workspace"));
             assert!(buffer_line(buffer, layout.footer.y).contains("Ctrl+C"));
+            if (width, height) == (80, 24) {
+                // Captured at the last commit before paired render/layout geometry
+                // first landed in d7a6115.
+                assert_eq!(
+                    character_cell_snapshot(buffer),
+                    include_str!("fixtures/single_chat_80x24.cells")
+                );
+            }
             if width == 40 {
                 assert_eq!(layout.status.height, 2);
                 assert_eq!(layout.footer.height, 2);
