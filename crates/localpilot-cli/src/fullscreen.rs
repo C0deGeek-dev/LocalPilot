@@ -34,7 +34,7 @@ use localpilot_terminal_ui::{
     KeyboardSupport, PlanEntry, QuestionOption as UiQuestionOption, QuestionResponse,
     RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
     StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, TimelineNavigation,
-    UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
+    TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -2707,6 +2707,10 @@ fn route_pointer_or_navigation(
     }
 }
 
+fn active_timeline_hits<'a>(app: &AppModel, hit_map: &'a HitMap) -> Option<&'a TimelinePaneHits> {
+    hit_map.timelines.as_ref()?.active(app.active_pair_pane())
+}
+
 fn handle_mouse_event(
     app: &mut AppModel,
     mouse: MouseEvent,
@@ -2755,14 +2759,14 @@ fn handle_mouse_event(
             if hit_map.takeover {
                 app.scroll_takeover_by(
                     -WHEEL_SCROLL_ROWS,
-                    hit_map.scrollbar.total_rows,
-                    hit_map.scrollbar.viewport_rows,
+                    hit_map.takeover_scrollbar.total_rows,
+                    hit_map.takeover_scrollbar.viewport_rows,
                 );
-            } else {
+            } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
                 app.active_timeline_mut().scroll_by(
                     -WHEEL_SCROLL_ROWS,
-                    hit_map.timeline_wrap_width,
-                    hit_map.timeline.height,
+                    timeline.wrap_width,
+                    timeline.timeline.height,
                 );
             }
             RoutedEvent::Handled
@@ -2772,14 +2776,14 @@ fn handle_mouse_event(
             if hit_map.takeover {
                 app.scroll_takeover_by(
                     WHEEL_SCROLL_ROWS,
-                    hit_map.scrollbar.total_rows,
-                    hit_map.scrollbar.viewport_rows,
+                    hit_map.takeover_scrollbar.total_rows,
+                    hit_map.takeover_scrollbar.viewport_rows,
                 );
-            } else {
+            } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
                 app.active_timeline_mut().scroll_by(
                     WHEEL_SCROLL_ROWS,
-                    hit_map.timeline_wrap_width,
-                    hit_map.timeline.height,
+                    timeline.wrap_width,
+                    timeline.timeline.height,
                 );
             }
             RoutedEvent::Handled
@@ -2788,30 +2792,44 @@ fn handle_mouse_event(
             app.disarm_exit();
             mouse_state.reset_gesture();
 
-            if rect_contains(hit_map.scrollbar.track, mouse.column, mouse.row) {
-                if let Some(thumb) = hit_map.scrollbar.thumb {
-                    if rect_contains(thumb, mouse.column, mouse.row) {
-                        mouse_state.scrollbar_grab = Some(mouse.row.saturating_sub(thumb.y));
-                    } else {
-                        let delta =
-                            isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
-                        let delta = if mouse.row < thumb.y { -delta } else { delta };
-                        if hit_map.takeover {
-                            app.scroll_takeover_by(
-                                delta,
-                                hit_map.scrollbar.total_rows,
-                                hit_map.scrollbar.viewport_rows,
-                            );
+            let active_timeline = active_timeline_hits(app, hit_map);
+            let scrollbar = if hit_map.takeover {
+                Some(&hit_map.takeover_scrollbar)
+            } else {
+                active_timeline.map(|timeline| &timeline.scrollbar)
+            };
+            if let Some(scrollbar) = scrollbar {
+                if rect_contains(scrollbar.track, mouse.column, mouse.row) {
+                    if let Some(thumb) = scrollbar.thumb {
+                        if rect_contains(thumb, mouse.column, mouse.row) {
+                            mouse_state.scrollbar_grab = Some(mouse.row.saturating_sub(thumb.y));
                         } else {
-                            app.active_timeline_mut().scroll_by(
-                                delta,
-                                hit_map.timeline_wrap_width,
-                                hit_map.timeline.height,
-                            );
+                            let viewport_height = if hit_map.takeover {
+                                usize::from(hit_map.takeover_content.height.max(1))
+                            } else {
+                                active_timeline.map_or(1, |timeline| {
+                                    usize::from(timeline.timeline.height.max(1))
+                                })
+                            };
+                            let delta = isize::try_from(viewport_height).unwrap_or(isize::MAX);
+                            let delta = if mouse.row < thumb.y { -delta } else { delta };
+                            if hit_map.takeover {
+                                app.scroll_takeover_by(
+                                    delta,
+                                    scrollbar.total_rows,
+                                    scrollbar.viewport_rows,
+                                );
+                            } else if let Some(timeline) = active_timeline {
+                                app.active_timeline_mut().scroll_by(
+                                    delta,
+                                    timeline.wrap_width,
+                                    timeline.timeline.height,
+                                );
+                            }
                         }
                     }
+                    return RoutedEvent::Handled;
                 }
-                return RoutedEvent::Handled;
             }
 
             if hit_map.takeover {
@@ -2841,15 +2859,17 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
 
-            if let Some(hit) = hit_map.timeline_rows.iter().find(|hit| {
-                hit.y == mouse.row
-                    && mouse.column >= hit_map.timeline.x
-                    && mouse.column < hit.content_x
-                    && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
-            }) {
-                if app.active_timeline_mut().toggle_expandable(hit.row.item_id) {
-                    app.active_timeline_mut().clear_selection();
-                    return RoutedEvent::Handled;
+            if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                if let Some(hit) = timeline.rows.iter().find(|hit| {
+                    hit.y == mouse.row
+                        && mouse.column >= timeline.timeline.x
+                        && mouse.column < hit.content_x
+                        && matches!(hit.row.part, VisualRowPart::Content { first: true, .. })
+                }) {
+                    if app.active_timeline_mut().toggle_expandable(hit.row.item_id) {
+                        app.active_timeline_mut().clear_selection();
+                        return RoutedEvent::Handled;
+                    }
                 }
             }
 
@@ -2869,7 +2889,9 @@ fn handle_mouse_event(
                 return RoutedEvent::Handled;
             }
 
-            if let Some((leading, trailing)) = selection_points(hit_map, mouse.column, mouse.row) {
+            if let Some((leading, trailing)) =
+                selection_points(app, hit_map, mouse.column, mouse.row)
+            {
                 app.active_timeline_mut().start_selection(leading);
                 mouse_state.selection = Some(SelectionGesture {
                     leading,
@@ -2887,18 +2909,23 @@ fn handle_mouse_event(
             app.disarm_exit();
             if let Some(grab) = mouse_state.scrollbar_grab {
                 let thumb_top = mouse.row.saturating_sub(grab);
-                if let Some(start) = hit_map.scrollbar.content_start_for_thumb_top(thumb_top) {
-                    if hit_map.takeover {
+                if hit_map.takeover {
+                    if let Some(start) = hit_map
+                        .takeover_scrollbar
+                        .content_start_for_thumb_top(thumb_top)
+                    {
                         app.scroll_takeover_to(
                             start,
-                            hit_map.scrollbar.total_rows,
-                            hit_map.scrollbar.viewport_rows,
+                            hit_map.takeover_scrollbar.total_rows,
+                            hit_map.takeover_scrollbar.viewport_rows,
                         );
-                    } else {
+                    }
+                } else if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                    if let Some(start) = timeline.scrollbar.content_start_for_thumb_top(thumb_top) {
                         app.active_timeline_mut().scroll_to_row(
                             start,
-                            hit_map.timeline_wrap_width,
-                            hit_map.timeline.height,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
                         );
                     }
                 }
@@ -2944,7 +2971,9 @@ fn handle_mouse_event(
             if rect_contains(hit_map.composer, mouse.column, mouse.row) {
                 return RoutedEvent::PasteClipboard;
             }
-            if rect_contains(hit_map.timeline, mouse.column, mouse.row) {
+            if active_timeline_hits(app, hit_map)
+                .is_some_and(|timeline| rect_contains(timeline.timeline, mouse.column, mouse.row))
+            {
                 return app
                     .active_timeline()
                     .selected_text()
@@ -2974,18 +3003,15 @@ fn advance_mouse_selection(app: &mut AppModel, hit_map: &HitMap, mouse_state: &M
     let Some((column, row)) = mouse_state.selection_pointer else {
         return;
     };
-    if row < hit_map.timeline.y {
-        app.active_timeline_mut().scroll_by(
-            -1,
-            hit_map.timeline_wrap_width,
-            hit_map.timeline.height,
-        );
-    } else if row >= hit_map.timeline.bottom() {
-        app.active_timeline_mut().scroll_by(
-            1,
-            hit_map.timeline_wrap_width,
-            hit_map.timeline.height,
-        );
+    let Some(timeline) = active_timeline_hits(app, hit_map) else {
+        return;
+    };
+    if row < timeline.timeline.y {
+        app.active_timeline_mut()
+            .scroll_by(-1, timeline.wrap_width, timeline.timeline.height);
+    } else if row >= timeline.timeline.bottom() {
+        app.active_timeline_mut()
+            .scroll_by(1, timeline.wrap_width, timeline.timeline.height);
     }
     extend_mouse_selection(app, hit_map, mouse_state, column, row);
 }
@@ -3000,7 +3026,7 @@ fn extend_mouse_selection(
     let Some(gesture) = mouse_state.selection else {
         return;
     };
-    let Some((leading, trailing)) = selection_points_nearest(hit_map, column, row) else {
+    let Some((leading, trailing)) = selection_points_nearest(app, hit_map, column, row) else {
         return;
     };
     if (row, column) >= (gesture.origin_row, gesture.origin_column) {
@@ -3013,11 +3039,15 @@ fn extend_mouse_selection(
 }
 
 fn selection_points(
+    app: &AppModel,
     hit_map: &HitMap,
     column: u16,
     row: u16,
 ) -> Option<(ContentPoint, ContentPoint)> {
-    let hit = hit_map.timeline_rows.iter().find(|hit| hit.y == row)?;
+    let hit = active_timeline_hits(app, hit_map)?
+        .rows
+        .iter()
+        .find(|hit| hit.y == row)?;
     Some((
         hit.point_for_column(column, false),
         hit.point_for_column(column, true),
@@ -3025,13 +3055,14 @@ fn selection_points(
 }
 
 fn selection_points_nearest(
+    app: &AppModel,
     hit_map: &HitMap,
     column: u16,
     row: u16,
 ) -> Option<(ContentPoint, ContentPoint)> {
-    selection_points(hit_map, column, row).or_else(|| {
-        let hit = hit_map
-            .timeline_rows
+    selection_points(app, hit_map, column, row).or_else(|| {
+        let hit = active_timeline_hits(app, hit_map)?
+            .rows
             .iter()
             .min_by_key(|hit| hit.y.abs_diff(row))?;
         Some((
@@ -3050,23 +3081,26 @@ fn apply_timeline_navigation(app: &mut AppModel, navigation: TimelineNavigation,
         apply_takeover_navigation(app, navigation, hit_map);
         return;
     }
-    let page = isize::try_from(hit_map.timeline.height.max(1)).unwrap_or(isize::MAX);
+    let Some(timeline) = active_timeline_hits(app, hit_map) else {
+        return;
+    };
+    let page = isize::try_from(timeline.timeline.height.max(1)).unwrap_or(isize::MAX);
     match navigation {
         TimelineNavigation::PageUp => app.active_timeline_mut().scroll_by(
             -page,
-            hit_map.timeline_wrap_width,
-            hit_map.timeline.height,
+            timeline.wrap_width,
+            timeline.timeline.height,
         ),
-        TimelineNavigation::PageDown => app.active_timeline_mut().scroll_by(
-            page,
-            hit_map.timeline_wrap_width,
-            hit_map.timeline.height,
-        ),
+        TimelineNavigation::PageDown => {
+            app.active_timeline_mut()
+                .scroll_by(page, timeline.wrap_width, timeline.timeline.height)
+        }
     }
 }
 
 fn apply_takeover_navigation(app: &mut AppModel, navigation: TakeoverNavigation, hit_map: &HitMap) {
-    let page = isize::try_from(hit_map.scrollbar.viewport_rows.max(1)).unwrap_or(isize::MAX);
+    let page =
+        isize::try_from(hit_map.takeover_scrollbar.viewport_rows.max(1)).unwrap_or(isize::MAX);
     let delta = match navigation {
         TakeoverNavigation::LineUp => -1,
         TakeoverNavigation::LineDown => 1,
@@ -3075,8 +3109,8 @@ fn apply_takeover_navigation(app: &mut AppModel, navigation: TakeoverNavigation,
     };
     app.scroll_takeover_by(
         delta,
-        hit_map.scrollbar.total_rows,
-        hit_map.scrollbar.viewport_rows,
+        hit_map.takeover_scrollbar.total_rows,
+        hit_map.takeover_scrollbar.viewport_rows,
     );
 }
 
@@ -3180,16 +3214,24 @@ fn handle_question_event(
         Event::Mouse(mouse) => {
             app.disarm_exit();
             match mouse.kind {
-                MouseEventKind::ScrollUp => app.active_timeline_mut().scroll_by(
-                    -WHEEL_SCROLL_ROWS,
-                    hit_map.timeline_wrap_width,
-                    hit_map.timeline.height,
-                ),
-                MouseEventKind::ScrollDown => app.active_timeline_mut().scroll_by(
-                    WHEEL_SCROLL_ROWS,
-                    hit_map.timeline_wrap_width,
-                    hit_map.timeline.height,
-                ),
+                MouseEventKind::ScrollUp => {
+                    if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                        app.active_timeline_mut().scroll_by(
+                            -WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                        app.active_timeline_mut().scroll_by(
+                            WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(hit) = hit_map
                         .question_rows
@@ -3741,6 +3783,14 @@ mod tests {
         draw_hit_map(&app(), 80, 24)
     }
 
+    fn single_hits(hit_map: &HitMap) -> &TimelinePaneHits {
+        hit_map
+            .timelines
+            .as_ref()
+            .and_then(|timelines| timelines.active(None))
+            .expect("single timeline hits")
+    }
+
     fn app() -> AppModel {
         AppModel::new(
             Header {
@@ -3847,6 +3897,7 @@ mod tests {
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
+        let timeline = single_hits(&hit_map);
         let mut mouse_state = MouseState::default();
         app.exit_armed = true;
         assert_eq!(
@@ -3854,8 +3905,8 @@ mod tests {
                 &mut app,
                 &Event::Mouse(mouse(
                     MouseEventKind::ScrollUp,
-                    hit_map.timeline.x,
-                    hit_map.timeline.y,
+                    timeline.timeline.x,
+                    timeline.timeline.y,
                 )),
                 &hit_map,
                 &mut mouse_state,
@@ -3871,13 +3922,14 @@ mod tests {
         app.active_timeline_mut().follow_bottom();
         app.begin_work();
         let busy_hit_map = draw_hit_map(&app, 80, 24);
+        let busy_timeline = single_hits(&busy_hit_map);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
                 &Event::Mouse(mouse(
                     MouseEventKind::ScrollUp,
-                    busy_hit_map.timeline.x,
-                    busy_hit_map.timeline.y,
+                    busy_timeline.timeline.x,
+                    busy_timeline.timeline.y,
                 )),
                 &busy_hit_map,
                 &mut mouse_state,
@@ -4427,8 +4479,8 @@ mod tests {
             .active_timeline_mut()
             .push(ItemKind::Assistant, "alpha 界 beta");
         let hit_map = draw_hit_map(&app, 80, 24);
-        let hit = hit_map
-            .timeline_rows
+        let hit = single_hits(&hit_map)
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("assistant row hit");
@@ -4523,8 +4575,8 @@ mod tests {
             .push(ItemKind::Assistant, "copy explicitly");
         assert!(!app.copy_on_select());
         let hit_map = draw_hit_map(&app, 80, 24);
-        let hit = hit_map
-            .timeline_rows
+        let hit = single_hits(&hit_map)
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("assistant row hit");
@@ -4581,8 +4633,8 @@ mod tests {
             .active_timeline_mut()
             .push(ItemKind::Assistant, "copy explicitly");
         let hit_map = draw_hit_map(&app, 80, 24);
-        let hit = hit_map
-            .timeline_rows
+        let hit = single_hits(&hit_map)
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("assistant row hit");
@@ -4662,8 +4714,8 @@ mod tests {
             .active_timeline_mut()
             .push(ItemKind::Assistant, "select me");
         let hit_map = draw_hit_map(&app, 80, 24);
-        let hit = hit_map
-            .timeline_rows
+        let hit = single_hits(&hit_map)
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("assistant row hit");
@@ -4730,7 +4782,10 @@ mod tests {
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
-        let origin = hit_map.timeline_rows.last().expect("visible timeline row");
+        let origin = single_hits(&hit_map)
+            .rows
+            .last()
+            .expect("visible timeline row");
         let mut mouse_state = MouseState::default();
         assert_eq!(
             route_pointer_or_navigation(
@@ -4751,7 +4806,7 @@ mod tests {
                 &Event::Mouse(mouse(
                     MouseEventKind::Drag(MouseButton::Left),
                     origin.content_x,
-                    hit_map.timeline.y.saturating_sub(1),
+                    single_hits(&hit_map).timeline.y.saturating_sub(1),
                 )),
                 &hit_map,
                 &mut mouse_state,
@@ -4760,11 +4815,11 @@ mod tests {
         );
 
         let after_drag = draw_hit_map(&app, 80, 24);
-        let start_after_drag = after_drag.scrollbar.start;
+        let start_after_drag = single_hits(&after_drag).scrollbar.start;
         advance_mouse_selection(&mut app, &after_drag, &mouse_state);
         let after_stationary_tick = draw_hit_map(&app, 80, 24);
 
-        assert!(after_stationary_tick.scrollbar.start < start_after_drag);
+        assert!(single_hits(&after_stationary_tick).scrollbar.start < start_after_drag);
         assert!(app.active_timeline().selected_text().is_some());
     }
 
@@ -4798,8 +4853,8 @@ mod tests {
                 .expanded
         );
         let hit_map = draw_hit_map(&app, 80, 24);
-        let hit = hit_map
-            .timeline_rows
+        let hit = single_hits(&hit_map)
+            .rows
             .iter()
             .find(|hit| hit.row.item_id == tool)
             .expect("tool row hit");
@@ -4810,7 +4865,7 @@ mod tests {
                 &mut app,
                 &Event::Mouse(mouse(
                     MouseEventKind::Down(MouseButton::Left),
-                    hit_map.timeline.x,
+                    single_hits(&hit_map).timeline.x,
                     hit.y,
                 )),
                 &hit_map,
@@ -4836,7 +4891,10 @@ mod tests {
                 .push(ItemKind::Assistant, format!("response {number:03}"));
         }
         let hit_map = draw_hit_map(&app, 80, 24);
-        let thumb = hit_map.scrollbar.thumb.expect("scrollbar thumb");
+        let thumb = single_hits(&hit_map)
+            .scrollbar
+            .thumb
+            .expect("scrollbar thumb");
         let mut mouse_state = MouseState::default();
 
         assert_eq!(
@@ -4859,7 +4917,7 @@ mod tests {
                 &Event::Mouse(mouse(
                     MouseEventKind::Drag(MouseButton::Left),
                     thumb.x,
-                    hit_map.scrollbar.track.y,
+                    single_hits(&hit_map).scrollbar.track.y,
                 )),
                 &hit_map,
                 &mut mouse_state,
@@ -4873,7 +4931,7 @@ mod tests {
                 &Event::Mouse(mouse(
                     MouseEventKind::Up(MouseButton::Left),
                     thumb.x,
-                    hit_map.scrollbar.track.y,
+                    single_hits(&hit_map).scrollbar.track.y,
                 )),
                 &hit_map,
                 &mut mouse_state,
@@ -4884,7 +4942,7 @@ mod tests {
 
         app.active_timeline_mut().follow_bottom();
         let hit_map = draw_hit_map(&app, 80, 24);
-        let thumb = hit_map.scrollbar.thumb.expect("bottom thumb");
+        let thumb = single_hits(&hit_map).scrollbar.thumb.expect("bottom thumb");
         let click_y = thumb.y.saturating_sub(1);
         assert_eq!(
             route_pointer_or_navigation(
@@ -4912,7 +4970,7 @@ mod tests {
         app.open_help();
         let mut hit_map = draw_hit_map(&app, 80, 20);
         assert!(hit_map.takeover);
-        assert_eq!(hit_map.scrollbar.start, 0);
+        assert_eq!(hit_map.takeover_scrollbar.start, 0);
         let mut mouse_state = MouseState::default();
 
         assert_eq!(
@@ -4925,10 +4983,13 @@ mod tests {
             RoutedEvent::Handled
         );
         hit_map = draw_hit_map(&app, 80, 20);
-        assert!(hit_map.scrollbar.start > 0);
+        assert!(hit_map.takeover_scrollbar.start > 0);
 
-        let thumb = hit_map.scrollbar.thumb.expect("help scrollbar thumb");
-        let track_bottom = hit_map.scrollbar.track.bottom().saturating_sub(1);
+        let thumb = hit_map
+            .takeover_scrollbar
+            .thumb
+            .expect("help scrollbar thumb");
+        let track_bottom = hit_map.takeover_scrollbar.track.bottom().saturating_sub(1);
         assert_eq!(
             route_pointer_or_navigation(
                 &mut app,
@@ -4957,11 +5018,11 @@ mod tests {
         );
         hit_map = draw_hit_map(&app, 80, 20);
         assert_eq!(
-            hit_map.scrollbar.start,
+            hit_map.takeover_scrollbar.start,
             hit_map
-                .scrollbar
+                .takeover_scrollbar
                 .total_rows
-                .saturating_sub(hit_map.scrollbar.viewport_rows)
+                .saturating_sub(hit_map.takeover_scrollbar.viewport_rows)
         );
         assert_eq!(
             route_pointer_or_navigation(

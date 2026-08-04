@@ -164,11 +164,17 @@ impl ProjectionSet {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn projection(&self, peer: PeerPane) -> Option<&SessionProjection> {
         match self {
             Self::Single(_) => None,
             Self::Pair { projections, .. } => Some(&projections[peer.index()]),
+        }
+    }
+
+    pub(super) fn projection_mut(&mut self, peer: PeerPane) -> Option<&mut SessionProjection> {
+        match self {
+            Self::Single(_) => None,
+            Self::Pair { projections, .. } => Some(&mut projections[peer.index()]),
         }
     }
 }

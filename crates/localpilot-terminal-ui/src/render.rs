@@ -5,7 +5,10 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView};
+use crate::app::{
+    sanitize_inline, CompletionKind, DiffPane, QuestionView, TakeoverView, TrustView,
+};
+use crate::projection::{PeerPane, SessionProjection};
 use crate::{
     ActivityState, AppModel, ColorSupport, DialogState, Focus, FrameLayout, ItemKind, PinnedPrompt,
     TabId, TakeoverKind, TextStyle, Theme, ThemeResolver, TimelineLayout, TimelinePaneLayout,
@@ -200,14 +203,135 @@ impl TimelineRowHit {
     }
 }
 
+/// Hit-test and viewport geometry for one visible session timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelinePaneHits {
+    pub peer: Option<PeerPane>,
+    pub label: Option<Rect>,
+    pub viewport: Rect,
+    pub timeline: Rect,
+    pub wrap_width: u16,
+    pub rows: Vec<TimelineRowHit>,
+    pub scrollbar: ScrollbarGeometry,
+}
+
+impl TimelinePaneHits {
+    #[must_use]
+    pub const fn contains(&self, column: u16, row: u16) -> bool {
+        let in_viewport = column >= self.viewport.x
+            && column < self.viewport.right()
+            && row >= self.viewport.y
+            && row < self.viewport.bottom();
+        let in_label = match self.label {
+            Some(label) => {
+                column >= label.x
+                    && column < label.right()
+                    && row >= label.y
+                    && row < label.bottom()
+            }
+            None => false,
+        };
+        in_viewport || in_label
+    }
+}
+
+/// Visible timeline hit regions for an ordinary, fallback, or split frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimelineHits {
+    Single(TimelinePaneHits),
+    Pair {
+        a: TimelinePaneHits,
+        divider: Rect,
+        b: TimelinePaneHits,
+    },
+}
+
+impl TimelineHits {
+    #[must_use]
+    pub fn active(&self, active_peer: Option<PeerPane>) -> Option<&TimelinePaneHits> {
+        match self {
+            Self::Single(pane)
+                if matches!(
+                    (pane.peer, active_peer),
+                    (None, None)
+                        | (Some(PeerPane::A), Some(PeerPane::A))
+                        | (Some(PeerPane::B), Some(PeerPane::B))
+                ) =>
+            {
+                Some(pane)
+            }
+            Self::Single(_) => None,
+            Self::Pair { a, b, .. } => match active_peer {
+                Some(PeerPane::A) => Some(a),
+                Some(PeerPane::B) => Some(b),
+                None => None,
+            },
+        }
+    }
+
+    fn active_mut(&mut self, active_peer: Option<PeerPane>) -> Option<&mut TimelinePaneHits> {
+        match self {
+            Self::Single(pane)
+                if matches!(
+                    (pane.peer, active_peer),
+                    (None, None)
+                        | (Some(PeerPane::A), Some(PeerPane::A))
+                        | (Some(PeerPane::B), Some(PeerPane::B))
+                ) =>
+            {
+                Some(pane)
+            }
+            Self::Single(_) => None,
+            Self::Pair { a, b, .. } => match active_peer {
+                Some(PeerPane::A) => Some(a),
+                Some(PeerPane::B) => Some(b),
+                None => None,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn for_peer(&self, peer: PeerPane) -> Option<&TimelinePaneHits> {
+        match self {
+            Self::Single(pane) => (pane.peer == Some(peer)).then_some(pane),
+            Self::Pair { a, b, .. } => Some(match peer {
+                PeerPane::A => a,
+                PeerPane::B => b,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn at(&self, column: u16, row: u16) -> Option<&TimelinePaneHits> {
+        match self {
+            Self::Single(pane) => pane.contains(column, row).then_some(pane),
+            Self::Pair { a, b, .. } => {
+                if a.contains(column, row) {
+                    Some(a)
+                } else {
+                    b.contains(column, row).then_some(b)
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn divider(&self) -> Option<Rect> {
+        match self {
+            Self::Single(_) => None,
+            Self::Pair { divider, .. } => Some(*divider),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitMap {
     pub takeover: bool,
+    pub takeover_content: Rect,
     pub frame: Option<FrameLayout>,
     pub tabs: Vec<TabHit>,
-    pub timeline: Rect,
-    pub timeline_wrap_width: u16,
-    pub timeline_rows: Vec<TimelineRowHit>,
+    pub timelines: Option<TimelineHits>,
     pub completion_rows: Vec<CompletionHit>,
     pub theme_rows: Vec<ThemeHit>,
     pub question_rows: Vec<QuestionHit>,
@@ -215,7 +339,7 @@ pub struct HitMap {
     pub trust_path: Option<TrustPathHit>,
     pub takeover_rows: Vec<TakeoverHit>,
     pub takeover_file_rows: Vec<TakeoverHit>,
-    pub scrollbar: ScrollbarGeometry,
+    pub takeover_scrollbar: ScrollbarGeometry,
     pub composer: Rect,
     pub editor_width: u16,
     pub composer_scroll: usize,
@@ -247,11 +371,16 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
                 .max(1)
         };
     let requested_editor_rows = u16::try_from(requested_editor_rows).unwrap_or(u16::MAX);
-    let Some(layout) = FrameLayout::calculate_for_mode(
-        area,
-        requested_editor_rows,
-        app.capabilities.screen_reader,
-    ) else {
+    let layout = if app.is_pair() {
+        FrameLayout::calculate_pair_for_mode(
+            area,
+            requested_editor_rows,
+            app.capabilities.screen_reader,
+        )
+    } else {
+        FrameLayout::calculate_for_mode(area, requested_editor_rows, app.capabilities.screen_reader)
+    };
+    let Some(layout) = layout else {
         frame.render_widget(
             Paragraph::new(format!(
                 "{APP_NAME}\nresize to at least {MINIMUM_WIDTH} × {MINIMUM_HEIGHT}"
@@ -261,11 +390,10 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         );
         return HitMap {
             takeover: false,
+            takeover_content: Rect::default(),
             frame: None,
             tabs: Vec::new(),
-            timeline: Rect::default(),
-            timeline_wrap_width: 1,
-            timeline_rows: Vec::new(),
+            timelines: None,
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
             question_rows: Vec::new(),
@@ -273,39 +401,85 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
             trust_path: None,
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
-            scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
+            takeover_scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
             composer_scroll: 0,
         };
     };
 
-    let timeline = match layout.timeline {
-        TimelineLayout::Single(timeline) => timeline,
-        // `render` uses the ordinary single-chat constructor. Keep this local
-        // bridge total until pane-generic rendering consumes both pair panes.
-        TimelineLayout::Pair(pair) => pair.first,
-    };
     let tabs = render_tabs(frame, layout.tabs, app);
-    let timeline_wrap_width = timeline_wrap_width(timeline.content.width, app);
-    let (scrollbar, mut timeline_rows) = render_timeline(frame, timeline, app);
-    let quick_help_area = render_quick_help(frame, timeline.content, app);
-    let (completion_area, completion_rows) = render_completion(frame, timeline.content, app);
+    let active_peer = app.active_pair_pane();
+    let mut timelines = match layout.timeline {
+        TimelineLayout::Single(timeline) => {
+            let projection = app.active_projection();
+            render_peer_label(frame, timeline, active_peer, projection, app);
+            Some(TimelineHits::Single(render_timeline(
+                frame,
+                timeline,
+                active_peer,
+                projection,
+                app,
+            )))
+        }
+        TimelineLayout::Pair(pair) => {
+            let (Some(a_projection), Some(b_projection)) =
+                (app.projection(PeerPane::A), app.projection(PeerPane::B))
+            else {
+                return HitMap {
+                    takeover: false,
+                    takeover_content: Rect::default(),
+                    frame: Some(layout),
+                    tabs,
+                    timelines: None,
+                    completion_rows: Vec::new(),
+                    theme_rows: Vec::new(),
+                    question_rows: Vec::new(),
+                    trust_rows: Vec::new(),
+                    trust_path: None,
+                    takeover_rows: Vec::new(),
+                    takeover_file_rows: Vec::new(),
+                    takeover_scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
+                    composer: layout.composer_content,
+                    editor_width: 1,
+                    composer_scroll: 0,
+                };
+            };
+            render_peer_label(frame, pair.first, Some(PeerPane::A), a_projection, app);
+            render_peer_label(frame, pair.second, Some(PeerPane::B), b_projection, app);
+            render_peer_divider(frame, pair.divider, app);
+            Some(TimelineHits::Pair {
+                a: render_timeline(frame, pair.first, Some(PeerPane::A), a_projection, app),
+                divider: pair.divider,
+                b: render_timeline(frame, pair.second, Some(PeerPane::B), b_projection, app),
+            })
+        }
+    };
+    let active_timeline = timelines
+        .as_ref()
+        .and_then(|timelines| timelines.active(active_peer))
+        .map_or(Rect::default(), |hits| hits.timeline);
+    let quick_help_area = render_quick_help(frame, active_timeline, app);
+    let (completion_area, completion_rows) = render_completion(frame, active_timeline, app);
     if let Some(overlay_area) = completion_area.or(quick_help_area) {
-        timeline_rows.retain(|hit| hit.y < overlay_area.y);
+        if let Some(active) = timelines
+            .as_mut()
+            .and_then(|timelines| timelines.active_mut(active_peer))
+        {
+            active.rows.retain(|hit| hit.y < overlay_area.y);
+        }
     }
     render_status(frame, layout.status, app, layout.stacked);
     let (editor_width, composer_scroll) = render_composer(frame, layout, app);
     render_footer(frame, layout.footer, app, layout.stacked);
     let theme_rows = render_theme_picker(frame, area, app);
-    let dialog_hits = render_dialog(frame, area, timeline.content, app);
+    let dialog_hits = render_dialog(frame, area, active_timeline, app);
     HitMap {
         takeover: false,
+        takeover_content: Rect::default(),
         frame: Some(layout),
         tabs,
-        timeline: timeline.content,
-        timeline_wrap_width,
-        timeline_rows,
+        timelines,
         completion_rows,
         theme_rows,
         question_rows: dialog_hits.question_rows,
@@ -313,7 +487,7 @@ pub fn render(frame: &mut Frame<'_>, app: &AppModel) -> HitMap {
         trust_path: dialog_hits.trust_path,
         takeover_rows: Vec::new(),
         takeover_file_rows: Vec::new(),
-        scrollbar,
+        takeover_scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
         composer: layout.composer_content,
         editor_width,
         composer_scroll,
@@ -464,11 +638,10 @@ fn render_takeover(
         let dialog_hits = render_dialog(frame, area, area, app);
         return HitMap {
             takeover: true,
+            takeover_content: Rect::default(),
             frame: None,
             tabs: Vec::new(),
-            timeline: Rect::default(),
-            timeline_wrap_width: 1,
-            timeline_rows: Vec::new(),
+            timelines: None,
             completion_rows: Vec::new(),
             theme_rows: Vec::new(),
             question_rows: dialog_hits.question_rows,
@@ -476,7 +649,7 @@ fn render_takeover(
             trust_path: dialog_hits.trust_path,
             takeover_rows: Vec::new(),
             takeover_file_rows: Vec::new(),
-            scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
+            takeover_scrollbar: ScrollbarGeometry::calculate(Rect::default(), 0, 0, 0),
             composer: Rect::default(),
             editor_width: 1,
             composer_scroll: 0,
@@ -816,11 +989,10 @@ fn render_takeover(
 
     HitMap {
         takeover: true,
+        takeover_content: content,
         frame: None,
         tabs: Vec::new(),
-        timeline: content,
-        timeline_wrap_width: content.width.max(1),
-        timeline_rows: Vec::new(),
+        timelines: None,
         completion_rows: Vec::new(),
         theme_rows: Vec::new(),
         question_rows: dialog_hits.question_rows,
@@ -828,7 +1000,7 @@ fn render_takeover(
         trust_path: dialog_hits.trust_path,
         takeover_rows,
         takeover_file_rows,
-        scrollbar,
+        takeover_scrollbar: scrollbar,
         composer: Rect::default(),
         editor_width: 1,
         composer_scroll: 0,
@@ -1449,20 +1621,52 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Vec<TabHit>
     hits
 }
 
+fn render_peer_label(
+    frame: &mut Frame<'_>,
+    timeline: TimelinePaneLayout,
+    peer: Option<PeerPane>,
+    projection: &SessionProjection,
+    app: &AppModel,
+) {
+    let (Some(label), Some(peer)) = (timeline.label, peer) else {
+        return;
+    };
+    let peer = match peer {
+        PeerPane::A => "A",
+        PeerPane::B => "B",
+    };
+    let provider = sanitize_inline(&projection.header.provider);
+    let model = sanitize_inline(&projection.header.model);
+    Paragraph::new(format!(" Peer {peer} · {provider} · {model}"))
+        .style(theme(app).ui(UiRole::Muted))
+        .render(label, frame.buffer_mut());
+}
+
+fn render_peer_divider(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+    for y in area.y..area.bottom() {
+        Line::styled("│", theme(app).ui(UiRole::Border)).render(
+            Rect::new(area.x, y, area.width.min(1), 1),
+            frame.buffer_mut(),
+        );
+    }
+}
+
 fn render_timeline(
     frame: &mut Frame<'_>,
     timeline: TimelinePaneLayout,
+    peer: Option<PeerPane>,
+    projection: &SessionProjection,
     app: &AppModel,
-) -> (ScrollbarGeometry, Vec<TimelineRowHit>) {
+) -> TimelinePaneHits {
     let area = timeline.content;
     let wrap_width = timeline_wrap_width(area.width, app);
-    let view = app.active_timeline().view(wrap_width, area.height.max(1));
+    let view = projection.timeline.view(wrap_width, area.height.max(1));
     let banner_visible = view.pinned.is_none()
         && view.start == 0
         && (view.total_rows.saturating_add(usize::from(BANNER_ROWS)) <= usize::from(area.height)
-            || matches!(app.active_timeline().viewport, crate::ViewportAnchor::Top));
+            || matches!(projection.timeline.viewport, crate::ViewportAnchor::Top));
     let content_offset = if banner_visible {
-        render_idle_banner(frame, area, app);
+        render_idle_banner(frame, area, projection, app);
         BANNER_ROWS
     } else if let Some(pinned) = &view.pinned {
         render_pinned_prompt(frame, area, pinned, app);
@@ -1472,7 +1676,7 @@ fn render_timeline(
     };
     let mut row_hits = Vec::new();
     if view.rows.is_empty() && view.pinned.is_none() && !banner_visible {
-        render_idle_banner(frame, area, app);
+        render_idle_banner(frame, area, projection, app);
     } else {
         let capacity = usize::from(area.height.saturating_sub(content_offset));
         for (offset, row) in view.rows.iter().take(capacity).enumerate() {
@@ -1521,7 +1725,15 @@ fn render_timeline(
         scrollbar_viewport_rows,
     );
     draw_scrollbar(frame, scrollbar, app);
-    (scrollbar, row_hits)
+    TimelinePaneHits {
+        peer,
+        label: timeline.label,
+        viewport: timeline.viewport,
+        timeline: area,
+        wrap_width,
+        rows: row_hits,
+        scrollbar,
+    }
 }
 
 fn timeline_wrap_width(width: u16, app: &AppModel) -> u16 {
@@ -1532,7 +1744,12 @@ fn timeline_wrap_width(width: u16, app: &AppModel) -> u16 {
     }
 }
 
-fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
+fn render_idle_banner(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    projection: &SessionProjection,
+    app: &AppModel,
+) {
     let theme = theme(app);
     if app.capabilities.screen_reader {
         let rows = [
@@ -1544,7 +1761,10 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
             ),
             "Check important results.".to_string(),
             String::new(),
-            format!("{} · {}", app.active_provider(), app.active_model()),
+            format!(
+                "{} · {}",
+                projection.header.provider, projection.header.model
+            ),
             "Tip: press ? for shortcuts".to_string(),
             "Type / to browse commands".to_string(),
         ];
@@ -1573,7 +1793,10 @@ fn render_idle_banner(frame: &mut Frame<'_>, area: Rect, app: &AppModel) {
         Line::from(vec![
             Span::styled("│ >_ ● │", mark),
             Span::styled(
-                format!("  {} · {}", app.active_provider(), app.active_model()),
+                format!(
+                    "  {} · {}",
+                    projection.header.provider, projection.header.model
+                ),
                 theme.ui(UiRole::Muted),
             ),
         ]),
@@ -2914,6 +3137,25 @@ mod tests {
         AppModel::new(header(), TerminalCapabilities::default())
     }
 
+    fn single_hits(hit_map: &HitMap) -> &TimelinePaneHits {
+        hit_map
+            .timelines
+            .as_ref()
+            .and_then(|timelines| timelines.active(None))
+            .expect("single timeline hits")
+    }
+
+    fn rect_text(buffer: &Buffer, area: Rect) -> String {
+        let mut text = String::new();
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
     #[test]
     fn idle_shell_renders_target_regions_to_a_backend_neutral_frame() {
         let backend = TestBackend::new(80, 24);
@@ -2930,21 +3172,165 @@ mod tests {
         assert!(rendered.contains("Tip: press ? for shortcuts"));
         assert!(rendered.contains("Type / to browse commands"));
         let hit_map = hit_map.expect("hit map");
+        let timeline = single_hits(&hit_map);
+        let timelines = hit_map.timelines.as_ref().expect("visible timeline");
+        assert!(timelines.for_peer(PeerPane::A).is_none());
+        assert!(timelines.for_peer(PeerPane::B).is_none());
         assert_eq!(hit_map.tabs.len(), 1);
-        assert!(hit_map.timeline.height > 0);
+        assert!(timeline.timeline.height > 0);
         assert!(hit_map.composer.height > 0);
         assert_eq!(
-            hit_map.timeline.right().saturating_add(1),
-            hit_map.scrollbar.track.x,
+            timeline.timeline.right().saturating_add(1),
+            timeline.scrollbar.track.x,
             "timeline wrapping must leave one blank cell before the scrollbar"
         );
         let layout = hit_map.frame.expect("frame layout");
-        assert_eq!(layout.status.x, hit_map.timeline.x);
-        assert_eq!(layout.footer.x, hit_map.timeline.x);
+        assert_eq!(layout.status.x, timeline.timeline.x);
+        assert_eq!(layout.footer.x, timeline.timeline.x);
         assert_eq!(
-            terminal.backend().buffer()[(hit_map.timeline.right(), hit_map.timeline.y)].symbol(),
+            terminal.backend().buffer()[(timeline.timeline.right(), timeline.timeline.y)].symbol(),
             " "
         );
+    }
+
+    #[test]
+    fn pair_rendering_keeps_named_content_and_hit_geometry_isolated() {
+        let mut app = AppModel::new_pair(
+            header(),
+            crate::SessionHeader {
+                provider: "provider-b\nnext".to_string(),
+                model: "model-b\tvariant".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: Some("Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        );
+        for index in 0..24 {
+            app.apply_runtime(crate::RuntimeUpdate::Text(format!(
+                "ALPHA_ONLY_{index:02}\n"
+            )));
+            assert!(app.apply_runtime_for(
+                PeerPane::B,
+                crate::RuntimeUpdate::Text(format!("BETA_ONLY_{index:02}\n"))
+            ));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw pair");
+        let hit_map = hit_map.expect("pair hit map");
+        let timelines = hit_map.timelines.as_ref().expect("visible timelines");
+        let a = timelines.for_peer(PeerPane::A).expect("peer A hits");
+        let b = timelines.for_peer(PeerPane::B).expect("peer B hits");
+        assert_eq!(a.peer, Some(PeerPane::A));
+        assert_eq!(b.peer, Some(PeerPane::B));
+        assert_eq!(timelines.active(Some(PeerPane::A)), Some(a));
+        assert_eq!(timelines.active(Some(PeerPane::B)), Some(b));
+        assert!(timelines.active(None).is_none());
+        let TimelineLayout::Pair(layout) = hit_map.frame.expect("frame").timeline else {
+            panic!("wide pair layout")
+        };
+        assert_eq!(a.label, layout.first.label);
+        assert_eq!(a.viewport, layout.first.viewport);
+        assert_eq!(a.timeline, layout.first.content);
+        assert_eq!(a.scrollbar.track, layout.first.scrollbar);
+        assert_eq!(b.label, layout.second.label);
+        assert_eq!(b.viewport, layout.second.viewport);
+        assert_eq!(b.timeline, layout.second.content);
+        assert_eq!(b.scrollbar.track, layout.second.scrollbar);
+
+        let a_area = Rect::new(
+            a.viewport.x,
+            a.label.map_or(a.viewport.y, |label| label.y),
+            a.viewport.width,
+            a.viewport
+                .height
+                .saturating_add(u16::from(a.label.is_some())),
+        );
+        let b_area = Rect::new(
+            b.viewport.x,
+            b.label.map_or(b.viewport.y, |label| label.y),
+            b.viewport.width,
+            b.viewport
+                .height
+                .saturating_add(u16::from(b.label.is_some())),
+        );
+        let a_text = rect_text(terminal.backend().buffer(), a_area);
+        let b_text = rect_text(terminal.backend().buffer(), b_area);
+        assert!(a_text.contains("Peer A · provider · model"));
+        assert!(a_text.contains("ALPHA_ONLY"));
+        assert!(!a_text.contains("BETA_ONLY"));
+        assert!(b_text.contains("Peer B · provider-b next · model-b variant"));
+        assert!(b_text.contains("BETA_ONLY"));
+        assert!(!b_text.contains("ALPHA_ONLY"));
+        assert_eq!(
+            timelines
+                .at(a.timeline.x, a.timeline.y)
+                .and_then(|hits| hits.peer),
+            Some(PeerPane::A)
+        );
+        let a_label = a.label.expect("peer A label");
+        assert_eq!(
+            timelines
+                .at(a_label.x, a_label.y)
+                .and_then(|hits| hits.peer),
+            Some(PeerPane::A)
+        );
+        assert_eq!(
+            timelines
+                .at(b.timeline.x, b.timeline.y)
+                .and_then(|hits| hits.peer),
+            Some(PeerPane::B)
+        );
+        let divider = timelines.divider().expect("pair divider");
+        assert!(timelines.at(divider.x, divider.y).is_none());
+        assert!(timelines.at(0, hit_map.composer.y).is_none());
+
+        let a_rows = a.rows.len();
+        let b_rows = b.rows.len();
+        let _ = app.handle_input(crate::InputAction::Insert("?".to_string()), 46);
+        let mut quick_hit_map = None;
+        terminal
+            .draw(|frame| quick_hit_map = Some(render(frame, &app)))
+            .expect("draw pair quick help");
+        let hit_map = quick_hit_map.expect("pair quick-help hit map");
+        let timelines = hit_map.timelines.as_ref().expect("visible timelines");
+        assert!(timelines.for_peer(PeerPane::A).expect("A").rows.len() < a_rows);
+        assert_eq!(
+            timelines.for_peer(PeerPane::B).expect("B").rows.len(),
+            b_rows
+        );
+    }
+
+    #[test]
+    fn narrow_pair_reports_only_the_active_named_pane() {
+        let app = AppModel::new_pair(
+            header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw narrow pair");
+        let hit_map = hit_map.expect("narrow pair hit map");
+        let timelines = hit_map.timelines.as_ref().expect("visible timeline");
+        let active = timelines
+            .active(Some(PeerPane::A))
+            .expect("active peer A hits");
+        assert_eq!(active.peer, Some(PeerPane::A));
+        assert!(active.label.is_some());
+        assert_eq!(timelines.for_peer(PeerPane::A), Some(active));
+        assert!(timelines.for_peer(PeerPane::B).is_none());
+        assert!(timelines.active(None).is_none());
     }
 
     #[test]
@@ -3000,7 +3386,7 @@ mod tests {
         assert!(hit_map.frame.is_none());
         assert!(hit_map.tabs.is_empty());
         assert_eq!(hit_map.composer, Rect::default());
-        assert!(hit_map.scrollbar.thumb.is_some());
+        assert!(hit_map.takeover_scrollbar.thumb.is_some());
         assert!(rendered.contains("Conversation commands"));
         assert!(rendered.contains("/model"));
         assert!(rendered.contains("Esc close"));
@@ -3138,7 +3524,7 @@ mod tests {
             assert_eq!(hit_map.takeover_rows[0].index, 0);
             assert_eq!(hit_map.takeover_rows[0].area.width, width.saturating_sub(5));
             if screen_reader {
-                assert!(hit_map.scrollbar.thumb.is_none());
+                assert!(hit_map.takeover_scrollbar.thumb.is_none());
             }
         }
     }
@@ -3224,8 +3610,8 @@ mod tests {
         assert!(rendered.contains("src/file-10.rs"));
         assert!(!rendered.contains("src/file-00.rs"));
         assert_eq!(hit_map.takeover_file_rows[0].index, 10);
-        assert_eq!(hit_map.scrollbar.total_rows, 20);
-        assert!(hit_map.scrollbar.thumb.is_some());
+        assert_eq!(hit_map.takeover_scrollbar.total_rows, 20);
+        assert!(hit_map.takeover_scrollbar.thumb.is_some());
     }
 
     #[test]
@@ -3253,7 +3639,8 @@ mod tests {
         assert!(rendered.contains("Ctrl+S      stash / restore draft"));
         assert!(rendered.contains("Esc Esc      clear draft"));
         assert!(footer_state(&app).contains("? or Esc close"));
-        assert!(hit_map.timeline_rows.len() < usize::from(hit_map.timeline.height));
+        let timeline = single_hits(&hit_map);
+        assert!(timeline.rows.len() < usize::from(timeline.timeline.height));
     }
 
     #[test]
@@ -3549,7 +3936,7 @@ mod tests {
             single_timeline(layout).content.height,
         );
         assert_eq!(
-            hit_map.scrollbar,
+            single_hits(&hit_map).scrollbar,
             ScrollbarGeometry::calculate(
                 single_timeline(layout).scrollbar,
                 view.start,
@@ -3574,9 +3961,10 @@ mod tests {
             .draw(|frame| hit_map = Some(render(frame, &app)))
             .expect("draw overflowing shell");
         let hit_map = hit_map.expect("hit map");
-        let thumb = hit_map.scrollbar.thumb.expect("scrollbar thumb");
+        let timeline = single_hits(&hit_map);
+        let thumb = timeline.scrollbar.thumb.expect("scrollbar thumb");
         assert!(thumb.height >= 1);
-        assert_eq!(thumb.bottom(), hit_map.scrollbar.track.bottom());
+        assert_eq!(thumb.bottom(), timeline.scrollbar.track.bottom());
         assert!(terminal.backend().to_string().contains('█'));
     }
 
@@ -3717,19 +4105,20 @@ mod tests {
             .draw(|frame| hit_map = Some(render(frame, &app)))
             .expect("draw row hits");
         let hit_map = hit_map.expect("hit map");
-        let prompt = hit_map
-            .timeline_rows
+        let timeline = single_hits(&hit_map);
+        let prompt = timeline
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::User)
             .expect("prompt hit");
-        assert_eq!(prompt.content_x, hit_map.timeline.x + 3);
+        assert_eq!(prompt.content_x, timeline.timeline.x + 3);
 
-        let response = hit_map
-            .timeline_rows
+        let response = timeline
+            .rows
             .iter()
             .find(|hit| hit.row.kind == ItemKind::Assistant)
             .expect("response hit");
-        assert_eq!(response.content_x, hit_map.timeline.x + 2);
+        assert_eq!(response.content_x, timeline.timeline.x + 2);
         assert_eq!(response.point_for_column(response.content_x, false).byte, 0);
         assert_eq!(
             response
@@ -3881,9 +4270,10 @@ mod tests {
             .draw(|frame| hit_map = Some(render(frame, &app)))
             .expect("draw overflowing screen-reader frame");
         let hit_map = hit_map.expect("screen-reader hit map");
-        assert!(hit_map.scrollbar.total_rows > hit_map.scrollbar.viewport_rows);
-        assert!(hit_map.scrollbar.thumb.is_none());
-        assert_eq!(hit_map.scrollbar.track, Rect::default());
+        let timeline = single_hits(&hit_map);
+        assert!(timeline.scrollbar.total_rows > timeline.scrollbar.viewport_rows);
+        assert!(timeline.scrollbar.thumb.is_none());
+        assert_eq!(timeline.scrollbar.track, Rect::default());
 
         app.request_approval("write_file", "src/main.rs", "project write");
         terminal

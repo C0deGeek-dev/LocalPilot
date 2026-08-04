@@ -41,7 +41,7 @@ pub use layout::{
 pub use projection::{PeerPane, SessionHeader};
 pub use render::{
     render, CompletionHit, HitMap, QuestionHit, ScrollbarGeometry, TabHit, TakeoverHit, ThemeHit,
-    TimelineRowHit, TrustHit, TrustPathHit,
+    TimelineHits, TimelinePaneHits, TimelineRowHit, TrustHit, TrustPathHit,
 };
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};

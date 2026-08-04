@@ -438,7 +438,7 @@ fn keep_selection_visible(scroll: &mut usize, selected: usize, total: usize, vie
     *scroll = (*scroll).min(total.saturating_sub(viewport));
 }
 
-fn sanitize_inline(text: &str) -> String {
+pub(crate) fn sanitize_inline(text: &str) -> String {
     sanitize_text(text)
         .chars()
         .map(|character| match character {
@@ -1114,6 +1114,14 @@ impl AppModel {
         self.projections.active_pair_pane()
     }
 
+    pub(crate) const fn active_projection(&self) -> &SessionProjection {
+        self.projections.active()
+    }
+
+    pub(crate) fn projection(&self, peer: PeerPane) -> Option<&SessionProjection> {
+        self.projections.projection(peer)
+    }
+
     #[must_use]
     pub fn shared_version(&self) -> &str {
         &self.header.version
@@ -1509,27 +1517,34 @@ impl AppModel {
     }
 
     pub fn apply_runtime(&mut self, update: RuntimeUpdate) {
+        Self::apply_runtime_projection(self.projections.active_mut(), update);
+    }
+
+    /// Applies a runtime update to one named peer without changing the active
+    /// pane. Returns `false` when this model does not contain a peer pair.
+    #[must_use]
+    pub fn apply_runtime_for(&mut self, peer: PeerPane, update: RuntimeUpdate) -> bool {
+        let Some(projection) = self.projections.projection_mut(peer) else {
+            return false;
+        };
+        Self::apply_runtime_projection(projection, update);
+        true
+    }
+
+    fn apply_runtime_projection(projection: &mut SessionProjection, update: RuntimeUpdate) {
         match update {
             RuntimeUpdate::Text(text) => {
-                self.projections.active_mut().stream_bytes = self
-                    .projections
-                    .active()
-                    .stream_bytes
-                    .saturating_add(text.len());
-                if !self.append_active(self.projections.active().active_assistant, &text) {
-                    self.projections.active_mut().active_assistant =
-                        self.push_runtime_item(ItemKind::Assistant, text);
+                projection.stream_bytes = projection.stream_bytes.saturating_add(text.len());
+                if !Self::append_active_to(projection, projection.active_assistant, &text) {
+                    projection.active_assistant =
+                        Self::push_runtime_item_to(projection, ItemKind::Assistant, text);
                 }
             }
             RuntimeUpdate::Reasoning(text) => {
-                self.projections.active_mut().stream_bytes = self
-                    .projections
-                    .active()
-                    .stream_bytes
-                    .saturating_add(text.len());
-                if !self.append_active(self.projections.active().active_reasoning, &text) {
-                    self.projections.active_mut().active_reasoning =
-                        self.push_runtime_item(ItemKind::Reasoning, text);
+                projection.stream_bytes = projection.stream_bytes.saturating_add(text.len());
+                if !Self::append_active_to(projection, projection.active_reasoning, &text) {
+                    projection.active_reasoning =
+                        Self::push_runtime_item_to(projection, ItemKind::Reasoning, text);
                 }
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
@@ -1549,13 +1564,11 @@ impl AppModel {
                 } else {
                     ItemKind::Tool
                 };
-                if let Some(item) = self.push_runtime_item(kind, text) {
-                    let _ = self
-                        .projections
-                        .active_mut()
+                if let Some(item) = Self::push_runtime_item_to(projection, kind, text) {
+                    let _ = projection
                         .timeline
                         .set_activity(item, Some(ActivityState::Running));
-                    self.projections.active_mut().active_tools.insert(
+                    projection.active_tools.insert(
                         id,
                         ActiveTool {
                             item_id: item,
@@ -1575,17 +1588,13 @@ impl AppModel {
                 if name == "ask_user" {
                     let output =
                         bounded_inline_text(tool_output_body(&output), MAX_TOOL_DETAIL_BYTES);
-                    if let Some(active) = self.projections.active_mut().active_tools.remove(&id) {
+                    if let Some(active) = projection.active_tools.remove(&id) {
                         let mut text = format!("Asked user {}", active.detail);
                         if !output.is_empty() {
                             text.push('\n');
                             text.push_str(&output);
                         }
-                        let _ = self
-                            .projections
-                            .active_mut()
-                            .timeline
-                            .replace_text(active.item_id, text);
+                        let _ = projection.timeline.replace_text(active.item_id, text);
                         let activity = if cancelled {
                             ActivityState::Cancelled
                         } else if is_error {
@@ -1593,22 +1602,20 @@ impl AppModel {
                         } else {
                             ActivityState::Success
                         };
-                        let _ = self
-                            .projections
-                            .active_mut()
+                        let _ = projection
                             .timeline
                             .set_activity(active.item_id, Some(activity));
-                        self.style_activity(active.item_id, activity);
+                        Self::style_activity_on(projection, active.item_id, activity);
                     } else {
                         let mut text = "Asked user".to_string();
                         if !output.is_empty() {
                             text.push('\n');
                             text.push_str(&output);
                         }
-                        let _ = self.push_runtime_item(ItemKind::Question, text);
+                        let _ = Self::push_runtime_item_to(projection, ItemKind::Question, text);
                     }
-                    if self.projections.active().timeline_search.is_some() {
-                        self.refresh_timeline_search();
+                    if projection.timeline_search.is_some() {
+                        Self::refresh_timeline_search_on(projection);
                     }
                     return;
                 }
@@ -1631,7 +1638,7 @@ impl AppModel {
                     format_tool_duration(duration_ms)
                 );
                 let output = bounded_view_text(&output, MAX_TOOL_OUTPUT_BYTES);
-                if let Some(active) = self.projections.active_mut().active_tools.remove(&id) {
+                if let Some(active) = projection.active_tools.remove(&id) {
                     if !active.detail.is_empty() {
                         text.push('\n');
                         text.push_str(&active.detail);
@@ -1640,11 +1647,7 @@ impl AppModel {
                         text.push('\n');
                         text.push_str(&output);
                     }
-                    let _ = self
-                        .projections
-                        .active_mut()
-                        .timeline
-                        .replace_text(active.item_id, text);
+                    let _ = projection.timeline.replace_text(active.item_id, text);
                     let activity = if cancelled {
                         ActivityState::Cancelled
                     } else if is_error {
@@ -1652,13 +1655,11 @@ impl AppModel {
                     } else {
                         ActivityState::Success
                     };
-                    let _ = self
-                        .projections
-                        .active_mut()
+                    let _ = projection
                         .timeline
                         .set_activity(active.item_id, Some(activity));
-                    self.style_activity(active.item_id, activity);
-                } else if let Some(item) = self.push_runtime_item(ItemKind::Tool, {
+                    Self::style_activity_on(projection, active.item_id, activity);
+                } else if let Some(item) = Self::push_runtime_item_to(projection, ItemKind::Tool, {
                     if !output.is_empty() {
                         text.push('\n');
                         text.push_str(&output);
@@ -1672,12 +1673,8 @@ impl AppModel {
                     } else {
                         ActivityState::Success
                     };
-                    let _ = self
-                        .projections
-                        .active_mut()
-                        .timeline
-                        .set_activity(item, Some(activity));
-                    self.style_activity(item, activity);
+                    let _ = projection.timeline.set_activity(item, Some(activity));
+                    Self::style_activity_on(projection, item, activity);
                 }
             }
             RuntimeUpdate::Usage {
@@ -1685,24 +1682,24 @@ impl AppModel {
                 output_tokens,
                 cached_input_tokens,
             } => {
-                let mut usage = self.projections.active().usage.unwrap_or_default();
+                let mut usage = projection.usage.unwrap_or_default();
                 usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
                 usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
                 usage.cached_input_tokens = usage
                     .cached_input_tokens
                     .saturating_add(cached_input_tokens);
-                self.projections.active_mut().usage = Some(usage);
+                projection.usage = Some(usage);
             }
             RuntimeUpdate::ContextUsage { used, limit } => {
-                self.projections.active_mut().context_usage = Some((used, limit));
+                projection.context_usage = Some((used, limit));
             }
             RuntimeUpdate::Notice(message)
             | RuntimeUpdate::Warning(message)
             | RuntimeUpdate::QuotaPaused(message) => {
-                let _ = self.push_runtime_item(ItemKind::Notice, message);
+                let _ = Self::push_runtime_item_to(projection, ItemKind::Notice, message);
             }
             RuntimeUpdate::Plan(plan) => {
-                self.projections.active_mut().plan = plan
+                projection.plan = plan
                     .into_iter()
                     .map(|entry| PlanEntry {
                         title: sanitize_text(&entry.title),
@@ -1712,35 +1709,39 @@ impl AppModel {
             }
             RuntimeUpdate::Recovery(state) => {
                 if state != RecoveryState::Healthy {
-                    let _ =
-                        self.push_runtime_item(ItemKind::Notice, format!("recovery: {state:?}"));
+                    let _ = Self::push_runtime_item_to(
+                        projection,
+                        ItemKind::Notice,
+                        format!("recovery: {state:?}"),
+                    );
                 }
             }
             RuntimeUpdate::ToolStuck { name, count } => {
-                let _ = self.push_runtime_item(
+                let _ = Self::push_runtime_item_to(
+                    projection,
                     ItemKind::Notice,
                     format!("tool {name} stopped after {count} repeated failures"),
                 );
             }
             RuntimeUpdate::FilesTouched => {}
             RuntimeUpdate::SoftInterruptInjected => {
-                self.style_active_transcript();
-                self.projections.active_mut().active_assistant = None;
-                self.projections.active_mut().active_reasoning = None;
-                self.projections.active_mut().active_tools.clear();
-                self.projections.active_mut().active_insert_before = None;
+                Self::style_transcript_on(projection);
+                projection.active_assistant = None;
+                projection.active_reasoning = None;
+                projection.active_tools.clear();
+                projection.active_insert_before = None;
             }
             RuntimeUpdate::Stopped(_) => {
-                self.style_active_transcript();
-                self.projections.active_mut().work = WorkState::Idle;
-                self.projections.active_mut().active_assistant = None;
-                self.projections.active_mut().active_reasoning = None;
-                self.projections.active_mut().active_tools.clear();
-                self.projections.active_mut().active_insert_before = None;
+                Self::style_transcript_on(projection);
+                projection.work = WorkState::Idle;
+                projection.active_assistant = None;
+                projection.active_reasoning = None;
+                projection.active_tools.clear();
+                projection.active_insert_before = None;
             }
         }
-        if self.projections.active().timeline_search.is_some() {
-            self.refresh_timeline_search();
+        if projection.timeline_search.is_some() {
+            Self::refresh_timeline_search_on(projection);
         }
     }
 
@@ -3246,7 +3247,10 @@ impl AppModel {
     }
 
     fn refresh_timeline_search(&mut self) {
-        let projection = self.projections.active_mut();
+        Self::refresh_timeline_search_on(self.projections.active_mut());
+    }
+
+    fn refresh_timeline_search_on(projection: &mut SessionProjection) {
         let Some(state) = &projection.timeline_search else {
             return;
         };
@@ -3604,60 +3608,49 @@ impl AppModel {
         }
     }
 
-    fn append_active(&mut self, active: Option<ItemId>, text: &str) -> bool {
-        active.is_some_and(|id| self.projections.active_mut().timeline.append_text(id, text))
+    fn append_active_to(
+        projection: &mut SessionProjection,
+        active: Option<ItemId>,
+        text: &str,
+    ) -> bool {
+        active.is_some_and(|id| projection.timeline.append_text(id, text))
     }
 
     fn push_runtime_item(&mut self, kind: ItemKind, text: impl Into<String>) -> Option<ItemId> {
+        Self::push_runtime_item_to(self.projections.active_mut(), kind, text)
+    }
+
+    fn push_runtime_item_to(
+        projection: &mut SessionProjection,
+        kind: ItemKind,
+        text: impl Into<String>,
+    ) -> Option<ItemId> {
         let text = text.into();
-        if let Some(before) = self.projections.active().active_insert_before {
-            self.projections
-                .active_mut()
-                .timeline
-                .insert_before(before, kind, text)
+        if let Some(before) = projection.active_insert_before {
+            projection.timeline.insert_before(before, kind, text)
         } else {
-            self.projections.active_mut().timeline.push(kind, text)
+            projection.timeline.push(kind, text)
         }
     }
 
-    fn style_active_transcript(&mut self) {
-        for id in [
-            self.projections.active().active_assistant,
-            self.projections.active().active_reasoning,
-        ]
-        .into_iter()
-        .flatten()
+    fn style_transcript_on(projection: &mut SessionProjection) {
+        for id in [projection.active_assistant, projection.active_reasoning]
+            .into_iter()
+            .flatten()
         {
-            let Some(item) = self.projections.active().timeline.item(id) else {
+            let Some(item) = projection.timeline.item(id) else {
                 continue;
             };
             let styles = semantic_ranges(item.kind, &item.text);
-            let _ = self
-                .projections
-                .active_mut()
-                .timeline
-                .set_styles(id, styles);
+            let _ = projection.timeline.set_styles(id, styles);
         }
     }
 
-    fn style_activity(&mut self, id: ItemId, activity: ActivityState) {
-        let Some(end_byte) = self
-            .projections
-            .active()
-            .timeline
-            .item(id)
-            .map(|item| item.text.len())
-        else {
+    fn style_activity_on(projection: &mut SessionProjection, id: ItemId, activity: ActivityState) {
+        let Some(end_byte) = projection.timeline.item(id).map(|item| item.text.len()) else {
             return;
         };
-        let role = match (
-            self.projections
-                .active()
-                .timeline
-                .item(id)
-                .map(|item| item.kind),
-            activity,
-        ) {
+        let role = match (projection.timeline.item(id).map(|item| item.kind), activity) {
             (Some(ItemKind::Question), ActivityState::Running | ActivityState::Success) => {
                 SemanticRole::Tool
             }
@@ -3677,11 +3670,7 @@ impl AppModel {
             })
             .into_iter()
             .collect();
-        let _ = self
-            .projections
-            .active_mut()
-            .timeline
-            .set_styles(id, styles);
+        let _ = projection.timeline.set_styles(id, styles);
     }
 
     fn cancel_or_exit(&mut self) -> AppCommand {
@@ -4176,6 +4165,95 @@ mod tests {
         assert_eq!(b.plan[0].title, "beta step");
         assert_eq!(b.usage.expect("B usage remains").total(), 18);
         assert!(matches!(app.dialog, Some(DialogState::Approval { .. })));
+    }
+
+    #[test]
+    fn named_runtime_updates_leave_the_active_peer_unchanged() {
+        let mut app = AppModel::new_pair(
+            Header {
+                version: "0".to_string(),
+                provider: "provider-a".to_string(),
+                model: "model-a".to_string(),
+                workspace: "workspace".to_string(),
+                branch: Some("main".to_string()),
+                workspace_dirty: Some(false),
+                mode: "agent".to_string(),
+                profile: "default".to_string(),
+                session_id: "session-a".to_string(),
+                session_name: Some("Alpha".to_string()),
+            },
+            SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: Some("Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        );
+        app.apply_runtime(RuntimeUpdate::Text("alpha response".to_string()));
+        app.projections.select(PeerPane::B);
+        app.open_timeline_search("beta".to_string());
+        app.projections.select(PeerPane::A);
+
+        assert!(app.apply_runtime_for(PeerPane::B, RuntimeUpdate::Text("beta response".into())));
+        assert!(app.apply_runtime_for(
+            PeerPane::B,
+            RuntimeUpdate::Reasoning("beta reasoning".into())
+        ));
+        assert!(app.apply_runtime_for(
+            PeerPane::B,
+            RuntimeUpdate::ToolStarted {
+                id: "tool-b".into(),
+                name: "inspect".into(),
+                detail: "beta detail".into(),
+            }
+        ));
+        assert!(app.apply_runtime_for(
+            PeerPane::B,
+            RuntimeUpdate::Plan(vec![PlanEntry {
+                title: "beta step".into(),
+                status: "active".into(),
+            }])
+        ));
+        assert!(app.apply_runtime_for(
+            PeerPane::B,
+            RuntimeUpdate::Usage {
+                input_tokens: 8,
+                output_tokens: 5,
+                cached_input_tokens: 3,
+            }
+        ));
+        assert!(app.apply_runtime_for(
+            PeerPane::B,
+            RuntimeUpdate::ContextUsage {
+                used: 13,
+                limit: 21,
+            }
+        ));
+
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert_eq!(app.active_stream_bytes(), "alpha response".len());
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert_eq!(app.active_timeline().items()[0].text, "alpha response");
+        let b = app.projection(PeerPane::B).expect("peer B projection");
+        assert_eq!(b.stream_bytes, "beta responsebeta reasoning".len());
+        assert_eq!(b.plan[0].title, "beta step");
+        assert_eq!(b.usage.expect("B usage").total(), 13);
+        assert_eq!(b.context_usage, Some((13, 21)));
+        assert!(b.active_assistant.is_some());
+        assert!(b.active_reasoning.is_some());
+        assert!(b.active_tools.contains_key("tool-b"));
+        assert!(b
+            .timeline_search
+            .as_ref()
+            .is_some_and(|search| !search.matches.is_empty()));
+
+        let mut single = model();
+        assert!(
+            !single.apply_runtime_for(PeerPane::A, RuntimeUpdate::Text("must not appear".into()))
+        );
+        assert!(single.active_timeline().items().is_empty());
+        assert_eq!(single.active_stream_bytes(), 0);
     }
 
     #[test]
