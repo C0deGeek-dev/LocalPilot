@@ -122,14 +122,12 @@ pub(crate) struct InteractiveSessionBundle {
 
 /// Host-assigned identity of one member of an interactive pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum PairPeer {
     A,
     B,
 }
 
 impl PairPeer {
-    #[allow(dead_code)]
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::A => "A",
@@ -140,53 +138,33 @@ impl PairPeer {
 
 /// One explicit provider/model choice for a pair member.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub(crate) struct InteractivePeerSelection<'a> {
     pub(crate) provider_id: &'a str,
     pub(crate) model: &'a str,
 }
 
 /// One identified member of a freshly constructed interactive pair.
-#[allow(dead_code)]
 pub(crate) struct InteractivePeerBundle {
     pub(crate) peer: PairPeer,
-    pub(crate) provider_id: String,
-    pub(crate) model: String,
     pub(crate) session: InteractiveSessionBundle,
 }
 
 /// Two ordinary interactive sessions sharing one workspace and original task.
-#[allow(dead_code)]
 pub(crate) struct InteractivePairBundle {
     task: String,
     pub(crate) a: InteractivePeerBundle,
     pub(crate) b: InteractivePeerBundle,
 }
 
-impl InteractivePairBundle {
-    /// The exact task installed into both prompts and later handed to the driver.
-    #[allow(dead_code)]
-    pub(crate) fn task(&self) -> &str {
-        &self.task
-    }
-}
-
 /// One hosted pair member and the UI-facing channels tied to its provenance.
-#[allow(dead_code)]
 pub(crate) struct InteractiveHostedPeer {
-    pub(crate) peer: PairPeer,
-    pub(crate) provider_id: String,
-    pub(crate) model: String,
-    pub(crate) session_id: SessionId,
     pub(crate) host: Arc<SessionHost>,
     pub(crate) events: broadcast::Receiver<RuntimeEvent>,
-    pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
     pub(crate) approvals: mpsc::UnboundedReceiver<ApprovalCall>,
     pub(crate) questions: mpsc::UnboundedReceiver<QuestionCall>,
 }
 
 /// Resources that keep an adopted interactive pair alive while it is driven.
-#[allow(dead_code)]
 pub(crate) struct InteractivePairOwner {
     pub(crate) cwd: PathBuf,
     pub(crate) task: String,
@@ -203,7 +181,6 @@ impl InteractivePairOwner {
     /// The caller must restore terminal modes before awaiting this cleanup and
     /// must no longer have a live driver. Explicit teardown is required because
     /// each runtime's peer binding points back through the host and registry.
-    #[allow(dead_code)]
     pub(crate) async fn close(self) {
         let Self {
             cwd,
@@ -229,7 +206,6 @@ impl InteractivePairOwner {
 }
 
 /// An adopted pair coupled to the resources that own its hosted sessions.
-#[allow(dead_code)]
 pub(crate) struct InteractivePairHost {
     adopted: AdoptedPair,
     owner: InteractivePairOwner,
@@ -237,19 +213,16 @@ pub(crate) struct InteractivePairHost {
 
 impl InteractivePairHost {
     /// The two sessions in stable peer order.
-    #[allow(dead_code)]
     pub(crate) fn sessions(&self) -> [SessionId; 2] {
         self.owner.sessions
     }
 
     /// The exact original task shared by both sessions.
-    #[allow(dead_code)]
     pub(crate) fn task(&self) -> &str {
         &self.owner.task
     }
 
     /// Build, register, adopt, and subscribe to two interactive sessions.
-    #[allow(dead_code)]
     pub(crate) async fn prepare(
         setup: &InteractiveSessionSetup,
         task: &str,
@@ -271,13 +244,11 @@ impl InteractivePairHost {
     }
 
     /// Split driver ownership from the UI/session resources without cloning.
-    #[allow(dead_code)]
     pub(crate) fn into_parts(self) -> (AdoptedPair, InteractivePairOwner) {
         (self.adopted, self.owner)
     }
 
     /// Tear down a pair that was prepared but never handed to a driver.
-    #[allow(dead_code)]
     pub(crate) async fn close(self) {
         let Self { adopted, owner } = self;
         drop(adopted);
@@ -294,14 +265,10 @@ impl InteractivePairHost {
         let InteractivePairBundle { task, a, b } = bundle;
         let InteractivePeerBundle {
             peer: a_peer,
-            provider_id: a_provider_id,
-            model: a_model,
             session: a_session,
         } = a;
         let InteractivePeerBundle {
             peer: b_peer,
-            provider_id: b_provider_id,
-            model: b_model,
             session: b_session,
         } = b;
         let a_id = a_session.runtime.session_id();
@@ -318,7 +285,7 @@ impl InteractivePairHost {
 
         let InteractiveSessionBundle {
             runtime: a_runtime,
-            approval_tx: a_approval_tx,
+            approval_tx: _,
             approvals: a_approvals,
             questions: a_questions,
         } = a_session;
@@ -368,24 +335,14 @@ impl InteractivePairHost {
             registry,
             swarm_host,
             a: InteractiveHostedPeer {
-                peer: a_peer,
-                provider_id: a_provider_id,
-                model: a_model,
-                session_id: a_id,
                 host: a_host,
                 events: a_events,
-                approval_tx: a_approval_tx,
                 approvals: a_approvals,
                 questions: a_questions,
             },
             b: InteractiveHostedPeer {
-                peer: b_peer,
-                provider_id: b_provider_id,
-                model: b_model,
-                session_id: b_id,
                 host: b_host,
                 events: b_events,
-                approval_tx: b_approval_tx,
                 approvals: b_approvals,
                 questions: b_questions,
             },
@@ -520,7 +477,6 @@ impl InteractiveSessionSetup {
     /// Both explicit selections are validated before either runtime is created.
     /// The same preserved task and parser-owned protocol contract are installed
     /// on both runtimes before either can be driven.
-    #[allow(dead_code)]
     pub(crate) async fn build_pair(
         &self,
         task: &str,
@@ -535,10 +491,9 @@ impl InteractiveSessionSetup {
 
         let a_session = self.build(a.provider_id, a.model).await?;
         let b_session = self.build(b.provider_id, b.model).await;
-        finish_pair_build(&self.cwd, task, a, b, a_session, b_session)
+        finish_pair_build(&self.cwd, task, a_session, b_session)
     }
 
-    #[allow(dead_code)]
     fn validate_pair_selection(
         &self,
         peer: PairPeer,
@@ -600,8 +555,6 @@ impl InteractiveSessionSetup {
 fn finish_pair_build(
     cwd: &Path,
     task: &str,
-    a: InteractivePeerSelection<'_>,
-    b: InteractivePeerSelection<'_>,
     mut a_session: InteractiveSessionBundle,
     b_session: anyhow::Result<InteractiveSessionBundle>,
 ) -> anyhow::Result<InteractivePairBundle> {
@@ -631,14 +584,10 @@ fn finish_pair_build(
         task: task.to_string(),
         a: InteractivePeerBundle {
             peer: PairPeer::A,
-            provider_id: a.provider_id.to_string(),
-            model: a.model.to_string(),
             session: a_session,
         },
         b: InteractivePeerBundle {
             peer: PairPeer::B,
-            provider_id: b.provider_id.to_string(),
-            model: b.model.to_string(),
             session: b_session,
         },
     })
@@ -949,13 +898,13 @@ mod tests {
             .await
             .expect("interactive pair");
 
-        assert_eq!(pair.task(), task);
+        assert_eq!(pair.task, task);
         assert_eq!(pair.a.peer, PairPeer::A);
         assert_eq!(pair.b.peer, PairPeer::B);
-        assert_eq!(pair.a.provider_id, "first");
-        assert_eq!(pair.a.model, "model-a");
-        assert_eq!(pair.b.provider_id, "second");
-        assert_eq!(pair.b.model, "model-b");
+        assert_eq!(pair.a.session.runtime.active_provider_id(), "first");
+        assert_eq!(pair.a.session.runtime.active_model(), "model-a");
+        assert_eq!(pair.b.session.runtime.active_provider_id(), "second");
+        assert_eq!(pair.b.session.runtime.active_model(), "model-b");
         assert_ne!(
             pair.a.session.runtime.session_id(),
             pair.b.session.runtime.session_id()
@@ -1065,15 +1014,9 @@ mod tests {
         .await
         .expect("hosted pair");
 
-        assert_ne!(pair.owner.a.session_id, pair.owner.b.session_id);
+        assert_ne!(pair.owner.sessions[0], pair.owner.sessions[1]);
         assert_eq!(pair.owner.sessions, pair.adopted.sessions());
         assert_eq!(pair.owner.task, "review the change");
-        assert_eq!(pair.owner.a.peer, PairPeer::A);
-        assert_eq!(pair.owner.a.provider_id, "first");
-        assert_eq!(pair.owner.a.model, "model-a");
-        assert_eq!(pair.owner.b.peer, PairPeer::B);
-        assert_eq!(pair.owner.b.provider_id, "second");
-        assert_eq!(pair.owner.b.model, "model-b");
         let [adopted_a, adopted_b] = pair.adopted.hosts();
         assert!(Arc::ptr_eq(&pair.owner.a.host, &adopted_a));
         assert!(Arc::ptr_eq(&pair.owner.b.host, &adopted_b));
@@ -1240,18 +1183,12 @@ mod tests {
             provider_id: "first",
             model: "model-a",
         };
-        let b = InteractivePeerSelection {
-            provider_id: "second",
-            model: "model-b",
-        };
         let a_session = setup.build(a.provider_id, a.model).await.expect("peer A");
         let a_id = a_session.runtime.session_id();
 
         let error = finish_pair_build(
             directory.path(),
             "cleanup partial construction",
-            a,
-            b,
             a_session,
             Err(anyhow::anyhow!("peer B construction failed")),
         )
