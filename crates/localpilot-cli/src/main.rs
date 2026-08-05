@@ -53,6 +53,7 @@ mod skill_discovery;
 mod skills_cmd;
 mod swarm_cmd;
 mod trust;
+mod trust_cmd;
 mod update;
 
 #[derive(Debug, Parser)]
@@ -128,6 +129,14 @@ enum Command {
         /// files + skills), their token weights, and advisory findings.
         #[arg(long)]
         hygiene: bool,
+    },
+    /// Inspect and manage which workspace folders are trusted. Trust is
+    /// exact-folder (not inherited by descendants); a trusted folder does not
+    /// re-prompt and may modify project skill state. It is a convenience gate the
+    /// permission engine still backs.
+    Trust {
+        #[command(subcommand)]
+        command: Option<TrustCommand>,
     },
     /// Store an API key for a provider (bring-your-own-key): deep-link to the key
     /// page, paste, validate, and save it in the OS keychain (or a 0600 file).
@@ -573,6 +582,28 @@ enum Command {
 /// Named credentials an MCP server entry can reference. Distinct from provider
 /// `login` credentials: they share the store's tiers but not its namespace, so
 /// the same visible name can exist in both without either overwriting the other.
+#[derive(Debug, Subcommand)]
+enum TrustCommand {
+    /// Show whether a folder is trusted (default: the current directory). Always
+    /// exits zero when it can evaluate trust.
+    Status {
+        /// Folder to check; defaults to the current directory.
+        path: Option<PathBuf>,
+    },
+    /// Trust a folder so it no longer prompts and may modify project skill state.
+    Add {
+        /// Folder to trust; defaults to the current directory.
+        path: Option<PathBuf>,
+    },
+    /// Remove a folder's trust.
+    Remove {
+        /// Folder to distrust; defaults to the current directory.
+        path: Option<PathBuf>,
+    },
+    /// List every trusted folder.
+    List,
+}
+
 #[derive(Debug, Subcommand)]
 enum CredentialCommand {
     /// Read one value from stdin and store it under `name`. The value is never
@@ -1540,6 +1571,14 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
         Command::Logout { provider } => {
             login_cmd::logout(&provider)?;
         }
+        Command::Trust { command } => {
+            match command.unwrap_or(TrustCommand::Status { path: None }) {
+                TrustCommand::Status { path } => trust_cmd::status(path)?,
+                TrustCommand::Add { path } => trust_cmd::add(path)?,
+                TrustCommand::Remove { path } => trust_cmd::remove(path)?,
+                TrustCommand::List => trust_cmd::list()?,
+            }
+        }
         Command::Credential { command } => match command {
             CredentialCommand::Set { name } => credential_cmd::set(&name)?,
             CredentialCommand::List => credential_cmd::list()?,
@@ -2459,6 +2498,66 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
 mod tests {
     use super::*;
     use localpilot_localmind::StoreRoot;
+
+    #[test]
+    fn trust_command_syntax_parses() {
+        // No subcommand resolves to `status` at dispatch; the bare form parses.
+        let bare = Cli::try_parse_from(["localpilot", "trust"]).expect("parse trust");
+        assert!(matches!(
+            bare.command,
+            Some(Command::Trust { command: None })
+        ));
+
+        // Each subcommand parses, with an optional PATH.
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "status"])
+                .expect("status")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::Status { path: None })
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "status", "some/dir"])
+                .expect("status path")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::Status { path: Some(_) })
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "add", "some/dir"])
+                .expect("add path")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::Add { path: Some(_) })
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "remove"])
+                .expect("remove")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::Remove { path: None })
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "remove", "some/dir"])
+                .expect("remove path")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::Remove { path: Some(_) })
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["localpilot", "trust", "list"])
+                .expect("list")
+                .command,
+            Some(Command::Trust {
+                command: Some(TrustCommand::List)
+            })
+        ));
+    }
 
     #[cfg(feature = "tui")]
     #[test]

@@ -28,4 +28,5 @@ mcp servers:
 memory store: <memory-root>
 capabilities: doctor-json, models-json, learning-workspace-flag, print-turn-timeout
 
-workspace trust: unknown (evaluated when a session starts)
+workspace trust: could not be evaluated
+  evaluation failed; run `localpilot trust status` for the error

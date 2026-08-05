@@ -26,21 +26,9 @@ pub fn write(root: &Path, objective: Option<&str>, out: &mut dyn Write) -> anyho
     };
 
     // Suggest discoverable skills relevant to the objective from the effective
-    // merged catalog — the user-global baseline plus the project overlay
-    // (best-effort, LocalHub#39).
-    let suggested = objective
-        .map(|obj| {
-            discover_trusted(root, true)
-                .map(|set| {
-                    set.relevant(obj)
-                        .into_iter()
-                        .map(|s| s.manifest.name.clone())
-                        .take(3)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    // merged catalog — the user-global baseline plus, only when the workspace is
+    // trusted, the project overlay (best-effort, LocalHub#39).
+    let suggested = objective_suggestions(root, objective, crate::trust::is_trusted(root));
 
     let summary = write_handoff(root, &store, latest.id, objective, suggested)?;
     writeln!(
@@ -55,6 +43,26 @@ pub fn write(root: &Path, objective: Option<&str>, out: &mut dyn Write) -> anyho
         summary.id
     )?;
     Ok(())
+}
+
+/// The up-to-three discoverable skills most relevant to `objective`, from the
+/// effective catalog. `trusted` gates the project overlay: an untrusted project's
+/// skills must not enter a handoff suggestion, so it is passed in explicitly
+/// rather than read from the store, keeping the choice testable.
+fn objective_suggestions(root: &Path, objective: Option<&str>, trusted: bool) -> Vec<String> {
+    objective
+        .map(|obj| {
+            discover_trusted(root, trusted)
+                .map(|set| {
+                    set.relevant(obj)
+                        .into_iter()
+                        .map(|s| s.manifest.name.clone())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
 }
 
 /// Load a handoff by id and run the deterministic resume check against the repo.
@@ -85,6 +93,36 @@ mod tests {
     /// promoted into accepted memory — close-out reads the transcript, never the
     /// handoff file, so the handoff body cannot appear in review candidates or
     /// accepted memory.
+    #[test]
+    fn an_untrusted_project_skill_is_never_suggested() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A discoverable project skill relevant to a unique objective keyword, so
+        // real user-global skills cannot affect the assertion.
+        let skill = root
+            .join(".localpilot")
+            .join("skills")
+            .join("handoff-fixture");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: handoff-fixture\ndescription: helps with zzqhandoffkeyword tasks\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let trusted = objective_suggestions(root, Some("zzqhandoffkeyword"), true);
+        assert!(
+            trusted.iter().any(|name| name == "handoff-fixture"),
+            "a trusted project skill should be suggested: {trusted:?}"
+        );
+
+        let untrusted = objective_suggestions(root, Some("zzqhandoffkeyword"), false);
+        assert!(
+            !untrusted.iter().any(|name| name == "handoff-fixture"),
+            "an untrusted project skill must not be suggested: {untrusted:?}"
+        );
+    }
+
     #[test]
     fn closeout_never_promotes_a_handoff_into_memory() {
         let dir = tempfile::tempdir().unwrap();

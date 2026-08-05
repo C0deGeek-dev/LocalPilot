@@ -19,7 +19,7 @@ use crate::{
 const BANNER_ROWS: u16 = 7;
 /// Width of the widest screen-reader timeline role label (`Shell completed: `).
 const SCREEN_READER_PREFIX_EXTRA: u16 = 17;
-const TRUST_OPTIONS: [&str; 3] = ["Yes", "Yes, remember this workspace", "No, exit"];
+const TRUST_OPTIONS: [&str; 3] = ["Session only", "Trust and remember", "No - exit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabHit {
@@ -4622,9 +4622,9 @@ mod tests {
         let timeline = single_timeline(hit_map.frame.expect("frame layout")).content;
         assert!(rendered.contains("Trust this workspace?"));
         assert!(rendered.contains("D:\\workspace"));
-        assert!(rendered.contains("❯ 1. Yes"));
-        assert!(rendered.contains("2. Yes, remember this workspace"));
-        assert!(rendered.contains("3. No, exit"));
+        assert!(rendered.contains("❯ 1. Session only"));
+        assert!(rendered.contains("2. Trust and remember"));
+        assert!(rendered.contains("3. No - exit"));
         assert!(rendered.contains("↑/↓ to select · enter to confirm · esc to exit"));
         assert_eq!(hit_map.trust_rows.len(), 3);
         assert_eq!(hit_map.trust_rows[0].area.x, timeline.x + 3);
@@ -4690,11 +4690,14 @@ mod tests {
 
             assert_eq!(hits.trust_rows.len(), 3);
             assert!(hits.trust_path.is_some());
-            assert!(rendered.contains("1. Yes"));
-            assert!(rendered.contains("3. No, exit"));
+            assert!(rendered.contains("1. Session only"));
+            assert!(rendered.contains("2. Trust and remember"));
+            assert!(rendered.contains("3. No - exit"));
             assert!(!rendered.contains("resize to at least"));
             if screen_reader {
-                assert!(rendered.contains("Current selection: 1. Yes"));
+                // The full "Current selection: 1. Session only" line is 34 cols
+                // and does not fit a width-30 frame; the three complete labels
+                // above already prove the relabel took effect.
                 assert!(!rendered.contains('╭'));
             } else {
                 assert!(rendered.contains('╭'));
@@ -5193,10 +5196,10 @@ mod tests {
             .draw(|frame| trust_hits = Some(render(frame, &app)))
             .expect("draw accessible trust dialog");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("Current selection: 1. Yes"));
-        assert!(rendered.contains("1. Yes"));
-        assert!(rendered.contains("2. Yes, remember this workspace"));
-        assert!(rendered.contains("3. No, exit"));
+        assert!(rendered.contains("Current selection: 1. Session only"));
+        assert!(rendered.contains("1. Session only"));
+        assert!(rendered.contains("2. Trust and remember"));
+        assert!(rendered.contains("3. No - exit"));
         assert!(!rendered.contains("╭"));
         assert_eq!(trust_hits.expect("trust hits").trust_rows.len(), 3);
 
@@ -5208,7 +5211,12 @@ mod tests {
             .expect("draw narrow screen-reader frame");
         let rendered = narrow.backend().to_string();
         assert!(rendered.contains("Home: current tab: Session; tabs:"));
-        assert!(rendered.contains("Current selection: 1. Yes"));
+        // The numbered choices render in full at this width; the one-line
+        // "Current selection:" summary is ellipsis-truncated here, so its full
+        // form is asserted at the wide screen-reader frame above instead.
+        assert!(rendered.contains("1. Session only"));
+        assert!(rendered.contains("2. Trust and remember"));
+        assert!(rendered.contains("3. No - exit"));
         assert!(!rendered.contains('›'));
     }
 

@@ -94,5 +94,6 @@ expression: render_json(&fixture())
     "doctor-json",
     "models-json"
   ],
-  "workspace_trust": "unknown"
+  "workspace_trust": "unknown",
+  "workspace_trust_store": "/home/user/.config/localpilot/trusted-folders.txt"
 }

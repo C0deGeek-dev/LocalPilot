@@ -71,6 +71,17 @@ fn run_managed(
     let manager = SkillsManager::new(cwd, home.as_deref(), trusted, &fetcher, &now);
     let mut confirm = StdinConfirm;
 
+    // A default (effective) read in an untrusted workspace omits project sources;
+    // disclose that so an empty or short list is not mistaken for "nothing here."
+    // Computed before `command` is consumed by the dispatch match.
+    let effective_read = match &command {
+        ProjectSkillsCommand::Repo {
+            command: SkillsRepoCommand::List { global },
+        }
+        | ProjectSkillsCommand::Available { global, .. } => Some(*global),
+        _ => None,
+    };
+
     let result: Result<(), SkillError> = match command {
         ProjectSkillsCommand::Repo { command } => match command {
             SkillsRepoCommand::Add { url, global, yes } => manager.repo_add(
@@ -125,7 +136,12 @@ fn run_managed(
     };
 
     match result {
-        Ok(()) => Ok(SkillsOutcome { had_failure: false }),
+        Ok(()) => {
+            if let Some(global) = effective_read {
+                disclose_untrusted_effective(global, trusted, out)?;
+            }
+            Ok(SkillsOutcome { had_failure: false })
+        }
         Err(err) => {
             writeln!(out, "error: {err}")?;
             Ok(SkillsOutcome { had_failure: true })
@@ -150,6 +166,25 @@ fn read_scope(global: bool) -> ReadScope {
     } else {
         ReadScope::Effective
     }
+}
+
+/// Disclose that project-local skills and sources are hidden when the default
+/// effective view is read in an untrusted workspace. An explicit `--global` read
+/// already selects the global baseline by intent, so it is notice-free. Shared by
+/// every default effective read, including `skills research`.
+pub(crate) fn disclose_untrusted_effective(
+    global: bool,
+    trusted: bool,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    if !global && !trusted {
+        writeln!(
+            out,
+            "note: this workspace is not trusted, so project-local skills and sources are hidden. \
+             Run `localpilot trust add` to include them, or pass `--global` for the global view."
+        )?;
+    }
+    Ok(())
 }
 
 /// Build the install target from the CLI flags, enforcing the `--all`/`--repo`
@@ -221,14 +256,19 @@ fn unix_now_string() -> String {
 }
 
 /// List the effective skills (global baseline overlaid by the project) with
-/// their invocation, origin scope, and a one-line summary. The user explicitly
-/// invoked this, so the project overlay is loaded (the workspace is trusted).
+/// their invocation, origin scope, and a one-line summary. The project overlay is
+/// loaded only when the workspace is trusted; an untrusted workspace shows the
+/// global baseline and a disclosure.
 ///
 /// # Errors
 /// Returns an error only if output cannot be written.
 pub fn list(root: &Path, global: bool, out: &mut dyn Write) -> anyhow::Result<()> {
-    match discover_trusted_scoped(root, true, global) {
-        Ok(set) => render_list(&set, out),
+    let trusted = trust::is_trusted(root);
+    match discover_trusted_scoped(root, trusted, global) {
+        Ok(set) => {
+            render_list(&set, out)?;
+            disclose_untrusted_effective(global, trusted, out)
+        }
         Err(err) => {
             writeln!(out, "could not read skills: {err}")?;
             Ok(())
@@ -280,8 +320,12 @@ fn render_list(set: &SkillSet, out: &mut dyn Write) -> anyhow::Result<()> {
 /// # Errors
 /// Returns an error only if output cannot be written.
 pub fn show(root: &Path, name: &str, global: bool, out: &mut dyn Write) -> anyhow::Result<()> {
-    match discover_trusted_scoped(root, true, global) {
-        Ok(set) => render_show(&set, name, out),
+    let trusted = trust::is_trusted(root);
+    match discover_trusted_scoped(root, trusted, global) {
+        Ok(set) => {
+            render_show(&set, name, out)?;
+            disclose_untrusted_effective(global, trusted, out)
+        }
         Err(err) => {
             writeln!(out, "could not read skills: {err}")?;
             Ok(())
@@ -335,6 +379,24 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn disclosure_fires_only_for_a_default_untrusted_read() {
+        // The one condition that hides the project layer: a default (non-global)
+        // read of an untrusted workspace.
+        let note = |global: bool, trusted: bool| {
+            let mut out = Vec::new();
+            disclose_untrusted_effective(global, trusted, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(note(false, false).contains("project-local skills and sources are hidden"));
+        assert!(note(false, true).is_empty(), "a trusted read is silent");
+        assert!(
+            note(true, false).is_empty(),
+            "an explicit --global read is silent"
+        );
+        assert!(note(true, true).is_empty());
+    }
 
     /// Write a `SKILL.md`-only skill under `<root>/<sub>/<name>`, where `sub` is
     /// e.g. `.localpilot/skills` or `.agents/skills`. `root` is a project root or

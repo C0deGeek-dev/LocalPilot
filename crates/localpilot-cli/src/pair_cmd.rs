@@ -183,8 +183,7 @@ pub(crate) async fn run(args: PairArgs) -> Result<crate::repl::ChatOutcome> {
     };
     let history =
         localpilot_store::PromptHistory::new(setup.config().history.persistence.is_enabled());
-    let trust_required = !matches!(resolved.profile, Profile::Bypass | Profile::Unrestricted)
-        && !crate::trust::is_trusted(&cwd);
+    let trust_required = crate::trust::prompt_required(resolved.profile, &cwd);
     let exit = crate::fullscreen::run_pair(
         primary,
         secondary,

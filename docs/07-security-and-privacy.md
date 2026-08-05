@@ -37,6 +37,40 @@ Trusted does not mean:
 - run destructive commands without approval
 - write outside workspace without approval
 
+Trust is a convenience gate, not a security boundary — the permission engine
+still mediates every effect. Its concrete role: a trusted folder does not
+re-prompt, its project-local skills and skill sources are loaded and visible, and
+its project skill state may be modified. An untrusted folder is served the
+user-global skill baseline only.
+
+### The trusted-folders store
+
+Trusted folders are recorded one canonical absolute path per line in a small
+file next to the user config:
+
+- Windows: `%APPDATA%\localpilot\trusted-folders.txt`
+- Linux/macOS: `$XDG_CONFIG_HOME/localpilot/trusted-folders.txt` (defaulting to
+  `~/.config/localpilot/trusted-folders.txt`)
+
+Trust is **exact-folder**: a trusted folder is not inherited by its
+subdirectories — each is trusted on its own.
+
+### Granting and revoking trust
+
+- The first time you `localpilot chat` in an untrusted folder, the dialog offers
+  three choices: trust for this session only (nothing is written), trust and
+  remember the workspace (the folder is added to the store), or exit.
+- `localpilot trust add [PATH]` records a folder (default: the current
+  directory); `localpilot trust remove [PATH]` revokes it; `localpilot trust
+  list` shows every trusted folder; `localpilot trust status [PATH]` reports
+  whether a folder is trusted and the store it was evaluated against.
+- `localpilot doctor` reports the current folder's trust state and the store
+  path.
+
+The `bypass` and `unrestricted` permission profiles skip the trust prompt
+entirely, so a folder worked exclusively in those profiles is never recorded;
+`localpilot trust add` remains the way to persist trust for such a folder.
+
 ## Secret Redaction
 
 Redact:

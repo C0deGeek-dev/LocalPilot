@@ -11,6 +11,10 @@ mod mcp_env;
 #[allow(dead_code)]
 #[path = "../src/output.rs"]
 mod output;
+// `doctor` now reads the trust store through `crate::trust`; include it too.
+#[allow(dead_code)]
+#[path = "../src/trust.rs"]
+mod trust;
 
 use doctor::{
     AgentsStatus, ConfigPath, DoctorReport, McpServerState, McpServerStatus, ProviderStatus,
@@ -214,6 +218,9 @@ fn report() -> DoctorReport {
             "print-turn-timeout".to_string(),
         ],
         workspace_trust: TrustState::Unknown,
+        workspace_trust_store: Some(
+            "/home/user/.config/localpilot/trusted-folders.txt".to_string(),
+        ),
         hygiene: None,
     }
 }

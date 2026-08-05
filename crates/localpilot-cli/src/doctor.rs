@@ -48,6 +48,10 @@ pub struct DoctorReport {
     /// feature-detect against an older binary rather than guess from the version.
     pub capabilities: Vec<String>,
     pub workspace_trust: TrustState,
+    /// The trusted-folders store path trust was evaluated against, when a config
+    /// base resolves. `None` when no config base is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_trust_store: Option<String>,
     /// Context-hygiene report — the authored-context layers (instruction files +
     /// skills) with their token weights and any advisory findings. Populated only
     /// by `doctor --hygiene`; absent (and omitted from JSON) otherwise, so the
@@ -233,7 +237,32 @@ fn agents() -> AgentsStatus {
     }
 }
 
+/// Map the result-returning trust query for `cwd` against `store` to a report
+/// state and the store path. An unreadable store or an unresolvable path reports
+/// `Unknown` — never a confident `Untrusted` from a broken store.
+fn workspace_trust_in(cwd: &Path, store: &Path) -> (TrustState, Option<String>) {
+    let state = match crate::trust::is_trusted_result_in(cwd, store) {
+        Ok(crate::trust::Trust::Trusted) => TrustState::Trusted,
+        Ok(crate::trust::Trust::Untrusted) => TrustState::Untrusted,
+        Err(_) => TrustState::Unknown,
+    };
+    (state, Some(store.display().to_string()))
+}
+
+/// The trust state of the current directory and the store it was evaluated
+/// against.
+fn workspace_trust() -> (TrustState, Option<String>) {
+    match (std::env::current_dir(), crate::trust::store_path()) {
+        (Ok(cwd), Some(store)) => workspace_trust_in(&cwd, &store),
+        (_, store) => (
+            TrustState::Unknown,
+            store.map(|path| path.display().to_string()),
+        ),
+    }
+}
+
 pub fn report() -> DoctorReport {
+    let (workspace_trust, workspace_trust_store) = workspace_trust();
     DoctorReport {
         version: env!("LOCALPILOT_VERSION").to_string(),
         binary_path: binary_path(),
@@ -247,7 +276,8 @@ pub fn report() -> DoctorReport {
         research_docs: research_docs(),
         agents: agents(),
         capabilities: capabilities(),
-        workspace_trust: TrustState::Unknown,
+        workspace_trust,
+        workspace_trust_store,
         hygiene: None,
     }
 }
@@ -335,6 +365,7 @@ fn capabilities() -> Vec<String> {
         "models-json".to_string(),
         "learning-workspace-flag".to_string(),
         "print-turn-timeout".to_string(),
+        "trust-cli".to_string(),
     ];
     if cfg!(feature = "tui") {
         caps.push("tui".to_string());
@@ -538,12 +569,31 @@ pub fn render(report: &DoctorReport) -> String {
     let _ = writeln!(s, "capabilities: {}", report.capabilities.join(", "));
     let _ = writeln!(s);
 
+    // Doctor now evaluates trust immediately, so the line is state-accurate.
     let trust = match report.workspace_trust {
         TrustState::Trusted => "trusted",
-        TrustState::Untrusted => "untrusted",
-        TrustState::Unknown => "unknown (evaluated when a session starts)",
+        TrustState::Untrusted => "not trusted",
+        TrustState::Unknown => "could not be evaluated",
     };
     let _ = writeln!(s, "workspace trust: {trust}");
+    match report.workspace_trust {
+        TrustState::Trusted => {
+            if let Some(store) = &report.workspace_trust_store {
+                let _ = writeln!(s, "  store: {store}");
+            }
+        }
+        TrustState::Untrusted => {
+            if let Some(store) = &report.workspace_trust_store {
+                let _ = writeln!(s, "  store: {store}  (grant with `localpilot trust add`)");
+            }
+        }
+        TrustState::Unknown => {
+            let _ = writeln!(
+                s,
+                "  evaluation failed; run `localpilot trust status` for the error"
+            );
+        }
+    }
 
     if let Some(context) = &report.hygiene {
         render_hygiene(&mut s, context);
@@ -990,6 +1040,9 @@ mod tests {
                 error: None,
             }],
             workspace_trust: TrustState::Unknown,
+            workspace_trust_store: Some(
+                "/home/user/.config/localpilot/trusted-folders.txt".to_string(),
+            ),
             hygiene: None,
         }
     }
@@ -997,6 +1050,37 @@ mod tests {
     #[test]
     fn render_is_stable() {
         insta::assert_snapshot!(render(&fixture()));
+    }
+
+    #[test]
+    fn capabilities_advertise_the_trust_cli_surface() {
+        assert!(capabilities().contains(&"trust-cli".to_string()));
+    }
+
+    #[test]
+    fn workspace_trust_maps_state_and_flags_a_broken_store() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        let store = home.path().join("trusted-folders.txt");
+
+        let (state, path) = workspace_trust_in(cwd.path(), &store);
+        assert_eq!(state, TrustState::Untrusted);
+        assert_eq!(path, Some(store.display().to_string()));
+
+        crate::trust::add_in(cwd.path(), &store).expect("add");
+        assert_eq!(
+            workspace_trust_in(cwd.path(), &store).0,
+            TrustState::Trusted
+        );
+
+        // An unreadable store (a directory where the file is expected) is Unknown,
+        // not a confident Untrusted.
+        let unreadable = home.path().join("store-as-dir");
+        std::fs::create_dir_all(&unreadable).expect("mkdir");
+        assert_eq!(
+            workspace_trust_in(cwd.path(), &unreadable).0,
+            TrustState::Unknown
+        );
     }
 
     #[test]

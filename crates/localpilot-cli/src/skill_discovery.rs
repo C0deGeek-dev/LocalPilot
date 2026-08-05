@@ -448,6 +448,11 @@ async fn run_discovery(
         ReadScope::Effective
     };
 
+    // A default effective research read hides an untrusted project's local
+    // catalogs (the manager gates them); disclose that. An explicit --global read
+    // selects the global baseline by intent and stays notice-free.
+    crate::skills_cmd::disclose_untrusted_effective(global, trusted, out)?;
+
     // Local matches first — always available, even with the web off.
     let mut candidates = manager.local_discovery(read)?;
 
@@ -1018,6 +1023,12 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         assert!(text.contains("Relevant skills"), "{text}");
         assert!(text.contains("Recommended: threejs-webgl"), "{text}");
+        // The default effective research read discloses the hidden project layer
+        // for this untrusted temp project (an explicit --global read would not).
+        assert!(
+            text.contains("project-local skills and sources are hidden"),
+            "{text}"
+        );
 
         // A review proposal was saved with the full evidence.
         let proposals = root.join(".localpilot").join("skill-proposals.toml");

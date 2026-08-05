@@ -2,6 +2,64 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
+
+Status: accepted. Closes LocalHub#57.
+
+Workspace trust was a half-built gate: it was enforced (an untrusted workspace
+could not modify project skill state) but had no key. The only writer was the
+interactive chat dialog; there was no `localpilot trust` command, no config key,
+and no env var. `doctor` hardcoded the state to `unknown`, so the one command
+whose job is to explain the environment could not see the flag that was blocking
+a `skills repo add`. Worse, reads and writes disagreed — `skills list`/`show`
+loaded the project overlay unconditionally while mutations refused — so a user
+could see a project skill but not install one, with no way to grant trust.
+
+Decision: keep the gate, and make it reachable, inspectable, and consistent.
+
+- **Keep the gate.** The folder-trust gate is the reachable half of a
+  defence-in-depth model; its permission-engine half (the `untrusted_floor`
+  escalation) is still driven by the permission profile this revision, and
+  LocalHub#60 is what will derive the session's trust from this folder store so
+  the two halves align. Removing the folder gate now would strand that model and
+  leave no user-facing trust surface, so it is made usable rather than removed.
+- **A `localpilot trust` CLI** with `status` (default), `add`, `remove`, and
+  `list`; paths default to the current directory. It is built on result-returning
+  store operations: `status` exits zero for a successfully evaluated
+  trusted-or-untrusted folder, while `add`/`remove`/`list` exit non-zero on an
+  invalid target, an unavailable config base, or a real store read/write error —
+  never the fire-and-forget behaviour the interactive dialog uses. Removal
+  rewrites the store atomically (a same-directory staged file and a same-volume
+  rename) so a failed write can never truncate the trust list, and deletes every
+  duplicate line so a single `remove` actually revokes trust.
+- **`doctor` reads the real store** through the same result-returning query and
+  reports `Trusted`/`Untrusted`, or `Unknown` only when evaluation genuinely
+  fails (an unreadable store, an unresolvable cwd/config base) — an unreadable
+  store is never collapsed into a confident `Untrusted`. It shows the store path
+  and advertises a `trust-cli` capability token.
+- **A distinct trust query.** The interactive boolean `is_trusted` stays
+  fail-closed for the startup gate; the CLI and `doctor` use a result-returning
+  query so a broken store is diagnosable rather than silently untrusted.
+- **Effective reads are gated on folder trust.** An untrusted workspace
+  contributes no project skills, sources, or catalogs to an effective read
+  (`skills list`/`show`/`repo list`/`available`, and the source-catalog half of
+  `skills research`); it is served the global baseline only, with a disclosure
+  naming `localpilot trust add`. An explicit `--global` read is notice-free. This
+  closes the read/write bypass; the handoff skill-suggestion path is gated the
+  same way.
+- **The refusal names the remedy** (`run localpilot trust add … or retry with
+  --global`), and the trust dialog relabels its choices so the session-only vs
+  remembered distinction is visible at the point of choice (the persistent-trust
+  option is not made the Enter default).
+- **The startup prompt predicate** is factored into one `trust::prompt_required`
+  used by every host, so the decision (a prompting profile over an untrusted
+  folder) has a single source of truth.
+
+Boundary: the harness `SessionConfig.trusted` derivation (which currently follows
+the permission profile rather than the folder-trust store) is deliberately left
+to LocalHub#60; this record makes trust reachable and consistently consumed by
+the surfaces already intended to consult folder trust.
+
 ## ADR-0142: Image Ingress Is Complete And Never Silent
 
 Status: accepted. Extends and amends ADR-0061 (vision is a resolved capability,

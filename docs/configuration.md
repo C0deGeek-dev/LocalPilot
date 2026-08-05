@@ -98,6 +98,16 @@ Enter confirms it and Escape exits. Screen-reader mode exposes the same three
 choices and current selection as text. Session-only trust starts the same
 trust-gated workspace services without writing the trusted-folder list.
 
+Trust can also be managed outside chat: `localpilot trust add [PATH]` /
+`remove [PATH]` / `list` / `status [PATH]` (paths default to the current
+directory), and `localpilot doctor` reports the current folder's trust state and
+store path. Trust is exact-folder — not inherited by subdirectories — and stored
+one canonical path per line in `trusted-folders.txt` next to the user config
+(`%APPDATA%\localpilot\` on Windows, `$XDG_CONFIG_HOME/localpilot/` elsewhere).
+The `bypass` and `unrestricted` profiles skip the prompt, so the CLI is the
+persistence route for a folder always worked in those profiles. See
+[07-security-and-privacy.md](07-security-and-privacy.md).
+
 The full-screen host uses the same resolved provider vision capability as the
 inline host. On a vision-capable model an image can be attached three ways, each
 as an atomic placeholder: Ctrl+V a copied bitmap; Ctrl+V a copied image file

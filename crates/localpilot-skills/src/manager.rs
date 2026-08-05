@@ -161,7 +161,11 @@ impl<'a> SkillsManager<'a> {
                 scopes.push((Scope::Global, paths));
             }
         }
-        if matches!(read, ReadScope::Effective) {
+        // An untrusted workspace contributes no project skills, sources, or
+        // catalogs to an effective read, matching what the file-discovery half
+        // (`discovery_roots`) already does — so reads and mutations answer to the
+        // same folder-trust rule.
+        if matches!(read, ReadScope::Effective) && self.trusted {
             if let Ok(paths) = self.paths(Scope::Project) {
                 scopes.push((Scope::Project, paths));
             }
@@ -174,7 +178,9 @@ impl<'a> SkillsManager<'a> {
     fn ensure_mutable(&self, scope: Scope) -> Result<(), SkillError> {
         if scope == Scope::Project && !self.trusted {
             return Err(SkillError::Refused(
-                "this workspace is not trusted; project skill state cannot be modified".to_string(),
+                "workspace is not trusted; run `localpilot trust add` for this folder, or retry \
+                 with `--global`"
+                    .to_string(),
             ));
         }
         Ok(())
@@ -1053,7 +1059,12 @@ mod tests {
                 &mut Vec::new(),
             )
             .unwrap_err();
-        assert!(matches!(err, SkillError::Refused(_)), "got {err:?}");
+        let SkillError::Refused(message) = &err else {
+            panic!("got {err:?}");
+        };
+        // The refusal names both remedies so the user is not stuck.
+        assert!(message.contains("localpilot trust add"), "got {message:?}");
+        assert!(message.contains("--global"), "got {message:?}");
         // The same operation in the global scope is allowed (trust gates project).
         m.repo_add(
             Scope::Global,
@@ -1062,6 +1073,49 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn untrusted_effective_read_excludes_project_sources_but_keeps_global() {
+        let c = ctx(&["alpha"]);
+        let fetcher = FakeFetcher {
+            fixture: c.fixture.clone(),
+            commit: "abc".to_string(),
+        };
+        // Trusted: register a project source and a global source.
+        let trusted = SkillsManager::new(&c.project, Some(&c.home), true, &fetcher, "1");
+        trusted
+            .repo_add(
+                Scope::Project,
+                "https://github.com/o/project",
+                Approval::AssumeYes,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        trusted
+            .repo_add(
+                Scope::Global,
+                "https://github.com/o/global",
+                Approval::AssumeYes,
+                &mut Vec::new(),
+            )
+            .unwrap();
+
+        // Untrusted: an effective read sees only the global source.
+        let untrusted = SkillsManager::new(&c.project, Some(&c.home), false, &fetcher, "1");
+        let mut effective = Vec::new();
+        untrusted
+            .repo_list(ReadScope::Effective, &mut effective)
+            .unwrap();
+        let effective = String::from_utf8(effective).unwrap();
+        assert!(effective.contains("o/global"), "got {effective:?}");
+        assert!(!effective.contains("o/project"), "got {effective:?}");
+
+        // A trusted effective read sees both.
+        let mut both = Vec::new();
+        trusted.repo_list(ReadScope::Effective, &mut both).unwrap();
+        let both = String::from_utf8(both).unwrap();
+        assert!(both.contains("o/project") && both.contains("o/global"));
     }
 
     #[test]
