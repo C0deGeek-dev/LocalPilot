@@ -139,6 +139,22 @@ pub trait WorkerFactory: Send + Sync {
     }
 }
 
+const ADOPTION_ONLY_FACTORY_REFUSAL: &str =
+    "this host adopts existing sessions and cannot create workers";
+
+/// Refuses every worker-construction path for a host that only adopts sessions.
+struct AdoptionOnlyWorkerFactory;
+
+impl WorkerFactory for AdoptionOnlyWorkerFactory {
+    fn create(&self, _request: &SpawnRequest) -> Result<SessionRuntime, String> {
+        Err(ADOPTION_ONLY_FACTORY_REFUSAL.to_string())
+    }
+
+    fn ensure_model_available(&self, _model: &str) -> Result<(), String> {
+        Err(ADOPTION_ONLY_FACTORY_REFUSAL.to_string())
+    }
+}
+
 /// What a spawn resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spawned {
@@ -309,6 +325,14 @@ impl SwarmHost {
             factory,
             touches: super::touches::TouchIndex::default(),
         }
+    }
+
+    /// Build a host that can adopt already-registered sessions but never create
+    /// workers. A mistaken spawn is refused through [`SpawnError`] rather than
+    /// panicking or silently selecting a provider.
+    #[must_use]
+    pub fn for_adoption(sessions: SessionRegistry, swarms: SwarmRegistry) -> Self {
+        Self::new(sessions, swarms, Arc::new(AdoptionOnlyWorkerFactory))
     }
 
     /// The shared record of who touched what recently.

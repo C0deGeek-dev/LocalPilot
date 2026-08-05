@@ -133,11 +133,7 @@ async fn pair_ready(limits: SwarmLimits) -> (SwarmHost, Arc<Sessions>, SessionId
     let factory = Arc::clone(&sessions) as Arc<dyn SessionFactory>;
     let first = registry.open_new(&*factory).await.unwrap();
     let second = registry.open_new(&*factory).await.unwrap();
-    let host = SwarmHost::new(
-        registry,
-        SwarmRegistry::with_limits(limits),
-        Arc::clone(&sessions) as Arc<dyn WorkerFactory>,
-    );
+    let host = SwarmHost::for_adoption(registry, SwarmRegistry::with_limits(limits));
     (host, sessions, first, second)
 }
 
@@ -148,6 +144,43 @@ async fn adopted_pair() -> (SwarmHost, Arc<Sessions>, AdoptedPair) {
         .await
         .unwrap();
     (host, sessions, pair)
+}
+
+#[tokio::test]
+async fn an_adoption_only_host_refuses_hierarchical_worker_spawns_with_typed_errors() {
+    let sessions = Sessions::new();
+    let registry = SessionRegistry::new();
+    let root = registry
+        .open_new(&*(Arc::clone(&sessions) as Arc<dyn SessionFactory>))
+        .await
+        .unwrap();
+    let host = SwarmHost::for_adoption(registry, SwarmRegistry::new());
+    host.adopt_root(&swarm(), root, "root").await.unwrap();
+    let refusal = "this host adopts existing sessions and cannot create workers";
+
+    let plain = SpawnRequest::new(swarm(), root, "worker", "do work");
+    assert_eq!(
+        host.spawn(&plain).await,
+        Err(SpawnError::Factory(refusal.to_string()))
+    );
+
+    let modeled = SpawnRequest::new(swarm(), root, "modeled", "do work").with_model("some-model");
+    assert_eq!(
+        host.spawn(&modeled).await,
+        Err(SpawnError::ProviderUnavailable {
+            model: "some-model".to_string(),
+            reason: refusal.to_string(),
+        })
+    );
+
+    assert_eq!(host.sessions().list().await, vec![root]);
+    let members = host.swarms().members(&swarm()).await;
+    assert_eq!(members.len(), 1, "no worker member was admitted");
+    assert_eq!(members[0].session, root);
+    assert!(
+        host.host(root).await.is_some(),
+        "the adopted root remains hosted"
+    );
 }
 
 #[tokio::test]
