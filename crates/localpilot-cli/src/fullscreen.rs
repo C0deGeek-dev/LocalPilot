@@ -1973,19 +1973,23 @@ fn parse_bool_setting(value: &str) -> Option<bool> {
     }
 }
 
+/// The composer-ownership guard shared by every image path: emits the reason
+/// notice and returns `true` when an attach must not proceed.
+fn image_attach_blocked(app: &mut AppModel) -> bool {
+    if let Some(block) = app.image_attach_block() {
+        app.apply_runtime(RuntimeUpdate::Warning(block.message().to_string()));
+        true
+    } else {
+        false
+    }
+}
+
 async fn attach_clipboard_image_idle(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     config: &localpilot_config::Config,
-    quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() || app.has_takeover() || app.has_theme_picker() {
-        return;
-    }
-    if app.shell_mode() {
-        app.apply_runtime(RuntimeUpdate::Warning(
-            "images are not available in shell mode".to_string(),
-        ));
+    if image_attach_blocked(app) {
         return;
     }
     let provider_id = runtime.active_provider_id().to_string();
@@ -1997,21 +2001,14 @@ async fn attach_clipboard_image_idle(
         provider_id,
         vision_capable: runtime.active_accepts_images(),
     };
-    attach_clipboard_image_with_capability(app, &capability, quiet_when_absent);
+    attach_clipboard_image_with_capability(app, &capability);
 }
 
 fn attach_clipboard_image_with_capability(
     app: &mut AppModel,
     capability: &ImageCapabilitySnapshot,
-    quiet_when_absent: bool,
 ) {
-    if app.has_input_overlay() || app.has_takeover() || app.has_theme_picker() {
-        return;
-    }
-    if app.shell_mode() {
-        app.apply_runtime(RuntimeUpdate::Warning(
-            "images are not available in shell mode".to_string(),
-        ));
+    if image_attach_blocked(app) {
         return;
     }
     if !capability.vision_capable {
@@ -2022,11 +2019,9 @@ fn attach_clipboard_image_with_capability(
     }
     let image = match crate::repl::read_clipboard_image() {
         Ok(ClipboardImageRead::Missing) => {
-            if !quiet_when_absent {
-                app.apply_runtime(RuntimeUpdate::Warning(
-                    "no image on the clipboard".to_string(),
-                ));
-            }
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "no image or image file on the clipboard".to_string(),
+            ));
             return;
         }
         Ok(ClipboardImageRead::Image(image)) => image,
@@ -2035,17 +2030,90 @@ fn attach_clipboard_image_with_capability(
             return;
         }
     };
+    let notice = image.attach_notice();
     let crate::repl::CapturedClipboardImage {
         media_type,
         data,
         byte_len,
-        width,
-        height,
+        ..
     } = image;
+    attach_prepared_image(app, media_type, data, byte_len, notice);
+}
+
+/// Hand a prepared image to the composer, emitting the success notice or, if the
+/// composer declined it after the pre-checks (a race with an overlay/dialog), the
+/// defensive fallback so the paste is never silently dropped.
+fn attach_prepared_image(
+    app: &mut AppModel,
+    media_type: &'static str,
+    data: String,
+    byte_len: usize,
+    success_notice: String,
+) {
     if app.attach_image(media_type, data, byte_len).is_some() {
-        app.apply_runtime(RuntimeUpdate::Warning(format!(
-            "attached {width}×{height} image"
-        )));
+        app.apply_runtime(RuntimeUpdate::Warning(success_notice));
+    } else {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "couldn't attach the image.".to_string(),
+        ));
+    }
+}
+
+async fn attach_image_path_idle(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    path: &std::path::Path,
+) {
+    if image_attach_blocked(app) {
+        return;
+    }
+    let provider_id = runtime.active_provider_id().to_string();
+    if !runtime.active_accepts_images() {
+        let resolved = resolved_image_support(config, Some(&provider_id)).await;
+        runtime.set_image_support_override(resolved);
+    }
+    let capability = ImageCapabilitySnapshot {
+        provider_id,
+        vision_capable: runtime.active_accepts_images(),
+    };
+    attach_image_path_with_capability(app, &capability, path);
+}
+
+fn attach_image_path_with_capability(
+    app: &mut AppModel,
+    capability: &ImageCapabilitySnapshot,
+    path: &std::path::Path,
+) {
+    if image_attach_blocked(app) {
+        return;
+    }
+    if !capability.vision_capable {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            crate::repl::image_unsupported_notice(&capability.provider_id),
+        ));
+        return;
+    }
+    match crate::repl::load_image_file(path) {
+        Ok(loaded) => {
+            let notice = format!("attached image {}", loaded.file_name);
+            attach_prepared_image(app, loaded.media_type, loaded.data, loaded.byte_len, notice);
+        }
+        Err(crate::repl::ImageLoadError::TooLarge) => {
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "that image is too large to attach.".to_string(),
+            ));
+        }
+        Err(crate::repl::ImageLoadError::Unsupported) => {
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "that file isn't a supported image (PNG, JPEG, WebP, or GIF).".to_string(),
+            ));
+        }
+        Err(crate::repl::ImageLoadError::Unreadable(message)) => {
+            app.apply_runtime(RuntimeUpdate::Warning(format!(
+                "couldn't read the image file: {message}"
+            )));
+        }
     }
 }
 
@@ -3208,7 +3276,7 @@ async fn run_event_loop(
         match next {
             Event::Key(key) if is_key_action(key) => {
                 if is_clipboard_image_key(key) {
-                    attach_clipboard_image_idle(app, runtime, config, false).await;
+                    attach_clipboard_image_idle(app, runtime, config).await;
                     continue;
                 }
                 let Some(action) = map_key(key) else {
@@ -3287,7 +3355,9 @@ async fn run_event_loop(
             }
             Event::Paste(text) => {
                 if text.trim().is_empty() {
-                    attach_clipboard_image_idle(app, runtime, config, true).await;
+                    attach_clipboard_image_idle(app, runtime, config).await;
+                } else if let Some(path) = crate::repl::recognized_image_candidate_path(&text) {
+                    attach_image_path_idle(app, runtime, config, &path).await;
                 } else {
                     let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
                 }
@@ -3823,7 +3893,7 @@ fn handle_turn_event_impl(
                 return false;
             }
             if is_clipboard_image_key(key) {
-                attach_clipboard_image_with_capability(app, image_capability, false);
+                attach_clipboard_image_with_capability(app, image_capability);
                 return false;
             }
             let Some(action) = map_key(key) else {
@@ -3904,7 +3974,9 @@ fn handle_turn_event_impl(
         }
         Event::Paste(text) => {
             if text.trim().is_empty() {
-                attach_clipboard_image_with_capability(app, image_capability, true);
+                attach_clipboard_image_with_capability(app, image_capability);
+            } else if let Some(path) = crate::repl::recognized_image_candidate_path(&text) {
+                attach_image_path_with_capability(app, image_capability, &path);
             } else {
                 let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
             }
@@ -6343,6 +6415,65 @@ mod tests {
         }
     }
 
+    fn timeline_has_notice(app: &AppModel, needle: &str) -> bool {
+        app.active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains(needle))
+    }
+
+    #[test]
+    fn attach_image_path_resolves_capability_before_reading_the_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let png = dir.path().join("photo.png");
+        std::fs::write(
+            &png,
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3],
+        )
+        .expect("write png");
+        let missing = dir.path().join("gone.png");
+
+        // (a) capable + a real PNG file -> attaches, notice names the file.
+        let mut capable = app();
+        attach_image_path_with_capability(&mut capable, &image_capability(true), &png);
+        assert!(timeline_has_notice(&capable, "attached image "));
+
+        // (b) not capable + a missing path -> the two-lever capability notice, and
+        // no file read happens (the path never existed, yet there is no read error).
+        let mut text_only = app();
+        attach_image_path_with_capability(&mut text_only, &image_capability(false), &missing);
+        assert!(timeline_has_notice(&text_only, "supports_vision"));
+        assert!(timeline_has_notice(&text_only, "vision_probe"));
+        assert!(!timeline_has_notice(
+            &text_only,
+            "couldn't read the image file"
+        ));
+
+        // (c) capable + a missing path -> the read-error notice.
+        let mut unreadable = app();
+        attach_image_path_with_capability(&mut unreadable, &image_capability(true), &missing);
+        assert!(timeline_has_notice(
+            &unreadable,
+            "couldn't read the image file"
+        ));
+    }
+
+    #[test]
+    fn attach_prepared_image_notifies_when_the_composer_declines() {
+        let mut app = app();
+        // A help takeover owns input, so attach_image returns None.
+        app.open_help();
+        attach_prepared_image(
+            &mut app,
+            "image/png",
+            "DATA".to_string(),
+            4,
+            "attached 1×1 image".to_string(),
+        );
+        assert!(timeline_has_notice(&app, "couldn't attach the image."));
+        assert!(!timeline_has_notice(&app, "attached 1×1 image"));
+    }
+
     #[test]
     fn ctrl_c_maps_to_contextual_interrupt_handling() {
         assert_eq!(
@@ -8742,7 +8873,7 @@ mod tests {
         assert!(snapshot < turn);
 
         let mut app = app();
-        attach_clipboard_image_with_capability(&mut app, &image_capability(false), false);
+        attach_clipboard_image_with_capability(&mut app, &image_capability(false));
         assert!(app.active_timeline().items().iter().any(|item| item
             .text
             .contains("current model is not known to accept images")));

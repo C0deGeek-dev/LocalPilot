@@ -617,7 +617,7 @@ async fn event_loop(
                             crate::trust::remember(host.cwd);
                         }
                     } else if is_clipboard_image_key(key) {
-                        attach_clipboard_image(state, runtime, &host, false).await;
+                        attach_clipboard_image(state, runtime, &host).await;
                     } else if handle_paste_burst(state, &mut paste_burst, key, buffered_after) {
                     } else if slash_picker_exact_submit(state, key) {
                         state.close_slash_picker();
@@ -643,7 +643,9 @@ async fn event_loop(
                 // clipboard image through paste, so probe the clipboard for one.
                 Event::Paste(text) if state.trust.is_none() => {
                     if text.trim().is_empty() {
-                        attach_clipboard_image(state, runtime, &host, true).await;
+                        attach_clipboard_image(state, runtime, &host).await;
+                    } else if let Some(path) = recognized_image_candidate_path(&text) {
+                        attach_image_path(state, runtime, &host, &path).await;
                     } else {
                         insert_paste(state, text);
                     }
@@ -2408,33 +2410,188 @@ fn insert_paste(state: &mut AppState, text: String) {
 /// provider request limits (~5 MB encoded ≈ ~3.7 MB of image bytes).
 const MAX_IMAGE_BASE64_BYTES: usize = 5 * 1024 * 1024;
 
+/// Where a captured image came from, so a success notice can name bitmap
+/// dimensions or a file name without fabricating one from the other.
+pub(crate) enum ImageSource {
+    Bitmap { width: usize, height: usize },
+    File { name: String },
+}
+
 pub(crate) struct CapturedClipboardImage {
     pub(crate) media_type: &'static str,
     pub(crate) data: String,
     pub(crate) byte_len: usize,
-    pub(crate) width: usize,
-    pub(crate) height: usize,
+    pub(crate) source: ImageSource,
+}
+
+impl CapturedClipboardImage {
+    /// The user-facing "attached …" notice for this capture.
+    pub(crate) fn attach_notice(&self) -> String {
+        match &self.source {
+            ImageSource::Bitmap { width, height } => format!("attached {width}×{height} image"),
+            ImageSource::File { name } => format!("attached image {name}"),
+        }
+    }
 }
 
 impl std::fmt::Debug for CapturedClipboardImage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CapturedClipboardImage")
+        let mut debug = formatter.debug_struct("CapturedClipboardImage");
+        debug
             .field("media_type", &self.media_type)
             .field(
                 "data",
                 &format_args!("<{} bytes redacted>", self.data.len()),
             )
-            .field("byte_len", &self.byte_len)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .finish()
+            .field("byte_len", &self.byte_len);
+        match &self.source {
+            ImageSource::Bitmap { width, height } => {
+                debug.field("width", width).field("height", height);
+            }
+            ImageSource::File { name } => {
+                debug.field("file", name);
+            }
+        }
+        debug.finish()
     }
 }
 
 pub(crate) enum ClipboardImageRead {
     Missing,
     Image(CapturedClipboardImage),
+}
+
+/// Image extensions the pasted-path recognizer will intercept as a candidate.
+/// This is only a conservative syntactic gate; the media type is always decided
+/// from magic bytes, so a mis-named file is still rejected by content.
+const SUPPORTED_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
+
+/// Identify a provider-safe image type from its leading magic bytes. Returns
+/// `None` for anything that is not PNG, JPEG, WebP, or GIF — including a file
+/// with an image extension but non-image content.
+pub(crate) fn image_media_type_from_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// The cardinality of a clipboard file list. The selector classifies count only;
+/// whether the single file is a readable, supported, in-budget image is decided
+/// by `load_image_file`, the single content authority.
+pub(crate) enum FileListPick {
+    None,
+    One(std::path::PathBuf),
+    Multiple,
+}
+
+pub(crate) fn pick_clipboard_image_file(paths: &[std::path::PathBuf]) -> FileListPick {
+    match paths {
+        [] => FileListPick::None,
+        [single] => FileListPick::One(single.clone()),
+        _ => FileListPick::Multiple,
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ImageLoadError {
+    TooLarge,
+    Unsupported,
+    Unreadable(String),
+}
+
+pub(crate) struct LoadedImage {
+    pub(crate) media_type: &'static str,
+    pub(crate) data: String,
+    pub(crate) byte_len: usize,
+    pub(crate) file_name: String,
+}
+
+/// Whether a raw byte length would base64-encode within the attach ceiling,
+/// computed overflow-safely so a preflight never allocates for an oversize file.
+fn encoded_base64_len_within_ceiling(raw_len: u64) -> bool {
+    match raw_len
+        .checked_add(2)
+        .map(|padded| padded / 3)
+        .and_then(|groups| groups.checked_mul(4))
+    {
+        Some(encoded) => encoded <= MAX_IMAGE_BASE64_BYTES as u64,
+        None => false,
+    }
+}
+
+/// Read an already-encoded image file and prepare it for attachment. The single
+/// content authority: it decides unreadable / unsupported / oversize. The size
+/// is preflighted from metadata before the bytes are read.
+pub(crate) fn load_image_file(path: &std::path::Path) -> Result<LoadedImage, ImageLoadError> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| ImageLoadError::Unreadable(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(ImageLoadError::Unreadable("not a regular file".to_string()));
+    }
+    if !encoded_base64_len_within_ceiling(metadata.len()) {
+        return Err(ImageLoadError::TooLarge);
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| ImageLoadError::Unreadable(error.to_string()))?;
+    let media_type = image_media_type_from_magic(&bytes).ok_or(ImageLoadError::Unsupported)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    if data.len() > MAX_IMAGE_BASE64_BYTES {
+        return Err(ImageLoadError::TooLarge);
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    Ok(LoadedImage {
+        media_type,
+        data,
+        byte_len: bytes.len(),
+        file_name,
+    })
+}
+
+fn strip_one_quote_pair(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
+}
+
+/// Recognize a paste that is unambiguously a single existing image-file path:
+/// one line, an optional matching quote pair, a supported image extension, and
+/// an existing regular file (checked with metadata only — no content read, so
+/// capability can be resolved before any bytes are touched). Anything else
+/// returns `None` and stays ordinary composer text.
+pub(crate) fn recognized_image_candidate_path(text: &str) -> Option<std::path::PathBuf> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        return None;
+    }
+    let unquoted = strip_one_quote_pair(trimmed);
+    if unquoted.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(unquoted);
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !SUPPORTED_IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Some(path.to_path_buf()),
+        _ => None,
+    }
 }
 
 pub(crate) fn image_unsupported_notice(provider_id: &str) -> String {
@@ -2448,46 +2605,91 @@ pub(crate) fn image_unsupported_notice(provider_id: &str) -> String {
 pub(crate) fn read_clipboard_image() -> Result<ClipboardImageRead, String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
-    let image = match clipboard.get_image() {
-        Ok(image) => image,
-        Err(error) if clipboard_error_is_missing_image(&error) => {
-            return Ok(ClipboardImageRead::Missing);
+    // Compute the bitmap read first so its borrow is released before the
+    // clipboard is moved into the file-list closure.
+    let image_result = clipboard.get_image();
+    read_clipboard_image_with(image_result, move || clipboard.get().file_list())
+}
+
+/// The clipboard-decision seam, injectable so it can be tested without a real
+/// clipboard. A missing bitmap falls back to a copied image file; a file-list
+/// read error is surfaced, never swallowed into a benign "missing".
+fn read_clipboard_image_with(
+    image_result: Result<arboard::ImageData<'_>, arboard::Error>,
+    file_list: impl FnOnce() -> Result<Vec<std::path::PathBuf>, arboard::Error>,
+) -> Result<ClipboardImageRead, String> {
+    match image_result {
+        Ok(image) => {
+            let width = image.width;
+            let height = image.height;
+            let png = encode_png(&image)?;
+            let data = base64::engine::general_purpose::STANDARD.encode(&png);
+            validate_image_base64_size(data.len())?;
+            Ok(ClipboardImageRead::Image(CapturedClipboardImage {
+                media_type: "image/png",
+                data,
+                byte_len: png.len(),
+                source: ImageSource::Bitmap { width, height },
+            }))
         }
-        Err(error) => return Err(format!("couldn't read the clipboard image: {error}")),
-    };
-    let width = image.width;
-    let height = image.height;
-    let png = encode_png(&image)?;
-    let data = base64::engine::general_purpose::STANDARD.encode(&png);
-    validate_image_base64_size(data.len())?;
-    Ok(ClipboardImageRead::Image(CapturedClipboardImage {
-        media_type: "image/png",
-        data,
-        byte_len: png.len(),
-        width,
-        height,
-    }))
+        Err(error) if clipboard_error_is_missing_image(&error) => {
+            // No bitmap on the clipboard — a copied image file (Windows CF_HDROP,
+            // macOS file URLs, Linux X11/XWayland URI lists) is the other shape.
+            match file_list() {
+                Ok(files) => match pick_clipboard_image_file(&files) {
+                    FileListPick::None => Ok(ClipboardImageRead::Missing),
+                    FileListPick::Multiple => Err(
+                        "multiple files are on the clipboard — copy a single image file."
+                            .to_string(),
+                    ),
+                    FileListPick::One(path) => match load_image_file(&path) {
+                        Ok(loaded) => Ok(ClipboardImageRead::Image(CapturedClipboardImage {
+                            media_type: loaded.media_type,
+                            data: loaded.data,
+                            byte_len: loaded.byte_len,
+                            source: ImageSource::File {
+                                name: loaded.file_name,
+                            },
+                        })),
+                        Err(ImageLoadError::TooLarge) => {
+                            Err("that image is too large to attach.".to_string())
+                        }
+                        Err(ImageLoadError::Unsupported) => Err(
+                            "the clipboard file isn't a supported image (PNG, JPEG, WebP, or GIF)."
+                                .to_string(),
+                        ),
+                        Err(ImageLoadError::Unreadable(message)) => {
+                            Err(format!("couldn't read the image file: {message}"))
+                        }
+                    },
+                },
+                // "No copied file" is the only benign file-list outcome; every
+                // other read/backend error must surface, not silently vanish.
+                Err(error) if clipboard_error_is_missing_image(&error) => {
+                    Ok(ClipboardImageRead::Missing)
+                }
+                Err(error) => Err(format!("couldn't read the clipboard file list: {error}")),
+            }
+        }
+        Err(error) => Err(format!("couldn't read the clipboard image: {error}")),
+    }
 }
 
 fn validate_image_base64_size(encoded_len: usize) -> Result<(), String> {
     if encoded_len > MAX_IMAGE_BASE64_BYTES {
-        Err("clipboard image is too large to attach".to_string())
+        Err("that image is too large to attach.".to_string())
     } else {
         Ok(())
     }
 }
 
-/// Read an image from the OS clipboard and attach it to the next prompt as a
-/// placeholder. Best effort: an unsupported model, an absent image, or an
-/// encode/oversize failure surfaces as a notice and never disturbs the session.
-/// `quiet_when_absent` suppresses the "no image" notice for the empty-paste
-/// fallback path, where a normal text paste simply had nothing to insert.
-async fn attach_clipboard_image(
+/// Resolve the image capability once, refusing (with the two-lever notice) when
+/// the active model is not known to accept images. Returns whether to proceed.
+async fn ensure_image_capability(
     state: &mut AppState,
     runtime: &mut SessionRuntime,
     host: &CommandHost<'_>,
-    quiet_when_absent: bool,
-) {
+) -> bool {
     if !runtime.active_accepts_images() {
         // An explicit paste is a strong signal the user wants images. The
         // capability may be unresolved (probe was off at startup, or the server
@@ -2502,13 +2704,28 @@ async fn attach_clipboard_image(
         state.apply(UiEvent::Notice(image_unsupported_notice(
             runtime.active_provider_id(),
         )));
+        return false;
+    }
+    true
+}
+
+/// Read an image from the OS clipboard (a bitmap or a single copied image file)
+/// and attach it to the next prompt as a placeholder. Best effort: an
+/// unsupported model, an absent image, or a read/oversize failure always
+/// surfaces a notice and never disturbs the session.
+async fn attach_clipboard_image(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    host: &CommandHost<'_>,
+) {
+    if !ensure_image_capability(state, runtime, host).await {
         return;
     }
     let image = match read_clipboard_image() {
         Ok(ClipboardImageRead::Missing) => {
-            if !quiet_when_absent {
-                state.apply(UiEvent::Notice("no image on the clipboard".to_string()));
-            }
+            state.apply(UiEvent::Notice(
+                "no image or image file on the clipboard".to_string(),
+            ));
             return;
         }
         Ok(ClipboardImageRead::Image(image)) => image,
@@ -2517,12 +2734,48 @@ async fn attach_clipboard_image(
             return;
         }
     };
+    let notice = image.attach_notice();
     let placeholder = state.register_image(image.media_type, image.data, image.byte_len);
     state.insert_input(&placeholder);
-    state.apply(UiEvent::Notice(format!(
-        "attached {}×{} image",
-        image.width, image.height
-    )));
+    state.apply(UiEvent::Notice(notice));
+}
+
+/// Attach an image identified by a pasted/dropped file path. Capability is
+/// resolved before any file bytes are read, so a text-only model gets the
+/// capability notice without touching the file, and a mis-named file is rejected
+/// by content afterwards.
+async fn attach_image_path(
+    state: &mut AppState,
+    runtime: &mut SessionRuntime,
+    host: &CommandHost<'_>,
+    path: &std::path::Path,
+) {
+    if !ensure_image_capability(state, runtime, host).await {
+        return;
+    }
+    match load_image_file(path) {
+        Ok(loaded) => {
+            let notice = format!("attached image {}", loaded.file_name);
+            let placeholder = state.register_image(loaded.media_type, loaded.data, loaded.byte_len);
+            state.insert_input(&placeholder);
+            state.apply(UiEvent::Notice(notice));
+        }
+        Err(ImageLoadError::TooLarge) => {
+            state.apply(UiEvent::Notice(
+                "that image is too large to attach.".to_string(),
+            ));
+        }
+        Err(ImageLoadError::Unsupported) => {
+            state.apply(UiEvent::Notice(
+                "that file isn't a supported image (PNG, JPEG, WebP, or GIF).".to_string(),
+            ));
+        }
+        Err(ImageLoadError::Unreadable(message)) => {
+            state.apply(UiEvent::Notice(format!(
+                "couldn't read the image file: {message}"
+            )));
+        }
+    }
 }
 
 /// Whether a clipboard read error means "there is simply no image on the
@@ -3136,7 +3389,7 @@ mod tests {
         assert_eq!(validate_image_base64_size(MAX_IMAGE_BASE64_BYTES), Ok(()));
         assert_eq!(
             validate_image_base64_size(MAX_IMAGE_BASE64_BYTES + 1),
-            Err("clipboard image is too large to attach".to_string())
+            Err("that image is too large to attach.".to_string())
         );
     }
 
@@ -3146,8 +3399,10 @@ mod tests {
             media_type: "image/png",
             data: "SECRET_CLIPBOARD_BASE64".to_string(),
             byte_len: 12,
-            width: 2,
-            height: 3,
+            source: ImageSource::Bitmap {
+                width: 2,
+                height: 3,
+            },
         };
         let debug = format!("{image:?}");
         assert!(!debug.contains("SECRET_CLIPBOARD_BASE64"));
@@ -3527,5 +3782,184 @@ mod tests {
             PendingAsk::Questions(questions) => questions,
             PendingAsk::Approval(_) => panic!("expected a pending question"),
         }
+    }
+
+    #[test]
+    fn image_media_type_is_detected_from_magic_bytes_not_extension() {
+        assert_eq!(
+            image_media_type_from_magic(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0]),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_media_type_from_magic(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_media_type_from_magic(b"GIF89a...."),
+            Some("image/gif")
+        );
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBPmore");
+        assert_eq!(image_media_type_from_magic(&webp), Some("image/webp"));
+        // Content that is not a supported image — including a truncated header —
+        // is `None`, so extension spoofing cannot pass.
+        assert_eq!(image_media_type_from_magic(b"this is just text"), None);
+        assert_eq!(image_media_type_from_magic(&[0xFF, 0xD8]), None);
+    }
+
+    #[test]
+    fn clipboard_file_list_pick_is_cardinality_only() {
+        assert!(matches!(pick_clipboard_image_file(&[]), FileListPick::None));
+        assert!(matches!(
+            pick_clipboard_image_file(&[std::path::PathBuf::from("a.png")]),
+            FileListPick::One(_)
+        ));
+        assert!(matches!(
+            pick_clipboard_image_file(&[
+                std::path::PathBuf::from("a.png"),
+                std::path::PathBuf::from("b.txt"),
+            ]),
+            FileListPick::Multiple
+        ));
+    }
+
+    #[test]
+    fn load_image_file_is_the_single_content_authority() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let png = dir.path().join("ok.png");
+        std::fs::write(
+            &png,
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3],
+        )
+        .expect("write png");
+        let loaded = load_image_file(&png).expect("png loads");
+        assert_eq!(loaded.media_type, "image/png");
+        assert_eq!(loaded.file_name, "ok.png");
+
+        // A .png whose bytes are not an image is rejected by content.
+        let fake = dir.path().join("fake.png");
+        std::fs::write(&fake, b"not an image at all").expect("write fake");
+        assert!(matches!(
+            load_image_file(&fake),
+            Err(ImageLoadError::Unsupported)
+        ));
+
+        // A missing file is unreadable.
+        assert!(matches!(
+            load_image_file(&dir.path().join("ghost.png")),
+            Err(ImageLoadError::Unreadable(_))
+        ));
+    }
+
+    #[test]
+    fn oversize_is_rejected_by_the_metadata_preflight_without_overflow() {
+        assert!(encoded_base64_len_within_ceiling(0));
+        assert!(encoded_base64_len_within_ceiling(1024));
+        // ~4 MiB raw -> ~5.3 MB base64, over the 5 MB ceiling.
+        assert!(!encoded_base64_len_within_ceiling(4 * 1024 * 1024));
+        // Would overflow u64 in the * 4 step; treated as too large, not a panic.
+        assert!(!encoded_base64_len_within_ceiling(u64::MAX));
+    }
+
+    #[test]
+    fn recognized_paths_intercept_only_existing_image_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let png = dir.path().join("pic.png");
+        std::fs::write(&png, [0x89, 0x50, 0x4E, 0x47]).expect("write png");
+        let bare = png.to_string_lossy().into_owned();
+        assert_eq!(recognized_image_candidate_path(&bare), Some(png.clone()));
+        assert_eq!(
+            recognized_image_candidate_path(&format!("\"{bare}\"")),
+            Some(png.clone())
+        );
+
+        // Ordinary prose and a non-image extension stay text.
+        assert_eq!(
+            recognized_image_candidate_path("just a sentence mentioning png files"),
+            None
+        );
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"x").expect("write txt");
+        assert_eq!(
+            recognized_image_candidate_path(&txt.to_string_lossy()),
+            None
+        );
+        // A non-existent image path is not intercepted.
+        assert_eq!(
+            recognized_image_candidate_path(&dir.path().join("ghost.png").to_string_lossy()),
+            None
+        );
+    }
+
+    #[test]
+    fn attach_notice_names_dimensions_or_a_file_without_fabrication() {
+        let bitmap = CapturedClipboardImage {
+            media_type: "image/png",
+            data: String::new(),
+            byte_len: 0,
+            source: ImageSource::Bitmap {
+                width: 10,
+                height: 20,
+            },
+        };
+        assert_eq!(bitmap.attach_notice(), "attached 10×20 image");
+        let file = CapturedClipboardImage {
+            media_type: "image/png",
+            data: String::new(),
+            byte_len: 0,
+            source: ImageSource::File {
+                name: "cat.png".to_string(),
+            },
+        };
+        assert_eq!(file.attach_notice(), "attached image cat.png");
+    }
+
+    #[test]
+    fn clipboard_read_falls_back_to_files_and_never_swallows_a_read_error() {
+        use arboard::Error;
+
+        // (a) no bitmap and no copied file (both ContentNotAvailable) -> Missing.
+        let read = read_clipboard_image_with(Err(Error::ContentNotAvailable), || {
+            Err(Error::ContentNotAvailable)
+        });
+        assert!(matches!(read, Ok(ClipboardImageRead::Missing)));
+
+        // (b) no bitmap, one copied PNG file -> a File capture.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 9]).expect("write");
+        let png_for_closure = png.clone();
+        let read = read_clipboard_image_with(Err(Error::ContentNotAvailable), move || {
+            Ok(vec![png_for_closure])
+        });
+        match read {
+            Ok(ClipboardImageRead::Image(image)) => {
+                assert_eq!(image.media_type, "image/png");
+                assert_eq!(image.attach_notice(), "attached image shot.png");
+            }
+            _ => panic!("expected a file image capture"),
+        }
+
+        // (c) no bitmap, multiple copied files -> the multiple-files error.
+        let read = read_clipboard_image_with(Err(Error::ContentNotAvailable), || {
+            Ok(vec![
+                std::path::PathBuf::from("a.png"),
+                std::path::PathBuf::from("b.png"),
+            ])
+        });
+        assert_eq!(
+            read.err().as_deref(),
+            Some("multiple files are on the clipboard — copy a single image file.")
+        );
+
+        // (d) a real file-list read error is surfaced, not swallowed into Missing.
+        let read = read_clipboard_image_with(Err(Error::ContentNotAvailable), || {
+            Err(Error::ClipboardNotSupported)
+        });
+        assert!(read
+            .err()
+            .expect("expected a surfaced error")
+            .starts_with("couldn't read the clipboard file list:"));
     }
 }

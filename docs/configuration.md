@@ -99,11 +99,18 @@ choices and current selection as text. Session-only trust starts the same
 trust-gated workspace services without writing the trusted-folder list.
 
 The full-screen host uses the same resolved provider vision capability as the
-inline host. On a vision-capable model, Ctrl+V can attach an image from the
-clipboard as an atomic placeholder; the encoded image is sent only with that
+inline host. On a vision-capable model an image can be attached three ways, each
+as an atomic placeholder: Ctrl+V a copied bitmap; Ctrl+V a copied image file
+(read from the clipboard file list when no bitmap is present); or paste/drop an
+image-file path into the composer. Supported formats are PNG, JPEG, WebP, and
+GIF, identified from magic bytes. The encoded image is sent only with that
 submitted turn and is never written to prompt history. Provider declarations
 may set `supports_vision = true`, while `[discovery] vision_probe = true` enables the
-existing best-effort local-server capability probe.
+existing best-effort local-server capability probe. Every path surfaces a notice
+— on success, on a capability refusal (naming both levers), on an absent,
+unreadable, unsupported, multiple, or oversize input, and when an open overlay or
+dialog owns the composer — so a paste never silently does nothing. Quick help
+(`?`) and `/help` document the three forms.
 
 Ctrl+G edits the idle composer in a foreground external editor. The host checks
 `LOCALPILOT_EDITOR`, then `VISUAL`, then `EDITOR`; the value may contain a quoted

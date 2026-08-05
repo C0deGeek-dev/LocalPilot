@@ -498,6 +498,13 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
     if !app.quick_help() || area.height == 0 {
         return None;
     }
+    // Image attach is a single-session affordance; a pair session rejects it, so
+    // the shared help advertises it only outside pair mode.
+    let (image_left, image_right) = if app.is_pair() {
+        ("images unavailable in pair", "")
+    } else {
+        ("Ctrl+V      paste an image", "  vision: bitmap/file/path")
+    };
     let left = [
         "Enter       send prompt",
         "Shift+Enter add a line",
@@ -505,6 +512,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         "Ctrl+R      search history",
         "Ctrl+G      external editor",
         "Ctrl+S      stash / restore draft",
+        image_left,
     ];
     let right = if app.capabilities.mouse_capture {
         [
@@ -514,6 +522,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Ctrl+F       search messages",
             "Esc          stop and steer",
             "Esc Esc      clear draft",
+            image_right,
         ]
     } else {
         [
@@ -523,14 +532,15 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             "Ctrl+F       search messages",
             "Esc          stop and steer",
             "Esc Esc      clear draft",
+            image_right,
         ]
     };
     let wide = area.width >= 70;
     let pair_rows = u16::from(app.is_pair());
     let requested = if wide {
-        7_u16.saturating_add(pair_rows)
+        8_u16.saturating_add(pair_rows)
     } else {
-        13_u16.saturating_add(pair_rows)
+        15_u16.saturating_add(pair_rows)
     };
     let height = requested.min(area.height);
     let help = Rect::new(
@@ -571,7 +581,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
             );
         }
         if app.is_pair() {
-            let y = help.y.saturating_add(7);
+            let y = help.y.saturating_add(8);
             if y < help.bottom() {
                 frame.render_widget(
                     Paragraph::new("F6          switch peer").style(theme.ui(UiRole::Foreground)),
@@ -733,6 +743,7 @@ fn render_takeover(
                 content.width,
                 theme,
                 app.capabilities.mouse_capture,
+                app.is_pair(),
             );
             let maximum = lines.len().saturating_sub(viewport_rows);
             let start = takeover.scroll.min(maximum);
@@ -1370,7 +1381,20 @@ fn help_lines(
     width: u16,
     theme: ThemeResolver,
     mouse_capture: bool,
+    is_pair: bool,
 ) -> Vec<Line<'static>> {
+    // Image attach is a single-session affordance; a pair session rejects it.
+    let (image_line_1, image_line_2) = if is_pair {
+        (
+            "  Images      Image input is unavailable in pair sessions".to_string(),
+            String::new(),
+        )
+    } else {
+        (
+            "  Ctrl+V      Attach an image (vision-capable models): a copied".to_string(),
+            "              bitmap or image file, or a pasted/dropped image path".to_string(),
+        )
+    };
     let mut source = vec![
         ("Conversation commands".to_string(), UiRole::Accent),
         (String::new(), UiRole::Foreground),
@@ -1412,6 +1436,8 @@ fn help_lines(
             "  Ctrl+S      Stash a draft, or restore the saved draft".to_string(),
             UiRole::Foreground,
         ),
+        (image_line_1, UiRole::Foreground),
+        (image_line_2, UiRole::Foreground),
         (
             "  Esc Esc     Clear the current draft".to_string(),
             UiRole::Foreground,
@@ -3344,6 +3370,19 @@ mod tests {
         }
     }
 
+    fn pair_model() -> AppModel {
+        AppModel::new_pair(
+            header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: Some("Beta".to_string()),
+            },
+            TerminalCapabilities::default(),
+        )
+    }
+
     fn snapshot_header() -> Header {
         Header {
             version: "snapshot-version".to_string(),
@@ -4439,6 +4478,59 @@ mod tests {
         assert!(footer_state(&app).contains("? or Esc close"));
         let timeline = single_hits(&hit_map);
         assert!(timeline.rows.len() < usize::from(timeline.timeline.height));
+    }
+
+    #[test]
+    fn image_paste_is_documented_in_quick_help_and_full_help() {
+        // Standard quick help (wide): the vision qualifier and all three forms.
+        let mut wide = model();
+        let _ = wide.handle_input(crate::InputAction::Insert("?".to_string()), 76);
+        let (buffer, _) = render_test_frame(&wide, 80, 24);
+        let text = rect_text(&buffer, buffer.area);
+        for needle in ["vision", "bitmap", "file", "path"] {
+            assert!(text.contains(needle), "wide quick help missing {needle}");
+        }
+
+        // Standard quick help (narrow): same coverage, nothing clipped.
+        let mut narrow = model();
+        let _ = narrow.handle_input(crate::InputAction::Insert("?".to_string()), 40);
+        let (buffer, _) = render_test_frame(&narrow, 48, 24);
+        let text = rect_text(&buffer, buffer.area);
+        for needle in ["vision", "bitmap", "file", "path"] {
+            assert!(text.contains(needle), "narrow quick help missing {needle}");
+        }
+
+        // Standard full /help names all three forms and the vision qualifier.
+        let mut help = model();
+        help.open_help();
+        let (buffer, _) = render_test_frame(&help, 90, 30);
+        let text = rect_text(&buffer, buffer.area);
+        for needle in [
+            "vision-capable",
+            "bitmap",
+            "image file",
+            "pasted/dropped image path",
+        ] {
+            assert!(text.contains(needle), "full help missing {needle}");
+        }
+
+        // Pair quick help says unavailable and offers no attach affordance.
+        let mut pair_quick = pair_model();
+        let _ = pair_quick.handle_input(crate::InputAction::Insert("?".to_string()), 76);
+        let (buffer, _) = render_test_frame(&pair_quick, 80, 24);
+        let text = rect_text(&buffer, buffer.area);
+        assert!(text.contains("unavailable in pair"));
+        assert!(!text.contains("paste an image"));
+        assert!(!text.contains("Attach an image"));
+
+        // Pair full /help: unavailable, and never an attach claim.
+        let mut pair_help = pair_model();
+        pair_help.open_help();
+        let (buffer, _) = render_test_frame(&pair_help, 90, 30);
+        let text = rect_text(&buffer, buffer.area);
+        assert!(text.contains("unavailable in pair sessions"));
+        assert!(!text.contains("paste an image"));
+        assert!(!text.contains("Attach an image"));
     }
 
     #[test]

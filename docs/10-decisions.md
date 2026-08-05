@@ -2,6 +2,51 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0142: Image Ingress Is Complete And Never Silent
+
+Status: accepted. Extends and amends ADR-0061 (vision is a resolved capability,
+config > probe > false).
+
+Image input shipped with ADR-0061, but only one narrow ingress — a clipboard
+bitmap via Ctrl+V — and several paths dropped the paste with no message at all:
+a blocked attach with no `else`, bare `return`s when an overlay or dialog owned
+input, and a `quiet_when_absent` flag that suppressed the "no image" notice on
+the very path Windows Terminal routes Ctrl+V through. Copying an image file in
+Explorer/Finder — what most users try — did nothing, because only a bitmap was
+read. The product spec still listed image input as "Later," contradicting the
+shipped code.
+
+Decision: image ingress is completed and made non-silent.
+
+- Three ingress forms use existing dependencies, no new Cargo feature: the
+  clipboard **bitmap** and **copied image file** ingress use the pinned
+  `arboard 3.6.1` — the copied file is read from `get().file_list()` (Windows
+  CF_HDROP, macOS file URLs, Linux X11/XWayland URI lists — the
+  `wayland-data-control` feature is deliberately not enabled) when no bitmap is
+  present; the **pasted or dropped image-file path** uses the existing terminal
+  paste channel (`Event::Paste`) and the shared file loader, the
+  compositor-independent complement that also covers a pure-Wayland terminal
+  where the native file list is unavailable. No new dependency; no `@mention`
+  semantics change and no `/image` command.
+- The clipboard file selector classifies **cardinality only** (`None | One |
+  Multiple`); a single shared loader is the one content authority that decides
+  unreadable / unsupported / oversize, with an overflow-safe size preflight from
+  metadata before any bytes are read.
+- Supported formats — PNG, JPEG, WebP, GIF — have their MIME type selected from
+  **magic bytes**, not extension, so a non-image hidden behind a supported
+  extension is rejected while supported image content is accepted under its true
+  type (a JPEG named `.png` attaches as `image/jpeg`). For a pasted path a
+  supported extension is only a conservative interception gate; capability is
+  resolved before any file bytes are read, so a text-only model refuses without
+  a read and a fake image is rejected after capability passes. A paste that is
+  not an image path stays ordinary composer text.
+- Every outcome surfaces a notice; nothing is silent. `AppModel` keeps one
+  ownership predicate, `image_attach_block`, and the CLI renders the specific
+  reason (which overlay/dialog/mode declined) plus a defensive post-read notice;
+  the `quiet_when_absent` suppression is removed from both hosts.
+- The feature is discoverable in quick help and `/help`, and `docs/01-product-spec`
+  no longer lists image input as "Later."
+
 ## ADR-0141: A Tool Start Retires The Open Assistant And Reasoning Segments
 
 Status: accepted. Refines ADR-0107 (the single stable-ID timeline model) and

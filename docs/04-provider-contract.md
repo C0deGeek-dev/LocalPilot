@@ -226,13 +226,24 @@ server advertises image input only once vision is declared or probed. `doctor`
 surfaces the config-declared capability (it is offline); `localpilot models`
 surfaces the full resolved capability and which signal decided it.
 
-In interactive chat, pasting an image (Ctrl+V, or a terminal that routes it as a
-bracketed paste) re-resolves this capability once before deciding: if vision is
+In interactive chat, an image can arrive three ways: a copied bitmap on the
+clipboard (Ctrl+V, or a terminal that routes it as a bracketed paste); a copied
+image file (Windows CF_HDROP, macOS file URLs, Linux X11/XWayland URI lists),
+read from the clipboard file list when no bitmap is present; and a pasted or
+dropped image file path — the compositor-independent complement that also covers
+a pure-Wayland terminal, where the native file list is unavailable. Each re-resolves this capability once before deciding: if vision is
 not already known, LocalPilot runs the same config > probe resolution again
-(catching a server that came up after startup), attaches on success, and
-otherwise shows a notice naming both levers (`supports_vision` and `[discovery]
-vision_probe`). A clipboard read that fails for any reason other than "no image
-present" always surfaces a notice — an image paste never fails silently.
+(catching a server that came up after startup) — for a pasted path this happens
+before any file bytes are read — attaches on success, and otherwise shows a
+notice naming both levers (`supports_vision` and `[discovery] vision_probe`).
+Supported formats are PNG, JPEG, WebP, and GIF, with the MIME type chosen from
+magic bytes rather than the extension: a non-image behind a supported extension
+is rejected, while supported image content is accepted under its true type (a
+JPEG named `.png` attaches as `image/jpeg`). Every outcome surfaces a notice — an
+absent image, a non-image or unreadable file, multiple copied files, or an
+oversize payload — so an image paste never fails silently, and the composer
+never drops it while an overlay or dialog owns input (the notice names the
+surface that declined).
 
 ## Quota Semantics
 

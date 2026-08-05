@@ -101,6 +101,33 @@ pub enum Focus {
     Timeline,
 }
 
+/// The surface that owns input when an image attach is declined, so the host can
+/// explain the refusal instead of dropping the paste silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageAttachBlock {
+    NotComposer,
+    Dialog,
+    Takeover,
+    ThemePicker,
+    InputOverlay,
+    ShellMode,
+}
+
+impl ImageAttachBlock {
+    /// The user-facing notice explaining why an image paste was declined.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotComposer => "image paste works only in the message composer.",
+            Self::Dialog => "close the open dialog before pasting an image.",
+            Self::Takeover => "image paste isn't available in this view — press Esc first.",
+            Self::ThemePicker => "close the theme picker before pasting an image.",
+            Self::InputOverlay => "close the open input overlay before pasting an image.",
+            Self::ShellMode => "images are not available in shell mode.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkState {
     Idle,
@@ -2471,22 +2498,38 @@ impl AppModel {
         }
     }
 
+    /// The surface that currently owns input and therefore blocks an image
+    /// attach, or `None` when the composer can accept one. This is the single
+    /// ownership authority; callers read the reason rather than re-deriving it.
+    #[must_use]
+    pub fn image_attach_block(&self) -> Option<ImageAttachBlock> {
+        if self.focus != Focus::Composer {
+            Some(ImageAttachBlock::NotComposer)
+        } else if self.dialog.is_some() {
+            Some(ImageAttachBlock::Dialog)
+        } else if self.takeover.is_some() {
+            Some(ImageAttachBlock::Takeover)
+        } else if self.theme_picker.is_some() {
+            Some(ImageAttachBlock::ThemePicker)
+        } else if self.has_input_overlay() {
+            Some(ImageAttachBlock::InputOverlay)
+        } else if self.shell_mode() {
+            Some(ImageAttachBlock::ShellMode)
+        } else {
+            None
+        }
+    }
+
     /// Attach an already-validated image to the ordinary composer. Overlays and
     /// dialogs own input while open, so a host-side Ctrl+V cannot bypass their
-    /// containment contract.
+    /// containment contract; `image_attach_block` reports which one declined.
     pub fn attach_image(
         &mut self,
         media_type: impl Into<String>,
         data: impl Into<String>,
         byte_len: usize,
     ) -> Option<String> {
-        if self.focus != Focus::Composer
-            || self.dialog.is_some()
-            || self.takeover.is_some()
-            || self.theme_picker.is_some()
-            || self.has_input_overlay()
-            || self.shell_mode()
-        {
+        if self.image_attach_block().is_some() {
             return None;
         }
         self.exit_armed = false;
@@ -5940,6 +5983,63 @@ mod tests {
         assert_eq!(
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::Copy(placeholder)
+        );
+    }
+
+    #[test]
+    fn image_attach_block_names_the_owning_surface() {
+        // A composer with an empty draft accepts an image.
+        let idle = model();
+        assert_eq!(idle.image_attach_block(), None);
+
+        // Every reason has a non-empty notice.
+        for block in [
+            ImageAttachBlock::NotComposer,
+            ImageAttachBlock::Dialog,
+            ImageAttachBlock::Takeover,
+            ImageAttachBlock::ThemePicker,
+            ImageAttachBlock::InputOverlay,
+            ImageAttachBlock::ShellMode,
+        ] {
+            assert!(!block.message().is_empty());
+        }
+
+        // Each of the six concrete owning surfaces reports its reason and refuses
+        // the attach. NotComposer is the real Focus::Timeline state.
+        let check = |setup: &dyn Fn(&mut AppModel), expected: ImageAttachBlock| {
+            let mut app = model();
+            setup(&mut app);
+            assert_eq!(app.image_attach_block(), Some(expected));
+            assert!(
+                app.attach_image("image/png", "X", 4).is_none(),
+                "attach must be refused for {expected:?}"
+            );
+        };
+        check(
+            &|app| app.focus = Focus::Timeline,
+            ImageAttachBlock::NotComposer,
+        );
+        check(
+            &|app| app.require_workspace_trust("fixture"),
+            ImageAttachBlock::Dialog,
+        );
+        check(&|app| app.open_help(), ImageAttachBlock::Takeover);
+        check(
+            &|app| app.open_theme_picker(),
+            ImageAttachBlock::ThemePicker,
+        );
+        check(
+            &|app| {
+                app.set_command_catalog([command("model", "Switch model")]);
+                let _ = app.handle_input(InputAction::Insert("/mo".to_string()), 80);
+            },
+            ImageAttachBlock::InputOverlay,
+        );
+        check(
+            &|app| {
+                let _ = app.handle_input(InputAction::Insert("!echo".to_string()), 80);
+            },
+            ImageAttachBlock::ShellMode,
         );
     }
 

@@ -435,7 +435,6 @@ capabilities:
 - web UI surface
 - plugin/skill marketplace
 - multi-repo orchestration
-- image input
 - IDE integration
 
 ### Out of Scope
