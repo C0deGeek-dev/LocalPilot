@@ -12,16 +12,19 @@ use std::sync::Arc;
 
 use localpilot_agents::AgentSet;
 use localpilot_config::Config;
-use localpilot_harness::{SessionConfig, SessionRuntime};
+use localpilot_core::SessionId;
+use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime};
 use localpilot_llm::ProviderRegistry;
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
     Approver, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile,
 };
+use localpilot_server::swarm::{AdoptedPair, SwarmHost};
+use localpilot_server::{swarm_id_for_dir, SessionHost, SessionRegistry, SwarmId, SwarmRegistry};
 use localpilot_store::Store;
 use localpilot_tools::{UserAnswer, UserPrompter, UserQuestion};
 use localpilot_tui::ApprovalRequest;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// A pending approval handed from the runtime to an interactive host.
 pub(crate) struct ApprovalCall {
@@ -168,6 +171,253 @@ impl InteractivePairBundle {
     }
 }
 
+/// One hosted pair member and the UI-facing channels tied to its provenance.
+#[allow(dead_code)]
+pub(crate) struct InteractiveHostedPeer {
+    pub(crate) peer: PairPeer,
+    pub(crate) provider_id: String,
+    pub(crate) model: String,
+    pub(crate) session_id: SessionId,
+    pub(crate) host: Arc<SessionHost>,
+    pub(crate) events: broadcast::Receiver<RuntimeEvent>,
+    pub(crate) approval_tx: mpsc::UnboundedSender<ApprovalCall>,
+    pub(crate) approvals: mpsc::UnboundedReceiver<ApprovalCall>,
+    pub(crate) questions: mpsc::UnboundedReceiver<QuestionCall>,
+}
+
+/// Resources that keep an adopted interactive pair alive while it is driven.
+#[allow(dead_code)]
+pub(crate) struct InteractivePairOwner {
+    pub(crate) cwd: PathBuf,
+    pub(crate) task: String,
+    pub(crate) sessions: [SessionId; 2],
+    pub(crate) registry: SessionRegistry,
+    pub(crate) swarm_host: SwarmHost,
+    pub(crate) a: InteractiveHostedPeer,
+    pub(crate) b: InteractiveHostedPeer,
+}
+
+impl InteractivePairOwner {
+    /// Close both hosted runtimes after their driver has stopped.
+    ///
+    /// The caller must restore terminal modes before awaiting this cleanup and
+    /// must no longer have a live driver. Explicit teardown is required because
+    /// each runtime's peer binding points back through the host and registry.
+    #[allow(dead_code)]
+    pub(crate) async fn close(self) {
+        let Self {
+            cwd,
+            sessions,
+            registry,
+            swarm_host,
+            a,
+            b,
+            ..
+        } = self;
+
+        a.host.cancel();
+        b.host.cancel();
+        close_registered(&registry, &swarm_host, &sessions).await;
+
+        // Release every strong host/receiver/channel owner before closeout.
+        drop(a);
+        drop(b);
+        drop(swarm_host);
+        drop(registry);
+        close_pair_contexts(&cwd, sessions);
+    }
+}
+
+/// An adopted pair coupled to the resources that own its hosted sessions.
+#[allow(dead_code)]
+pub(crate) struct InteractivePairHost {
+    adopted: AdoptedPair,
+    owner: InteractivePairOwner,
+}
+
+impl InteractivePairHost {
+    /// Build, register, adopt, and subscribe to two interactive sessions.
+    #[allow(dead_code)]
+    pub(crate) async fn prepare(
+        setup: &InteractiveSessionSetup,
+        task: &str,
+        a: InteractivePeerSelection<'_>,
+        b: InteractivePeerSelection<'_>,
+    ) -> anyhow::Result<Self> {
+        let bundle = setup.build_pair(task, a, b).await?;
+        let registry = SessionRegistry::new();
+        let swarm_host = SwarmHost::for_adoption(registry.clone(), SwarmRegistry::new());
+        let swarm = swarm_id_for_dir(setup.cwd());
+        Self::from_bundle(
+            setup.cwd().to_path_buf(),
+            bundle,
+            registry,
+            swarm_host,
+            swarm,
+        )
+        .await
+    }
+
+    /// Split driver ownership from the UI/session resources without cloning.
+    #[allow(dead_code)]
+    pub(crate) fn into_parts(self) -> (AdoptedPair, InteractivePairOwner) {
+        (self.adopted, self.owner)
+    }
+
+    /// Tear down a pair that was prepared but never handed to a driver.
+    #[allow(dead_code)]
+    pub(crate) async fn close(self) {
+        let Self { adopted, owner } = self;
+        drop(adopted);
+        owner.close().await;
+    }
+
+    async fn from_bundle(
+        cwd: PathBuf,
+        bundle: InteractivePairBundle,
+        registry: SessionRegistry,
+        swarm_host: SwarmHost,
+        swarm: SwarmId,
+    ) -> anyhow::Result<Self> {
+        let InteractivePairBundle { task, a, b } = bundle;
+        let InteractivePeerBundle {
+            peer: a_peer,
+            provider_id: a_provider_id,
+            model: a_model,
+            session: a_session,
+        } = a;
+        let InteractivePeerBundle {
+            peer: b_peer,
+            provider_id: b_provider_id,
+            model: b_model,
+            session: b_session,
+        } = b;
+        let a_id = a_session.runtime.session_id();
+        let b_id = b_session.runtime.session_id();
+        let sessions = [a_id, b_id];
+
+        if a_id == b_id {
+            close_unhosted_pair_session(&cwd, a_session);
+            close_unhosted_pair_session(&cwd, b_session);
+            return Err(anyhow::anyhow!(
+                "interactive pair sessions must have distinct ids"
+            ));
+        }
+
+        let InteractiveSessionBundle {
+            runtime: a_runtime,
+            approval_tx: a_approval_tx,
+            approvals: a_approvals,
+            questions: a_questions,
+        } = a_session;
+        let InteractiveSessionBundle {
+            runtime: b_runtime,
+            approval_tx: b_approval_tx,
+            approvals: b_approvals,
+            questions: b_questions,
+        } = b_session;
+
+        // Registration consumes its runtime on both outcomes, so a failure can
+        // explicitly clean only a still-owned or already-registered peer.
+        if let Err(error) = registry.register(a_runtime).await {
+            let b_session = InteractiveSessionBundle {
+                runtime: b_runtime,
+                approval_tx: b_approval_tx,
+                approvals: b_approvals,
+                questions: b_questions,
+            };
+            close_unhosted_pair_session(&cwd, b_session);
+            return Err(error.into());
+        }
+        if let Err(error) = registry.register(b_runtime).await {
+            close_registered(&registry, &swarm_host, &[a_id]).await;
+            crate::context_inject::close_out(&cwd, a_id);
+            return Err(error.into());
+        }
+
+        let adopted = match swarm_host
+            .adopt_pair(&swarm, (a_id, a_peer.label()), (b_id, b_peer.label()))
+            .await
+        {
+            Ok(adopted) => adopted,
+            Err(error) => {
+                close_registered(&registry, &swarm_host, &sessions).await;
+                close_pair_contexts(&cwd, sessions);
+                return Err(error.into());
+            }
+        };
+        let [a_host, b_host] = adopted.hosts();
+        let a_events = a_host.subscribe();
+        let b_events = b_host.subscribe();
+        let owner = InteractivePairOwner {
+            cwd,
+            task,
+            sessions,
+            registry,
+            swarm_host,
+            a: InteractiveHostedPeer {
+                peer: a_peer,
+                provider_id: a_provider_id,
+                model: a_model,
+                session_id: a_id,
+                host: a_host,
+                events: a_events,
+                approval_tx: a_approval_tx,
+                approvals: a_approvals,
+                questions: a_questions,
+            },
+            b: InteractiveHostedPeer {
+                peer: b_peer,
+                provider_id: b_provider_id,
+                model: b_model,
+                session_id: b_id,
+                host: b_host,
+                events: b_events,
+                approval_tx: b_approval_tx,
+                approvals: b_approvals,
+                questions: b_questions,
+            },
+        };
+        Ok(Self { adopted, owner })
+    }
+}
+
+async fn close_registered(
+    registry: &SessionRegistry,
+    swarm_host: &SwarmHost,
+    sessions: &[SessionId],
+) {
+    for &session in sessions {
+        if let Some(host) = swarm_host.host(session).await {
+            host.cancel();
+        }
+    }
+    for &session in sessions {
+        if let Some(handle) = registry.get(session).await {
+            handle.lock().await.close();
+        }
+    }
+    for &session in sessions {
+        swarm_host.unhost(session).await;
+    }
+    for &session in sessions {
+        registry.remove(session).await;
+    }
+}
+
+fn close_unhosted_pair_session(cwd: &Path, mut session: InteractiveSessionBundle) {
+    let id = session.runtime.session_id();
+    session.runtime.close();
+    drop(session);
+    crate::context_inject::close_out(cwd, id);
+}
+
+fn close_pair_contexts(cwd: &Path, sessions: [SessionId; 2]) {
+    for session in sessions {
+        crate::context_inject::close_out(cwd, session);
+    }
+}
+
 impl InteractiveSessionSetup {
     /// Resolve provider, MCP, and agent resources once for this workspace.
     pub(crate) async fn resolve(
@@ -271,38 +521,9 @@ impl InteractiveSessionSetup {
         self.validate_pair_selection(PairPeer::A, a)?;
         self.validate_pair_selection(PairPeer::B, b)?;
 
-        let mut a_session = self.build(a.provider_id, a.model).await?;
-        let mut b_session = self.build(b.provider_id, b.model).await?;
-        a_session
-            .runtime
-            .append_system_prompt(localpilot_server::swarm::pair_session_directive(
-                PairPeer::A.label(),
-                PairPeer::B.label(),
-                task,
-            ));
-        b_session
-            .runtime
-            .append_system_prompt(localpilot_server::swarm::pair_session_directive(
-                PairPeer::B.label(),
-                PairPeer::A.label(),
-                task,
-            ));
-
-        Ok(InteractivePairBundle {
-            task: task.to_string(),
-            a: InteractivePeerBundle {
-                peer: PairPeer::A,
-                provider_id: a.provider_id.to_string(),
-                model: a.model.to_string(),
-                session: a_session,
-            },
-            b: InteractivePeerBundle {
-                peer: PairPeer::B,
-                provider_id: b.provider_id.to_string(),
-                model: b.model.to_string(),
-                session: b_session,
-            },
-        })
+        let a_session = self.build(a.provider_id, a.model).await?;
+        let b_session = self.build(b.provider_id, b.model).await;
+        finish_pair_build(&self.cwd, task, a, b, a_session, b_session)
     }
 
     #[allow(dead_code)]
@@ -362,6 +583,53 @@ impl InteractiveSessionSetup {
             agents: None,
         }
     }
+}
+
+fn finish_pair_build(
+    cwd: &Path,
+    task: &str,
+    a: InteractivePeerSelection<'_>,
+    b: InteractivePeerSelection<'_>,
+    mut a_session: InteractiveSessionBundle,
+    b_session: anyhow::Result<InteractiveSessionBundle>,
+) -> anyhow::Result<InteractivePairBundle> {
+    let mut b_session = match b_session {
+        Ok(session) => session,
+        Err(error) => {
+            close_unhosted_pair_session(cwd, a_session);
+            return Err(error);
+        }
+    };
+    a_session
+        .runtime
+        .append_system_prompt(localpilot_server::swarm::pair_session_directive(
+            PairPeer::A.label(),
+            PairPeer::B.label(),
+            task,
+        ));
+    b_session
+        .runtime
+        .append_system_prompt(localpilot_server::swarm::pair_session_directive(
+            PairPeer::B.label(),
+            PairPeer::A.label(),
+            task,
+        ));
+
+    Ok(InteractivePairBundle {
+        task: task.to_string(),
+        a: InteractivePeerBundle {
+            peer: PairPeer::A,
+            provider_id: a.provider_id.to_string(),
+            model: a.model.to_string(),
+            session: a_session,
+        },
+        b: InteractivePeerBundle {
+            peer: PairPeer::B,
+            provider_id: b.provider_id.to_string(),
+            model: b.model.to_string(),
+            session: b_session,
+        },
+    })
 }
 
 /// The exact interactive `SessionConfig` formerly constructed inline by chat.
@@ -473,6 +741,9 @@ mod tests {
     use localpilot_harness::StopReason;
     use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
     use localpilot_sandbox::{CommandClass, Decision};
+    use localpilot_server::swarm::{SpawnError, SwarmError};
+    use localpilot_server::SwarmLimits;
+    use localpilot_store::SessionEventKind;
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
@@ -737,6 +1008,236 @@ mod tests {
         assert!(pair.b.session.approvals.try_recv().is_err());
         assert!(pair.a.session.questions.try_recv().is_err());
         assert!(pair.b.session.questions.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn interactive_pair_host_retains_exact_hosts_identity_and_four_input_receivers() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let (setup, first_provider, second_provider) = setup_with_two_providers(directory.path());
+        let mut pair = InteractivePairHost::prepare(
+            &setup,
+            "review the change",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .expect("hosted pair");
+
+        assert_ne!(pair.owner.a.session_id, pair.owner.b.session_id);
+        assert_eq!(pair.owner.sessions, pair.adopted.sessions());
+        assert_eq!(pair.owner.task, "review the change");
+        assert_eq!(pair.owner.a.peer, PairPeer::A);
+        assert_eq!(pair.owner.a.provider_id, "first");
+        assert_eq!(pair.owner.a.model, "model-a");
+        assert_eq!(pair.owner.b.peer, PairPeer::B);
+        assert_eq!(pair.owner.b.provider_id, "second");
+        assert_eq!(pair.owner.b.model, "model-b");
+        let [adopted_a, adopted_b] = pair.adopted.hosts();
+        assert!(Arc::ptr_eq(&pair.owner.a.host, &adopted_a));
+        assert!(Arc::ptr_eq(&pair.owner.b.host, &adopted_b));
+        assert_eq!(pair.owner.a.host.subscriber_count(), 2);
+        assert_eq!(pair.owner.b.host.subscriber_count(), 2);
+        assert!(pair.owner.a.events.try_recv().is_err());
+        assert!(pair.owner.b.events.try_recv().is_err());
+        assert!(pair.owner.a.approvals.try_recv().is_err());
+        assert!(pair.owner.a.questions.try_recv().is_err());
+        assert!(pair.owner.b.approvals.try_recv().is_err());
+        assert!(pair.owner.b.questions.try_recv().is_err());
+        assert_eq!(pair.owner.registry.len().await, 2);
+        assert!(first_provider.requests().is_empty());
+        assert!(second_provider.requests().is_empty());
+
+        pair.close().await;
+    }
+
+    #[tokio::test]
+    async fn interactive_pair_host_consuming_split_keeps_exact_hosts_and_subscriptions() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let (setup, first_provider, second_provider) = setup_with_two_providers(directory.path());
+        let pair = InteractivePairHost::prepare(
+            &setup,
+            "split ownership",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .expect("hosted pair");
+
+        let (adopted, owner) = pair.into_parts();
+        assert_eq!(adopted.sessions(), owner.sessions);
+        let [adopted_a, adopted_b] = adopted.hosts();
+        assert!(Arc::ptr_eq(&owner.a.host, &adopted_a));
+        assert!(Arc::ptr_eq(&owner.b.host, &adopted_b));
+        assert_eq!(owner.a.host.subscriber_count(), 2);
+        assert_eq!(owner.b.host.subscriber_count(), 2);
+        assert!(first_provider.requests().is_empty());
+        assert!(second_provider.requests().is_empty());
+
+        drop(adopted);
+        owner.close().await;
+    }
+
+    #[tokio::test]
+    async fn interactive_pair_host_close_removes_sessions_hosts_and_closes_both_logs() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let (setup, first_provider, second_provider) = setup_with_two_providers(directory.path());
+        let bundle = setup
+            .build_pair(
+                "tear down both",
+                InteractivePeerSelection {
+                    provider_id: "first",
+                    model: "model-a",
+                },
+                InteractivePeerSelection {
+                    provider_id: "second",
+                    model: "model-b",
+                },
+            )
+            .await
+            .expect("pair bundle");
+        let sessions = [
+            bundle.a.session.runtime.session_id(),
+            bundle.b.session.runtime.session_id(),
+        ];
+        let registry = SessionRegistry::new();
+        let external_registry = registry.clone();
+        let swarm_host = SwarmHost::for_adoption(registry.clone(), SwarmRegistry::new());
+        let external_host = swarm_host.clone();
+        let pair = InteractivePairHost::from_bundle(
+            directory.path().to_path_buf(),
+            bundle,
+            registry,
+            swarm_host,
+            swarm_id_for_dir(directory.path()),
+        )
+        .await
+        .expect("hosted pair");
+
+        pair.close().await;
+
+        assert!(external_registry.is_empty().await);
+        for session in sessions {
+            assert!(external_host.host(session).await.is_none());
+            assert_session_closed(directory.path(), session);
+        }
+        assert!(first_provider.requests().is_empty());
+        assert!(second_provider.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interactive_pair_host_admission_failure_rolls_back_both_sessions() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let (setup, first_provider, second_provider) = setup_with_two_providers(directory.path());
+        let bundle = setup
+            .build_pair(
+                "refuse atomically",
+                InteractivePeerSelection {
+                    provider_id: "first",
+                    model: "model-a",
+                },
+                InteractivePeerSelection {
+                    provider_id: "second",
+                    model: "model-b",
+                },
+            )
+            .await
+            .expect("pair bundle");
+        let sessions = [
+            bundle.a.session.runtime.session_id(),
+            bundle.b.session.runtime.session_id(),
+        ];
+        let registry = SessionRegistry::new();
+        let external_registry = registry.clone();
+        let swarms = SwarmRegistry::with_limits(SwarmLimits {
+            max_members: 1,
+            max_active: 4,
+        });
+        let external_swarms = swarms.clone();
+        let swarm_host = SwarmHost::for_adoption(registry.clone(), swarms);
+        let external_host = swarm_host.clone();
+        let swarm = swarm_id_for_dir(directory.path());
+
+        let error = InteractivePairHost::from_bundle(
+            directory.path().to_path_buf(),
+            bundle,
+            registry,
+            swarm_host,
+            swarm.clone(),
+        )
+        .await
+        .err()
+        .expect("pair admission must fail");
+
+        assert!(matches!(
+            error.downcast_ref::<SpawnError>(),
+            Some(SpawnError::Admission(SwarmError::MemberCapReached {
+                cap: 1
+            }))
+        ));
+        assert!(external_registry.is_empty().await);
+        assert!(external_swarms.members(&swarm).await.is_empty());
+        for session in sessions {
+            assert!(external_host.host(session).await.is_none());
+            assert_session_closed(directory.path(), session);
+        }
+        assert!(first_provider.requests().is_empty());
+        assert!(second_provider.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_second_pair_build_closes_the_already_built_first_session() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let (setup, first_provider, second_provider) = setup_with_two_providers(directory.path());
+        let a = InteractivePeerSelection {
+            provider_id: "first",
+            model: "model-a",
+        };
+        let b = InteractivePeerSelection {
+            provider_id: "second",
+            model: "model-b",
+        };
+        let a_session = setup.build(a.provider_id, a.model).await.expect("peer A");
+        let a_id = a_session.runtime.session_id();
+
+        let error = finish_pair_build(
+            directory.path(),
+            "cleanup partial construction",
+            a,
+            b,
+            a_session,
+            Err(anyhow::anyhow!("peer B construction failed")),
+        )
+        .err()
+        .expect("peer B error is preserved");
+
+        assert_eq!(error.to_string(), "peer B construction failed");
+        assert_session_closed(directory.path(), a_id);
+        assert!(first_provider.requests().is_empty());
+        assert!(second_provider.requests().is_empty());
+    }
+
+    fn assert_session_closed(root: &Path, session: SessionId) {
+        let events = Store::open(root)
+            .read_events(session)
+            .expect("session event log");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == SessionEventKind::SessionClosed),
+            "session {session} was not closed: {events:?}"
+        );
     }
 
     #[tokio::test]
