@@ -2249,6 +2249,7 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
         let visible_rows = usize::from(inner.height.max(1));
         let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
         render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
+        render_pair_composer_label(frame, layout.composer, app, surface);
         frame.render_widget(
             Paragraph::new(search)
                 .style(surface)
@@ -2275,6 +2276,7 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
     render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
+    render_pair_composer_label(frame, layout.composer, app, surface);
     let placeholder = app.editor.text().is_empty() && app.shell_mode();
     let composer_text = if placeholder {
         "Run a shell command"
@@ -2304,6 +2306,35 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
     }
     (width, scroll)
+}
+
+fn render_pair_composer_label(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppModel,
+    surface: ratatui::style::Style,
+) {
+    let Some(peer) = app.active_pair_pane() else {
+        return;
+    };
+    let width = area.width.saturating_sub(4);
+    if width == 0 {
+        return;
+    }
+    let peer = match peer {
+        crate::PeerPane::A => "A",
+        crate::PeerPane::B => "B",
+    };
+    let label = truncate_end(&format!(" Steer Peer {peer} "), width);
+    frame.render_widget(
+        Paragraph::new(label).style(surface.patch(theme(app).ui(UiRole::Prompt))),
+        Rect::new(
+            area.x.saturating_add(2),
+            area.y,
+            width.min(area.right().saturating_sub(area.x.saturating_add(2))),
+            1,
+        ),
+    );
 }
 
 fn reverse_search_projection(app: &AppModel) -> Option<(String, usize)> {
@@ -5029,6 +5060,36 @@ mod tests {
             terminal: Some("Converged".to_string()),
         }));
         assert_eq!(status_right(&pair), "Converged · 2/3 rounds · 0 tokens");
+    }
+
+    #[test]
+    fn collaboration_composer_names_the_selected_peer_only() {
+        let mut pair = AppModel::new_pair(
+            snapshot_header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        );
+
+        let composer_line = |app: &AppModel| {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            let mut hit_map = None;
+            terminal
+                .draw(|frame| hit_map = Some(render(frame, app)))
+                .expect("draw composer target");
+            let layout = hit_map.expect("hit map").frame.expect("layout");
+            buffer_line(terminal.backend().buffer(), layout.composer.y)
+        };
+
+        assert!(composer_line(&pair).contains("Steer Peer A"));
+        assert!(pair.select_pair_pane(PeerPane::B));
+        assert!(composer_line(&pair).contains("Steer Peer B"));
+        assert!(!composer_line(&model()).contains("Steer Peer"));
     }
 
     #[test]

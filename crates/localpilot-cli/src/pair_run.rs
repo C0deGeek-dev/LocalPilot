@@ -487,6 +487,19 @@ impl InteractivePairRun {
         self.driver.is_some()
     }
 
+    /// Queue user steering for one exact peer while the collaboration remains
+    /// observably live. An idle peer is still a valid target for its next slot.
+    pub(crate) fn steer(&self, peer: PairPeer, text: String) -> bool {
+        if self.completion.is_some() {
+            return false;
+        }
+        match peer {
+            PairPeer::A => self.owner.a.host.steer(text),
+            PairPeer::B => self.owner.b.host.steer(text),
+        }
+        true
+    }
+
     /// Fail closed every user request, then reach the driver and both hosts.
     pub(crate) fn abort_and_cancel(&mut self) {
         self.fail_closed_asks();
@@ -1009,12 +1022,14 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt as _;
     use localpilot_config::{Config, ProviderConfig};
+    use localpilot_core::ContentBlock;
     use localpilot_llm::{
         FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest,
         ProviderDeclaration, ProviderError, ProviderRegistry,
     };
     use localpilot_sandbox::Profile;
     use localpilot_store::{SessionEventKind, Store};
+    use serde_json::json;
     use tokio::sync::{mpsc, Notify};
 
     use super::*;
@@ -1037,6 +1052,16 @@ mod tests {
                 .with_declaration(declaration(id))
                 .text(response),
         )
+    }
+
+    fn provider_received(provider: &FakeProvider, needle: &str) -> bool {
+        provider.requests().iter().any(|request| {
+            request.messages.iter().any(|message| {
+                message.content.iter().any(
+                    |block| matches!(block, ContentBlock::Text { text } if text.contains(needle)),
+                )
+            })
+        })
     }
 
     fn setup(
@@ -1259,6 +1284,124 @@ mod tests {
         }
         assert!(first.requests().is_empty());
         assert!(second.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_peer_steering_is_user_sourced_peer_local_and_rejected_after_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = fake("first", A_PROPOSAL);
+        let second = fake("second", B_PROPOSAL);
+        let setup = setup(directory.path(), first.clone(), second.clone());
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+
+        assert!(run.steer(PairPeer::B, "B-USER-STEER".to_string()));
+        let mut a_sources = Vec::new();
+        let mut b_sources = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = run.next().await {
+                if let PairPumpEvent::Runtime {
+                    peer,
+                    event: RuntimeEvent::SoftInterruptInjected { source, .. },
+                } = event
+                {
+                    match peer {
+                        PairPeer::A => a_sources.push(source),
+                        PairPeer::B => b_sources.push(source),
+                    }
+                }
+            }
+        })
+        .await
+        .expect("pair completes");
+
+        assert!(!run.steer(PairPeer::A, "too late".to_string()));
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::CapReached);
+        assert!(!a_sources.iter().any(|source| source == "user"));
+        assert!(b_sources.iter().any(|source| source == "user"));
+        assert!(b_sources.iter().any(|source| source == "system"));
+        assert!(!provider_received(&first, "B-USER-STEER"));
+        assert!(provider_received(&second, "B-USER-STEER"));
+        assert!(provider_received(&second, "[system] Message from A"));
+    }
+
+    #[tokio::test]
+    async fn active_peer_steering_lands_at_the_existing_after_tool_safe_point() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = Arc::new(
+            FakeProvider::new()
+                .with_declaration(declaration("first"))
+                .tool_call(
+                    "question-a",
+                    "ask_user",
+                    json!({
+                        "questions": [{
+                            "header": "Choice",
+                            "question": "Continue?",
+                            "options": [
+                                {
+                                    "label": "yes",
+                                    "description": "Continue the fixture."
+                                },
+                                {
+                                    "label": "no",
+                                    "description": "Stop the fixture."
+                                }
+                            ],
+                            "multi_select": false
+                        }]
+                    }),
+                )
+                .text(A_PROPOSAL),
+        );
+        let second = fake("second", B_PROPOSAL);
+        let setup = setup(directory.path(), first.clone(), second.clone());
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+
+        let ask = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match run.next().await {
+                    Some(PairPumpEvent::Ask(ask)) => break ask,
+                    Some(_) => {}
+                    None => panic!("pair ended before A asked its question"),
+                }
+            }
+        })
+        .await
+        .expect("A asks while its turn is active");
+        assert_eq!(ask.peer, PairPeer::A);
+        assert!(matches!(&ask.request, PairAskRequest::Questions(_)));
+        assert!(run.steer(PairPeer::A, "A-MID-TURN-STEER".to_string()));
+        run.answer_ask(
+            ask.id,
+            PairAskAnswer::Questions(vec![UserAnswer::Selected(vec!["yes".to_string()])]),
+        )
+        .expect("answer A question");
+
+        let mut saw_user_boundary = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = run.next().await {
+                saw_user_boundary |= matches!(
+                    event,
+                    PairPumpEvent::Runtime {
+                        peer: PairPeer::A,
+                        event: RuntimeEvent::SoftInterruptInjected { ref source, .. },
+                    } if source == "user"
+                );
+            }
+        })
+        .await
+        .expect("pair completes after steering");
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::CapReached);
+        assert!(saw_user_boundary);
+        assert!(provider_received(&first, "A-MID-TURN-STEER"));
+        assert!(!provider_received(&second, "A-MID-TURN-STEER"));
+        assert!(provider_received(&second, "[system] Message from A"));
     }
 
     #[tokio::test]

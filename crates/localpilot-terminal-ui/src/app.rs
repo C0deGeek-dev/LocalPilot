@@ -2524,6 +2524,17 @@ impl AppModel {
             .set_pending(id, false)
     }
 
+    /// Activate a queued prompt in one named collaboration projection without
+    /// changing the shared composer target.
+    #[must_use]
+    pub fn activate_prompt_for(&mut self, peer: PeerPane, id: ItemId) -> bool {
+        let Some(projection) = self.projections.projection_mut(peer) else {
+            return false;
+        };
+        projection.timeline.follow_bottom();
+        projection.timeline.set_pending(id, false)
+    }
+
     /// Insert a stable compact user-shell row. Pending rows intentionally carry
     /// no running activity until their ordered queue position activates.
     pub fn append_shell(&mut self, command: &UserShellCommand, pending: bool) -> Option<ItemId> {
@@ -4215,6 +4226,36 @@ mod tests {
             })
         );
         assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+    }
+
+    #[test]
+    fn named_prompt_activation_is_peer_local_and_focus_neutral() {
+        let mut app = pair_model();
+        let a = app
+            .append_prompt("alpha steering", None, true)
+            .expect("A prompt");
+        assert!(app.select_pair_pane(PeerPane::B));
+        let b = app
+            .append_prompt("beta steering", None, true)
+            .expect("B prompt");
+
+        assert!(app.activate_prompt_for(PeerPane::A, a));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+        assert!(
+            !app.timeline_for(PeerPane::A)
+                .expect("A timeline")
+                .item(a)
+                .expect("A prompt remains")
+                .pending
+        );
+        assert!(
+            app.timeline_for(PeerPane::B)
+                .expect("B timeline")
+                .item(b)
+                .expect("B prompt remains")
+                .pending
+        );
+        assert!(!model().activate_prompt_for(PeerPane::A, a));
     }
 
     #[test]

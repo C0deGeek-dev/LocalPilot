@@ -204,6 +204,10 @@ enum PairDialog {
 
 enum PairHostAction {
     None,
+    Steer {
+        peer: PairPeer,
+        text: String,
+    },
     Answer {
         id: PairAskId,
         answer: PairAskAnswer,
@@ -222,6 +226,7 @@ struct PairTerminalAdapter {
     dialog: Option<PairDialog>,
     pump_open: bool,
     terminal: Option<PairTerminalStatus>,
+    pending_steers: [VecDeque<ItemId>; 2],
 }
 
 impl PairTerminalAdapter {
@@ -230,6 +235,48 @@ impl PairTerminalAdapter {
             dialog: None,
             pump_open: true,
             terminal: None,
+            pending_steers: [VecDeque::new(), VecDeque::new()],
+        }
+    }
+
+    fn queue_steer(&mut self, peer: PairPeer, item_id: ItemId) {
+        self.pending_steers[peer_index(peer)].push_back(item_id);
+    }
+
+    fn activate_steer(&mut self, app: &mut AppModel, peer: PairPeer) {
+        if let Some(item_id) = self.pending_steers[peer_index(peer)].pop_front() {
+            let _ = app.activate_prompt_for(pair_pane(peer), item_id);
+        }
+    }
+
+    fn reject_latest_steer(&mut self, app: &mut AppModel, peer: PairPeer) {
+        if let Some(item_id) = self.pending_steers[peer_index(peer)].pop_back() {
+            let _ = app.activate_prompt_for(pair_pane(peer), item_id);
+        }
+        apply_pair_warning(
+            app,
+            peer,
+            "steering was not delivered because the collaboration had finished",
+        );
+    }
+
+    fn settle_pending_steers(&mut self, app: &mut AppModel) {
+        for peer in [PairPeer::A, PairPeer::B] {
+            let pending = &mut self.pending_steers[peer_index(peer)];
+            let count = pending.len();
+            while let Some(item_id) = pending.pop_front() {
+                let _ = app.activate_prompt_for(pair_pane(peer), item_id);
+            }
+            if count > 0 {
+                apply_pair_warning(
+                    app,
+                    peer,
+                    format!(
+                        "{count} steering message{} not delivered before the collaboration ended",
+                        if count == 1 { " was" } else { "s were" }
+                    ),
+                );
+            }
         }
     }
 
@@ -245,6 +292,12 @@ impl PairTerminalAdapter {
     fn apply_pump_event(&mut self, app: &mut AppModel, event: PairPumpEvent) -> PairHostAction {
         match event {
             PairPumpEvent::Runtime { peer, event } => {
+                if matches!(
+                    &event,
+                    RuntimeEvent::SoftInterruptInjected { source, .. } if source == "user"
+                ) {
+                    self.activate_steer(app, peer);
+                }
                 let _ = app.apply_runtime_for(pair_pane(peer), map_runtime_event(event));
             }
             PairPumpEvent::Ask(ask) => return self.install_ask(app, ask),
@@ -365,6 +418,7 @@ impl PairTerminalAdapter {
     fn record_terminal(&mut self, app: &mut AppModel, status: PairRunStatus) {
         if let PairRunState::Finished(terminal) = status.state {
             self.terminal = Some(terminal);
+            self.settle_pending_steers(app);
             let _ = app.apply_runtime_for(
                 PeerPane::A,
                 RuntimeUpdate::Stopped(pair_terminal_stop_state(terminal)),
@@ -1090,6 +1144,20 @@ const fn pair_pane(peer: PairPeer) -> PeerPane {
     match peer {
         PairPeer::A => PeerPane::A,
         PairPeer::B => PeerPane::B,
+    }
+}
+
+const fn pair_peer(peer: PeerPane) -> PairPeer {
+    match peer {
+        PeerPane::A => PairPeer::A,
+        PeerPane::B => PairPeer::B,
+    }
+}
+
+const fn peer_index(peer: PairPeer) -> usize {
+    match peer {
+        PairPeer::A => 0,
+        PairPeer::B => 1,
     }
 }
 
@@ -2443,6 +2511,7 @@ async fn run_pair_event_loop(
                         &mut mouse_state,
                         context.config,
                         context.cwd,
+                        context.history,
                     );
                     if execute_pair_host_action(run, adapter, app, action) {
                         return Ok(());
@@ -2466,6 +2535,12 @@ fn execute_pair_host_action(
 ) -> bool {
     match action {
         PairHostAction::None => false,
+        PairHostAction::Steer { peer, text } => {
+            if !run.steer(peer, text) {
+                adapter.reject_latest_steer(app, peer);
+            }
+            false
+        }
         PairHostAction::Answer {
             id,
             answer,
@@ -2509,6 +2584,42 @@ fn execute_pair_host_action(
     }
 }
 
+fn prepare_pair_steer(
+    app: &mut AppModel,
+    adapter: &mut PairTerminalAdapter,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    submitted: SubmittedInput,
+) -> PairHostAction {
+    if !submitted.images.is_empty() {
+        apply_pair_notice(
+            app,
+            format!(
+                "This submission was not sent: peer steering accepts text only and contained {} image{}.",
+                submitted.images.len(),
+                if submitted.images.len() == 1 { "" } else { "s" }
+            ),
+        );
+        return PairHostAction::None;
+    }
+    let Some(pane) = app.active_pair_pane() else {
+        return PairHostAction::None;
+    };
+    let peer = pair_peer(pane);
+    let Some(item_id) =
+        app.append_prompt(submitted.display.clone(), Some(local_prompt_time()), true)
+    else {
+        apply_pair_warning(app, peer, "steering could not be queued for display");
+        return PairHostAction::None;
+    };
+    persist_prompt(app, history, cwd, &submitted);
+    adapter.queue_steer(peer, item_id);
+    PairHostAction::Steer {
+        peer,
+        text: submitted.prompt,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_pair_terminal_event(
     app: &mut AppModel,
@@ -2518,6 +2629,7 @@ fn handle_pair_terminal_event(
     mouse_state: &mut MouseState,
     config: &localpilot_config::Config,
     cwd: &Path,
+    history: &localpilot_store::PromptHistory,
 ) -> PairHostAction {
     match &adapter.dialog {
         Some(PairDialog::Approval { .. }) => {
@@ -2568,19 +2680,16 @@ fn handle_pair_terminal_event(
                     PairHostAction::None
                 }
                 AppCommand::RunSlash(submitted) => execute_pair_slash(app, config, cwd, submitted),
-                AppCommand::Submit(_) => {
+                AppCommand::Submit(submitted) => {
                     if adapter.terminal.is_some() {
                         apply_pair_notice(
                             app,
                             "This collaboration has finished; start a new run to send another prompt.",
                         );
+                        PairHostAction::None
                     } else {
-                        apply_pair_notice(
-                            app,
-                            "Peer steering is not available in this collaboration yet.",
-                        );
+                        prepare_pair_steer(app, adapter, history, cwd, submitted)
                     }
-                    PairHostAction::None
                 }
                 AppCommand::RunShell(_) => {
                     apply_pair_notice(
@@ -5228,6 +5337,69 @@ mod tests {
     }
 
     #[test]
+    fn pair_terminal_adapter_settles_every_undelivered_peer_steer() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        let a = app
+            .append_prompt("alpha steer", None, true)
+            .expect("A prompt");
+        adapter.queue_steer(PairPeer::A, a);
+        assert!(app.select_pair_pane(PeerPane::B));
+        let b = app
+            .append_prompt("beta steer", None, true)
+            .expect("B prompt");
+        adapter.queue_steer(PairPeer::B, b);
+        assert!(app.select_pair_pane(PeerPane::A));
+
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Finished(PairRunStatus {
+                state: PairRunState::Finished(PairTerminalStatus::CapReached),
+                completed_rounds: 1,
+                max_rounds: 1,
+                scheduled: None,
+            }),
+        );
+
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        for (peer, item) in [(PeerPane::A, a), (PeerPane::B, b)] {
+            let timeline = app.timeline_for(peer).expect("peer timeline");
+            assert!(!timeline.item(item).expect("settled prompt").pending);
+            assert!(timeline
+                .items()
+                .iter()
+                .any(|entry| entry.text.contains("1 steering message was not delivered")));
+        }
+    }
+
+    #[test]
+    fn pair_terminal_adapter_rejects_the_latest_steer_on_its_origin_peer() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        assert!(app.select_pair_pane(PeerPane::B));
+        let item = app
+            .append_prompt("late beta steer", None, true)
+            .expect("B prompt");
+        adapter.queue_steer(PairPeer::B, item);
+        assert!(app.select_pair_pane(PeerPane::A));
+
+        adapter.reject_latest_steer(&mut app, PairPeer::B);
+
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        let beta = app.timeline_for(PeerPane::B).expect("B timeline");
+        assert!(!beta.item(item).expect("rejected prompt remains").pending);
+        assert!(beta.items().iter().any(|entry| entry
+            .text
+            .contains("steering was not delivered because the collaboration had finished")));
+        assert!(!app
+            .timeline_for(PeerPane::A)
+            .expect("A timeline")
+            .items()
+            .iter()
+            .any(|entry| entry.text.contains("steering was not delivered")));
+    }
+
+    #[test]
     fn pair_terminal_adapter_attributes_and_steps_one_exact_question_vector() {
         let mut app = pair_app();
         let mut adapter = PairTerminalAdapter::new();
@@ -5281,13 +5453,14 @@ mod tests {
     }
 
     #[test]
-    fn pair_focus_changes_but_submission_and_images_do_not_drive_a_peer() {
+    fn pair_focus_targets_steering_and_image_submissions_are_not_sent() {
         let mut app = pair_app();
         let mut adapter = PairTerminalAdapter::new();
         let hit_map = draw_hit_map(&app, 100, 28);
         let mut mouse_state = MouseState::default();
         let config = localpilot_config::Config::default();
         let cwd = Path::new(".");
+        let history = localpilot_store::PromptHistory::with_store(None);
 
         let action = handle_pair_terminal_event(
             &mut app,
@@ -5297,6 +5470,7 @@ mod tests {
             &mut mouse_state,
             &config,
             cwd,
+            &history,
         );
         assert!(matches!(action, PairHostAction::None));
         assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
@@ -5310,20 +5484,98 @@ mod tests {
             &mut mouse_state,
             &config,
             cwd,
+            &history,
+        );
+        assert!(matches!(
+            action,
+            PairHostAction::Steer {
+                peer: PairPeer::B,
+                text,
+            } if text == "follow up"
+        ));
+        let b_item = app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .find(|item| item.kind == ItemKind::User)
+            .expect("queued B steer");
+        assert!(b_item.pending);
+        let b_item_id = b_item.id;
+
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Runtime {
+                peer: PairPeer::A,
+                event: RuntimeEvent::SoftInterruptInjected {
+                    point: "between_calls".to_string(),
+                    source: "system".to_string(),
+                },
+            },
+        );
+        assert!(
+            app.timeline_for(PeerPane::B)
+                .unwrap()
+                .item(b_item_id)
+                .expect("B item remains")
+                .pending
+        );
+        assert!(app.select_pair_pane(PeerPane::A));
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Runtime {
+                peer: PairPeer::B,
+                event: RuntimeEvent::SoftInterruptInjected {
+                    point: "after_tools".to_string(),
+                    source: "user".to_string(),
+                },
+            },
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert!(
+            !app.timeline_for(PeerPane::B)
+                .unwrap()
+                .item(b_item_id)
+                .expect("B item activated")
+                .pending
+        );
+
+        let user_rows = app
+            .timeline_for(PeerPane::A)
+            .unwrap()
+            .items()
+            .iter()
+            .filter(|item| item.kind == ItemKind::User)
+            .count();
+        let _ = app
+            .attach_image("image/png", "opaque", 6)
+            .expect("attach image");
+        let action = handle_pair_terminal_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut adapter,
+            &hit_map,
+            &mut mouse_state,
+            &config,
+            cwd,
+            &history,
         );
         assert!(matches!(action, PairHostAction::None));
+        assert_eq!(
+            app.timeline_for(PeerPane::A)
+                .unwrap()
+                .items()
+                .iter()
+                .filter(|item| item.kind == ItemKind::User)
+                .count(),
+            user_rows
+        );
         assert!(app
-            .timeline_for(PeerPane::B)
+            .timeline_for(PeerPane::A)
             .unwrap()
             .items()
             .iter()
-            .any(|item| item.text.contains("Peer steering is not available")));
-        assert!(!app
-            .timeline_for(PeerPane::B)
-            .unwrap()
-            .items()
-            .iter()
-            .any(|item| item.kind == ItemKind::User));
+            .any(|item| item.text.contains("submission was not sent")));
 
         let action = handle_pair_terminal_event(
             &mut app,
@@ -5333,10 +5585,11 @@ mod tests {
             &mut mouse_state,
             &config,
             cwd,
+            &history,
         );
         assert!(matches!(action, PairHostAction::None));
         assert!(app
-            .timeline_for(PeerPane::B)
+            .timeline_for(PeerPane::A)
             .unwrap()
             .items()
             .iter()
