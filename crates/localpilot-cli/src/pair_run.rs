@@ -44,13 +44,92 @@ pub(crate) enum PairRunState {
     Finished(PairTerminalStatus),
 }
 
-/// The small progress projection needed before richer result presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The revision and full digest of the current shared candidate, retained whole so
+/// presentation can abbreviate the digest only when it renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairCandidateStatus {
+    pub(crate) revision: u64,
+    pub(crate) full_digest: String,
+}
+
+/// The progress projection that drives live convergence chrome and the retained
+/// result. Every session identity is validated into an owned-peer slot before it
+/// reaches this shape, so a foreign or malformed identity never renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PairRunStatus {
     pub(crate) state: PairRunState,
     pub(crate) completed_rounds: u32,
     pub(crate) max_rounds: u32,
     pub(crate) scheduled: Option<PairPeer>,
+    pub(crate) candidate: Option<PairCandidateStatus>,
+    pub(crate) agreements: [bool; 2],
+    pub(crate) repairing: Option<PairPeer>,
+}
+
+/// The current shared candidate as retained result data: the revision and the full
+/// digest and artifact, cloned once at terminal handoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairResultCandidate {
+    pub(crate) revision: u64,
+    pub(crate) digest: String,
+    pub(crate) artifact: String,
+}
+
+/// A read-only, presentation-only clone of a finished run, taken from the retained
+/// report at terminal handoff. Building or rendering it never touches the workspace
+/// or version control. `raw[0]`/`raw[1]` are peer A/B's latest raw responses in
+/// owned order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairResultSnapshot {
+    pub(crate) reason: PairTerminalStatus,
+    pub(crate) detail: Option<String>,
+    pub(crate) completed_rounds: u32,
+    pub(crate) candidate: Option<PairResultCandidate>,
+    pub(crate) raw: [Option<String>; 2],
+}
+
+impl PairResultSnapshot {
+    /// Clone the retained report into presentation data, attributing each raw
+    /// response to its owned peer by session identity.
+    pub(crate) fn from_report(report: &PairReport, sessions: [SessionId; 2]) -> Self {
+        Self {
+            reason: terminal_status(report.reason()),
+            detail: outcome_detail(report.reason()),
+            completed_rounds: report.completed_rounds(),
+            candidate: report.candidate().map(|candidate| PairResultCandidate {
+                revision: candidate.revision(),
+                digest: candidate.digest().to_string(),
+                artifact: candidate.artifact().to_string(),
+            }),
+            raw: [
+                report.raw_for(sessions[0]).map(str::to_string),
+                report.raw_for(sessions[1]).map(str::to_string),
+            ],
+        }
+    }
+
+    /// The result shape for a driver that failed to join: no candidate or raw, just
+    /// the explicit failure detail.
+    pub(crate) fn from_driver_failure(detail: String) -> Self {
+        Self {
+            reason: PairTerminalStatus::DriverFailed,
+            detail: Some(detail),
+            completed_rounds: 0,
+            candidate: None,
+            raw: [None, None],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_reason(reason: PairTerminalStatus) -> Self {
+        Self {
+            reason,
+            detail: None,
+            completed_rounds: 0,
+            candidate: None,
+            raw: [None, None],
+        }
+    }
 }
 
 /// Stable identity for one user decision requested by a peer.
@@ -151,10 +230,13 @@ pub(crate) enum PairPumpEvent {
     InvariantViolation {
         detail: String,
     },
-    Finished(PairRunStatus),
-    DriverFailed {
-        detail: String,
+    Finished {
         status: PairRunStatus,
+        result: Box<PairResultSnapshot>,
+    },
+    DriverFailed {
+        status: PairRunStatus,
+        result: Box<PairResultSnapshot>,
     },
 }
 
@@ -196,6 +278,12 @@ pub(crate) enum PairRunSetupIssue {
     Driver(#[from] PairSetupError),
     #[error("driver progress named unknown session {0}")]
     ForeignScheduledPeer(SessionId),
+    #[error("driver progress named unknown repairing session {0}")]
+    ForeignRepairPeer(SessionId),
+    #[error("driver progress named unknown agreement session {0}")]
+    ForeignAgreementPeer(SessionId),
+    #[error("driver progress named agreement session {0} twice")]
+    DuplicateAgreementPeer(SessionId),
 }
 
 /// A setup error coupled to the intact host that still needs explicit cleanup.
@@ -408,7 +496,7 @@ impl PreparedPairRun {
     }
 
     pub(crate) fn status(&self) -> PairRunStatus {
-        self.status
+        self.status.clone()
     }
 
     /// Start the sole task allowed to drive either peer.
@@ -475,7 +563,7 @@ enum PumpReady {
 impl InteractivePairRun {
     #[cfg(test)]
     pub(crate) fn status(&self) -> PairRunStatus {
-        self.status
+        self.status.clone()
     }
 
     #[cfg(test)]
@@ -485,6 +573,17 @@ impl InteractivePairRun {
 
     pub(crate) fn is_driver_live(&self) -> bool {
         self.driver.is_some()
+    }
+
+    /// Fuse the progress source and cooperatively abort after a live progress
+    /// projection violates an invariant, surfacing it exactly once. The retained
+    /// terminal result still flows through the existing drain/settlement path.
+    fn fail_on_projection_issue(&mut self, issue: PairRunSetupIssue) -> PairPumpEvent {
+        self.progress_open = false;
+        self.abort_and_cancel();
+        PairPumpEvent::InvariantViolation {
+            detail: issue.to_string(),
+        }
     }
 
     /// Queue user steering for one exact peer while the collaboration remains
@@ -674,18 +773,10 @@ impl InteractivePairRun {
                 PumpReady::Progress(Some(progress)) => {
                     match status_from_progress(&progress, self.owner.sessions) {
                         Ok(status) => {
-                            self.status = status;
+                            self.status = status.clone();
                             return Some(PairPumpEvent::Progress(status));
                         }
-                        Err(issue) => {
-                            // Fuse the invalid source so it cannot repeat while
-                            // cooperative abort brings the driver to completion.
-                            self.progress_open = false;
-                            self.abort_and_cancel();
-                            return Some(PairPumpEvent::InvariantViolation {
-                                detail: issue.to_string(),
-                            });
-                        }
+                        Err(issue) => return Some(self.fail_on_projection_issue(issue)),
                     }
                 }
                 PumpReady::Progress(None) => {
@@ -940,14 +1031,19 @@ impl InteractivePairRun {
 
     fn terminal_event(&self) -> PairPumpEvent {
         match self.completion.as_ref() {
-            Some(PairRunCompletion::Report(_)) => PairPumpEvent::Finished(self.status),
+            Some(PairRunCompletion::Report(report)) => PairPumpEvent::Finished {
+                status: self.status.clone(),
+                result: Box::new(PairResultSnapshot::from_report(report, self.owner.sessions)),
+            },
             Some(PairRunCompletion::DriverFailed(detail)) => PairPumpEvent::DriverFailed {
-                detail: detail.clone(),
-                status: self.status,
+                status: self.status.clone(),
+                result: Box::new(PairResultSnapshot::from_driver_failure(detail.clone())),
             },
             None => PairPumpEvent::DriverFailed {
-                detail: "driver ended without a retained completion".to_string(),
-                status: self.status,
+                result: Box::new(PairResultSnapshot::from_driver_failure(
+                    "driver ended without a retained completion".to_string(),
+                )),
+                status: self.status.clone(),
             },
         }
     }
@@ -958,17 +1054,68 @@ fn status_from_progress(
     sessions: [SessionId; 2],
 ) -> Result<PairRunStatus, PairRunSetupIssue> {
     let scheduled = match progress.next_peer() {
-        Some(session) if session == sessions[0] => Some(PairPeer::A),
-        Some(session) if session == sessions[1] => Some(PairPeer::B),
-        Some(session) => return Err(PairRunSetupIssue::ForeignScheduledPeer(session)),
+        Some(session) => Some(
+            owned_peer(session, sessions)
+                .ok_or(PairRunSetupIssue::ForeignScheduledPeer(session))?,
+        ),
         None => None,
     };
+    let repairing = match progress.repairing_peer() {
+        Some(session) => Some(
+            owned_peer(session, sessions).ok_or(PairRunSetupIssue::ForeignRepairPeer(session))?,
+        ),
+        None => None,
+    };
+    let agreements = project_agreements(progress.agreements(), sessions)?;
+    let candidate = progress.candidate().map(|candidate| PairCandidateStatus {
+        revision: candidate.revision(),
+        full_digest: candidate.digest().to_string(),
+    });
     Ok(PairRunStatus {
         state: PairRunState::Running,
         completed_rounds: progress.completed_rounds(),
         max_rounds: progress.max_rounds(),
         scheduled,
+        candidate,
+        agreements,
+        repairing,
     })
+}
+
+/// Map one driver session onto its owned peer slot, or `None` when it belongs to
+/// neither peer — the single seam every projected identity passes through.
+fn owned_peer(session: SessionId, sessions: [SessionId; 2]) -> Option<PairPeer> {
+    if session == sessions[0] {
+        Some(PairPeer::A)
+    } else if session == sessions[1] {
+        Some(PairPeer::B)
+    } else {
+        None
+    }
+}
+
+/// Project the driver's two per-session agreement pairs onto owned-peer order.
+/// A foreign identity or a repeated peer is a typed error; there is no positional
+/// fallback. With exactly two fixed entries, a foreign or duplicated identity is
+/// rejected below, so the surviving pair always covers both owned peers — a
+/// "missing peer" shape is unreachable and needs no variant of its own.
+fn project_agreements(
+    agreements: [(SessionId, bool); 2],
+    sessions: [SessionId; 2],
+) -> Result<[bool; 2], PairRunSetupIssue> {
+    let [(first, first_agreed), (second, second_agreed)] = agreements;
+    let first_peer =
+        owned_peer(first, sessions).ok_or(PairRunSetupIssue::ForeignAgreementPeer(first))?;
+    let second_peer =
+        owned_peer(second, sessions).ok_or(PairRunSetupIssue::ForeignAgreementPeer(second))?;
+    if peer_index(first_peer) == peer_index(second_peer) {
+        return Err(PairRunSetupIssue::DuplicateAgreementPeer(second));
+    }
+    // Two distinct owned peers cover both slots; place each into owned order.
+    let mut owned = [false; 2];
+    owned[peer_index(first_peer)] = first_agreed;
+    owned[peer_index(second_peer)] = second_agreed;
+    Ok(owned)
 }
 
 fn terminal_status(outcome: &PairOutcome) -> PairTerminalStatus {
@@ -983,6 +1130,16 @@ fn terminal_status(outcome: &PairOutcome) -> PairTerminalStatus {
         PairOutcome::BudgetExceeded => PairTerminalStatus::BudgetExceeded,
         PairOutcome::NoProgress => PairTerminalStatus::NoProgress,
         _ => PairTerminalStatus::Unknown,
+    }
+}
+
+/// The sanitizable failure detail an error-bearing outcome carries, if any.
+fn outcome_detail(outcome: &PairOutcome) -> Option<String> {
+    match outcome {
+        PairOutcome::ProtocolError { detail }
+        | PairOutcome::PeerFailed { detail }
+        | PairOutcome::ProviderError { detail } => Some(detail.clone()),
+        _ => None,
     }
 }
 
@@ -1037,6 +1194,136 @@ mod tests {
 
     const A_PROPOSAL: &str = r#"{"v":1,"action":"propose","artifact":"alpha"}"#;
     const B_PROPOSAL: &str = r#"{"v":1,"action":"propose","artifact":"beta"}"#;
+
+    #[test]
+    fn identity_projection_validates_scheduled_repair_and_agreement_sessions() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let foreign = SessionId::new();
+
+        // Each owned session maps to its peer; a stranger maps to nothing.
+        assert_eq!(owned_peer(a, [a, b]), Some(PairPeer::A));
+        assert_eq!(owned_peer(b, [a, b]), Some(PairPeer::B));
+        assert_eq!(owned_peer(foreign, [a, b]), None);
+
+        // Agreements project into owned order regardless of the driver's pair order.
+        assert_eq!(
+            project_agreements([(a, true), (b, false)], [a, b]).unwrap(),
+            [true, false]
+        );
+        assert_eq!(
+            project_agreements([(b, true), (a, false)], [a, b]).unwrap(),
+            [false, true]
+        );
+        // A foreign or duplicated agreement identity is a typed error, never a
+        // positional guess.
+        assert!(matches!(
+            project_agreements([(a, true), (foreign, false)], [a, b]),
+            Err(PairRunSetupIssue::ForeignAgreementPeer(session)) if session == foreign
+        ));
+        assert!(matches!(
+            project_agreements([(a, true), (a, false)], [a, b]),
+            Err(PairRunSetupIssue::DuplicateAgreementPeer(session)) if session == a
+        ));
+    }
+
+    #[tokio::test]
+    async fn from_report_attributes_candidate_and_raw_by_session_not_position() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = fake("first", A_PROPOSAL);
+        let second = fake("second", B_PROPOSAL);
+        let setup = setup(directory.path(), first.clone(), second.clone());
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while run.next().await.is_some() {}
+        })
+        .await
+        .expect("pair completes");
+        let completion = run.shutdown().await;
+        let report = completion.report().expect("a retained report");
+        let sessions = report.peers();
+
+        // Owned order attributes each raw envelope to its session, not its slot.
+        let snapshot = PairResultSnapshot::from_report(report, sessions);
+        assert_eq!(snapshot.raw[0].as_deref(), report.raw_for(sessions[0]));
+        assert_eq!(snapshot.raw[1].as_deref(), report.raw_for(sessions[1]));
+        assert!(snapshot.raw[0].is_some() && snapshot.raw[1].is_some());
+        assert_ne!(snapshot.raw[0], snapshot.raw[1]);
+
+        // Projecting with the sessions swapped swaps the raw slots — proof the
+        // mapping is by identity, never by position.
+        let swapped = PairResultSnapshot::from_report(report, [sessions[1], sessions[0]]);
+        assert_eq!(swapped.raw[0], snapshot.raw[1]);
+        assert_eq!(swapped.raw[1], snapshot.raw[0]);
+
+        // The candidate clone carries the retained revision/digest/artifact verbatim.
+        let candidate = report.candidate().expect("an applied candidate");
+        let cloned = snapshot
+            .candidate
+            .expect("candidate cloned into the snapshot");
+        assert_eq!(cloned.revision, candidate.revision());
+        assert_eq!(cloned.digest, candidate.digest());
+        assert_eq!(cloned.artifact, candidate.artifact());
+
+        // A driver-failure snapshot carries the detail and nothing to inspect.
+        let failed = PairResultSnapshot::from_driver_failure("boom".to_string());
+        assert_eq!(failed.reason, PairTerminalStatus::DriverFailed);
+        assert_eq!(failed.detail.as_deref(), Some("boom"));
+        assert!(failed.candidate.is_none());
+        assert_eq!(failed.raw, [None, None]);
+    }
+
+    #[tokio::test]
+    async fn a_live_projection_invariant_fuses_progress_and_settles_a_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = fake("first", A_PROPOSAL);
+        let second = fake("second", B_PROPOSAL);
+        let setup = setup(directory.path(), first.clone(), second.clone());
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+
+        // A typed projection issue surfaces exactly one invariant and fuses progress
+        // without panicking.
+        let event =
+            run.fail_on_projection_issue(PairRunSetupIssue::ForeignScheduledPeer(SessionId::new()));
+        assert!(matches!(event, PairPumpEvent::InvariantViolation { .. }));
+        assert!(!run.progress_open, "the invalid progress source is fused");
+
+        // The cooperative abort still brings the driver to a retained terminal that
+        // the normal drain/settlement path can present.
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::Aborted);
+    }
+
+    #[test]
+    fn a_missing_agreement_shape_is_unreachable_because_foreign_and_duplicate_exhaust_it() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        let foreign = SessionId::new();
+        // Both orders of the two owned peers project cleanly.
+        assert_eq!(
+            project_agreements([(a, true), (b, false)], [a, b]).unwrap(),
+            [true, false]
+        );
+        assert_eq!(
+            project_agreements([(b, false), (a, true)], [a, b]).unwrap(),
+            [true, false]
+        );
+        // The only ways a fixed two-entry array fails to cover both peers are a
+        // foreign identity or a repeated one; each is caught before any "missing"
+        // shape can arise, so no missing-peer variant is needed.
+        assert!(matches!(
+            project_agreements([(a, true), (foreign, false)], [a, b]),
+            Err(PairRunSetupIssue::ForeignAgreementPeer(session)) if session == foreign
+        ));
+        assert!(matches!(
+            project_agreements([(b, true), (b, false)], [a, b]),
+            Err(PairRunSetupIssue::DuplicateAgreementPeer(session)) if session == b
+        ));
+    }
 
     fn declaration(id: &str) -> ProviderDeclaration {
         let seed = FakeProvider::new();
@@ -1666,7 +1953,7 @@ mod tests {
                 PairPumpEvent::Runtime { .. }
                 | PairPumpEvent::RuntimeLagged { .. }
                 | PairPumpEvent::Progress(_) => {}
-                PairPumpEvent::Finished(status) => break status,
+                PairPumpEvent::Finished { status, .. } => break status,
                 PairPumpEvent::AskChannelClosed { .. } => {
                     panic!("closed request channel emitted more than once")
                 }
@@ -1711,17 +1998,21 @@ mod tests {
             panic!("forced driver task failure");
         }));
 
-        let detail = loop {
+        let result = loop {
             match run.next().await.unwrap() {
                 PairPumpEvent::Runtime { .. }
                 | PairPumpEvent::RuntimeLagged { .. }
                 | PairPumpEvent::Progress(_) => {}
-                PairPumpEvent::DriverFailed { detail, .. } => break detail,
+                PairPumpEvent::DriverFailed { result, .. } => break result,
                 PairPumpEvent::Ask(_) => panic!("a defaulted request reached the final screen"),
                 other => panic!("unexpected driver-failure event: {other:?}"),
             }
         };
-        assert!(detail.contains("forced driver task failure"));
+        assert!(result
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("forced driver task failure"));
         assert!(!approval_answer.await.unwrap());
         assert_eq!(
             question_answers.await.unwrap(),
@@ -1787,7 +2078,7 @@ mod tests {
         let terminal = loop {
             match run.next().await.unwrap() {
                 PairPumpEvent::Progress(_) => {}
-                PairPumpEvent::Finished(status) => break status,
+                PairPumpEvent::Finished { status, .. } => break status,
                 other => panic!("unexpected shutdown event: {other:?}"),
             }
         };
@@ -1839,7 +2130,7 @@ mod tests {
                     event: RuntimeEvent::Text(message),
                 } => routed.push((peer, message)),
                 PairPumpEvent::Progress(_) => {}
-                PairPumpEvent::Finished(status) => break status,
+                PairPumpEvent::Finished { status, .. } => break status,
                 other => panic!("unexpected final-drain event: {other:?}"),
             }
         };
@@ -1889,11 +2180,16 @@ mod tests {
             panic!("driver task panic fixture");
         }));
 
-        let (detail, status) = match run.next().await.unwrap() {
-            PairPumpEvent::DriverFailed { detail, status } => (detail, status),
+        let (result, status) = match run.next().await.unwrap() {
+            PairPumpEvent::DriverFailed { status, result } => (result, status),
             other => panic!("expected driver failure, got {other:?}"),
         };
-        assert!(detail.contains("panicked"));
+        assert_eq!(result.reason, PairTerminalStatus::DriverFailed);
+        assert!(result
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("panicked"));
         assert_eq!(
             status.state,
             PairRunState::Finished(PairTerminalStatus::DriverFailed)
@@ -2018,7 +2314,7 @@ mod tests {
                 .expect("terminal event")
             {
                 PairPumpEvent::Runtime { .. } | PairPumpEvent::Progress(_) => {}
-                PairPumpEvent::Finished(status) => {
+                PairPumpEvent::Finished { status, .. } => {
                     assert_eq!(
                         status.state,
                         PairRunState::Finished(PairTerminalStatus::CapReached)

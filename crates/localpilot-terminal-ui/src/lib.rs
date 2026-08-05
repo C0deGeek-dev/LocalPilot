@@ -27,9 +27,9 @@ mod timeline;
 
 pub use app::{
     AppCommand, AppModel, ColorSupport, CompletionCommand, DialogState, DiffFile, DiffLine,
-    DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PairStatus, PlanEntry,
-    QuestionAction, QuestionOption, QuestionResponse, RecoveryState, RuntimeUpdate, SessionEntry,
-    SessionSelection, SettingEdit, SettingEntry, StopState, TabId, TakeoverKind,
+    DiffLineKind, Focus, Header, InputAction, KeyboardSupport, PairStatus, PairStatusCandidate,
+    PlanEntry, QuestionAction, QuestionOption, QuestionResponse, RecoveryState, RuntimeUpdate,
+    SessionEntry, SessionSelection, SettingEdit, SettingEntry, StopState, TabId, TakeoverKind,
     TakeoverNavigation, TerminalCapabilities, TimelineNavigation, TrustAction, UsageTotals,
     UserShellCommand, UserShellOutput, WorkState,
 };
@@ -46,9 +46,9 @@ pub use render::{
 pub use sanitize::sanitize_text;
 pub use theme::{Theme, ThemeParseError, ThemeResolver, UiRole};
 pub use timeline::{
-    ActivityState, ContentPoint, ItemId, ItemKind, PinnedPrompt, Selection, SemanticRole,
-    StyledRange, TextStyle, Timeline, TimelineItem, TimelineView, ViewportAnchor, VisualRow,
-    VisualRowPart, VisualSpan,
+    ActivityState, ContentPoint, ItemId, ItemKind, PinnedPrompt, ResultTone, Selection,
+    SemanticRole, StyledRange, TextStyle, Timeline, TimelineItem, TimelineView, ViewportAnchor,
+    VisualRow, VisualRowPart, VisualSpan,
 };
 
 /// The product name shown by the full-screen UI.

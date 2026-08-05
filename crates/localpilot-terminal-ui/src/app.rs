@@ -7,8 +7,8 @@ use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
 use crate::projection::{ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState};
 use crate::{
-    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, SemanticRole,
-    SessionHeader, StyledRange, TextStyle, Theme, Timeline,
+    sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, ResultTone,
+    SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline,
 };
 
 const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
@@ -718,12 +718,23 @@ impl UsageTotals {
     }
 }
 
+/// The current shared candidate as live chrome: the revision and the full digest,
+/// abbreviated only at render time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairStatusCandidate {
+    pub revision: u64,
+    pub full_digest: String,
+}
+
 /// Minimal live/terminal status for an exact-two collaboration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairStatus {
     pub completed_rounds: u32,
     pub max_rounds: u32,
     pub scheduled: Option<PeerPane>,
+    pub candidate: Option<PairStatusCandidate>,
+    pub agreements: [bool; 2],
+    pub repairing: Option<PeerPane>,
     pub terminal: Option<String>,
 }
 
@@ -1145,6 +1156,10 @@ impl AppModel {
             .terminal
             .map(|terminal| sanitize_inline(&terminal))
             .filter(|terminal| !terminal.is_empty());
+        status.candidate = status.candidate.map(|candidate| PairStatusCandidate {
+            revision: candidate.revision,
+            full_digest: sanitize_inline(&candidate.full_digest),
+        });
         self.pair_status = Some(status);
         true
     }
@@ -2533,6 +2548,19 @@ impl AppModel {
         };
         projection.timeline.follow_bottom();
         projection.timeline.set_pending(id, false)
+    }
+
+    /// Append a retained, inspect-and-copy-only result into one named collaboration
+    /// projection, toned by outcome. Returns `false` for the ordinary single-session
+    /// model without mutating anything. Text is sanitized by the timeline like every
+    /// other row.
+    #[must_use]
+    pub fn append_result_for(&mut self, peer: PeerPane, text: String, tone: ResultTone) -> bool {
+        let Some(projection) = self.projections.projection_mut(peer) else {
+            return false;
+        };
+        projection.timeline.follow_bottom();
+        projection.timeline.push_result(text, tone).is_some()
     }
 
     /// Insert a stable compact user-shell row. Pending rows intentionally carry
@@ -4151,6 +4179,9 @@ mod tests {
             completed_rounds: 0,
             max_rounds: 3,
             scheduled: Some(PeerPane::A),
+            candidate: None,
+            agreements: [false, false],
+            repairing: None,
             terminal: None,
         }));
         assert_eq!(app.shared_version(), "0");
@@ -4213,6 +4244,12 @@ mod tests {
             completed_rounds: 2,
             max_rounds: 3,
             scheduled: Some(PeerPane::B),
+            candidate: Some(PairStatusCandidate {
+                revision: 4,
+                full_digest: "ab\ncd".to_string(),
+            }),
+            agreements: [true, false],
+            repairing: Some(PeerPane::B),
             terminal: Some("converged\nraw".to_string()),
         }));
 
@@ -4222,6 +4259,12 @@ mod tests {
                 completed_rounds: 2,
                 max_rounds: 3,
                 scheduled: Some(PeerPane::B),
+                candidate: Some(PairStatusCandidate {
+                    revision: 4,
+                    full_digest: "ab cd".to_string(),
+                }),
+                agreements: [true, false],
+                repairing: Some(PeerPane::B),
                 terminal: Some("converged raw".to_string()),
             })
         );
@@ -4256,6 +4299,64 @@ mod tests {
                 .pending
         );
         assert!(!model().activate_prompt_for(PeerPane::A, a));
+    }
+
+    #[test]
+    fn append_result_for_is_pair_only_sanitized_and_selectable() {
+        use crate::ContentPoint;
+
+        // Single chat rejects a result and leaves its timeline byte-for-byte unchanged.
+        let mut single = model();
+        let before = single.active_timeline().items().to_vec();
+        assert!(!single.append_result_for(PeerPane::A, "x".to_string(), ResultTone::Error));
+        assert_eq!(
+            single.active_timeline().items().to_vec(),
+            before,
+            "a rejected result must not mutate any item content, kind, style, or tone"
+        );
+
+        // Pair mode appends a sanitized, toned result into the named projection only.
+        let mut pair = pair_model();
+        assert!(pair.append_result_for(
+            PeerPane::A,
+            "kept body\u{7}tail".to_string(),
+            ResultTone::Incomplete
+        ));
+        assert!(pair
+            .timeline_for(PeerPane::B)
+            .expect("B timeline")
+            .items()
+            .iter()
+            .all(|item| item.kind != ItemKind::Result));
+
+        let (id, tone, sanitized) = {
+            let item = pair
+                .timeline_for(PeerPane::A)
+                .expect("A timeline")
+                .items()
+                .iter()
+                .find(|item| item.kind == ItemKind::Result)
+                .expect("a result row");
+            (item.id, item.tone, item.text.clone())
+        };
+        assert_eq!(tone, Some(ResultTone::Incomplete));
+        assert!(!sanitized.contains('\u{7}'), "control text is sanitized");
+
+        // The result row is a generic selectable timeline item: selecting it and
+        // reading the selection returns its copied text.
+        let timeline = pair.timeline_for_mut(PeerPane::A).expect("A timeline");
+        timeline.start_selection(ContentPoint {
+            item_id: id,
+            byte: 0,
+        });
+        timeline.extend_selection(ContentPoint {
+            item_id: id,
+            byte: sanitized.len(),
+        });
+        assert_eq!(
+            timeline.selected_text().as_deref(),
+            Some(sanitized.as_str())
+        );
     }
 
     #[test]

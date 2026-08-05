@@ -1499,6 +1499,121 @@ async fn progress_clears_agreements_on_a_revise() {
 }
 
 #[tokio::test]
+async fn progress_marks_and_clears_the_repairing_peer() {
+    let a = SessionId::new();
+    let b = SessionId::new();
+    let driver = PairDriver::new(
+        a,
+        b,
+        "task",
+        PairBounds {
+            slot_timeout: Duration::from_millis(50),
+            ..bounds()
+        },
+    )
+    .unwrap();
+    let mut progress = driver.progress();
+    // A proposes rev1; B's primary is malformed, so its one repair is spent on the
+    // same peer. The repair drive then parks until the slot deadline, holding the
+    // repair snapshot long enough for a concurrent observer to see it.
+    let mut endpoints = scripts(
+        a,
+        &[Move::Propose("v1".to_string())],
+        b,
+        &[Move::Malformed, Move::Hang],
+    );
+
+    let mut seen = Vec::new();
+    let run = driver.run(&mut endpoints);
+    tokio::pin!(run);
+    let report = loop {
+        tokio::select! {
+            outcome = &mut run => break outcome,
+            Some(snapshot) = progress.changed() => seen.push(snapshot),
+        }
+    };
+    // The repair timed out (its drive never produced), so the terminal reason is a
+    // timeout — the point under test is the transient repair signal, not the reason.
+    assert_eq!(report.reason(), &PairOutcome::TimedOut);
+
+    let repairing = seen
+        .iter()
+        .find(|snapshot| snapshot.repairing_peer().is_some())
+        .expect("a repair snapshot was published while B repaired");
+    assert_eq!(repairing.repairing_peer(), Some(b));
+    // The same peer stays scheduled for its repair drive, and the installed candidate
+    // is unchanged by the repair decision.
+    assert_eq!(repairing.next_peer(), Some(b));
+    assert_eq!(
+        repairing.candidate().map(CandidateSnapshot::revision),
+        Some(1)
+    );
+
+    // The terminal snapshot clears the repair signal: the authoritative latest value
+    // after the run has finished carries no repairing peer.
+    assert_eq!(progress.latest().repairing_peer(), None);
+}
+
+#[tokio::test]
+async fn progress_clears_the_repair_signal_on_the_next_valid_slot() {
+    let a = SessionId::new();
+    let b = SessionId::new();
+    let driver = PairDriver::new(
+        a,
+        b,
+        "task",
+        PairBounds {
+            slot_timeout: Duration::from_millis(50),
+            ..bounds()
+        },
+    )
+    .unwrap();
+    // A proposes rev1; B's primary is malformed and its one repair agrees; A's next
+    // turn then hangs, holding the post-repair scheduled snapshot long enough for a
+    // concurrent observer to read the cleared repair signal off the watch.
+    let mut endpoints = scripts(
+        a,
+        &[Move::Propose("v1".to_string()), Move::Hang],
+        b,
+        &[Move::Malformed, Move::AgreeLatest],
+    );
+
+    let mut progress = driver.progress();
+    let run = driver.run(&mut endpoints);
+    tokio::pin!(run);
+    let mut seen = Vec::new();
+    let report = loop {
+        tokio::select! {
+            outcome = &mut run => break outcome,
+            Some(snapshot) = progress.changed() => seen.push(snapshot),
+        }
+    };
+
+    // After the valid repair, the next scheduled (non-terminal) snapshot carries no
+    // repair signal, the applied candidate, and B's fresh agreement — the clear is
+    // authoritative, not merely the terminal value.
+    let cleared = seen
+        .iter()
+        .find(|snapshot| snapshot.next_peer() == Some(a) && snapshot.candidate().is_some())
+        .expect("a post-repair scheduled snapshot");
+    assert_eq!(cleared.repairing_peer(), None);
+    assert_eq!(
+        cleared.candidate().map(CandidateSnapshot::revision),
+        Some(1)
+    );
+    assert!(
+        cleared
+            .agreements()
+            .iter()
+            .any(|(id, agreed)| *id == b && *agreed),
+        "B's repair agreement is reflected before A's turn"
+    );
+
+    assert_eq!(report.reason(), &PairOutcome::TimedOut);
+    assert_eq!(progress.latest().repairing_peer(), None);
+}
+
+#[tokio::test]
 async fn progress_advances_agreements_one_then_two() {
     let a = SessionId::new();
     let b = SessionId::new();

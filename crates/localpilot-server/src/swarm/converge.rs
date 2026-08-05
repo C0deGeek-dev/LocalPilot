@@ -455,6 +455,7 @@ impl CandidateSnapshot {
 #[non_exhaustive]
 pub struct PairReport {
     outcome: PairOutcome,
+    completed_rounds: u32,
     peers: [SessionId; 2],
     raw: [Option<String>; 2],
     candidate: Option<CandidateSnapshot>,
@@ -465,6 +466,13 @@ impl PairReport {
     #[must_use]
     pub fn reason(&self) -> &PairOutcome {
         &self.outcome
+    }
+
+    /// How many full rounds completed before the pair stopped — the same count the
+    /// live progress reported, read back from the retained snapshot.
+    #[must_use]
+    pub fn completed_rounds(&self) -> u32 {
+        self.completed_rounds
     }
 
     /// The two scheduled peers, in stable order (index-aligned with [`raw`](Self::raw)).
@@ -506,6 +514,7 @@ pub struct PairProgress {
     next_peer: Option<SessionId>,
     candidate: Option<CandidateSnapshot>,
     agreements: [(SessionId, bool); 2],
+    repairing_peer: Option<SessionId>,
 }
 
 impl PairProgress {
@@ -538,6 +547,14 @@ impl PairProgress {
     #[must_use]
     pub fn agreements(&self) -> [(SessionId, bool); 2] {
         self.agreements
+    }
+
+    /// The peer currently spending its slot's single repair, if any. Set the moment
+    /// the driver decides to repair a malformed or stale result, and cleared by the
+    /// next valid-slot publish or the terminal snapshot — never inferred from prose.
+    #[must_use]
+    pub fn repairing_peer(&self) -> Option<SessionId> {
+        self.repairing_peer
     }
 }
 
@@ -784,6 +801,7 @@ impl PairDriver {
             next_peer: Some(first),
             candidate: None,
             agreements: [(first, false), (second, false)],
+            repairing_peer: None,
         });
         Ok(Self {
             state: PairState::distinct(first, second),
@@ -821,10 +839,29 @@ impl PairDriver {
         }
     }
 
-    /// Publish the current state onto the progress channel. `next_peer` is the peer
+    /// Publish the current state with no repair in flight. `next_peer` is the peer
     /// scheduled for the upcoming slot, or `None` for the final terminal snapshot.
+    /// Every scheduled-slot and terminal publish clears a prior repair signal.
     /// Nonblocking; a run with no observers simply updates the retained value.
     fn publish(&self, next_peer: Option<SessionId>, completed_rounds: u32) {
+        self.publish_state(next_peer, completed_rounds, None);
+    }
+
+    /// Publish the moment the driver spends a slot's single repair on `peer`: that
+    /// same peer stays scheduled for its repair drive, and the repair signal is set.
+    fn publish_repairing(&self, peer: SessionId, completed_rounds: u32) {
+        self.publish_state(Some(peer), completed_rounds, Some(peer));
+    }
+
+    /// The one place a progress snapshot is written, so the repair set/clear is
+    /// auditable at every call site. Candidate and agreements are always the current
+    /// authoritative state; only `next_peer` and `repairing_peer` vary per call.
+    fn publish_state(
+        &self,
+        next_peer: Option<SessionId>,
+        completed_rounds: u32,
+        repairing_peer: Option<SessionId>,
+    ) {
         let _previous = self.progress.send_replace(PairProgress {
             completed_rounds,
             max_rounds: self.bounds.max_rounds,
@@ -834,6 +871,7 @@ impl PairDriver {
                 (self.peers[0], self.state.agreed(self.peers[0])),
                 (self.peers[1], self.state.agreed(self.peers[1])),
             ],
+            repairing_peer,
         });
     }
 
@@ -861,8 +899,12 @@ impl PairDriver {
         let mut raw: [Option<String>; 2] = [None, None];
         let outcome = self.run_loop(endpoints, &mut raw).await;
         let candidate = self.state.candidate().map(CandidateSnapshot::of);
+        // Read the round count back from the authoritative progress the loop already
+        // published, so the retained report agrees with the last live snapshot.
+        let completed_rounds = self.progress.borrow().completed_rounds();
         PairReport {
             outcome,
+            completed_rounds,
             peers: self.peers,
             raw,
             candidate,
@@ -1019,6 +1061,10 @@ impl PairDriver {
                         }
                         repaired = true;
                         repair_prompt = render_repair(&detail);
+                        // The same peer is about to spend its one repair drive; surface
+                        // it now so observers see the repair, not a silent stall. The
+                        // next slot or terminal publish clears it.
+                        self.publish_repairing(peer, rounds);
                     }
                 }
             };

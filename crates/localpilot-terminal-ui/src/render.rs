@@ -1713,6 +1713,7 @@ fn render_timeline(
                 let content_column = role_prefix(
                     row.kind,
                     row.activity,
+                    row.tone,
                     first,
                     theme(app),
                     app.capabilities.screen_reader,
@@ -1929,6 +1930,7 @@ fn timeline_line(row: &VisualRow, app: &AppModel, width: u16) -> Line<'static> {
     let mut spans = role_prefix(
         row.kind,
         row.activity,
+        row.tone,
         first,
         theme,
         app.capabilities.screen_reader,
@@ -2007,9 +2009,21 @@ fn framed_rule(width: u16, top: bool, style: ratatui::style::Style) -> Line<'sta
     Line::styled(fill.repeat(usize::from(width)), style)
 }
 
+/// The theme role a retained result renders with. Absent tone fails closed to
+/// `Error` so a result never wears success chrome without a proved convergence;
+/// only an explicit `Success` tone (set exclusively by `push_result`) is success.
+const fn result_role(tone: Option<crate::ResultTone>) -> UiRole {
+    match tone {
+        Some(crate::ResultTone::Success) => UiRole::Success,
+        Some(crate::ResultTone::Incomplete) => UiRole::Warning,
+        Some(crate::ResultTone::Error) | None => UiRole::Error,
+    }
+}
+
 fn role_prefix(
     kind: ItemKind,
     activity: Option<ActivityState>,
+    tone: Option<crate::ResultTone>,
     first: bool,
     theme: ThemeResolver,
     screen_reader: bool,
@@ -2091,6 +2105,10 @@ fn role_prefix(
                 ),
             },
             ItemKind::Notice => (if first { "Notice: " } else { "        " }, UiRole::Warning),
+            ItemKind::Result => (
+                if first { "Result: " } else { "        " },
+                result_role(tone),
+            ),
         };
         return vec![Span::styled(label, theme.ui(role))];
     }
@@ -2149,6 +2167,10 @@ fn role_prefix(
             if first { "! " } else { "  " },
             theme.ui(UiRole::Warning),
         )],
+        ItemKind::Result => vec![Span::styled(
+            if first { "◆ " } else { "  " },
+            theme.ui(result_role(tone)),
+        )],
     }
 }
 
@@ -2203,18 +2225,34 @@ fn status_right(app: &AppModel) -> String {
                 status.completed_rounds, status.max_rounds
             ));
         } else {
-            parts.push(format!(
-                "{}/{} rounds{}",
-                status.completed_rounds,
-                status.max_rounds,
-                status.scheduled.map_or_else(String::new, |peer| format!(
-                    " · Peer {}",
-                    match peer {
-                        crate::PeerPane::A => "A",
-                        crate::PeerPane::B => "B",
-                    }
-                ))
+            let current = if status.max_rounds == 0 {
+                0
+            } else {
+                status
+                    .completed_rounds
+                    .saturating_add(1)
+                    .min(status.max_rounds)
+            };
+            let mut running = format!("{current}/{} rounds", status.max_rounds);
+            if let Some(peer) = status.scheduled {
+                running.push_str(&format!(" · Peer {}", peer_label(peer)));
+            }
+            if let Some(candidate) = &status.candidate {
+                running.push_str(&format!(
+                    " · r{} {}",
+                    candidate.revision,
+                    abbreviated_digest(&candidate.full_digest)
+                ));
+            }
+            running.push_str(&format!(
+                " · A {} · B {}",
+                agreement_word(status.agreements[0]),
+                agreement_word(status.agreements[1])
             ));
+            if let Some(peer) = status.repairing {
+                running.push_str(&format!(" · Repairing Peer {}", peer_label(peer)));
+            }
+            parts.push(running);
         }
     }
     parts.push(format!("{} tokens", usage.total()));
@@ -2230,6 +2268,26 @@ fn status_right(app: &AppModel) -> String {
         parts.push(format!("{percentage}% context"));
     }
     parts.join(" · ")
+}
+
+const fn peer_label(peer: crate::PeerPane) -> &'static str {
+    match peer {
+        crate::PeerPane::A => "A",
+        crate::PeerPane::B => "B",
+    }
+}
+
+const fn agreement_word(agreed: bool) -> &'static str {
+    if agreed {
+        "agreed"
+    } else {
+        "pending"
+    }
+}
+
+/// The first eight characters of a full candidate digest, for compact chrome.
+fn abbreviated_digest(full_digest: &str) -> String {
+    full_digest.chars().take(8).collect()
 }
 
 fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -> (u16, usize) {
@@ -5049,17 +5107,197 @@ mod tests {
             completed_rounds: 1,
             max_rounds: 3,
             scheduled: Some(PeerPane::B),
+            candidate: Some(crate::PairStatusCandidate {
+                revision: 2,
+                full_digest: "0123456789abcdef".to_string(),
+            }),
+            agreements: [true, false],
+            repairing: None,
             terminal: None,
         }));
-        assert_eq!(status_right(&pair), "1/3 rounds · Peer B · 0 tokens");
+        // Running chrome shows the in-flight round, scheduled peer, revision with an
+        // eight-character digest, and text-first agreement state.
+        assert_eq!(
+            status_right(&pair),
+            "2/3 rounds · Peer B · r2 01234567 · A agreed · B pending · 0 tokens"
+        );
 
         assert!(pair.set_pair_status(crate::PairStatus {
             completed_rounds: 2,
             max_rounds: 3,
             scheduled: None,
+            candidate: None,
+            agreements: [true, true],
+            repairing: None,
             terminal: Some("Converged".to_string()),
         }));
         assert_eq!(status_right(&pair), "Converged · 2/3 rounds · 0 tokens");
+    }
+
+    #[test]
+    fn a_result_role_fails_closed_without_a_success_tone() {
+        assert_eq!(
+            result_role(Some(crate::ResultTone::Success)),
+            UiRole::Success
+        );
+        assert_eq!(
+            result_role(Some(crate::ResultTone::Incomplete)),
+            UiRole::Warning
+        );
+        assert_eq!(result_role(Some(crate::ResultTone::Error)), UiRole::Error);
+        // A result with no proved tone never wears success chrome.
+        assert_eq!(result_role(None), UiRole::Error);
+        assert_ne!(result_role(None), UiRole::Success);
+    }
+
+    fn pair_status_model() -> AppModel {
+        AppModel::new_pair(
+            snapshot_header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        )
+    }
+
+    #[test]
+    fn a_result_row_shows_a_distinct_prefix_in_both_accessibility_modes() {
+        for (screen_reader, needle) in [(false, "◆"), (true, "Result:")] {
+            let mut pair = AppModel::new_pair(
+                snapshot_header(),
+                crate::SessionHeader {
+                    provider: "provider-b".to_string(),
+                    model: "model-b".to_string(),
+                    session_id: "session-b".to_string(),
+                    session_name: None,
+                },
+                TerminalCapabilities {
+                    screen_reader,
+                    ..TerminalCapabilities::default()
+                },
+            );
+            assert!(pair.append_result_for(
+                PeerPane::A,
+                "converged result body".to_string(),
+                crate::ResultTone::Success,
+            ));
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &pair);
+                })
+                .expect("draw result row");
+            let buffer = terminal.backend().buffer();
+            let found = (0..buffer.area.height).any(|y| buffer_line(buffer, y).contains(needle));
+            assert!(
+                found,
+                "screen_reader={screen_reader}: `{needle}` not rendered"
+            );
+        }
+    }
+
+    #[test]
+    fn running_chrome_shows_repair_and_reset_with_the_full_digest_retained() {
+        let mut pair = pair_status_model();
+        // A repair in flight is named; the full digest is retained but abbreviated.
+        assert!(pair.set_pair_status(crate::PairStatus {
+            completed_rounds: 1,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::B),
+            candidate: Some(crate::PairStatusCandidate {
+                revision: 5,
+                full_digest: "0123456789abcdef0123".to_string(),
+            }),
+            agreements: [true, false],
+            repairing: Some(PeerPane::B),
+            terminal: None,
+        }));
+        assert_eq!(
+            status_right(&pair),
+            "2/3 rounds · Peer B · r5 01234567 · A agreed · B pending · Repairing Peer B · 0 tokens"
+        );
+        assert_eq!(
+            pair.pair_status()
+                .and_then(|status| status.candidate.as_ref())
+                .map(|candidate| candidate.full_digest.as_str()),
+            Some("0123456789abcdef0123"),
+            "the full digest is retained though the chrome shows only eight characters"
+        );
+
+        // A new revision resets both agreements to pending in the visible chrome.
+        assert!(pair.set_pair_status(crate::PairStatus {
+            completed_rounds: 1,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::A),
+            candidate: Some(crate::PairStatusCandidate {
+                revision: 6,
+                full_digest: "ff".to_string(),
+            }),
+            agreements: [false, false],
+            repairing: None,
+            terminal: None,
+        }));
+        assert_eq!(
+            status_right(&pair),
+            "2/3 rounds · Peer A · r6 ff · A pending · B pending · 0 tokens"
+        );
+    }
+
+    #[test]
+    fn a_narrow_status_line_clips_without_overflowing() {
+        let mut pair = pair_status_model();
+        assert!(pair.set_pair_status(crate::PairStatus {
+            completed_rounds: 1,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::B),
+            candidate: Some(crate::PairStatusCandidate {
+                revision: 5,
+                full_digest: "0123456789abcdef".to_string(),
+            }),
+            agreements: [true, false],
+            repairing: Some(PeerPane::B),
+            terminal: None,
+        }));
+        // The wide status string is longer than a narrow terminal; the existing width
+        // policy must clip it to the frame without wrapping or overflowing.
+        let width = 48;
+        let backend = TestBackend::new(width, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut layout = None;
+        terminal
+            .draw(|frame| layout = Some(render(frame, &pair).frame.expect("layout")))
+            .expect("draw narrow status");
+        let layout = layout.expect("frame layout");
+        // Confirm the narrow (stacked) status path is exercised.
+        assert_eq!(
+            layout.status.height, 2,
+            "the narrow status stacks into two lines"
+        );
+        // Precondition: the untruncated status is genuinely wider than the frame, and
+        // its full form ends with the token count that truncation should clip.
+        let full = status_right(&pair);
+        assert!(
+            full.chars().count() > usize::from(width),
+            "precondition: the untruncated status is wider than the frame"
+        );
+        assert!(full.ends_with("0 tokens"));
+        // `truncate_end` — not mere buffer padding — was applied: the leading round
+        // text survives, an ellipsis marks the cut, and the trailing token count is
+        // clipped away.
+        let line = buffer_line(terminal.backend().buffer(), layout.status.bottom() - 1);
+        assert!(
+            line.contains("2/3 rounds · Peer B"),
+            "leading status text survives truncation: {line:?}"
+        );
+        assert!(line.contains('…'), "the status was truncated: {line:?}");
+        assert!(
+            !line.contains("0 tokens"),
+            "the trailing status content was clipped: {line:?}"
+        );
     }
 
     #[test]

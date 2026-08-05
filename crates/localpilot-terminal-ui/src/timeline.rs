@@ -27,6 +27,17 @@ pub enum ItemKind {
     Question,
     Shell,
     Notice,
+    Result,
+}
+
+/// The honesty of a retained collaboration result, driving its distinct prefix and
+/// colour. Success is only a genuine convergence; a bounded or aborted run is
+/// incomplete; a failed run is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultTone {
+    Success,
+    Incomplete,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +74,7 @@ impl From<ItemKind> for SemanticRole {
             ItemKind::Question => Self::Tool,
             ItemKind::Shell => Self::Tool,
             ItemKind::Notice => Self::Notice,
+            ItemKind::Result => Self::Notice,
         }
     }
 }
@@ -121,6 +133,7 @@ pub struct TimelineItem {
     pub trailing: Option<String>,
     pub pending: bool,
     pub activity: Option<ActivityState>,
+    pub tone: Option<ResultTone>,
     pub expanded: bool,
 }
 
@@ -135,6 +148,7 @@ impl TimelineItem {
             trailing: None,
             pending: false,
             activity: None,
+            tone: None,
             expanded: !matches!(kind, ItemKind::Reasoning | ItemKind::Tool),
         }
     }
@@ -160,6 +174,7 @@ pub struct VisualRow {
     pub trailing: Option<String>,
     pub pending: bool,
     pub activity: Option<ActivityState>,
+    pub tone: Option<ResultTone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +304,23 @@ impl Timeline {
             self.new_content.set(true);
         }
         self.invalidate_layout();
+        Some(id)
+    }
+
+    /// Append a retained result item, colouring its whole body by the result tone so
+    /// a non-success result never reads as ordinary output.
+    pub fn push_result(&mut self, text: impl Into<String>, tone: ResultTone) -> Option<ItemId> {
+        let id = self.push(ItemKind::Result, text)?;
+        if let Some(index) = self.item_positions.get(&id).copied() {
+            let role = match tone {
+                ResultTone::Success => SemanticRole::Success,
+                ResultTone::Incomplete => SemanticRole::Accent,
+                ResultTone::Error => SemanticRole::Error,
+            };
+            let item = &mut self.items[index];
+            item.tone = Some(tone);
+            item.styles = full_range_style(&item.text, TextStyle::new(role));
+        }
         Some(id)
     }
 
@@ -862,7 +894,8 @@ fn item_content_width(item: &TimelineItem, width: u16) -> u16 {
         | ItemKind::Tool
         | ItemKind::Question
         | ItemKind::Shell
-        | ItemKind::Notice => 2,
+        | ItemKind::Notice
+        | ItemKind::Result => 2,
     };
     width.saturating_sub(decoration).max(1)
 }
@@ -921,6 +954,7 @@ fn frame_row(item: &TimelineItem, part: VisualRowPart) -> VisualRow {
         trailing: None,
         pending: item.pending,
         activity: item.activity,
+        tone: item.tone,
     }
 }
 
@@ -999,13 +1033,15 @@ fn visual_row(item: &TimelineItem, range: TextRow, part: VisualRowPart) -> Visua
             | ItemKind::Tool
             | ItemKind::Question
             | ItemKind::Shell
-            | ItemKind::Notice => 2,
+            | ItemKind::Notice
+            | ItemKind::Result => 2,
         },
         trailing: matches!(part, VisualRowPart::Content { first: true, .. })
             .then(|| item.trailing.clone())
             .flatten(),
         pending: item.pending,
         activity: item.activity,
+        tone: item.tone,
     }
 }
 

@@ -31,11 +31,11 @@ use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PairStatus, PeerPane, PlanEntry, QuestionOption as UiQuestionOption,
-    QuestionResponse, RecoveryState, RuntimeUpdate, SessionEntry, SessionHeader, SessionSelection,
-    SettingEdit, SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities,
-    Theme, Timeline, TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand,
-    UserShellOutput, VisualRowPart,
+    KeyboardSupport, PairStatus, PairStatusCandidate, PeerPane, PlanEntry,
+    QuestionOption as UiQuestionOption, QuestionResponse, RecoveryState, ResultTone, RuntimeUpdate,
+    SessionEntry, SessionHeader, SessionSelection, SettingEdit, SettingEntry, StopState,
+    SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, Timeline, TimelineNavigation,
+    TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -50,10 +50,12 @@ use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
     may_be_unbracketed_paste_key, PasteAction, PasteBurst,
 };
+#[cfg(test)]
+use crate::pair_run::PairResultCandidate;
 use crate::pair_run::{
     InteractivePairRun, PairAsk, PairAskAnswer, PairAskAnswerError, PairAskId, PairAskKind,
-    PairAskRequest, PairPumpEvent, PairRunState, PairRunStatus, PairTerminalStatus,
-    PreparedPairRun,
+    PairAskRequest, PairPumpEvent, PairResultSnapshot, PairRunState, PairRunStatus,
+    PairTerminalStatus, PreparedPairRun,
 };
 use crate::repl::{switch_model_target, ClipboardImageRead};
 
@@ -301,7 +303,7 @@ impl PairTerminalAdapter {
                 let _ = app.apply_runtime_for(pair_pane(peer), map_runtime_event(event));
             }
             PairPumpEvent::Ask(ask) => return self.install_ask(app, ask),
-            PairPumpEvent::Progress(status) => apply_pair_status(app, status),
+            PairPumpEvent::Progress(status) => apply_pair_status(app, &status),
             PairPumpEvent::RuntimeLagged { peer, skipped } => {
                 apply_pair_warning(
                     app,
@@ -329,23 +331,16 @@ impl PairTerminalAdapter {
                 apply_pair_warning(app, PairPeer::A, format!("collaboration stopped: {detail}"));
                 apply_pair_warning(app, PairPeer::B, format!("collaboration stopped: {detail}"));
             }
-            PairPumpEvent::Finished(status) => {
+            PairPumpEvent::Finished { status, result } => {
                 self.clear_dialog(app);
-                self.record_terminal(app, status);
+                self.record_terminal(app, status, &result);
             }
-            PairPumpEvent::DriverFailed { detail, status } => {
+            PairPumpEvent::DriverFailed { status, result } => {
+                // The self-contained result card already carries the failure detail
+                // and must remain the final terminal presentation, so no second
+                // notice is appended after it.
                 self.clear_dialog(app);
-                self.record_terminal(app, status);
-                apply_pair_warning(
-                    app,
-                    PairPeer::A,
-                    format!("collaboration driver failed: {detail}"),
-                );
-                apply_pair_warning(
-                    app,
-                    PairPeer::B,
-                    format!("collaboration driver failed: {detail}"),
-                );
+                self.record_terminal(app, status, &result);
             }
         }
         PairHostAction::None
@@ -415,9 +410,17 @@ impl PairTerminalAdapter {
         }
     }
 
-    fn record_terminal(&mut self, app: &mut AppModel, status: PairRunStatus) {
+    fn record_terminal(
+        &mut self,
+        app: &mut AppModel,
+        status: PairRunStatus,
+        result: &PairResultSnapshot,
+    ) {
         if let PairRunState::Finished(terminal) = status.state {
             self.terminal = Some(terminal);
+            // Ordered terminal handling: settle steering, quiesce both projections'
+            // work, apply the final status, then leave exactly one retained result
+            // card per timeline.
             self.settle_pending_steers(app);
             let _ = app.apply_runtime_for(
                 PeerPane::A,
@@ -428,8 +431,107 @@ impl PairTerminalAdapter {
                 RuntimeUpdate::Stopped(pair_terminal_stop_state(terminal)),
             );
         }
-        apply_pair_status(app, status);
+        apply_pair_status(app, &status);
+        let tone = result_tone(result.reason);
+        for peer in [PairPeer::A, PairPeer::B] {
+            let _ = app.append_result_for(pair_pane(peer), render_pair_result(result, peer), tone);
+        }
     }
+}
+
+/// The honesty tone a terminal reason renders with: only a genuine convergence is a
+/// success; a bounded or aborted run is incomplete; everything else is an error.
+const fn result_tone(reason: PairTerminalStatus) -> ResultTone {
+    match reason {
+        PairTerminalStatus::Converged => ResultTone::Success,
+        PairTerminalStatus::CapReached | PairTerminalStatus::Aborted => ResultTone::Incomplete,
+        PairTerminalStatus::ProtocolError
+        | PairTerminalStatus::TimedOut
+        | PairTerminalStatus::PeerFailed
+        | PairTerminalStatus::ProviderError
+        | PairTerminalStatus::BudgetExceeded
+        | PairTerminalStatus::NoProgress
+        | PairTerminalStatus::DriverFailed
+        | PairTerminalStatus::Unknown => ResultTone::Error,
+    }
+}
+
+/// The retained, inspect-and-copy-only card for one peer: the shared outcome and
+/// candidate, then only this peer's raw response. Candidate lines are duplicated on
+/// both cards so either the wide split or a later narrow single pane is
+/// self-contained.
+fn render_pair_result(result: &PairResultSnapshot, peer: PairPeer) -> String {
+    let mut lines = vec![result_headline(result)];
+    match &result.candidate {
+        Some(candidate) => {
+            lines.push(format!(
+                "Candidate: revision {} (digest {})",
+                candidate.revision, candidate.digest
+            ));
+            lines.push(format!("Artifact: {}", candidate.artifact));
+        }
+        None => lines.push("Candidate: none was applied.".to_string()),
+    }
+    let raw = result.raw[peer_index(peer)].as_deref();
+    match raw {
+        Some(raw) => lines.push(format!(
+            "Peer {}'s latest response: {raw}",
+            pair_peer_label(peer)
+        )),
+        None => lines.push(format!(
+            "Peer {} produced no response to inspect.",
+            pair_peer_label(peer)
+        )),
+    }
+    lines.push("Inspect/copy only; no files or version control were changed.".to_string());
+    lines.join("\n")
+}
+
+/// The one-line, factual outcome headline for a retained result.
+fn result_headline(result: &PairResultSnapshot) -> String {
+    let detail = || {
+        result
+            .detail
+            .clone()
+            .unwrap_or_else(|| "no detail".to_string())
+    };
+    match result.reason {
+        PairTerminalStatus::Converged => match &result.candidate {
+            Some(candidate) => format!("Converged at revision {}.", candidate.revision),
+            None => "Converged.".to_string(),
+        },
+        PairTerminalStatus::CapReached => format!(
+            "Round cap reached after {}; no convergence.",
+            counted_rounds(result.completed_rounds)
+        ),
+        PairTerminalStatus::Aborted => "Aborted before convergence.".to_string(),
+        PairTerminalStatus::TimedOut => "Timed out before convergence.".to_string(),
+        PairTerminalStatus::BudgetExceeded => "Budget exceeded before convergence.".to_string(),
+        PairTerminalStatus::NoProgress => {
+            "Stopped with no progress before convergence.".to_string()
+        }
+        PairTerminalStatus::ProtocolError => {
+            format!("Protocol error before convergence: {}", detail())
+        }
+        PairTerminalStatus::PeerFailed => format!("A peer failed before convergence: {}", detail()),
+        PairTerminalStatus::ProviderError => {
+            format!("Provider error before convergence: {}", detail())
+        }
+        PairTerminalStatus::DriverFailed => format!("The driver failed: {}", detail()),
+        PairTerminalStatus::Unknown => "Finished without convergence.".to_string(),
+    }
+}
+
+const fn pair_peer_label(peer: PairPeer) -> &'static str {
+    match peer {
+        PairPeer::A => "A",
+        PairPeer::B => "B",
+    }
+}
+
+/// A round count with grammatical agreement: `1 round`, otherwise `N rounds`.
+fn counted_rounds(rounds: u32) -> String {
+    format!("{rounds} round{}", if rounds == 1 { "" } else { "s" })
 }
 
 fn rejected_pair_ask(id: PairAskId, request: PairAskRequest) -> PairHostAction {
@@ -807,7 +909,7 @@ pub(crate) async fn run_pair(
     let mut app = AppModel::new_pair(primary, secondary, capabilities);
     app.set_command_catalog(pair_command_catalog());
     apply_host_preferences(&mut app);
-    apply_pair_status(&mut app, prepared.status());
+    apply_pair_status(&mut app, &prepared.status());
     if context.trust_required {
         app.require_workspace_trust(context.cwd.display().to_string());
     }
@@ -1030,6 +1132,7 @@ fn visible_transcript(app: &AppModel) -> String {
                 ItemKind::Question => "Question",
                 ItemKind::Shell => "Shell",
                 ItemKind::Notice => "Notice",
+                ItemKind::Result => "Result",
             };
             let visible = if item.kind == ItemKind::Tool && !item.expanded {
                 item.text.lines().next().unwrap_or_default()
@@ -1186,7 +1289,10 @@ fn pair_terminal_label(status: PairTerminalStatus) -> &'static str {
 
 const fn pair_terminal_stop_state(status: PairTerminalStatus) -> StopState {
     match status {
-        PairTerminalStatus::Converged | PairTerminalStatus::CapReached => StopState::Done,
+        // Only a genuine convergence is a success; a bounded round-cap run settled
+        // without converging.
+        PairTerminalStatus::Converged => StopState::Done,
+        PairTerminalStatus::CapReached => StopState::Quiesced,
         PairTerminalStatus::Aborted => StopState::Cancelled,
         PairTerminalStatus::TimedOut => StopState::TimedOut,
         PairTerminalStatus::ProviderError => StopState::ProviderError,
@@ -1199,7 +1305,7 @@ const fn pair_terminal_stop_state(status: PairTerminalStatus) -> StopState {
     }
 }
 
-fn apply_pair_status(app: &mut AppModel, status: PairRunStatus) {
+fn apply_pair_status(app: &mut AppModel, status: &PairRunStatus) {
     let terminal = match status.state {
         PairRunState::Running => None,
         PairRunState::Finished(terminal) => Some(pair_terminal_label(terminal).to_string()),
@@ -1208,6 +1314,15 @@ fn apply_pair_status(app: &mut AppModel, status: PairRunStatus) {
         completed_rounds: status.completed_rounds,
         max_rounds: status.max_rounds,
         scheduled: status.scheduled.map(pair_pane),
+        candidate: status
+            .candidate
+            .as_ref()
+            .map(|candidate| PairStatusCandidate {
+                revision: candidate.revision,
+                full_digest: candidate.full_digest.clone(),
+            }),
+        agreements: status.agreements,
+        repairing: status.repairing.map(pair_pane),
         terminal,
     });
 }
@@ -5118,12 +5233,16 @@ mod tests {
     }
 
     fn pair_app() -> AppModel {
+        pair_app_with_workspace("fixture-workspace")
+    }
+
+    fn pair_app_with_workspace(workspace: &str) -> AppModel {
         AppModel::new_pair(
             Header {
                 version: "0".to_string(),
                 provider: "provider-a".to_string(),
                 model: "model-a".to_string(),
-                workspace: "fixture-workspace".to_string(),
+                workspace: workspace.to_string(),
                 branch: Some("fixture-branch".to_string()),
                 workspace_dirty: Some(true),
                 mode: "agent".to_string(),
@@ -5304,6 +5423,9 @@ mod tests {
             completed_rounds: 1,
             max_rounds: 3,
             scheduled: Some(PairPeer::B),
+            candidate: None,
+            agreements: [false, false],
+            repairing: None,
         };
         let _ = adapter.apply_pump_event(&mut app, PairPumpEvent::Progress(running));
         assert_eq!(
@@ -5312,6 +5434,9 @@ mod tests {
                 completed_rounds: 1,
                 max_rounds: 3,
                 scheduled: Some(PeerPane::B),
+                candidate: None,
+                agreements: [false, false],
+                repairing: None,
                 terminal: None,
             })
         );
@@ -5326,13 +5451,311 @@ mod tests {
             completed_rounds: 2,
             max_rounds: 3,
             scheduled: None,
+            candidate: None,
+            agreements: [false, false],
+            repairing: None,
         };
-        let _ = adapter.apply_pump_event(&mut app, PairPumpEvent::Finished(finished));
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Finished {
+                status: finished,
+                result: Box::new(PairResultSnapshot::for_reason(
+                    PairTerminalStatus::Converged,
+                )),
+            },
+        );
         assert_eq!(adapter.terminal, Some(PairTerminalStatus::Converged));
         assert_eq!(
             app.pair_status()
                 .and_then(|status| status.terminal.as_deref()),
             Some("Converged")
+        );
+    }
+
+    #[test]
+    fn every_terminal_reason_maps_to_an_honest_result_tone() {
+        for (reason, tone) in [
+            (PairTerminalStatus::Converged, ResultTone::Success),
+            (PairTerminalStatus::CapReached, ResultTone::Incomplete),
+            (PairTerminalStatus::Aborted, ResultTone::Incomplete),
+            (PairTerminalStatus::ProtocolError, ResultTone::Error),
+            (PairTerminalStatus::TimedOut, ResultTone::Error),
+            (PairTerminalStatus::PeerFailed, ResultTone::Error),
+            (PairTerminalStatus::ProviderError, ResultTone::Error),
+            (PairTerminalStatus::BudgetExceeded, ResultTone::Error),
+            (PairTerminalStatus::NoProgress, ResultTone::Error),
+            (PairTerminalStatus::DriverFailed, ResultTone::Error),
+            (PairTerminalStatus::Unknown, ResultTone::Error),
+        ] {
+            assert_eq!(result_tone(reason), tone, "tone for {reason:?}");
+            // Only a convergence may claim success.
+            if reason != PairTerminalStatus::Converged {
+                assert_ne!(result_tone(reason), ResultTone::Success, "{reason:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_terminal_reason_renders_its_factual_headline() {
+        let cases: [(PairTerminalStatus, Option<&str>, &str); 11] = [
+            (PairTerminalStatus::Converged, None, "Converged."),
+            (
+                PairTerminalStatus::CapReached,
+                None,
+                "Round cap reached after 0 rounds; no convergence.",
+            ),
+            (
+                PairTerminalStatus::Aborted,
+                None,
+                "Aborted before convergence.",
+            ),
+            (
+                PairTerminalStatus::TimedOut,
+                None,
+                "Timed out before convergence.",
+            ),
+            (
+                PairTerminalStatus::BudgetExceeded,
+                None,
+                "Budget exceeded before convergence.",
+            ),
+            (
+                PairTerminalStatus::NoProgress,
+                None,
+                "Stopped with no progress before convergence.",
+            ),
+            (
+                PairTerminalStatus::ProtocolError,
+                Some("bad frame"),
+                "Protocol error before convergence: bad frame",
+            ),
+            (
+                PairTerminalStatus::PeerFailed,
+                Some("peer down"),
+                "A peer failed before convergence: peer down",
+            ),
+            (
+                PairTerminalStatus::ProviderError,
+                Some("429"),
+                "Provider error before convergence: 429",
+            ),
+            (
+                PairTerminalStatus::DriverFailed,
+                Some("panicked"),
+                "The driver failed: panicked",
+            ),
+            (
+                PairTerminalStatus::Unknown,
+                None,
+                "Finished without convergence.",
+            ),
+        ];
+        for (reason, detail, expected) in cases {
+            let snapshot = PairResultSnapshot {
+                reason,
+                detail: detail.map(str::to_string),
+                completed_rounds: 0,
+                candidate: None,
+                raw: [None, None],
+            };
+            let card = render_pair_result(&snapshot, PairPeer::A);
+            assert!(card.contains(expected), "reason {reason:?} card: {card}");
+            assert!(
+                card.contains("Inspect/copy only; no files or version control were changed."),
+                "footer missing for {reason:?}"
+            );
+        }
+        // A convergence with a candidate names its revision.
+        let converged = PairResultSnapshot {
+            reason: PairTerminalStatus::Converged,
+            detail: None,
+            completed_rounds: 4,
+            candidate: Some(PairResultCandidate {
+                revision: 7,
+                digest: "d".to_string(),
+                artifact: "a".to_string(),
+            }),
+            raw: [None, None],
+        };
+        assert!(render_pair_result(&converged, PairPeer::A).contains("Converged at revision 7."));
+
+        // The round-cap count agrees grammatically: exactly one round is singular.
+        let one_round = PairResultSnapshot {
+            completed_rounds: 1,
+            ..PairResultSnapshot::for_reason(PairTerminalStatus::CapReached)
+        };
+        assert!(render_pair_result(&one_round, PairPeer::A)
+            .contains("Round cap reached after 1 round; no convergence."));
+    }
+
+    #[test]
+    fn result_cards_duplicate_the_candidate_but_keep_raw_peer_local() {
+        let result = PairResultSnapshot {
+            reason: PairTerminalStatus::Converged,
+            detail: None,
+            completed_rounds: 3,
+            candidate: Some(PairResultCandidate {
+                revision: 2,
+                digest: "deadbeefcafe".to_string(),
+                artifact: "shared artifact".to_string(),
+            }),
+            raw: [Some("ALPHA-RAW".to_string()), Some("BETA-RAW".to_string())],
+        };
+        let a = render_pair_result(&result, PairPeer::A);
+        let b = render_pair_result(&result, PairPeer::B);
+        assert!(
+            a.contains("ALPHA-RAW") && !a.contains("BETA-RAW"),
+            "A card: {a}"
+        );
+        assert!(
+            b.contains("BETA-RAW") && !b.contains("ALPHA-RAW"),
+            "B card: {b}"
+        );
+        for card in [&a, &b] {
+            assert!(card.contains("Converged at revision 2."));
+            assert!(card.contains("digest deadbeefcafe"));
+            assert!(card.contains("shared artifact"));
+            assert!(
+                card.contains("Inspect/copy only; no files or version control were changed."),
+                "footer missing: {card}"
+            );
+        }
+
+        // Missing candidate and a peer with no response read as explicit unavailables,
+        // and the round-cap headline names how many rounds ran.
+        let cap = PairResultSnapshot {
+            completed_rounds: 5,
+            ..PairResultSnapshot::for_reason(PairTerminalStatus::CapReached)
+        };
+        let card = render_pair_result(&cap, PairPeer::A);
+        assert!(card.contains("Round cap reached after 5 rounds; no convergence."));
+        assert!(card.contains("Candidate: none was applied."));
+        assert!(card.contains("Peer A produced no response"));
+    }
+
+    #[test]
+    fn terminal_leaves_one_toned_result_row_in_each_pane() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        let result = PairResultSnapshot {
+            reason: PairTerminalStatus::CapReached,
+            detail: None,
+            completed_rounds: 1,
+            candidate: Some(PairResultCandidate {
+                revision: 1,
+                digest: "abc123".to_string(),
+                artifact: "draft".to_string(),
+            }),
+            raw: [
+                Some("ALPHA-CARD".to_string()),
+                Some("BETA-CARD".to_string()),
+            ],
+        };
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Finished {
+                status: PairRunStatus {
+                    state: PairRunState::Finished(PairTerminalStatus::CapReached),
+                    completed_rounds: 1,
+                    max_rounds: 1,
+                    scheduled: None,
+                    candidate: None,
+                    agreements: [false, false],
+                    repairing: None,
+                },
+                result: Box::new(result),
+            },
+        );
+        for (pane, mine, theirs) in [
+            (PeerPane::A, "ALPHA-CARD", "BETA-CARD"),
+            (PeerPane::B, "BETA-CARD", "ALPHA-CARD"),
+        ] {
+            let timeline = app.timeline_for(pane).expect("peer timeline");
+            let cards: Vec<_> = timeline
+                .items()
+                .iter()
+                .filter(|item| item.kind == ItemKind::Result)
+                .collect();
+            assert_eq!(cards.len(), 1, "exactly one result card per pane");
+            let card = cards[0];
+            assert_eq!(card.tone, Some(ResultTone::Incomplete));
+            assert!(card.text.contains(mine) && !card.text.contains(theirs));
+            assert!(card
+                .text
+                .contains("Round cap reached after 1 round; no convergence."));
+        }
+    }
+
+    #[test]
+    fn building_the_result_presentation_never_touches_version_control() {
+        // The retained result is inspect/copy-only. Rendering it into both panes of an
+        // app rooted at a freshly initialized, clean git workspace must not create,
+        // stage, or commit anything: the porcelain is empty before and after.
+        let repo = tempfile::tempdir().expect("temporary git workspace");
+        let root = repo.path().display().to_string();
+        // Address the repo with `-C <path>` so the process working directory is never
+        // changed — keeping the proof scoped and parallel-test safe.
+        let git = |args: &[&str]| {
+            let mut full = vec!["-C", root.as_str()];
+            for arg in args {
+                full.push(arg);
+            }
+            std::process::Command::new("git")
+                .args(&full)
+                .output()
+                .expect("run git")
+        };
+        assert!(git(&["init", "--initial-branch=main"]).status.success());
+        let porcelain = || {
+            String::from_utf8(git(&["status", "--porcelain=v1", "--untracked-files=all"]).stdout)
+                .expect("utf8 porcelain")
+        };
+        let before = porcelain();
+        assert!(
+            before.is_empty(),
+            "precondition: the initialized repo starts clean, got {before:?}"
+        );
+
+        let mut app = pair_app_with_workspace(&root);
+        let mut adapter = PairTerminalAdapter::new();
+        let result = PairResultSnapshot {
+            reason: PairTerminalStatus::Converged,
+            detail: None,
+            completed_rounds: 2,
+            candidate: Some(PairResultCandidate {
+                revision: 2,
+                digest: "digest".to_string(),
+                artifact: "artifact".to_string(),
+            }),
+            raw: [Some("A-RAW".to_string()), Some("B-RAW".to_string())],
+        };
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Finished {
+                status: PairRunStatus {
+                    state: PairRunState::Finished(PairTerminalStatus::Converged),
+                    completed_rounds: 2,
+                    max_rounds: 3,
+                    scheduled: None,
+                    candidate: None,
+                    agreements: [true, true],
+                    repairing: None,
+                },
+                result: Box::new(result),
+            },
+        );
+        // The result cards exist in memory, and version control is untouched.
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .expect("A timeline")
+            .items()
+            .iter()
+            .any(|item| item.kind == ItemKind::Result));
+        let after = porcelain();
+        assert_eq!(before, after, "result presentation changed version control");
+        assert!(
+            after.is_empty(),
+            "the workspace remains clean after the result: {after:?}"
         );
     }
 
@@ -5353,12 +5776,20 @@ mod tests {
 
         let _ = adapter.apply_pump_event(
             &mut app,
-            PairPumpEvent::Finished(PairRunStatus {
-                state: PairRunState::Finished(PairTerminalStatus::CapReached),
-                completed_rounds: 1,
-                max_rounds: 1,
-                scheduled: None,
-            }),
+            PairPumpEvent::Finished {
+                status: PairRunStatus {
+                    state: PairRunState::Finished(PairTerminalStatus::CapReached),
+                    completed_rounds: 1,
+                    max_rounds: 1,
+                    scheduled: None,
+                    candidate: None,
+                    agreements: [false, false],
+                    repairing: None,
+                },
+                result: Box::new(PairResultSnapshot::for_reason(
+                    PairTerminalStatus::CapReached,
+                )),
+            },
         );
 
         assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
