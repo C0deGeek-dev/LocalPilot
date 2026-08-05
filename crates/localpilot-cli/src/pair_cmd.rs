@@ -4,13 +4,20 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use clap::Args;
-use localpilot_config::Config;
+use localpilot_config::{CliOverrides, Config, ConfigPaths};
 use localpilot_sandbox::Profile;
 use localpilot_server::swarm::PairBounds;
+use localpilot_store::Store;
+use localpilot_terminal_ui::{Header, SessionHeader};
+use localpilot_tui::Mode;
 
-use crate::interactive_session::PairPeer;
+use crate::interactive_session::{
+    InteractivePairHost, InteractivePeerSelection, InteractiveSessionSetup, PairPeer,
+};
+use crate::pair_run::{PairRunSetupFailure, PreparedPairRun};
 
 pub(crate) const PAIR_ABOUT: &str = "Run an opt-in two-agent collaboration. Both peers use the configured default provider and model unless selected separately.";
+pub(crate) const PAIR_EXIT_HELP: &str = "Exit status 0 means the agents converged. A round cap, timeout, abort, peer or provider failure, protocol error, budget limit, no progress, or driver failure returns a nonzero status.";
 
 const DEFAULT_MAX_ROUNDS: u32 = 3;
 const DEFAULT_SLOT_TIMEOUT_SECS: u64 = 600;
@@ -94,6 +101,89 @@ impl PairArgs {
     }
 }
 
+pub(crate) async fn run(args: PairArgs) -> Result<crate::repl::ChatOutcome> {
+    let cwd = std::env::current_dir()?;
+    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
+    let resolved = args.resolve(&config)?;
+
+    if config.storage.auto_prune {
+        let policy = crate::session_cmd::retention_policy(&config.storage, None, None);
+        if !policy.is_unbounded() {
+            let _ = Store::open(&cwd).prune(policy, crate::session_cmd::now_unix(), false);
+        }
+    }
+
+    let setup = InteractiveSessionSetup::resolve(cwd.clone(), config, resolved.profile).await?;
+    let host = InteractivePairHost::prepare(
+        &setup,
+        &resolved.task,
+        InteractivePeerSelection {
+            provider_id: &resolved.a.provider_id,
+            model: &resolved.a.model,
+        },
+        InteractivePeerSelection {
+            provider_id: &resolved.b.provider_id,
+            model: &resolved.b.model,
+        },
+    )
+    .await?;
+    let sessions = host.sessions();
+    let prepared = match PreparedPairRun::new(host, resolved.bounds) {
+        Ok(prepared) => prepared,
+        Err(failure) => return close_setup_failure(failure).await,
+    };
+
+    let git = crate::repl::workspace_git_status(&cwd);
+    let profile = crate::repl::ui_profile(resolved.profile)
+        .label()
+        .to_string();
+    let primary = Header {
+        version: env!("LOCALPILOT_VERSION").to_string(),
+        provider: resolved.a.provider_id,
+        model: resolved.a.model,
+        workspace: cwd.display().to_string(),
+        branch: git.as_ref().map(|status| status.branch.clone()),
+        workspace_dirty: git.as_ref().and_then(|status| status.dirty),
+        mode: Mode::Agent.label().to_string(),
+        profile,
+        session_id: sessions[0].to_string(),
+        session_name: None,
+    };
+    let secondary = SessionHeader {
+        provider: resolved.b.provider_id,
+        model: resolved.b.model,
+        session_id: sessions[1].to_string(),
+        session_name: None,
+    };
+    let history =
+        localpilot_store::PromptHistory::new(setup.config().history.persistence.is_enabled());
+    let trust_required = !matches!(resolved.profile, Profile::Bypass | Profile::Unrestricted)
+        && !crate::trust::is_trusted(&cwd);
+    let exit = crate::fullscreen::run_pair(
+        primary,
+        secondary,
+        prepared,
+        crate::fullscreen::PairHostContext {
+            cwd: &cwd,
+            history: &history,
+            ingest: &setup.config().ingest,
+            config: setup.config(),
+            trust_required,
+        },
+    )
+    .await?;
+    Ok(crate::repl::ChatOutcome {
+        succeeded: exit.converged && !exit.trust_denied,
+        presentation: None,
+    })
+}
+
+async fn close_setup_failure(failure: PairRunSetupFailure) -> Result<crate::repl::ChatOutcome> {
+    let (issue, host) = failure.into_parts();
+    host.close().await;
+    Err(issue.into())
+}
+
 fn resolve_peer(
     config: &Config,
     peer: PairPeer,
@@ -149,7 +239,7 @@ mod tests {
     use localpilot_config::ProviderConfig;
 
     #[derive(Debug, Parser)]
-    #[command(name = "pair", about = PAIR_ABOUT)]
+    #[command(name = "pair", about = PAIR_ABOUT, after_long_help = PAIR_EXIT_HELP)]
     struct PairParser {
         #[command(flatten)]
         args: PairArgs,
@@ -333,6 +423,7 @@ mod tests {
         let help = PairParser::command().render_long_help().to_string();
 
         assert!(help.contains(PAIR_ABOUT));
+        assert!(help.contains(PAIR_EXIT_HELP));
         for expected in [
             "--provider-a <PROVIDER>",
             "--model-a <MODEL>",

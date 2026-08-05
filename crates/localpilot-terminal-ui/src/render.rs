@@ -2195,7 +2195,29 @@ fn status_left(app: &AppModel) -> String {
 
 fn status_right(app: &AppModel) -> String {
     let usage = app.active_usage().unwrap_or_default();
-    let mut parts = vec![format!("{} tokens", usage.total())];
+    let mut parts = Vec::new();
+    if let Some(status) = app.pair_status() {
+        if let Some(terminal) = &status.terminal {
+            parts.push(format!(
+                "{terminal} · {}/{} rounds",
+                status.completed_rounds, status.max_rounds
+            ));
+        } else {
+            parts.push(format!(
+                "{}/{} rounds{}",
+                status.completed_rounds,
+                status.max_rounds,
+                status.scheduled.map_or_else(String::new, |peer| format!(
+                    " · Peer {}",
+                    match peer {
+                        crate::PeerPane::A => "A",
+                        crate::PeerPane::B => "B",
+                    }
+                ))
+            ));
+        }
+    }
+    parts.push(format!("{} tokens", usage.total()));
     if usage.cached_input_tokens > 0 {
         parts.push(format!("{} cached", usage.cached_input_tokens));
     }
@@ -4975,6 +4997,38 @@ mod tests {
                 assert!(status_left.contains("experience*]"));
             }
         }
+    }
+
+    #[test]
+    fn collaboration_status_is_additive_and_single_status_stays_exact() {
+        let single = model();
+        assert_eq!(status_right(&single), "0 tokens");
+
+        let mut pair = AppModel::new_pair(
+            snapshot_header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        );
+        assert!(pair.set_pair_status(crate::PairStatus {
+            completed_rounds: 1,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::B),
+            terminal: None,
+        }));
+        assert_eq!(status_right(&pair), "1/3 rounds · Peer B · 0 tokens");
+
+        assert!(pair.set_pair_status(crate::PairStatus {
+            completed_rounds: 2,
+            max_rounds: 3,
+            scheduled: None,
+            terminal: Some("Converged".to_string()),
+        }));
+        assert_eq!(status_right(&pair), "Converged · 2/3 rounds · 0 tokens");
     }
 
     #[test]

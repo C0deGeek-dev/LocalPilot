@@ -2819,7 +2819,7 @@ fn render_session_tree(events: &[localpilot_store::SessionEvent]) -> Vec<String>
     lines
 }
 
-fn ui_profile(profile: Profile) -> UiProfile {
+pub(crate) fn ui_profile(profile: Profile) -> UiProfile {
     match profile {
         Profile::Default => UiProfile::Default,
         Profile::Relaxed => UiProfile::Relaxed,

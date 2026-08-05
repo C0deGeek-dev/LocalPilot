@@ -31,11 +31,11 @@ use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
     DiffFile, DiffLine, DiffLineKind, Header, HitMap, InputAction, ItemId, ItemKind,
-    KeyboardSupport, PeerPane, PlanEntry, QuestionOption as UiQuestionOption, QuestionResponse,
-    RecoveryState, RuntimeUpdate, SessionEntry, SessionSelection, SettingEdit, SettingEntry,
-    StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities, Theme, Timeline,
-    TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput,
-    VisualRowPart,
+    KeyboardSupport, PairStatus, PeerPane, PlanEntry, QuestionOption as UiQuestionOption,
+    QuestionResponse, RecoveryState, RuntimeUpdate, SessionEntry, SessionHeader, SessionSelection,
+    SettingEdit, SettingEntry, StopState, SubmittedInput, TakeoverNavigation, TerminalCapabilities,
+    Theme, Timeline, TimelineNavigation, TimelinePaneHits, UsageTotals, UserShellCommand,
+    UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
@@ -45,10 +45,15 @@ use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::interactive_session::{resolved_image_support, ApprovalCall, QuestionCall};
+use crate::interactive_session::{resolved_image_support, ApprovalCall, PairPeer, QuestionCall};
 use crate::key_input::{
     is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
     may_be_unbracketed_paste_key, PasteAction, PasteBurst,
+};
+use crate::pair_run::{
+    InteractivePairRun, PairAsk, PairAskAnswer, PairAskAnswerError, PairAskId, PairAskKind,
+    PairAskRequest, PairPumpEvent, PairRunState, PairRunStatus, PairTerminalStatus,
+    PreparedPairRun,
 };
 use crate::repl::{switch_model_target, ClipboardImageRead};
 
@@ -81,6 +86,19 @@ pub(crate) struct HostContext<'a> {
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
     pub(crate) config: &'a localpilot_config::Config,
     pub(crate) trust_required: bool,
+}
+
+pub(crate) struct PairHostContext<'a> {
+    pub(crate) cwd: &'a Path,
+    pub(crate) history: &'a localpilot_store::PromptHistory,
+    pub(crate) ingest: &'a localpilot_config::IngestConfig,
+    pub(crate) config: &'a localpilot_config::Config,
+    pub(crate) trust_required: bool,
+}
+
+pub(crate) struct PairRestoredExit {
+    pub(crate) converged: bool,
+    pub(crate) trust_denied: bool,
 }
 
 /// A model `ask_user` call being answered one question at a time.
@@ -123,6 +141,255 @@ impl PendingQuestions {
             self.answers.push(UserAnswer::Dismissed);
         }
         let _ = self.reply.send(self.answers);
+    }
+}
+
+/// One peer question call being presented one question at a time.
+struct PendingPairQuestions {
+    id: PairAskId,
+    peer: PairPeer,
+    questions: Vec<UserQuestion>,
+    index: usize,
+    answers: Vec<UserAnswer>,
+}
+
+enum PairQuestionAdvance {
+    Pending,
+    Complete,
+    Failed,
+}
+
+impl PendingPairQuestions {
+    fn show_current(&self, app: &mut AppModel) -> bool {
+        let question = &self.questions[self.index];
+        app.request_question_for(
+            pair_pane(self.peer),
+            question.header.clone(),
+            question.question.clone(),
+            question.options.iter().map(|option| UiQuestionOption {
+                label: option.label.clone(),
+                description: option.description.clone(),
+            }),
+            question.multi_select,
+            self.index + 1,
+            self.questions.len(),
+        )
+    }
+
+    fn advance(&mut self, app: &mut AppModel, answer: UserAnswer) -> PairQuestionAdvance {
+        self.answers.push(answer);
+        self.index += 1;
+        app.clear_dialog();
+        if self.index >= self.questions.len() {
+            PairQuestionAdvance::Complete
+        } else if self.show_current(app) {
+            PairQuestionAdvance::Pending
+        } else {
+            PairQuestionAdvance::Failed
+        }
+    }
+
+    fn finish(mut self) -> (PairAskId, Vec<UserAnswer>) {
+        while self.answers.len() < self.questions.len() {
+            self.answers.push(UserAnswer::Dismissed);
+        }
+        (self.id, self.answers)
+    }
+}
+
+enum PairDialog {
+    Approval { id: PairAskId },
+    Questions(PendingPairQuestions),
+}
+
+enum PairHostAction {
+    None,
+    Answer {
+        id: PairAskId,
+        answer: PairAskAnswer,
+        abort: bool,
+        exit: bool,
+    },
+    Abort {
+        exit: bool,
+    },
+    Exit,
+}
+
+/// Pure translation between the terminal model and the typed collaboration
+/// pump. Runtime ownership and terminal I/O remain in the outer loop.
+struct PairTerminalAdapter {
+    dialog: Option<PairDialog>,
+    pump_open: bool,
+    terminal: Option<PairTerminalStatus>,
+}
+
+impl PairTerminalAdapter {
+    fn new() -> Self {
+        Self {
+            dialog: None,
+            pump_open: true,
+            terminal: None,
+        }
+    }
+
+    fn clear_dialog(&mut self, app: &mut AppModel) {
+        self.dialog = None;
+        app.clear_dialog();
+    }
+
+    fn mark_pump_closed(&mut self) {
+        self.pump_open = false;
+    }
+
+    fn apply_pump_event(&mut self, app: &mut AppModel, event: PairPumpEvent) -> PairHostAction {
+        match event {
+            PairPumpEvent::Runtime { peer, event } => {
+                let _ = app.apply_runtime_for(pair_pane(peer), map_runtime_event(event));
+            }
+            PairPumpEvent::Ask(ask) => return self.install_ask(app, ask),
+            PairPumpEvent::Progress(status) => apply_pair_status(app, status),
+            PairPumpEvent::RuntimeLagged { peer, skipped } => {
+                apply_pair_warning(
+                    app,
+                    peer,
+                    format!("runtime updates lagged; {skipped} update(s) were skipped"),
+                );
+            }
+            PairPumpEvent::RuntimeClosed { peer } => {
+                self.clear_dialog(app);
+                apply_pair_warning(app, peer, "runtime event stream closed unexpectedly");
+            }
+            PairPumpEvent::AskChannelClosed { peer, kind } => {
+                self.clear_dialog(app);
+                apply_pair_warning(
+                    app,
+                    peer,
+                    format!(
+                        "{} request channel closed unexpectedly",
+                        pair_ask_kind(kind)
+                    ),
+                );
+            }
+            PairPumpEvent::InvariantViolation { detail } => {
+                self.clear_dialog(app);
+                apply_pair_warning(app, PairPeer::A, format!("collaboration stopped: {detail}"));
+                apply_pair_warning(app, PairPeer::B, format!("collaboration stopped: {detail}"));
+            }
+            PairPumpEvent::Finished(status) => {
+                self.clear_dialog(app);
+                self.record_terminal(app, status);
+            }
+            PairPumpEvent::DriverFailed { detail, status } => {
+                self.clear_dialog(app);
+                self.record_terminal(app, status);
+                apply_pair_warning(
+                    app,
+                    PairPeer::A,
+                    format!("collaboration driver failed: {detail}"),
+                );
+                apply_pair_warning(
+                    app,
+                    PairPeer::B,
+                    format!("collaboration driver failed: {detail}"),
+                );
+            }
+        }
+        PairHostAction::None
+    }
+
+    fn install_ask(&mut self, app: &mut AppModel, ask: PairAsk) -> PairHostAction {
+        let PairAsk { id, peer, request } = ask;
+        if self.dialog.is_some() {
+            self.clear_dialog(app);
+            apply_pair_warning(
+                app,
+                peer,
+                "a second user request arrived while one was visible",
+            );
+            return rejected_pair_ask(id, request);
+        }
+        match request {
+            PairAskRequest::Approval(request) => {
+                if app.request_approval_for(
+                    pair_pane(peer),
+                    request.tool,
+                    request.target,
+                    request.risk_class,
+                ) {
+                    self.dialog = Some(PairDialog::Approval { id });
+                    PairHostAction::None
+                } else {
+                    apply_pair_warning(app, peer, "the approval dialog could not be displayed");
+                    PairHostAction::Answer {
+                        id,
+                        answer: PairAskAnswer::Approval(false),
+                        abort: true,
+                        exit: false,
+                    }
+                }
+            }
+            PairAskRequest::Questions(questions) => {
+                if questions.is_empty() {
+                    return PairHostAction::Answer {
+                        id,
+                        answer: PairAskAnswer::Questions(Vec::new()),
+                        abort: false,
+                        exit: false,
+                    };
+                }
+                let pending = PendingPairQuestions {
+                    id,
+                    peer,
+                    questions,
+                    index: 0,
+                    answers: Vec::new(),
+                };
+                if pending.show_current(app) {
+                    self.dialog = Some(PairDialog::Questions(pending));
+                    PairHostAction::None
+                } else {
+                    apply_pair_warning(app, peer, "the question dialog could not be displayed");
+                    let (id, answers) = pending.finish();
+                    PairHostAction::Answer {
+                        id,
+                        answer: PairAskAnswer::Questions(answers),
+                        abort: true,
+                        exit: false,
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_terminal(&mut self, app: &mut AppModel, status: PairRunStatus) {
+        if let PairRunState::Finished(terminal) = status.state {
+            self.terminal = Some(terminal);
+            let _ = app.apply_runtime_for(
+                PeerPane::A,
+                RuntimeUpdate::Stopped(pair_terminal_stop_state(terminal)),
+            );
+            let _ = app.apply_runtime_for(
+                PeerPane::B,
+                RuntimeUpdate::Stopped(pair_terminal_stop_state(terminal)),
+            );
+        }
+        apply_pair_status(app, status);
+    }
+}
+
+fn rejected_pair_ask(id: PairAskId, request: PairAskRequest) -> PairHostAction {
+    let answer = match request {
+        PairAskRequest::Approval(_) => PairAskAnswer::Approval(false),
+        PairAskRequest::Questions(questions) => {
+            PairAskAnswer::Questions(vec![UserAnswer::Dismissed; questions.len()])
+        }
+    };
+    PairHostAction::Answer {
+        id,
+        answer,
+        abort: true,
+        exit: false,
     }
 }
 
@@ -447,6 +714,188 @@ pub(crate) async fn run(
     Ok(restore_exit_with(exit_draft, || modes.restore()))
 }
 
+/// Own the full-screen lifetime for an exact-two collaboration. Every async
+/// host close happens only after the terminal has been restored.
+pub(crate) async fn run_pair(
+    primary: Header,
+    secondary: SessionHeader,
+    prepared: PreparedPairRun,
+    context: PairHostContext<'_>,
+) -> Result<PairRestoredExit> {
+    install_panic_restore_hook();
+    let mouse_capture = std::env::var(CHAT_MOUSE_ENV)
+        .ok()
+        .as_deref()
+        .and_then(parse_bool_setting)
+        .unwrap_or(true);
+    let (mut modes, capabilities) = match TerminalModes::enter(mouse_capture) {
+        Ok(entered) => entered,
+        Err(error) => {
+            prepared.into_host().close().await;
+            return Err(error);
+        }
+    };
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = match Terminal::new(backend).context("initialize collaboration terminal") {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            modes.restore();
+            prepared.into_host().close().await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = terminal.clear().context("clear collaboration terminal") {
+        restore_pair_terminal(terminal, &mut modes);
+        prepared.into_host().close().await;
+        return Err(error);
+    }
+
+    let mut app = AppModel::new_pair(primary, secondary, capabilities);
+    app.set_command_catalog(pair_command_catalog());
+    apply_host_preferences(&mut app);
+    apply_pair_status(&mut app, prepared.status());
+    if context.trust_required {
+        app.require_workspace_trust(context.cwd.display().to_string());
+    }
+    if let Err(error) = draw_synchronized(&mut terminal, &app) {
+        restore_pair_terminal(terminal, &mut modes);
+        prepared.into_host().close().await;
+        return Err(error);
+    }
+
+    let mut workspace_index = WorkspaceFileIndex::start(context.cwd.to_path_buf());
+    let history_entries = context.history.load();
+    app.seed_history(
+        localpilot_store::project_entries(&history_entries, context.cwd)
+            .iter()
+            .map(expand_history_entry)
+            .collect(),
+    );
+    if context.trust_required {
+        let trust = run_pair_trust_loop(
+            &mut terminal,
+            &mut app,
+            context.cwd,
+            context.ingest,
+            &mut workspace_index,
+        );
+        match trust {
+            Ok(PairTrustOutcome::Accepted) => {}
+            Ok(PairTrustOutcome::Exit) => {
+                restore_pair_terminal(terminal, &mut modes);
+                prepared.into_host().close().await;
+                return Ok(PairRestoredExit {
+                    converged: false,
+                    trust_denied: false,
+                });
+            }
+            Ok(PairTrustOutcome::Denied) => {
+                restore_pair_terminal(terminal, &mut modes);
+                prepared.into_host().close().await;
+                return Ok(PairRestoredExit {
+                    converged: false,
+                    trust_denied: true,
+                });
+            }
+            Err(error) => {
+                restore_pair_terminal(terminal, &mut modes);
+                prepared.into_host().close().await;
+                return Err(error);
+            }
+        }
+    } else {
+        crate::repl::start_session_knowledge_index(context.cwd, context.ingest);
+    }
+
+    let _ = app.begin_work_for(PeerPane::A);
+    let _ = app.begin_work_for(PeerPane::B);
+    let mut run = prepared.spawn();
+    let mut adapter = PairTerminalAdapter::new();
+    let loop_result = run_pair_event_loop(
+        &mut terminal,
+        &mut app,
+        &mut run,
+        &mut adapter,
+        context,
+        &mut workspace_index,
+    )
+    .await;
+    adapter.clear_dialog(&mut app);
+    if loop_result.is_err() || run.is_driver_live() {
+        run.abort_and_cancel();
+    }
+    restore_pair_terminal(terminal, &mut modes);
+    let completion = run.shutdown().await;
+    match loop_result {
+        Ok(()) => Ok(PairRestoredExit {
+            converged: completion.terminal_status() == PairTerminalStatus::Converged,
+            trust_denied: false,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+fn restore_pair_terminal(
+    mut terminal: Terminal<CrosstermBackend<Stdout>>,
+    modes: &mut TerminalModes,
+) {
+    let _ = terminal.show_cursor();
+    drop(terminal);
+    modes.restore();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairTrustOutcome {
+    Accepted,
+    Exit,
+    Denied,
+}
+
+fn run_pair_trust_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    cwd: &Path,
+    ingest: &localpilot_config::IngestConfig,
+    workspace_index: &mut WorkspaceFileIndex,
+) -> Result<PairTrustOutcome> {
+    let mut mouse_state = MouseState::default();
+    let mut paste_burst = PasteBurst::default();
+    while app.workspace_trust_pending() {
+        workspace_index.refresh(app);
+        let hit_map = draw_synchronized(terminal, app)?;
+        if !event::poll(EVENT_POLL_INTERVAL).context("poll collaboration trust input")? {
+            advance_mouse_selection(app, &hit_map, &mouse_state);
+            continue;
+        }
+        let next = event::read().context("read collaboration trust input")?;
+        mouse_state.reset_gesture();
+        if let Event::Key(key) = &next {
+            if is_key_action(*key) {
+                let buffered_after = buffered_after_fullscreen_key(*key)
+                    .context("poll after collaboration trust paste key")?;
+                if handle_dialog_paste_burst(app, &mut paste_burst, *key, buffered_after, false) {
+                    continue;
+                }
+            }
+        }
+        match handle_trust_event(app, next, &hit_map) {
+            TrustEventOutcome::Pending => {}
+            TrustEventOutcome::Copy(text) => copy_to_clipboard(app, text),
+            TrustEventOutcome::ContinueSession => {
+                accept_workspace_trust(app, cwd, false, crate::trust::remember);
+                crate::repl::start_session_knowledge_index(cwd, ingest);
+            }
+            TrustEventOutcome::Remember => {
+                accept_workspace_trust(app, cwd, true, crate::trust::remember);
+                crate::repl::start_session_knowledge_index(cwd, ingest);
+            }
+            TrustEventOutcome::Exit => return Ok(PairTrustOutcome::Exit),
+            TrustEventOutcome::Deny => return Ok(PairTrustOutcome::Denied),
+        }
+    }
+    Ok(PairTrustOutcome::Accepted)
+}
+
 fn apply_startup_item(app: &mut AppModel, item: StartupItem) {
     match item {
         StartupItem::User(text) => {
@@ -600,6 +1049,110 @@ fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
         description: "Review tracked workspace changes".to_string(),
     });
     command_catalog
+}
+
+fn pair_command_catalog() -> Vec<CompletionCommand> {
+    const SUPPORTED: &[&str] = &["exit", "quit"];
+    let mut command_catalog = localpilot_tui::AppState::slash_commands()
+        .iter()
+        .filter(|(name, _)| SUPPORTED.contains(name))
+        .map(|(name, description)| CompletionCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+        })
+        .collect::<Vec<_>>();
+    command_catalog.extend([
+        CompletionCommand {
+            name: "search".to_string(),
+            description: "Search messages for the selected peer".to_string(),
+        },
+        CompletionCommand {
+            name: "help".to_string(),
+            description: "Open keyboard and command help".to_string(),
+        },
+        CompletionCommand {
+            name: "theme".to_string(),
+            description: "Preview terminal color modes".to_string(),
+        },
+        CompletionCommand {
+            name: "settings".to_string(),
+            description: "Inspect terminal settings".to_string(),
+        },
+        CompletionCommand {
+            name: "diff".to_string(),
+            description: "Review tracked workspace changes".to_string(),
+        },
+    ]);
+    command_catalog
+}
+
+const fn pair_pane(peer: PairPeer) -> PeerPane {
+    match peer {
+        PairPeer::A => PeerPane::A,
+        PairPeer::B => PeerPane::B,
+    }
+}
+
+const fn pair_ask_kind(kind: PairAskKind) -> &'static str {
+    match kind {
+        PairAskKind::Approval => "approval",
+        PairAskKind::Questions => "question",
+    }
+}
+
+fn pair_terminal_label(status: PairTerminalStatus) -> &'static str {
+    match status {
+        PairTerminalStatus::Converged => "Converged",
+        PairTerminalStatus::CapReached => "Round cap reached",
+        PairTerminalStatus::ProtocolError => "Protocol error",
+        PairTerminalStatus::Aborted => "Aborted",
+        PairTerminalStatus::TimedOut => "Timed out",
+        PairTerminalStatus::PeerFailed => "Peer failed",
+        PairTerminalStatus::ProviderError => "Provider error",
+        PairTerminalStatus::BudgetExceeded => "Budget exceeded",
+        PairTerminalStatus::NoProgress => "No progress",
+        PairTerminalStatus::DriverFailed => "Driver failed",
+        PairTerminalStatus::Unknown => "Finished",
+    }
+}
+
+const fn pair_terminal_stop_state(status: PairTerminalStatus) -> StopState {
+    match status {
+        PairTerminalStatus::Converged | PairTerminalStatus::CapReached => StopState::Done,
+        PairTerminalStatus::Aborted => StopState::Cancelled,
+        PairTerminalStatus::TimedOut => StopState::TimedOut,
+        PairTerminalStatus::ProviderError => StopState::ProviderError,
+        PairTerminalStatus::BudgetExceeded => StopState::BudgetExceeded,
+        PairTerminalStatus::NoProgress => StopState::NoProgress,
+        PairTerminalStatus::ProtocolError
+        | PairTerminalStatus::PeerFailed
+        | PairTerminalStatus::DriverFailed
+        | PairTerminalStatus::Unknown => StopState::Degraded,
+    }
+}
+
+fn apply_pair_status(app: &mut AppModel, status: PairRunStatus) {
+    let terminal = match status.state {
+        PairRunState::Running => None,
+        PairRunState::Finished(terminal) => Some(pair_terminal_label(terminal).to_string()),
+    };
+    let _ = app.set_pair_status(PairStatus {
+        completed_rounds: status.completed_rounds,
+        max_rounds: status.max_rounds,
+        scheduled: status.scheduled.map(pair_pane),
+        terminal,
+    });
+}
+
+fn apply_pair_warning(app: &mut AppModel, peer: PairPeer, warning: impl Into<String>) {
+    let _ = app.apply_runtime_for(pair_pane(peer), RuntimeUpdate::Warning(warning.into()));
+}
+
+fn apply_pair_notice(app: &mut AppModel, notice: impl Into<String>) {
+    let Some(peer) = app.active_pair_pane() else {
+        return;
+    };
+    let _ = app.apply_runtime_for(peer, RuntimeUpdate::Notice(notice.into()));
 }
 
 fn sorted_session_entries(mut sessions: Vec<SessionIndexEntry>) -> Vec<SessionIndexEntry> {
@@ -1801,6 +2354,517 @@ async fn execute_fullscreen_slash(
         }
     }
     false
+}
+
+enum PairLoopReady {
+    Pump(Option<PairPumpEvent>),
+    Tick,
+}
+
+async fn run_pair_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    run: &mut InteractivePairRun,
+    adapter: &mut PairTerminalAdapter,
+    context: PairHostContext<'_>,
+    workspace_index: &mut WorkspaceFileIndex,
+) -> Result<()> {
+    let mut mouse_state = MouseState::default();
+    let mut paste_burst = PasteBurst::default();
+    let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let ready = tokio::select! {
+            event = run.next(), if adapter.pump_open => PairLoopReady::Pump(event),
+            _ = tick.tick() => PairLoopReady::Tick,
+        };
+        match ready {
+            PairLoopReady::Pump(Some(event)) => {
+                let action = adapter.apply_pump_event(app, event);
+                if execute_pair_host_action(run, adapter, app, action) {
+                    return Ok(());
+                }
+            }
+            PairLoopReady::Pump(None) => adapter.mark_pump_closed(),
+            PairLoopReady::Tick => {
+                workspace_index.refresh(app);
+                let mut hit_map = draw_synchronized(terminal, app)?;
+                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                    let action = if matches!(&adapter.dialog, Some(PairDialog::Questions(_))) {
+                        let resolution = app.handle_question_input(InputAction::Paste(text));
+                        resolve_pair_question_action(app, resolution, adapter)
+                    } else if adapter.dialog.is_none() {
+                        let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                        PairHostAction::None
+                    } else {
+                        PairHostAction::None
+                    };
+                    if execute_pair_host_action(run, adapter, app, action) {
+                        return Ok(());
+                    }
+                }
+                for _ in 0..64 {
+                    if !event::poll(Duration::ZERO).context("poll collaboration input")? {
+                        break;
+                    }
+                    let next = event::read().context("read collaboration input")?;
+                    if let Event::Key(key) = &next {
+                        if is_key_action(*key) {
+                            let buffered_after = buffered_after_fullscreen_key(*key)
+                                .context("poll after collaboration paste key")?;
+                            let consumed = if adapter.dialog.is_some() {
+                                handle_dialog_paste_burst(
+                                    app,
+                                    &mut paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    matches!(&adapter.dialog, Some(PairDialog::Questions(_))),
+                                )
+                            } else {
+                                handle_fullscreen_paste_burst(
+                                    app,
+                                    &mut paste_burst,
+                                    *key,
+                                    buffered_after,
+                                    hit_map.editor_width,
+                                )
+                            };
+                            if consumed {
+                                continue;
+                            }
+                        }
+                    }
+                    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
+                    let action = handle_pair_terminal_event(
+                        app,
+                        next,
+                        adapter,
+                        &hit_map,
+                        &mut mouse_state,
+                        context.config,
+                        context.cwd,
+                    );
+                    if execute_pair_host_action(run, adapter, app, action) {
+                        return Ok(());
+                    }
+                    if geometry_event {
+                        hit_map = draw_synchronized(terminal, app)?;
+                    }
+                }
+                advance_mouse_selection(app, &hit_map, &mouse_state);
+                let _ = draw_synchronized(terminal, app)?;
+            }
+        }
+    }
+}
+
+fn execute_pair_host_action(
+    run: &mut InteractivePairRun,
+    adapter: &mut PairTerminalAdapter,
+    app: &mut AppModel,
+    action: PairHostAction,
+) -> bool {
+    match action {
+        PairHostAction::None => false,
+        PairHostAction::Answer {
+            id,
+            answer,
+            abort,
+            exit,
+        } => {
+            if let Err(error) = run.answer_ask(id, answer) {
+                match error {
+                    PairAskAnswerError::RequesterGone { .. } => {
+                        apply_pair_notice(app, error.to_string());
+                    }
+                    PairAskAnswerError::NoActive { .. }
+                    | PairAskAnswerError::Stale { .. }
+                    | PairAskAnswerError::WrongKind { .. }
+                    | PairAskAnswerError::WrongQuestionCount { .. } => {
+                        apply_pair_warning(app, PairPeer::A, error.to_string());
+                        apply_pair_warning(app, PairPeer::B, error.to_string());
+                        adapter.clear_dialog(app);
+                        run.abort_and_cancel();
+                    }
+                }
+            }
+            if abort {
+                adapter.clear_dialog(app);
+                run.abort_and_cancel();
+            }
+            exit
+        }
+        PairHostAction::Abort { exit } => {
+            adapter.clear_dialog(app);
+            run.abort_and_cancel();
+            exit
+        }
+        PairHostAction::Exit => {
+            adapter.clear_dialog(app);
+            if run.is_driver_live() {
+                run.abort_and_cancel();
+            }
+            true
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_pair_terminal_event(
+    app: &mut AppModel,
+    event: Event,
+    adapter: &mut PairTerminalAdapter,
+    hit_map: &HitMap,
+    mouse_state: &mut MouseState,
+    config: &localpilot_config::Config,
+    cwd: &Path,
+) -> PairHostAction {
+    match &adapter.dialog {
+        Some(PairDialog::Approval { .. }) => {
+            return handle_pair_approval_event(app, event, adapter)
+        }
+        Some(PairDialog::Questions(_)) => {
+            return handle_pair_question_event(app, event, adapter, hit_map)
+        }
+        None => {}
+    }
+
+    match route_pointer_or_navigation(app, &event, hit_map, mouse_state) {
+        RoutedEvent::Handled => return PairHostAction::None,
+        RoutedEvent::Copy(text) => {
+            copy_to_clipboard(app, text);
+            return PairHostAction::None;
+        }
+        RoutedEvent::PasteClipboard => {
+            paste_text_from_clipboard(app, hit_map.editor_width);
+            return PairHostAction::None;
+        }
+        RoutedEvent::Unhandled => {}
+    }
+    match event {
+        Event::Key(key) if is_key_action(key) => {
+            if is_clipboard_image_key(key) {
+                apply_pair_notice(
+                    app,
+                    "Clipboard images are not available in this collaboration yet.",
+                );
+                return PairHostAction::None;
+            }
+            let Some(action) = map_key(key) else {
+                return PairHostAction::None;
+            };
+            match app.handle_input(action, hit_map.editor_width) {
+                AppCommand::Exit => PairHostAction::Exit,
+                AppCommand::CancelWork => PairHostAction::Abort { exit: false },
+                AppCommand::Copy(text) => {
+                    copy_to_clipboard(app, text);
+                    PairHostAction::None
+                }
+                AppCommand::OpenExternalEditor => {
+                    apply_pair_notice(
+                        app,
+                        "The external editor is not available during a collaboration.",
+                    );
+                    PairHostAction::None
+                }
+                AppCommand::RunSlash(submitted) => execute_pair_slash(app, config, cwd, submitted),
+                AppCommand::Submit(_) => {
+                    if adapter.terminal.is_some() {
+                        apply_pair_notice(
+                            app,
+                            "This collaboration has finished; start a new run to send another prompt.",
+                        );
+                    } else {
+                        apply_pair_notice(
+                            app,
+                            "Peer steering is not available in this collaboration yet.",
+                        );
+                    }
+                    PairHostAction::None
+                }
+                AppCommand::RunShell(_) => {
+                    apply_pair_notice(
+                        app,
+                        "Shell commands are not available during a collaboration.",
+                    );
+                    PairHostAction::None
+                }
+                AppCommand::NavigateTakeover(navigation) => {
+                    apply_takeover_navigation(app, navigation, hit_map);
+                    PairHostAction::None
+                }
+                AppCommand::NavigateTimeline(navigation) => {
+                    apply_timeline_navigation(app, navigation, hit_map);
+                    PairHostAction::None
+                }
+                AppCommand::ActivateSession(_) => {
+                    apply_pair_notice(app, "Sessions cannot be changed during a collaboration.");
+                    PairHostAction::None
+                }
+                AppCommand::None => PairHostAction::None,
+            }
+        }
+        Event::Paste(text) => {
+            if text.trim().is_empty() {
+                apply_pair_notice(
+                    app,
+                    "Clipboard images are not available in this collaboration yet.",
+                );
+            } else {
+                let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+            }
+            PairHostAction::None
+        }
+        Event::FocusGained
+        | Event::FocusLost
+        | Event::Resize(_, _)
+        | Event::Mouse(_)
+        | Event::Key(_) => PairHostAction::None,
+    }
+}
+
+fn handle_pair_approval_event(
+    app: &mut AppModel,
+    event: Event,
+    adapter: &mut PairTerminalAdapter,
+) -> PairHostAction {
+    let Event::Key(key) = event else {
+        return PairHostAction::None;
+    };
+    if !is_key_action(key) {
+        return PairHostAction::None;
+    }
+    let (answer, abort, exit) = if is_cancel(key) {
+        match app.handle_input(InputAction::CancelOrExit, 1) {
+            AppCommand::Copy(text) => {
+                copy_to_clipboard(app, text);
+                return PairHostAction::None;
+            }
+            AppCommand::Exit => (false, true, true),
+            AppCommand::CancelWork => (false, true, false),
+            _ => return PairHostAction::None,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => (true, false, false),
+            KeyCode::Enter if !app.capabilities.screen_reader => (true, false, false),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => (false, false, false),
+            _ => return PairHostAction::None,
+        }
+    };
+    let Some(PairDialog::Approval { id }) = adapter.dialog.take() else {
+        return PairHostAction::Abort { exit: false };
+    };
+    app.clear_dialog();
+    PairHostAction::Answer {
+        id,
+        answer: PairAskAnswer::Approval(answer),
+        abort,
+        exit,
+    }
+}
+
+fn handle_pair_question_event(
+    app: &mut AppModel,
+    event: Event,
+    adapter: &mut PairTerminalAdapter,
+    hit_map: &HitMap,
+) -> PairHostAction {
+    match event {
+        Event::Mouse(mouse) => {
+            app.disarm_exit();
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                        app.active_timeline_mut().scroll_by(
+                            -WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(timeline) = active_timeline_hits(app, hit_map) {
+                        app.active_timeline_mut().scroll_by(
+                            WHEEL_SCROLL_ROWS,
+                            timeline.wrap_width,
+                            timeline.timeline.height,
+                        );
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(hit) = hit_map
+                        .question_rows
+                        .iter()
+                        .find(|hit| rect_contains(hit.area, mouse.column, mouse.row))
+                    {
+                        app.select_question_option(hit.index);
+                    }
+                }
+                _ => {}
+            }
+            PairHostAction::None
+        }
+        Event::Paste(text) => {
+            let resolution = app.handle_question_input(InputAction::Paste(text));
+            resolve_pair_question_action(app, resolution, adapter)
+        }
+        Event::Key(key) if is_key_action(key) => {
+            if is_cancel(key) {
+                let command = app.handle_input(InputAction::CancelOrExit, hit_map.editor_width);
+                return match command {
+                    AppCommand::Copy(text) => {
+                        copy_to_clipboard(app, text);
+                        PairHostAction::None
+                    }
+                    AppCommand::Exit => dismiss_pair_questions(app, adapter, true, true),
+                    AppCommand::CancelWork => dismiss_pair_questions(app, adapter, true, false),
+                    _ => PairHostAction::None,
+                };
+            }
+            app.disarm_exit();
+            let Some(action) = map_key(key) else {
+                return PairHostAction::None;
+            };
+            if let InputAction::NavigateTimeline(navigation) = action {
+                apply_timeline_navigation(app, navigation, hit_map);
+                return PairHostAction::None;
+            }
+            let resolution = app.handle_question_input(action);
+            resolve_pair_question_action(app, resolution, adapter)
+        }
+        Event::FocusGained | Event::FocusLost | Event::Resize(_, _) | Event::Key(_) => {
+            PairHostAction::None
+        }
+    }
+}
+
+fn resolve_pair_question_action(
+    app: &mut AppModel,
+    action: QuestionAction,
+    adapter: &mut PairTerminalAdapter,
+) -> PairHostAction {
+    match action {
+        QuestionAction::None => PairHostAction::None,
+        QuestionAction::Cancel => dismiss_pair_questions(app, adapter, false, false),
+        QuestionAction::Submit(response) => {
+            let answer = match response {
+                QuestionResponse::Selected(labels) => UserAnswer::Selected(labels),
+                QuestionResponse::Other(text) => UserAnswer::Other(text),
+            };
+            let advance = match adapter.dialog.as_mut() {
+                Some(PairDialog::Questions(pending)) => pending.advance(app, answer),
+                _ => return PairHostAction::Abort { exit: false },
+            };
+            match advance {
+                PairQuestionAdvance::Pending => PairHostAction::None,
+                PairQuestionAdvance::Complete => {
+                    let Some(PairDialog::Questions(pending)) = adapter.dialog.take() else {
+                        return PairHostAction::Abort { exit: false };
+                    };
+                    let (id, answers) = pending.finish();
+                    PairHostAction::Answer {
+                        id,
+                        answer: PairAskAnswer::Questions(answers),
+                        abort: false,
+                        exit: false,
+                    }
+                }
+                PairQuestionAdvance::Failed => {
+                    apply_pair_notice(app, "The next question could not be displayed.");
+                    dismiss_pair_questions(app, adapter, true, false)
+                }
+            }
+        }
+    }
+}
+
+fn dismiss_pair_questions(
+    app: &mut AppModel,
+    adapter: &mut PairTerminalAdapter,
+    abort: bool,
+    exit: bool,
+) -> PairHostAction {
+    let Some(PairDialog::Questions(pending)) = adapter.dialog.take() else {
+        return PairHostAction::Abort { exit };
+    };
+    app.clear_dialog();
+    let (id, answers) = pending.finish();
+    PairHostAction::Answer {
+        id,
+        answer: PairAskAnswer::Questions(answers),
+        abort,
+        exit,
+    }
+}
+
+fn execute_pair_slash(
+    app: &mut AppModel,
+    config: &localpilot_config::Config,
+    cwd: &Path,
+    submitted: SubmittedInput,
+) -> PairHostAction {
+    if !submitted.images.is_empty() {
+        apply_pair_notice(app, "Image attachments were ignored for the slash command.");
+    }
+    if submitted.prompt.trim() == "/settings" {
+        app.open_settings(fullscreen_settings(app, config));
+        return PairHostAction::None;
+    }
+    if submitted.prompt.trim() == "/diff" {
+        match load_workspace_diff(cwd) {
+            Ok(files) => app.open_diff(files),
+            Err(error) => app.open_diff([DiffFile {
+                status: "!".to_string(),
+                path: "Diff unavailable".to_string(),
+                additions: 0,
+                deletions: 0,
+                lines: vec![DiffLine {
+                    old_line: None,
+                    new_line: None,
+                    kind: DiffLineKind::Metadata,
+                    text: error.to_string(),
+                }],
+            }]),
+        }
+        return PairHostAction::None;
+    }
+    match parse_slash(&submitted.prompt) {
+        Some(SlashAction::Exit { print_transcript }) => {
+            app.request_exit(print_transcript);
+            PairHostAction::Exit
+        }
+        Some(SlashAction::Invalid { command, reason }) => {
+            apply_pair_warning(app, PairPeer::A, format!("invalid /{command}: {reason}"));
+            PairHostAction::None
+        }
+        Some(SlashAction::Unknown(command)) => {
+            apply_pair_warning(
+                app,
+                PairPeer::A,
+                format!("unknown slash command: /{command}"),
+            );
+            PairHostAction::None
+        }
+        Some(_) => {
+            let command = submitted
+                .prompt
+                .trim()
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("command");
+            apply_pair_notice(
+                app,
+                format!("/{command} is not available during a collaboration."),
+            );
+            PairHostAction::None
+        }
+        None => {
+            apply_pair_warning(app, PairPeer::A, "invalid slash command input");
+            PairHostAction::None
+        }
+    }
 }
 
 async fn run_event_loop(
@@ -3869,12 +4933,22 @@ fn install_panic_restore_hook() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, MouseEvent};
+    use localpilot_config::ProviderConfig;
     use localpilot_core::TokenUsage;
+    use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
+    use localpilot_sandbox::Profile;
+    use localpilot_server::swarm::PairBounds;
     use localpilot_terminal_ui::{ItemKind, ViewportAnchor, WorkState};
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::interactive_session::{
+        InteractivePairHost, InteractivePeerSelection, InteractiveSessionSetup,
+    };
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -3956,6 +5030,317 @@ mod tests {
             },
             TerminalCapabilities::default(),
         )
+    }
+
+    fn pair_question(label: &str) -> UserQuestion {
+        UserQuestion {
+            header: Some(label.to_string()),
+            question: format!("Choose {label}"),
+            options: vec![localpilot_tools::QuestionOption {
+                label: label.to_string(),
+                description: None,
+            }],
+            multi_select: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn real_host_pump_drives_the_production_adapter_and_test_backend() {
+        const A_PROPOSAL: &str = r#"{"v":1,"action":"propose","artifact":"alpha"}"#;
+        const B_PROPOSAL: &str = r#"{"v":1,"action":"propose","artifact":"beta"}"#;
+        let provider = |id: &str, response: &str| {
+            let seed = FakeProvider::new();
+            let mut declaration = seed.declaration().clone();
+            declaration.id = id.to_string();
+            declaration.display_name = id.to_string();
+            Arc::new(
+                FakeProvider::new()
+                    .with_declaration(declaration)
+                    .text(response),
+            )
+        };
+        let first = provider("first", A_PROPOSAL);
+        let second = provider("second", B_PROPOSAL);
+        let providers = HashMap::from([
+            ("first".to_string(), first.clone() as Arc<dyn ModelProvider>),
+            (
+                "second".to_string(),
+                second.clone() as Arc<dyn ModelProvider>,
+            ),
+        ]);
+        let models = HashMap::from([
+            ("first".to_string(), "model-a".to_string()),
+            ("second".to_string(), "model-b".to_string()),
+        ]);
+        let mut config = localpilot_config::Config::default();
+        config.provider.default = "first".to_string();
+        config
+            .providers
+            .insert("first".to_string(), ProviderConfig::default());
+        config
+            .providers
+            .insert("second".to_string(), ProviderConfig::default());
+        let directory = tempfile::tempdir().unwrap();
+        let setup = InteractiveSessionSetup::for_test(
+            directory.path().to_path_buf(),
+            config,
+            Profile::Default,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        let host = InteractivePairHost::prepare(
+            &setup,
+            "compare both proposals",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .unwrap();
+        let mut run = PreparedPairRun::new(
+            host,
+            PairBounds {
+                max_rounds: 1,
+                slot_timeout: Duration::from_secs(5),
+                slot_token_budget: 0,
+            },
+        )
+        .unwrap()
+        .spawn();
+        let mut app = pair_app();
+        let _ = app.begin_work_for(PeerPane::A);
+        let _ = app.begin_work_for(PeerPane::B);
+        let mut adapter = PairTerminalAdapter::new();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while adapter.terminal.is_none() {
+                let event = run.next().await.expect("event before terminal status");
+                let action = adapter.apply_pump_event(&mut app, event);
+                assert!(matches!(action, PairHostAction::None));
+                let hits = draw_hit_map(&app, 120, 30);
+                assert!(hits.timelines.is_some());
+            }
+        })
+        .await
+        .expect("real pair host completed");
+
+        let completion = run.shutdown().await;
+        assert!(matches!(
+            completion.terminal_status(),
+            PairTerminalStatus::CapReached | PairTerminalStatus::Converged
+        ));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("alpha")));
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("beta")));
+        assert!(!first.requests().is_empty());
+        assert!(!second.requests().is_empty());
+    }
+
+    #[test]
+    fn pair_terminal_adapter_routes_peer_updates_status_and_retained_completion() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+
+        assert!(matches!(
+            adapter.apply_pump_event(
+                &mut app,
+                PairPumpEvent::Runtime {
+                    peer: PairPeer::B,
+                    event: RuntimeEvent::Text("beta stream".to_string()),
+                },
+            ),
+            PairHostAction::None
+        ));
+        assert!(matches!(
+            adapter.apply_pump_event(
+                &mut app,
+                PairPumpEvent::Runtime {
+                    peer: PairPeer::A,
+                    event: RuntimeEvent::Text("alpha stream".to_string()),
+                },
+            ),
+            PairHostAction::None
+        ));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("alpha stream")));
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("beta stream")));
+
+        let running = PairRunStatus {
+            state: PairRunState::Running,
+            completed_rounds: 1,
+            max_rounds: 3,
+            scheduled: Some(PairPeer::B),
+        };
+        let _ = adapter.apply_pump_event(&mut app, PairPumpEvent::Progress(running));
+        assert_eq!(
+            app.pair_status(),
+            Some(&PairStatus {
+                completed_rounds: 1,
+                max_rounds: 3,
+                scheduled: Some(PeerPane::B),
+                terminal: None,
+            })
+        );
+        let hits = draw_hit_map(&app, 120, 30);
+        assert!(
+            hits.timelines.is_some(),
+            "pair status must remain renderable"
+        );
+
+        let finished = PairRunStatus {
+            state: PairRunState::Finished(PairTerminalStatus::Converged),
+            completed_rounds: 2,
+            max_rounds: 3,
+            scheduled: None,
+        };
+        let _ = adapter.apply_pump_event(&mut app, PairPumpEvent::Finished(finished));
+        assert_eq!(adapter.terminal, Some(PairTerminalStatus::Converged));
+        assert_eq!(
+            app.pair_status()
+                .and_then(|status| status.terminal.as_deref()),
+            Some("Converged")
+        );
+    }
+
+    #[test]
+    fn pair_terminal_adapter_attributes_and_steps_one_exact_question_vector() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        let id = PairAskId::fixture(7);
+        let install = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Ask(PairAsk {
+                id,
+                peer: PairPeer::B,
+                request: PairAskRequest::Questions(vec![
+                    pair_question("first"),
+                    pair_question("second"),
+                ]),
+            }),
+        );
+        assert!(matches!(install, PairHostAction::None));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+
+        let first = resolve_pair_question_action(
+            &mut app,
+            QuestionAction::Submit(QuestionResponse::Selected(vec!["first".to_string()])),
+            &mut adapter,
+        );
+        assert!(matches!(first, PairHostAction::None));
+        let second = resolve_pair_question_action(
+            &mut app,
+            QuestionAction::Submit(QuestionResponse::Other("custom".to_string())),
+            &mut adapter,
+        );
+        match second {
+            PairHostAction::Answer {
+                id: answer_id,
+                answer: PairAskAnswer::Questions(answers),
+                abort,
+                exit,
+            } => {
+                assert_eq!(answer_id, id);
+                assert_eq!(
+                    answers,
+                    vec![
+                        UserAnswer::Selected(vec!["first".to_string()]),
+                        UserAnswer::Other("custom".to_string()),
+                    ]
+                );
+                assert!(!abort);
+                assert!(!exit);
+            }
+            _ => panic!("expected one complete question answer"),
+        }
+        assert!(adapter.dialog.is_none());
+    }
+
+    #[test]
+    fn pair_focus_changes_but_submission_and_images_do_not_drive_a_peer() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        let hit_map = draw_hit_map(&app, 100, 28);
+        let mut mouse_state = MouseState::default();
+        let config = localpilot_config::Config::default();
+        let cwd = Path::new(".");
+
+        let action = handle_pair_terminal_event(
+            &mut app,
+            Event::Key(press(KeyCode::F(6), KeyModifiers::NONE)),
+            &mut adapter,
+            &hit_map,
+            &mut mouse_state,
+            &config,
+            cwd,
+        );
+        assert!(matches!(action, PairHostAction::None));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::B));
+
+        let _ = app.handle_input(InputAction::Insert("follow up".to_string()), 80);
+        let action = handle_pair_terminal_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut adapter,
+            &hit_map,
+            &mut mouse_state,
+            &config,
+            cwd,
+        );
+        assert!(matches!(action, PairHostAction::None));
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("Peer steering is not available")));
+        assert!(!app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.kind == ItemKind::User));
+
+        let action = handle_pair_terminal_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            &mut adapter,
+            &hit_map,
+            &mut mouse_state,
+            &config,
+            cwd,
+        );
+        assert!(matches!(action, PairHostAction::None));
+        assert!(app
+            .timeline_for(PeerPane::B)
+            .unwrap()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("Clipboard images are not available")));
     }
 
     fn fill_pair_timelines(app: &mut AppModel, rows: usize) {

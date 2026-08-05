@@ -57,6 +57,13 @@ pub(crate) struct PairRunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PairAskId(u64);
 
+#[cfg(test)]
+impl PairAskId {
+    pub(crate) const fn fixture(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 /// The channel family that produced a user decision request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PairAskKind {
@@ -158,6 +165,7 @@ pub(crate) enum PairRunCompletion {
 }
 
 impl PairRunCompletion {
+    #[cfg(test)]
     pub(crate) fn report(&self) -> Option<&PairReport> {
         match self {
             Self::Report(report) => Some(report),
@@ -165,6 +173,7 @@ impl PairRunCompletion {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn driver_failure(&self) -> Option<&str> {
         match self {
             Self::Report(_) => None,
@@ -205,6 +214,7 @@ impl std::fmt::Debug for PairRunSetupFailure {
 }
 
 impl PairRunSetupFailure {
+    #[cfg(test)]
     pub(crate) fn issue(&self) -> &PairRunSetupIssue {
         &self.issue
     }
@@ -397,6 +407,10 @@ impl PreparedPairRun {
         self.host
     }
 
+    pub(crate) fn status(&self) -> PairRunStatus {
+        self.status
+    }
+
     /// Start the sole task allowed to drive either peer.
     pub(crate) fn spawn(self) -> InteractivePairRun {
         let Self {
@@ -459,10 +473,12 @@ enum PumpReady {
 }
 
 impl InteractivePairRun {
+    #[cfg(test)]
     pub(crate) fn status(&self) -> PairRunStatus {
         self.status
     }
 
+    #[cfg(test)]
     pub(crate) fn completion(&self) -> Option<&PairRunCompletion> {
         self.completion.as_ref()
     }

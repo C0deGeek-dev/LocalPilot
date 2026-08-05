@@ -718,6 +718,15 @@ impl UsageTotals {
     }
 }
 
+/// Minimal live/terminal status for an exact-two collaboration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairStatus {
+    pub completed_rounds: u32,
+    pub max_rounds: u32,
+    pub scheduled: Option<PeerPane>,
+    pub terminal: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanEntry {
     pub title: String,
@@ -973,6 +982,7 @@ pub enum RuntimeUpdate {
 pub struct AppModel {
     header: SharedHeader,
     projections: ProjectionSet,
+    pair_status: Option<PairStatus>,
     pub capabilities: TerminalCapabilities,
     pub theme: Theme,
     pub tabs: Vec<TabId>,
@@ -1080,6 +1090,7 @@ impl AppModel {
         Self {
             header,
             projections,
+            pair_status: None,
             capabilities,
             theme: Theme::Default,
             tabs: vec![TabId::Session],
@@ -1116,6 +1127,26 @@ impl AppModel {
     #[must_use]
     pub const fn active_pair_pane(&self) -> Option<PeerPane> {
         self.projections.active_pair_pane()
+    }
+
+    #[must_use]
+    pub const fn pair_status(&self) -> Option<&PairStatus> {
+        self.pair_status.as_ref()
+    }
+
+    /// Updates collaboration chrome without changing either session projection.
+    /// Returns `false` for the ordinary single-session model.
+    #[must_use]
+    pub fn set_pair_status(&mut self, mut status: PairStatus) -> bool {
+        if !self.is_pair() {
+            return false;
+        }
+        status.terminal = status
+            .terminal
+            .map(|terminal| sanitize_inline(&terminal))
+            .filter(|terminal| !terminal.is_empty());
+        self.pair_status = Some(status);
+        true
     }
 
     /// Selects one peer as the target of keyboard input and the shared composer.
@@ -1796,14 +1827,32 @@ impl AppModel {
     }
 
     pub fn begin_work(&mut self) {
-        self.projections.active_mut().work = WorkState::Busy {
+        Self::begin_projection_work(self.projections.active_mut());
+    }
+
+    /// Marks one collaboration peer busy without changing the selected pane.
+    /// Returns `false` for the ordinary single-session model.
+    #[must_use]
+    pub fn begin_work_for(&mut self, peer: PeerPane) -> bool {
+        if !self.is_pair() {
+            return false;
+        }
+        let Some(projection) = self.projections.projection_mut(peer) else {
+            return false;
+        };
+        Self::begin_projection_work(projection);
+        true
+    }
+
+    fn begin_projection_work(projection: &mut SessionProjection) {
+        projection.work = WorkState::Busy {
             cancellation_requested: false,
         };
-        self.projections.active_mut().active_assistant = None;
-        self.projections.active_mut().active_reasoning = None;
-        self.projections.active_mut().active_tools.clear();
-        self.projections.active_mut().stream_bytes = 0;
-        self.projections.active_mut().active_insert_before = None;
+        projection.active_assistant = None;
+        projection.active_reasoning = None;
+        projection.active_tools.clear();
+        projection.stream_bytes = 0;
+        projection.active_insert_before = None;
     }
 
     pub fn begin_work_before(&mut self, item: Option<ItemId>) {
@@ -4086,6 +4135,13 @@ mod tests {
     #[test]
     fn explicit_accessors_project_the_existing_single_state_without_transformation() {
         let mut app = model();
+        assert!(app.pair_status().is_none());
+        assert!(!app.set_pair_status(PairStatus {
+            completed_rounds: 0,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::A),
+            terminal: None,
+        }));
         assert_eq!(app.shared_version(), "0");
         assert_eq!(app.shared_workspace(), "workspace");
         assert_eq!(app.shared_branch(), Some("main"));
@@ -4128,6 +4184,37 @@ mod tests {
         assert_eq!(app.active_context_usage(), Some((5, 8)));
         app.apply_runtime(RuntimeUpdate::Text("bytes".to_string()));
         assert_eq!(app.active_stream_bytes(), 5);
+    }
+
+    #[test]
+    fn pair_status_is_sanitized_and_never_changes_the_active_projection() {
+        let mut app = pair_model();
+        assert!(app.begin_work_for(PeerPane::B));
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
+        assert_eq!(
+            app.projection(PeerPane::B)
+                .map(|projection| projection.work),
+            Some(WorkState::Busy {
+                cancellation_requested: false,
+            })
+        );
+        assert!(app.set_pair_status(PairStatus {
+            completed_rounds: 2,
+            max_rounds: 3,
+            scheduled: Some(PeerPane::B),
+            terminal: Some("converged\nraw".to_string()),
+        }));
+
+        assert_eq!(
+            app.pair_status(),
+            Some(&PairStatus {
+                completed_rounds: 2,
+                max_rounds: 3,
+                scheduled: Some(PeerPane::B),
+                terminal: Some("converged raw".to_string()),
+            })
+        );
+        assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
     }
 
     #[test]

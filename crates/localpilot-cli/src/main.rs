@@ -35,10 +35,8 @@ mod models_cmd;
 mod output;
 mod outward_cmd;
 #[cfg(feature = "tui")]
-#[allow(dead_code)] // Staged parser/preflight; the terminal runner will consume this module.
 mod pair_cmd;
 #[cfg(feature = "tui")]
-#[allow(dead_code)] // Staged driver/pump; terminal dispatch will consume this module.
 mod pair_run;
 mod propose_patch;
 #[cfg(feature = "tui")]
@@ -417,6 +415,14 @@ enum Command {
         #[arg(long)]
         resume: Option<String>,
     },
+    /// Run an opt-in two-agent collaboration in the full-screen terminal.
+    #[cfg(feature = "tui")]
+    #[command(
+        name = "pair",
+        about = pair_cmd::PAIR_ABOUT,
+        after_long_help = pair_cmd::PAIR_EXIT_HELP
+    )]
+    Pair(pair_cmd::PairArgs),
     /// Run the agent loop once non-interactively and print the answer (pipelines).
     ///
     /// This one-shot path *reads* accepted project memory (it injects relevant
@@ -1467,7 +1473,7 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
     // default terminal log subscriber must not write into it mid-session.
     // File logging via LOCALPILOT_LOG is unaffected.
     #[cfg(feature = "tui")]
-    let terminal_owned = matches!(cli.command, Some(Command::Chat { .. }) | None);
+    let terminal_owned = command_owns_terminal(cli.command.as_ref());
     #[cfg(not(feature = "tui"))]
     let terminal_owned = false;
     if let Some(log_path) = logging::init(&cwd, terminal_owned) {
@@ -2120,6 +2126,10 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
                 repl::run_chat(model.as_deref(), provider.as_deref(), profile, resume).await?;
             exit_code = finish_chat(outcome)?;
         }
+        #[cfg(feature = "tui")]
+        Command::Pair(args) => {
+            exit_code = finish_chat(pair_cmd::run(args).await?)?;
+        }
         Command::Print {
             prompt,
             model,
@@ -2345,6 +2355,14 @@ async fn run() -> anyhow::Result<std::process::ExitCode> {
     Ok(exit_code)
 }
 
+#[cfg(feature = "tui")]
+fn command_owns_terminal(command: Option<&Command>) -> bool {
+    matches!(
+        command,
+        Some(Command::Chat { .. } | Command::Pair(_)) | None
+    )
+}
+
 /// Bare `localpilot` with no subcommand. On a `tui`-enabled build it launches the
 /// interactive REPL when a provider and model are resolvable; otherwise (and on
 /// the default build) it prints the doctor report so a misconfigured or headless
@@ -2441,6 +2459,22 @@ async fn ask(prompt: &str, model: &str, provider_id: Option<&str>) -> anyhow::Re
 mod tests {
     use super::*;
     use localpilot_localmind::StoreRoot;
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn collaboration_command_is_reachable_and_owns_the_terminal() {
+        let pair = Cli::try_parse_from(["localpilot", "pair", "review this change"])
+            .expect("parse collaboration command");
+        assert!(matches!(pair.command.as_ref(), Some(Command::Pair(_))));
+        assert!(command_owns_terminal(pair.command.as_ref()));
+
+        let chat = Cli::try_parse_from(["localpilot", "chat"]).expect("parse chat command");
+        assert!(command_owns_terminal(chat.command.as_ref()));
+        assert!(command_owns_terminal(None));
+
+        let doctor = Cli::try_parse_from(["localpilot", "doctor"]).expect("parse doctor command");
+        assert!(!command_owns_terminal(doctor.command.as_ref()));
+    }
 
     #[cfg(feature = "tui")]
     #[test]
