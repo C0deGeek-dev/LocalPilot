@@ -2518,7 +2518,14 @@ fn render_dialog(
                 theme.ui(UiRole::Foreground),
             ),
             Line::styled(target.clone(), theme.ui(UiRole::Muted)),
-            Line::styled("Y allow once · N deny", theme.ui(UiRole::Muted)),
+            Line::styled(
+                if app.dialog_peer().is_some() {
+                    "Ctrl+C abort · Y allow once · N or Esc deny"
+                } else {
+                    "Y allow once · N deny"
+                },
+                theme.ui(UiRole::Muted),
+            ),
         ],
         DialogState::Question(_) => Vec::new(),
     };
@@ -2539,7 +2546,18 @@ fn dialog_heading(app: &AppModel, heading: &str) -> String {
                 PeerPane::A => "A",
                 PeerPane::B => "B",
             };
-            format!("Peer {peer} · {heading}")
+            // Read the origin peer's model from its named projection and sanitize it
+            // here; a malformed or empty label never drops the promised model text.
+            let model = app
+                .dialog_peer_model()
+                .map(sanitize_inline)
+                .unwrap_or_default();
+            let model = if model.trim().is_empty() {
+                "unknown model"
+            } else {
+                model.as_str()
+            };
+            format!("Peer {peer} · {model} · {heading}")
         },
     )
 }
@@ -2784,7 +2802,14 @@ fn render_screen_reader_dialog(
             ),
             Line::styled(truncate_end(target, area.width), theme.ui(UiRole::Muted)),
             Line::styled("Y allow once", theme.ui(UiRole::Foreground)),
-            Line::styled("N or Esc deny", theme.ui(UiRole::Muted)),
+            Line::styled(
+                if app.dialog_peer().is_some() {
+                    "N or Esc deny · Ctrl+C abort"
+                } else {
+                    "N or Esc deny"
+                },
+                theme.ui(UiRole::Muted),
+            ),
         ],
         DialogState::Question(_) => Vec::new(),
     };
@@ -2811,19 +2836,31 @@ fn render_question_dialog(
         .min(if screen_reader { 72 } else { 44 });
     let horizontal_chrome = if screen_reader { 0 } else { 4 };
     let projected_content_width = width.saturating_sub(horizontal_chrome);
-    let footer = if question.editing_other {
-        "enter to confirm · esc to return to choices"
-    } else if question.multi_select {
-        "↑/↓ to select · space to toggle · enter to confirm · esc to cancel"
-    } else {
-        "↑/↓ to select · enter to confirm · esc to cancel"
-    };
-    let footer_rows =
-        if screen_reader && UnicodeWidthStr::width(footer) > usize::from(projected_content_width) {
-            2
+    // A collaboration question can be aborted (Ctrl+C) as well as dismissed (Esc),
+    // including while editing the Other field. Lead with BOTH controls so each survives
+    // width truncation. Single chat keeps its copy byte-identical.
+    let footer = if app.dialog_peer().is_some() {
+        if question.editing_other {
+            "Ctrl+C abort · Esc choices · enter to confirm".to_string()
+        } else if question.multi_select {
+            "Ctrl+C abort · Esc dismiss · ↑/↓ select · space toggle · enter confirm".to_string()
         } else {
-            1
-        };
+            "Ctrl+C abort · Esc dismiss · ↑/↓ select · enter confirm".to_string()
+        }
+    } else if question.editing_other {
+        "enter to confirm · esc to return to choices".to_string()
+    } else if question.multi_select {
+        "↑/↓ to select · space to toggle · enter to confirm · esc to cancel".to_string()
+    } else {
+        "↑/↓ to select · enter to confirm · esc to cancel".to_string()
+    };
+    let footer_rows = if screen_reader
+        && UnicodeWidthStr::width(footer.as_str()) > usize::from(projected_content_width)
+    {
+        2
+    } else {
+        1
+    };
     let fixed_rows = if screen_reader { 3 } else { 6 };
     let requested_height = u16::try_from(question.options.len())
         .unwrap_or(u16::MAX)
@@ -2958,9 +2995,9 @@ fn render_question_dialog(
         }
     }
     let footer = if screen_reader {
-        footer.to_string()
+        footer.clone()
     } else {
-        truncate_end(footer, content_width)
+        truncate_end(&footer, content_width)
     };
     frame.render_widget(
         Paragraph::new(footer)
@@ -3163,6 +3200,10 @@ fn footer_state(app: &AppModel) -> String {
 }
 
 fn working_input_actions(app: &AppModel) -> &'static str {
+    if app.is_pair() {
+        // A collaboration has no single-turn interrupt; the control is a full abort.
+        return "/abort stops both peers";
+    }
     if app.editor.text().is_empty() {
         "Esc interrupt"
     } else {
@@ -3767,7 +3808,7 @@ mod tests {
         assert!(terminal
             .backend()
             .to_string()
-            .contains("Peer B · Permission required"));
+            .contains("Peer B · model-b · Permission required"));
 
         let mut screen_reader = AppModel::new_pair(
             header(),
@@ -3801,7 +3842,174 @@ mod tests {
             })
             .expect("draw screen-reader question");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("Peer B · Question"), "{rendered}");
+        assert!(
+            rendered.contains("Peer B · model-b · Question"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn pair_dialog_footers_keep_both_safety_controls_visible_after_width_handling() {
+        let secondary = || crate::SessionHeader {
+            provider: "provider-b".to_string(),
+            model: "model-b".to_string(),
+            session_id: "session-b".to_string(),
+            session_name: None,
+        };
+        let options = || {
+            [
+                crate::QuestionOption {
+                    label: "Yes".to_string(),
+                    description: None,
+                },
+                crate::QuestionOption {
+                    label: "No".to_string(),
+                    description: None,
+                },
+            ]
+        };
+        let rendered = |app: &AppModel, width: u16, height: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, app);
+                })
+                .expect("draw dialog");
+            terminal.backend().to_string()
+        };
+        let has_both = |text: &str, abort: bool, esc: &str| {
+            assert_eq!(text.contains("Ctrl+C abort"), abort, "abort in: {text}");
+            if abort {
+                assert!(text.contains(esc), "`{esc}` missing in: {text}");
+            }
+        };
+
+        // Normal approval keeps both the abort and the Esc-deny controls.
+        let mut approval =
+            AppModel::new_pair(header(), secondary(), TerminalCapabilities::default());
+        assert!(approval.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        has_both(&rendered(&approval, 60, 24), true, "Esc deny");
+
+        // Screen-reader approval keeps both.
+        let mut sr_approval = AppModel::new_pair(
+            header(),
+            secondary(),
+            TerminalCapabilities {
+                screen_reader: true,
+                ..TerminalCapabilities::default()
+            },
+        );
+        assert!(sr_approval.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        has_both(&rendered(&sr_approval, 60, 24), true, "Esc deny");
+
+        // A narrow normal question truncates its footer, but both controls lead and
+        // survive width handling.
+        let mut question =
+            AppModel::new_pair(header(), secondary(), TerminalCapabilities::default());
+        assert!(question.request_question_for(
+            PeerPane::B,
+            None,
+            "Continue with the shared plan right now?",
+            options(),
+            false,
+            1,
+            1,
+        ));
+        has_both(&rendered(&question, 48, 20), true, "Esc dismiss");
+
+        // Screen-reader question keeps both.
+        let mut sr_question = AppModel::new_pair(
+            header(),
+            secondary(),
+            TerminalCapabilities {
+                screen_reader: true,
+                ..TerminalCapabilities::default()
+            },
+        );
+        assert!(sr_question.request_question_for(
+            PeerPane::B,
+            None,
+            "Continue?",
+            options(),
+            false,
+            1,
+            1,
+        ));
+        has_both(&rendered(&sr_question, 60, 24), true, "Esc dismiss");
+
+        // Editing the Other field still shows both the abort and the Esc-choices
+        // controls. Navigate onto the implicit Other option and submit to enter it.
+        let mut other = AppModel::new_pair(header(), secondary(), TerminalCapabilities::default());
+        assert!(other.request_question_for(PeerPane::B, None, "Pick one", options(), false, 1, 1));
+        let _ = other.handle_question_input(crate::InputAction::MoveDown);
+        let _ = other.handle_question_input(crate::InputAction::MoveDown);
+        assert!(matches!(
+            other.handle_question_input(crate::InputAction::Submit),
+            crate::QuestionAction::None
+        ));
+        has_both(&rendered(&other, 60, 20), true, "Esc choices");
+
+        // Single chat keeps its plain footer with no pair abort control.
+        let mut single = model();
+        single.request_approval("write", "target", "ask");
+        has_both(&rendered(&single, 60, 24), false, "");
+    }
+
+    #[test]
+    fn a_pair_dialog_heading_sanitizes_the_model_and_falls_back_when_empty() {
+        // A malicious/control-laden model label is sanitized into the heading.
+        let noisy = crate::SessionHeader {
+            provider: "provider-b".to_string(),
+            model: "evil\nmodel\u{7}x".to_string(),
+            session_id: "session-b".to_string(),
+            session_name: None,
+        };
+        let mut app = AppModel::new_pair(header(), noisy, TerminalCapabilities::default());
+        assert!(app.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        let heading = dialog_heading(&app, "Permission required");
+        assert!(heading.starts_with("Peer B · "));
+        assert!(heading.ends_with(" · Permission required"));
+        assert!(!heading.contains('\n') && !heading.contains('\u{7}'));
+
+        // An empty model label falls back to an explicit placeholder, never a blank.
+        let blank = crate::SessionHeader {
+            provider: "provider-b".to_string(),
+            model: String::new(),
+            session_id: "session-b".to_string(),
+            session_name: None,
+        };
+        let mut app = AppModel::new_pair(header(), blank, TerminalCapabilities::default());
+        assert!(app.request_approval_for(PeerPane::B, "write", "target", "ask"));
+        assert_eq!(
+            dialog_heading(&app, "Permission required"),
+            "Peer B · unknown model · Permission required"
+        );
+
+        // Single chat keeps a plain heading with no peer or model.
+        let mut single = model();
+        single.request_approval("write", "target", "ask");
+        assert_eq!(
+            dialog_heading(&single, "Permission required"),
+            "Permission required"
+        );
+    }
+
+    #[test]
+    fn a_running_collaboration_footer_uses_abort_language_not_interrupt() {
+        let pair = AppModel::new_pair(
+            snapshot_header(),
+            crate::SessionHeader {
+                provider: "provider-b".to_string(),
+                model: "model-b".to_string(),
+                session_id: "session-b".to_string(),
+                session_name: None,
+            },
+            TerminalCapabilities::default(),
+        );
+        assert_eq!(working_input_actions(&pair), "/abort stops both peers");
+        // Single chat keeps its exact single-turn interrupt copy.
+        let single = model();
+        assert_eq!(working_input_actions(&single), "Esc interrupt");
     }
 
     #[test]

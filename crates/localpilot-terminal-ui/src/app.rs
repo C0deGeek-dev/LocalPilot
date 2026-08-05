@@ -1883,6 +1883,31 @@ impl AppModel {
         }
     }
 
+    /// Mark every busy collaboration peer as having its cancellation requested,
+    /// without changing focus and without faking terminal completion. Idle or already
+    /// terminal projections are left unchanged; the real terminal state still arrives
+    /// later from the driver. Returns `false` and mutates nothing for the ordinary
+    /// single-session model.
+    #[must_use]
+    pub fn request_pair_cancellation(&mut self) -> bool {
+        if !self.is_pair() {
+            return false;
+        }
+        for peer in [PeerPane::A, PeerPane::B] {
+            if let Some(projection) = self.projections.projection_mut(peer) {
+                if let WorkState::Busy {
+                    cancellation_requested: false,
+                } = projection.work
+                {
+                    projection.work = WorkState::Busy {
+                        cancellation_requested: true,
+                    };
+                }
+            }
+        }
+        true
+    }
+
     #[must_use]
     pub(crate) fn reverse_search(&self) -> Option<ReverseSearchView<'_>> {
         let Some(InputOverlay::ReverseHistory(state)) = &self.input_overlay else {
@@ -3025,6 +3050,17 @@ impl AppModel {
     #[must_use]
     pub const fn dialog_peer(&self) -> Option<PeerPane> {
         self.dialog_peer
+    }
+
+    /// The model label of the current dialog's origin peer, borrowed from that peer's
+    /// named projection. `None` when no dialog peer is attributed (ordinary single
+    /// chat). The renderer sanitizes it; the ask channel never carries this string.
+    #[must_use]
+    pub(crate) fn dialog_peer_model(&self) -> Option<&str> {
+        let peer = self.dialog_peer()?;
+        self.projections
+            .projection(peer)
+            .map(|projection| projection.header.model.as_str())
     }
 
     fn claim_dialog_focus(&mut self) {
@@ -4357,6 +4393,54 @@ mod tests {
             timeline.selected_text().as_deref(),
             Some(sanitized.as_str())
         );
+    }
+
+    #[test]
+    fn request_pair_cancellation_marks_busy_panes_and_leaves_others_and_single_chat() {
+        // Single chat mutates nothing and reports false.
+        let mut single = model();
+        assert!(!single.request_pair_cancellation());
+
+        // A busy, B idle. Requesting cancellation flips only A, and never faces focus.
+        let mut pair = pair_model();
+        assert!(pair.begin_work_for(PeerPane::A));
+        let focus = pair.active_pair_pane();
+        assert!(pair.request_pair_cancellation());
+        assert_eq!(pair.active_pair_pane(), focus, "focus is unchanged");
+        assert_eq!(
+            pair.projections.projection(PeerPane::A).expect("A").work,
+            WorkState::Busy {
+                cancellation_requested: true
+            }
+        );
+        assert_eq!(
+            pair.projections.projection(PeerPane::B).expect("B").work,
+            WorkState::Idle
+        );
+
+        // Idempotent: a second request leaves the flagged pane exactly as it was.
+        assert!(pair.request_pair_cancellation());
+        assert_eq!(
+            pair.projections.projection(PeerPane::A).expect("A").work,
+            WorkState::Busy {
+                cancellation_requested: true
+            }
+        );
+
+        // With BOTH panes busy, a request marks both — and still never moves focus.
+        assert!(pair.begin_work_for(PeerPane::B));
+        let focus = pair.active_pair_pane();
+        assert!(pair.request_pair_cancellation());
+        assert_eq!(pair.active_pair_pane(), focus, "focus is unchanged");
+        for pane in [PeerPane::A, PeerPane::B] {
+            assert_eq!(
+                pair.projections.projection(pane).expect("pane").work,
+                WorkState::Busy {
+                    cancellation_requested: true
+                },
+                "pane {pane:?} is marked cancelling",
+            );
+        }
     }
 
     #[test]

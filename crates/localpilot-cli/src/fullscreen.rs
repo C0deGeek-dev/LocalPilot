@@ -258,7 +258,7 @@ impl PairTerminalAdapter {
         apply_pair_warning(
             app,
             peer,
-            "steering was not delivered because the collaboration had finished",
+            "steering was not delivered because the collaboration was no longer accepting input",
         );
     }
 
@@ -1238,6 +1238,10 @@ fn pair_command_catalog() -> Vec<CompletionCommand> {
         CompletionCommand {
             name: "diff".to_string(),
             description: "Review tracked workspace changes".to_string(),
+        },
+        CompletionCommand {
+            name: "abort".to_string(),
+            description: "Stop the collaboration and both peers".to_string(),
         },
     ]);
     command_catalog
@@ -2642,6 +2646,14 @@ async fn run_pair_event_loop(
     }
 }
 
+/// Every user-facing abort routes through here: reflect the pending cancellation on
+/// both busy panes, then request the sole supervisor abort. No terminal is faked; the
+/// real terminal state arrives later from the driver report and its retained card.
+fn abort_pair(app: &mut AppModel, run: &mut InteractivePairRun) {
+    let _ = app.request_pair_cancellation();
+    run.abort_and_cancel();
+}
+
 fn execute_pair_host_action(
     run: &mut InteractivePairRun,
     adapter: &mut PairTerminalAdapter,
@@ -2674,19 +2686,19 @@ fn execute_pair_host_action(
                         apply_pair_warning(app, PairPeer::A, error.to_string());
                         apply_pair_warning(app, PairPeer::B, error.to_string());
                         adapter.clear_dialog(app);
-                        run.abort_and_cancel();
+                        abort_pair(app, run);
                     }
                 }
             }
             if abort {
                 adapter.clear_dialog(app);
-                run.abort_and_cancel();
+                abort_pair(app, run);
             }
             exit
         }
         PairHostAction::Abort { exit } => {
             adapter.clear_dialog(app);
-            run.abort_and_cancel();
+            abort_pair(app, run);
             exit
         }
         PairHostAction::Exit => {
@@ -3033,6 +3045,20 @@ fn execute_pair_slash(
     }
     if submitted.prompt.trim() == "/settings" {
         app.open_settings(fullscreen_settings(app, config));
+        return PairHostAction::None;
+    }
+    // Match `/abort` as an exact first token so `/abortive` stays an unknown command
+    // rather than a mis-typed abort.
+    if submitted.prompt.split_whitespace().next() == Some("/abort") {
+        if submitted.prompt.split_whitespace().nth(1).is_none() {
+            // Maps to the sole existing abort action; no second cancellation path.
+            return PairHostAction::Abort { exit: false };
+        }
+        apply_pair_warning(
+            app,
+            PairPeer::A,
+            "usage: /abort takes no arguments; it stops the collaboration and both peers",
+        );
         return PairHostAction::None;
     }
     if submitted.prompt.trim() == "/diff" {
@@ -5378,6 +5404,133 @@ mod tests {
         assert!(!second.requests().is_empty());
     }
 
+    async fn pending_pair_run() -> (tempfile::TempDir, InteractivePairRun) {
+        let provider = |id: &str| {
+            let seed = FakeProvider::new();
+            let mut declaration = seed.declaration().clone();
+            declaration.id = id.to_string();
+            declaration.display_name = id.to_string();
+            Arc::new(FakeProvider::new().with_declaration(declaration).text("{}"))
+                as Arc<dyn ModelProvider>
+        };
+        let providers = HashMap::from([
+            ("first".to_string(), provider("first")),
+            ("second".to_string(), provider("second")),
+        ]);
+        let models = HashMap::from([
+            ("first".to_string(), "model-a".to_string()),
+            ("second".to_string(), "model-b".to_string()),
+        ]);
+        let mut config = localpilot_config::Config::default();
+        config.provider.default = "first".to_string();
+        config
+            .providers
+            .insert("first".to_string(), ProviderConfig::default());
+        config
+            .providers
+            .insert("second".to_string(), ProviderConfig::default());
+        let directory = tempfile::tempdir().unwrap();
+        let setup = InteractiveSessionSetup::for_test(
+            directory.path().to_path_buf(),
+            config,
+            Profile::Default,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        let host = InteractivePairHost::prepare(
+            &setup,
+            "compare both proposals",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .unwrap();
+        let run = PreparedPairRun::new(
+            host,
+            PairBounds {
+                max_rounds: 1,
+                slot_timeout: Duration::from_secs(5),
+                slot_token_budget: 0,
+            },
+        )
+        .unwrap()
+        .spawn();
+        (directory, run)
+    }
+
+    fn assert_both_panes_cancelling(app: &mut AppModel) {
+        for pane in [PeerPane::A, PeerPane::B] {
+            let _ = app.select_pair_pane(pane);
+            assert_eq!(
+                app.active_work(),
+                localpilot_terminal_ui::WorkState::Busy {
+                    cancellation_requested: true
+                },
+                "pane {pane:?} reflects the requested cancellation",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_abort_action_marks_both_busy_panes_cancelling_before_terminal() {
+        let (_dir, mut run) = pending_pair_run().await;
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        assert!(app.begin_work_for(PeerPane::A));
+        assert!(app.begin_work_for(PeerPane::B));
+
+        // The abort action reflects the pending cancellation on BOTH busy panes
+        // through the real host-action seam, and does not fake terminal completion.
+        let exit = execute_pair_host_action(
+            &mut run,
+            &mut adapter,
+            &mut app,
+            PairHostAction::Abort { exit: false },
+        );
+        assert!(!exit);
+        assert!(
+            adapter.terminal.is_none(),
+            "the abort does not fake a terminal report"
+        );
+        assert_both_panes_cancelling(&mut app);
+
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn a_modal_abort_answer_also_marks_both_panes_cancelling() {
+        let (_dir, mut run) = pending_pair_run().await;
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        assert!(app.begin_work_for(PeerPane::A));
+        assert!(app.begin_work_for(PeerPane::B));
+
+        // A modal Ctrl+C answers with abort=true (here with no active request, taking
+        // the stale/invariant aborting path); it must also cancel both panes.
+        let exit = execute_pair_host_action(
+            &mut run,
+            &mut adapter,
+            &mut app,
+            PairHostAction::Answer {
+                id: PairAskId::fixture(1),
+                answer: PairAskAnswer::Approval(false),
+                abort: true,
+                exit: false,
+            },
+        );
+        assert!(!exit);
+        assert_both_panes_cancelling(&mut app);
+
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::Aborted);
+    }
+
     #[test]
     fn pair_terminal_adapter_routes_peer_updates_status_and_retained_completion() {
         let mut app = pair_app();
@@ -5687,6 +5840,103 @@ mod tests {
     }
 
     #[test]
+    fn abort_slash_maps_to_the_sole_abort_action_and_rejects_arguments() {
+        let mut app = pair_app();
+        let config = localpilot_config::Config::default();
+        let cwd = Path::new(".");
+        let submit = |prompt: &str| SubmittedInput {
+            shown: prompt.to_string(),
+            display: prompt.to_string(),
+            prompt: prompt.to_string(),
+            pastes: Vec::new(),
+            images: Vec::new(),
+        };
+        // Bare `/abort` maps to the one existing abort action.
+        assert!(matches!(
+            execute_pair_slash(&mut app, &config, cwd, submit("/abort")),
+            PairHostAction::Abort { exit: false }
+        ));
+        // Arguments are rejected with an explicit usage notice and no action.
+        assert!(matches!(
+            execute_pair_slash(&mut app, &config, cwd, submit("/abort now")),
+            PairHostAction::None
+        ));
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .expect("A timeline")
+            .items()
+            .iter()
+            .any(|item| item.text.contains("usage: /abort")));
+
+        // A different command that merely shares the prefix is NOT a mistyped `/abort`:
+        // it neither aborts nor prints the abort usage.
+        let mut other = pair_app();
+        assert!(!matches!(
+            execute_pair_slash(&mut other, &config, cwd, submit("/abortive")),
+            PairHostAction::Abort { .. }
+        ));
+        assert!(other
+            .timeline_for(PeerPane::A)
+            .expect("A timeline")
+            .items()
+            .iter()
+            .all(|item| !item.text.contains("usage: /abort")));
+    }
+
+    #[test]
+    fn an_aborted_terminal_settles_steers_and_leaves_one_incomplete_card_per_pane() {
+        let mut app = pair_app();
+        let mut adapter = PairTerminalAdapter::new();
+        // Both peers busy; the abort request marks both cancelling without faking a
+        // terminal, then a pending steer is queued.
+        assert!(app.begin_work_for(PeerPane::A));
+        assert!(app.begin_work_for(PeerPane::B));
+        assert!(app.request_pair_cancellation());
+        let steer = app
+            .append_prompt("late steer", None, true)
+            .expect("steer row");
+        adapter.queue_steer(PairPeer::A, steer);
+
+        let _ = adapter.apply_pump_event(
+            &mut app,
+            PairPumpEvent::Finished {
+                status: PairRunStatus {
+                    state: PairRunState::Finished(PairTerminalStatus::Aborted),
+                    completed_rounds: 0,
+                    max_rounds: 1,
+                    scheduled: None,
+                    candidate: None,
+                    agreements: [false, false],
+                    repairing: None,
+                },
+                result: Box::new(PairResultSnapshot::for_reason(PairTerminalStatus::Aborted)),
+            },
+        );
+
+        // The pending steer settled at the terminal.
+        assert!(
+            !app.timeline_for(PeerPane::A)
+                .expect("A timeline")
+                .item(steer)
+                .expect("steer row")
+                .pending
+        );
+        // Each pane ends with exactly one Incomplete Aborted result card.
+        for pane in [PeerPane::A, PeerPane::B] {
+            let cards: Vec<_> = app
+                .timeline_for(pane)
+                .expect("pane timeline")
+                .items()
+                .iter()
+                .filter(|item| item.kind == ItemKind::Result)
+                .collect();
+            assert_eq!(cards.len(), 1, "exactly one result card per pane");
+            assert_eq!(cards[0].tone, Some(ResultTone::Incomplete));
+            assert!(cards[0].text.contains("Aborted before convergence."));
+        }
+    }
+
+    #[test]
     fn building_the_result_presentation_never_touches_version_control() {
         // The retained result is inspect/copy-only. Rendering it into both panes of an
         // app rooted at a freshly initialized, clean git workspace must not create,
@@ -5819,9 +6069,9 @@ mod tests {
         assert_eq!(app.active_pair_pane(), Some(PeerPane::A));
         let beta = app.timeline_for(PeerPane::B).expect("B timeline");
         assert!(!beta.item(item).expect("rejected prompt remains").pending);
-        assert!(beta.items().iter().any(|entry| entry
-            .text
-            .contains("steering was not delivered because the collaboration had finished")));
+        assert!(beta.items().iter().any(|entry| entry.text.contains(
+            "steering was not delivered because the collaboration was no longer accepting input"
+        )));
         assert!(!app
             .timeline_for(PeerPane::A)
             .expect("A timeline")

@@ -1682,6 +1682,66 @@ async fn an_abort_with_a_produced_reply_aborts_but_retains_the_raw() {
 }
 
 #[tokio::test]
+async fn an_abort_during_an_observed_repair_ends_aborted_and_never_reaches_the_other_peer() {
+    let a = SessionId::new();
+    let b = SessionId::new();
+    let driver = PairDriver::new(
+        a,
+        b,
+        "task",
+        PairBounds {
+            slot_timeout: Duration::from_secs(5),
+            ..bounds()
+        },
+    )
+    .unwrap();
+    let abort = driver.abort_handle();
+    // A's primary is malformed, so its one repair drive runs; that repair hangs, so the
+    // authoritative repairing snapshot is observable. We abort at exactly that seam —
+    // during the observed repair — rather than inferring it from call counts.
+    let mut endpoints = scripts(a, &[Move::Malformed, Move::Hang], b, &[]);
+    let mut progress = driver.progress();
+    let mut observed_repair = false;
+    // Scope the run future so its `&mut endpoints` borrow is released before the
+    // drive-count assertions below.
+    let report = {
+        let run = driver.run(&mut endpoints);
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                outcome = &mut run => break outcome,
+                Some(snapshot) = progress.changed() => {
+                    if snapshot.repairing_peer() == Some(a) {
+                        assert_eq!(snapshot.next_peer(), Some(a));
+                        observed_repair = true;
+                        abort.abort();
+                    }
+                }
+            }
+        }
+    };
+
+    assert!(
+        observed_repair,
+        "the transient repairing snapshot was observed before the abort"
+    );
+    assert_eq!(report.reason(), &PairOutcome::Aborted);
+    // A was driven twice — the malformed primary and the aborting repair; B is never
+    // scheduled or driven.
+    assert_eq!(endpoints.drives(a), 2, "A was re-driven for the repair");
+    assert_eq!(endpoints.drives(b), 0, "B is never driven");
+    assert!(
+        report.raw_for(a).is_some(),
+        "the malformed raw is retained through the abort"
+    );
+    assert_eq!(
+        progress.latest().repairing_peer(),
+        None,
+        "the repair signal clears terminally"
+    );
+}
+
+#[tokio::test]
 async fn progress_can_be_observed_live_then_closes() {
     let a = SessionId::new();
     let b = SessionId::new();

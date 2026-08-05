@@ -967,6 +967,30 @@ mod tests {
         assert!(pair.a.session.runtime.active_accepts_images());
         assert!(!pair.b.session.runtime.active_accepts_images());
 
+        // Both peers run under the same selected profile, through independent engines:
+        // changing one peer's profile never touches the other's.
+        assert_eq!(
+            pair.a.session.runtime.permission_engine_handle().profile(),
+            Profile::Default
+        );
+        assert_eq!(
+            pair.b.session.runtime.permission_engine_handle().profile(),
+            Profile::Default
+        );
+        pair.a
+            .session
+            .runtime
+            .set_permission_profile(Profile::Unrestricted, Vec::new());
+        assert_eq!(
+            pair.a.session.runtime.permission_engine_handle().profile(),
+            Profile::Unrestricted
+        );
+        assert_eq!(
+            pair.b.session.runtime.permission_engine_handle().profile(),
+            Profile::Default,
+            "B's permission engine is independent of A's"
+        );
+
         let a_directive = localpilot_server::swarm::pair_session_directive("A", "B", task);
         let b_directive = localpilot_server::swarm::pair_session_directive("B", "A", task);
         let a_prompt = pair.a.session.runtime.system_prompt_text();

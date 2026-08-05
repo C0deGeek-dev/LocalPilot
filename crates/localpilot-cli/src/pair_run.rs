@@ -527,6 +527,7 @@ impl PreparedPairRun {
             drain_next: PairPeer::A,
             pending: VecDeque::new(),
             terminal_emitted: false,
+            stop_requested: false,
         }
     }
 }
@@ -550,6 +551,10 @@ pub(crate) struct InteractivePairRun {
     drain_next: PairPeer,
     pending: VecDeque<PairPumpEvent>,
     terminal_emitted: bool,
+    /// Set the moment an abort is requested, before the driver report is joined, so
+    /// no new user input is accepted after the stop request even while the terminal
+    /// result is still being produced.
+    stop_requested: bool,
 }
 
 enum PumpReady {
@@ -587,9 +592,11 @@ impl InteractivePairRun {
     }
 
     /// Queue user steering for one exact peer while the collaboration remains
-    /// observably live. An idle peer is still a valid target for its next slot.
+    /// observably live and no stop has been requested. An idle peer is still a valid
+    /// target for its next slot; a run that has requested its stop rejects new input
+    /// even before its terminal report is joined.
     pub(crate) fn steer(&self, peer: PairPeer, text: String) -> bool {
-        if self.completion.is_some() {
+        if self.stop_requested || self.completion.is_some() {
             return false;
         }
         match peer {
@@ -599,8 +606,16 @@ impl InteractivePairRun {
         true
     }
 
-    /// Fail closed every user request, then reach the driver and both hosts.
+    /// Request the stop, fail closed every user request, then reach the driver and
+    /// both hosts. Setting the stop gate first closes the user-input window before the
+    /// terminal report is joined; repeated calls are a no-op.
     pub(crate) fn abort_and_cancel(&mut self) {
+        // A repeated request, or one after the run already completed, is a true no-op:
+        // the gate/asks/hosts are only closed once.
+        if self.stop_requested || self.completion.is_some() {
+            return;
+        }
+        self.stop_requested = true;
         self.fail_closed_asks();
         self.abort_driver_and_hosts();
     }
@@ -901,8 +916,9 @@ impl InteractivePairRun {
     }
 
     fn stop_for_ask_error(&mut self, error: PairAskObservationError) -> PairPumpEvent {
-        self.fail_closed_asks();
-        self.abort_driver_and_hosts();
+        // Route through the same stop gate so an ask-channel failure also closes the
+        // user-input window, not just the driver/hosts.
+        self.abort_and_cancel();
         match error {
             PairAskObservationError::ChannelClosed(source) => PairPumpEvent::AskChannelClosed {
                 peer: source.peer(),
@@ -1860,6 +1876,9 @@ mod tests {
         senders.b_questions.send(buffered_b_questions).unwrap();
 
         run.abort_and_cancel();
+        // The stop gate now rejects new steering, and a repeated abort is a no-op.
+        assert!(!run.steer(PairPeer::A, "post-abort steer".to_string()));
+        run.abort_and_cancel();
         assert!(!active_answer.await.unwrap());
         assert_eq!(
             queued_question_answers.await.unwrap(),
@@ -1894,6 +1913,208 @@ mod tests {
         for session in sessions {
             assert_session_closed(directory.path(), session);
         }
+    }
+
+    #[tokio::test]
+    async fn an_abort_gates_input_then_drains_to_one_terminal_that_schedules_no_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let setup = setup(
+            directory.path(),
+            PendingProvider::arc("first"),
+            PendingProvider::arc("second"),
+        );
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(2))
+            .unwrap()
+            .spawn();
+
+        run.abort_and_cancel();
+        // The stop gate closes the input window before the report is joined; a second
+        // abort is a no-op.
+        assert!(!run.steer(PairPeer::A, "late".to_string()));
+        run.abort_and_cancel();
+        assert!(!run.steer(PairPeer::B, "later".to_string()));
+
+        // The pump drains to exactly one retained terminal event whose snapshot
+        // schedules no peer, then yields `None`.
+        let mut terminals = 0;
+        let mut terminal_scheduled = Some(PairPeer::A);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = run.next().await {
+                match event {
+                    PairPumpEvent::Finished { status, .. } => {
+                        terminals += 1;
+                        terminal_scheduled = status.scheduled;
+                    }
+                    PairPumpEvent::DriverFailed { status, .. } => {
+                        terminals += 1;
+                        terminal_scheduled = status.scheduled;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("pump drains after abort");
+        assert_eq!(terminals, 1, "exactly one retained terminal event");
+        assert_eq!(terminal_scheduled, None, "the terminal schedules no peer");
+        assert!(run.next().await.is_none());
+
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn an_abort_after_completion_keeps_the_real_terminal_outcome() {
+        // The counterpart ordering: a report that truly completed before the user's
+        // abort request keeps its real outcome and is not rewritten to Aborted. (The
+        // abort-wins-when-set-first ordering is proven by the driver's abort tests.)
+        let directory = tempfile::tempdir().unwrap();
+        let first = fake("first", A_PROPOSAL);
+        let second = fake("second", B_PROPOSAL);
+        let setup = setup(directory.path(), first, second);
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+
+        let mut terminal = None;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = run.next().await {
+                if let PairPumpEvent::Finished { status, .. } = &event {
+                    terminal = Some(status.state);
+                }
+            }
+        })
+        .await
+        .expect("pair reaches its natural terminal");
+        assert_eq!(
+            terminal,
+            Some(PairRunState::Finished(PairTerminalStatus::CapReached)),
+        );
+
+        // A late abort after the report already completed does not rewrite it.
+        run.abort_and_cancel();
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::CapReached);
+    }
+
+    #[tokio::test]
+    async fn both_peers_share_one_profile_and_a_write_is_allowed_while_b_is_denied() {
+        // Both peers run under the same selected profile with independent runtime
+        // state. Each really calls ask_user, then write_file, then proposes; each peer's
+        // independent permission engine asks for its write, and the user allows A's but
+        // denies B's, so only A's file lands. This proves the real allow/deny effect on
+        // top of the already-covered attribution/answer-only-origin/queue/fail-close tests.
+        let directory = tempfile::tempdir().unwrap();
+        let ask = json!({
+            "questions": [{
+                "header": "Choice",
+                "question": "Proceed?",
+                "options": [
+                    { "label": "yes", "description": "Proceed." },
+                    { "label": "no", "description": "Stop." }
+                ],
+                "multi_select": false
+            }]
+        });
+        let first = Arc::new(
+            FakeProvider::new()
+                .with_declaration(declaration("first"))
+                .tool_call("question-a", "ask_user", ask.clone())
+                .tool_call(
+                    "write-a",
+                    "write_file",
+                    json!({"path": "a.txt", "content": "ALPHA"}),
+                )
+                .text(A_PROPOSAL),
+        );
+        let second = Arc::new(
+            FakeProvider::new()
+                .with_declaration(declaration("second"))
+                .tool_call("question-b", "ask_user", ask)
+                .tool_call(
+                    "write-b",
+                    "write_file",
+                    json!({"path": "b.txt", "content": "BETA"}),
+                )
+                .text(B_PROPOSAL),
+        );
+        let setup = setup(directory.path(), first.clone(), second.clone());
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(1))
+            .unwrap()
+            .spawn();
+
+        let mut a_questioned = false;
+        let mut b_questioned = false;
+        let mut a_write_asked = false;
+        let mut b_write_asked = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = run.next().await {
+                let PairPumpEvent::Ask(ask) = event else {
+                    continue;
+                };
+                match (&ask.request, ask.peer) {
+                    (PairAskRequest::Questions(_), PairPeer::A) => {
+                        a_questioned = true;
+                        run.answer_ask(
+                            ask.id,
+                            PairAskAnswer::Questions(vec![UserAnswer::Selected(vec![
+                                "yes".to_string()
+                            ])]),
+                        )
+                        .expect("answer A question");
+                    }
+                    (PairAskRequest::Questions(_), PairPeer::B) => {
+                        b_questioned = true;
+                        run.answer_ask(
+                            ask.id,
+                            PairAskAnswer::Questions(vec![UserAnswer::Selected(vec![
+                                "yes".to_string()
+                            ])]),
+                        )
+                        .expect("answer B question");
+                    }
+                    (PairAskRequest::Approval(request), PairPeer::A) => {
+                        a_write_asked = true;
+                        assert_eq!(request.tool, "write_file");
+                        // Allow A's write.
+                        run.answer_ask(ask.id, PairAskAnswer::Approval(true))
+                            .expect("allow A write");
+                    }
+                    (PairAskRequest::Approval(request), PairPeer::B) => {
+                        b_write_asked = true;
+                        assert_eq!(request.tool, "write_file");
+                        // Deny B's write.
+                        run.answer_ask(ask.id, PairAskAnswer::Approval(false))
+                            .expect("deny B write");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the pair completes both peers' tool flow");
+
+        // Each peer's own engine, configured from the same selected profile, asked for
+        // its write (profile equality/independence is proven in interactive_session).
+        assert!(
+            a_questioned && b_questioned,
+            "both peers asked their question"
+        );
+        assert!(
+            a_write_asked && b_write_asked,
+            "each peer's engine asked it to approve its write under the same profile"
+        );
+        // Only the allowed write landed; the denied one never touched the workspace.
+        assert!(
+            directory.path().join("a.txt").exists(),
+            "A's approved write landed"
+        );
+        assert!(
+            !directory.path().join("b.txt").exists(),
+            "B's denied write did not land"
+        );
+
+        let completion = run.shutdown().await;
+        assert_eq!(completion.terminal_status(), PairTerminalStatus::CapReached);
     }
 
     #[tokio::test]
