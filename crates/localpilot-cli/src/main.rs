@@ -37,6 +37,9 @@ mod outward_cmd;
 #[cfg(feature = "tui")]
 #[allow(dead_code)] // Staged parser/preflight; the terminal runner will consume this module.
 mod pair_cmd;
+#[cfg(feature = "tui")]
+#[allow(dead_code)] // Staged driver/pump; terminal dispatch will consume this module.
+mod pair_run;
 mod propose_patch;
 #[cfg(feature = "tui")]
 mod repl;

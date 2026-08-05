@@ -236,6 +236,18 @@ pub(crate) struct InteractivePairHost {
 }
 
 impl InteractivePairHost {
+    /// The two sessions in stable peer order.
+    #[allow(dead_code)]
+    pub(crate) fn sessions(&self) -> [SessionId; 2] {
+        self.owner.sessions
+    }
+
+    /// The exact original task shared by both sessions.
+    #[allow(dead_code)]
+    pub(crate) fn task(&self) -> &str {
+        &self.owner.task
+    }
+
     /// Build, register, adopt, and subscribe to two interactive sessions.
     #[allow(dead_code)]
     pub(crate) async fn prepare(
@@ -568,7 +580,7 @@ impl InteractiveSessionSetup {
     }
 
     #[cfg(test)]
-    fn for_test(
+    pub(crate) fn for_test(
         cwd: PathBuf,
         config: Config,
         profile: Profile,
