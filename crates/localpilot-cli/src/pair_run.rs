@@ -12,10 +12,14 @@ use localpilot_server::swarm::{
     PairAbort, PairBounds, PairDriver, PairOutcome, PairProgress, PairProgressRx, PairReport,
     PairSetupError,
 };
-use tokio::sync::broadcast;
+use localpilot_tools::{UserAnswer, UserQuestion};
+use localpilot_tui::ApprovalRequest;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
 
-use crate::interactive_session::{InteractivePairHost, InteractivePairOwner, PairPeer};
+use crate::interactive_session::{
+    ApprovalCall, InteractivePairHost, InteractivePairOwner, PairPeer, QuestionCall,
+};
 
 /// Detail-free terminal categories suitable for the basic run status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +53,74 @@ pub(crate) struct PairRunStatus {
     pub(crate) scheduled: Option<PairPeer>,
 }
 
+/// Stable identity for one user decision requested by a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PairAskId(u64);
+
+/// The channel family that produced a user decision request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairAskKind {
+    Approval,
+    Questions,
+}
+
+/// A terminal-neutral request that can be attributed before it is rendered.
+#[derive(Debug, Clone)]
+pub(crate) enum PairAskRequest {
+    Approval(ApprovalRequest),
+    Questions(Vec<UserQuestion>),
+}
+
+/// The visible clone of a request whose exact reply channel stays private.
+#[derive(Debug, Clone)]
+pub(crate) struct PairAsk {
+    pub(crate) id: PairAskId,
+    pub(crate) peer: PairPeer,
+    pub(crate) request: PairAskRequest,
+}
+
+/// A typed response to the currently active request.
+#[derive(Debug)]
+pub(crate) enum PairAskAnswer {
+    Approval(bool),
+    Questions(Vec<UserAnswer>),
+}
+
+impl PairAskAnswer {
+    const fn kind(&self) -> PairAskKind {
+        match self {
+            Self::Approval(_) => PairAskKind::Approval,
+            Self::Questions(_) => PairAskKind::Questions,
+        }
+    }
+}
+
+/// Why an answer could not be delivered to the active requester.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum PairAskAnswerError {
+    #[error("there is no active request for answer {received:?}")]
+    NoActive { received: PairAskId },
+    #[error("answer {received:?} does not match active request {active:?}")]
+    Stale {
+        received: PairAskId,
+        active: PairAskId,
+    },
+    #[error("request {id:?} expects {expected:?}, not {received:?}")]
+    WrongKind {
+        id: PairAskId,
+        expected: PairAskKind,
+        received: PairAskKind,
+    },
+    #[error("request {id:?} expects {expected} question answers, not {received}")]
+    WrongQuestionCount {
+        id: PairAskId,
+        expected: usize,
+        received: usize,
+    },
+    #[error("the requester for {id:?} ended before its answer arrived")]
+    RequesterGone { id: PairAskId },
+}
+
 /// A single attributed update from the driver supervisor.
 #[derive(Debug)]
 pub(crate) enum PairPumpEvent {
@@ -56,6 +128,7 @@ pub(crate) enum PairPumpEvent {
         peer: PairPeer,
         event: RuntimeEvent,
     },
+    Ask(PairAsk),
     Progress(PairRunStatus),
     RuntimeLagged {
         peer: PairPeer,
@@ -63,6 +136,10 @@ pub(crate) enum PairPumpEvent {
     },
     RuntimeClosed {
         peer: PairPeer,
+    },
+    AskChannelClosed {
+        peer: PairPeer,
+        kind: PairAskKind,
     },
     InvariantViolation {
         detail: String,
@@ -137,6 +214,143 @@ impl PairRunSetupFailure {
     }
 }
 
+enum PendingPairAsk {
+    Approval {
+        id: PairAskId,
+        peer: PairPeer,
+        request: ApprovalRequest,
+        reply: oneshot::Sender<bool>,
+    },
+    Questions {
+        id: PairAskId,
+        peer: PairPeer,
+        questions: Vec<UserQuestion>,
+        reply: oneshot::Sender<Vec<UserAnswer>>,
+    },
+}
+
+impl PendingPairAsk {
+    const fn id(&self) -> PairAskId {
+        match self {
+            Self::Approval { id, .. } | Self::Questions { id, .. } => *id,
+        }
+    }
+
+    const fn kind(&self) -> PairAskKind {
+        match self {
+            Self::Approval { .. } => PairAskKind::Approval,
+            Self::Questions { .. } => PairAskKind::Questions,
+        }
+    }
+
+    fn view(&self) -> PairAsk {
+        match self {
+            Self::Approval {
+                id, peer, request, ..
+            } => PairAsk {
+                id: *id,
+                peer: *peer,
+                request: PairAskRequest::Approval(request.clone()),
+            },
+            Self::Questions {
+                id,
+                peer,
+                questions,
+                ..
+            } => PairAsk {
+                id: *id,
+                peer: *peer,
+                request: PairAskRequest::Questions(questions.clone()),
+            },
+        }
+    }
+
+    fn fail_closed(self) {
+        match self {
+            Self::Approval { reply, .. } => {
+                let _ = reply.send(false);
+            }
+            Self::Questions {
+                questions, reply, ..
+            } => {
+                let _ = reply.send(vec![UserAnswer::Dismissed; questions.len()]);
+            }
+        }
+    }
+
+    fn answer(self, answer: PairAskAnswer) -> bool {
+        match (self, answer) {
+            (Self::Approval { reply, .. }, PairAskAnswer::Approval(approved)) => {
+                reply.send(approved).is_ok()
+            }
+            (Self::Questions { reply, .. }, PairAskAnswer::Questions(answers)) => {
+                reply.send(answers).is_ok()
+            }
+            _ => false,
+        }
+    }
+}
+
+enum ObservedPairAsk {
+    Approval { peer: PairPeer, call: ApprovalCall },
+    Questions { peer: PairPeer, call: QuestionCall },
+}
+
+impl ObservedPairAsk {
+    fn fail_closed(self) {
+        match self {
+            Self::Approval { call, .. } => deny_approval(call),
+            Self::Questions { call, .. } => dismiss_questions(call),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PairAskSource {
+    AApproval,
+    AQuestions,
+    BApproval,
+    BQuestions,
+}
+
+impl PairAskSource {
+    const ALL: [Self; 4] = [
+        Self::AApproval,
+        Self::AQuestions,
+        Self::BApproval,
+        Self::BQuestions,
+    ];
+
+    const fn peer(self) -> PairPeer {
+        match self {
+            Self::AApproval | Self::AQuestions => PairPeer::A,
+            Self::BApproval | Self::BQuestions => PairPeer::B,
+        }
+    }
+
+    const fn kind(self) -> PairAskKind {
+        match self {
+            Self::AApproval | Self::BApproval => PairAskKind::Approval,
+            Self::AQuestions | Self::BQuestions => PairAskKind::Questions,
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::AApproval => 0,
+            Self::AQuestions => 1,
+            Self::BApproval => 2,
+            Self::BQuestions => 3,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum PairAskObservationError {
+    ChannelClosed(PairAskSource),
+    IdExhausted,
+}
+
 /// A validated driver and intact host that have not started model work yet.
 #[must_use = "a prepared collaboration must be spawned or its host explicitly closed"]
 pub(crate) struct PreparedPairRun {
@@ -203,6 +417,11 @@ impl PreparedPairRun {
             completion: None,
             status,
             runtime_open: [true, true],
+            ask_open: [true; 4],
+            next_ask_id: Some(1),
+            active_ask: None,
+            queued_asks: VecDeque::new(),
+            active_needs_emit: false,
             drain_next: PairPeer::A,
             pending: VecDeque::new(),
             terminal_emitted: false,
@@ -221,6 +440,11 @@ pub(crate) struct InteractivePairRun {
     completion: Option<PairRunCompletion>,
     status: PairRunStatus,
     runtime_open: [bool; 2],
+    ask_open: [bool; 4],
+    next_ask_id: Option<u64>,
+    active_ask: Option<PendingPairAsk>,
+    queued_asks: VecDeque<PendingPairAsk>,
+    active_needs_emit: bool,
     drain_next: PairPeer,
     pending: VecDeque<PairPumpEvent>,
     terminal_emitted: bool,
@@ -228,6 +452,8 @@ pub(crate) struct InteractivePairRun {
 
 enum PumpReady {
     Runtime(PairPeer, Result<RuntimeEvent, broadcast::error::RecvError>),
+    Approval(PairPeer, Option<ApprovalCall>),
+    Questions(PairPeer, Option<QuestionCall>),
     Progress(Option<PairProgress>),
     Driver(Result<PairReport, JoinError>),
 }
@@ -245,8 +471,63 @@ impl InteractivePairRun {
         self.driver.is_some()
     }
 
-    /// Abort the protocol and reach both exact in-flight session hosts.
-    pub(crate) fn abort_and_cancel(&self) {
+    /// Fail closed every user request, then reach the driver and both hosts.
+    pub(crate) fn abort_and_cancel(&mut self) {
+        self.fail_closed_asks();
+        self.abort_driver_and_hosts();
+    }
+
+    /// Answer only the active request whose identity the pump emitted.
+    pub(crate) fn answer_ask(
+        &mut self,
+        id: PairAskId,
+        answer: PairAskAnswer,
+    ) -> Result<(), PairAskAnswerError> {
+        let Some(active) = self.active_ask.as_ref() else {
+            return Err(PairAskAnswerError::NoActive { received: id });
+        };
+        if active.id() != id {
+            return Err(PairAskAnswerError::Stale {
+                received: id,
+                active: active.id(),
+            });
+        }
+
+        let expected_kind = active.kind();
+        let received_kind = answer.kind();
+        if expected_kind != received_kind {
+            return Err(PairAskAnswerError::WrongKind {
+                id,
+                expected: expected_kind,
+                received: received_kind,
+            });
+        }
+        if let (PendingPairAsk::Questions { questions, .. }, PairAskAnswer::Questions(answers)) =
+            (active, &answer)
+        {
+            if questions.len() != answers.len() {
+                return Err(PairAskAnswerError::WrongQuestionCount {
+                    id,
+                    expected: questions.len(),
+                    received: answers.len(),
+                });
+            }
+        }
+
+        let Some(active) = self.active_ask.take() else {
+            return Err(PairAskAnswerError::NoActive { received: id });
+        };
+        self.active_needs_emit = false;
+        let delivered = active.answer(answer);
+        self.promote_queued_ask();
+        if delivered {
+            Ok(())
+        } else {
+            Err(PairAskAnswerError::RequesterGone { id })
+        }
+    }
+
+    fn abort_driver_and_hosts(&self) {
         self.abort.abort();
         self.owner.a.host.cancel();
         self.owner.b.host.cancel();
@@ -270,8 +551,21 @@ impl InteractivePairRun {
                 return Some(self.terminal_event());
             }
 
+            // Preserve a deterministic tie-break for calls already buffered,
+            // then surface a waiting human decision before hot runtime streams.
+            if let Err(error) = self.scan_buffered_asks() {
+                return Some(self.stop_for_ask_error(error));
+            }
+            if self.active_needs_emit {
+                self.active_needs_emit = false;
+                if let Some(active) = self.active_ask.as_ref() {
+                    return Some(PairPumpEvent::Ask(active.view()));
+                }
+            }
+
             let ready = {
                 let Some(driver) = self.driver.as_mut() else {
+                    self.fail_closed_asks();
                     self.status.state = PairRunState::Finished(PairTerminalStatus::DriverFailed);
                     self.status.scheduled = None;
                     self.completion = Some(PairRunCompletion::DriverFailed(
@@ -285,6 +579,18 @@ impl InteractivePairRun {
                     }
                     event = self.owner.b.events.recv(), if self.runtime_open[1] => {
                         PumpReady::Runtime(PairPeer::B, event)
+                    }
+                    call = self.owner.a.approvals.recv(), if self.ask_open[0] => {
+                        PumpReady::Approval(PairPeer::A, call)
+                    }
+                    call = self.owner.a.questions.recv(), if self.ask_open[1] => {
+                        PumpReady::Questions(PairPeer::A, call)
+                    }
+                    call = self.owner.b.approvals.recv(), if self.ask_open[2] => {
+                        PumpReady::Approval(PairPeer::B, call)
+                    }
+                    call = self.owner.b.questions.recv(), if self.ask_open[3] => {
+                        PumpReady::Questions(PairPeer::B, call)
                     }
                     progress = self.progress.changed(), if self.progress_open => {
                         PumpReady::Progress(progress)
@@ -304,6 +610,37 @@ impl InteractivePairRun {
                     self.runtime_open[peer_index(peer)] = false;
                     self.abort_and_cancel();
                     return Some(PairPumpEvent::RuntimeClosed { peer });
+                }
+                PumpReady::Approval(peer, Some(call)) => {
+                    if let Err(error) = self.observe_ask(ObservedPairAsk::Approval { peer, call }) {
+                        return Some(self.stop_for_ask_error(error));
+                    }
+                }
+                PumpReady::Questions(peer, Some(call)) => {
+                    if let Err(error) = self.observe_ask(ObservedPairAsk::Questions { peer, call })
+                    {
+                        return Some(self.stop_for_ask_error(error));
+                    }
+                }
+                PumpReady::Approval(peer, None) => {
+                    return Some(
+                        self.stop_for_ask_error(PairAskObservationError::ChannelClosed(
+                            match peer {
+                                PairPeer::A => PairAskSource::AApproval,
+                                PairPeer::B => PairAskSource::BApproval,
+                            },
+                        )),
+                    );
+                }
+                PumpReady::Questions(peer, None) => {
+                    return Some(
+                        self.stop_for_ask_error(PairAskObservationError::ChannelClosed(
+                            match peer {
+                                PairPeer::A => PairAskSource::AQuestions,
+                                PairPeer::B => PairAskSource::BQuestions,
+                            },
+                        )),
+                    );
                 }
                 PumpReady::Progress(Some(progress)) => {
                     match status_from_progress(&progress, self.owner.sessions) {
@@ -335,6 +672,159 @@ impl InteractivePairRun {
         }
     }
 
+    fn scan_buffered_asks(&mut self) -> Result<(), PairAskObservationError> {
+        for source in PairAskSource::ALL {
+            if !self.ask_open[source.index()] {
+                continue;
+            }
+            let observed = match self.try_receive_ask(source) {
+                Ok(observed) => observed,
+                Err(mpsc::error::TryRecvError::Empty) => continue,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(PairAskObservationError::ChannelClosed(source))
+                }
+            };
+            self.observe_ask(observed)?;
+        }
+        Ok(())
+    }
+
+    fn try_receive_ask(
+        &mut self,
+        source: PairAskSource,
+    ) -> Result<ObservedPairAsk, mpsc::error::TryRecvError> {
+        match source {
+            PairAskSource::AApproval => {
+                self.owner
+                    .a
+                    .approvals
+                    .try_recv()
+                    .map(|call| ObservedPairAsk::Approval {
+                        peer: PairPeer::A,
+                        call,
+                    })
+            }
+            PairAskSource::AQuestions => {
+                self.owner
+                    .a
+                    .questions
+                    .try_recv()
+                    .map(|call| ObservedPairAsk::Questions {
+                        peer: PairPeer::A,
+                        call,
+                    })
+            }
+            PairAskSource::BApproval => {
+                self.owner
+                    .b
+                    .approvals
+                    .try_recv()
+                    .map(|call| ObservedPairAsk::Approval {
+                        peer: PairPeer::B,
+                        call,
+                    })
+            }
+            PairAskSource::BQuestions => {
+                self.owner
+                    .b
+                    .questions
+                    .try_recv()
+                    .map(|call| ObservedPairAsk::Questions {
+                        peer: PairPeer::B,
+                        call,
+                    })
+            }
+        }
+    }
+
+    fn observe_ask(&mut self, observed: ObservedPairAsk) -> Result<(), PairAskObservationError> {
+        let observed = match observed {
+            ObservedPairAsk::Questions { call, .. } if call.questions.is_empty() => {
+                let _ = call.reply.send(Vec::new());
+                return Ok(());
+            }
+            observed => observed,
+        };
+
+        let Some(raw_id) = self.next_ask_id else {
+            observed.fail_closed();
+            return Err(PairAskObservationError::IdExhausted);
+        };
+        self.next_ask_id = raw_id.checked_add(1);
+        let id = PairAskId(raw_id);
+        let pending = match observed {
+            ObservedPairAsk::Approval { peer, call } => PendingPairAsk::Approval {
+                id,
+                peer,
+                request: call.request,
+                reply: call.reply,
+            },
+            ObservedPairAsk::Questions { peer, call } => PendingPairAsk::Questions {
+                id,
+                peer,
+                questions: call.questions,
+                reply: call.reply,
+            },
+        };
+        if self.active_ask.is_none() {
+            self.active_ask = Some(pending);
+            self.active_needs_emit = true;
+        } else {
+            self.queued_asks.push_back(pending);
+        }
+        Ok(())
+    }
+
+    fn promote_queued_ask(&mut self) {
+        self.active_ask = self.queued_asks.pop_front();
+        self.active_needs_emit = self.active_ask.is_some();
+    }
+
+    fn stop_for_ask_error(&mut self, error: PairAskObservationError) -> PairPumpEvent {
+        self.fail_closed_asks();
+        self.abort_driver_and_hosts();
+        match error {
+            PairAskObservationError::ChannelClosed(source) => PairPumpEvent::AskChannelClosed {
+                peer: source.peer(),
+                kind: source.kind(),
+            },
+            PairAskObservationError::IdExhausted => PairPumpEvent::InvariantViolation {
+                detail: "user request identity space was exhausted".to_string(),
+            },
+        }
+    }
+
+    /// This order is load-bearing and the operation is intentionally idempotent:
+    /// close new sends, wake owned requests, drain buffered sends, then fuse arms.
+    fn fail_closed_asks(&mut self) {
+        self.owner.a.approvals.close();
+        self.owner.a.questions.close();
+        self.owner.b.approvals.close();
+        self.owner.b.questions.close();
+
+        if let Some(active) = self.active_ask.take() {
+            active.fail_closed();
+        }
+        for ask in self.queued_asks.drain(..) {
+            ask.fail_closed();
+        }
+        while let Ok(call) = self.owner.a.approvals.try_recv() {
+            deny_approval(call);
+        }
+        while let Ok(call) = self.owner.a.questions.try_recv() {
+            dismiss_questions(call);
+        }
+        while let Ok(call) = self.owner.b.approvals.try_recv() {
+            deny_approval(call);
+        }
+        while let Ok(call) = self.owner.b.questions.try_recv() {
+            dismiss_questions(call);
+        }
+
+        self.active_needs_emit = false;
+        self.ask_open = [false; 4];
+    }
+
     /// Complete shutdown after the terminal owner has restored terminal modes.
     ///
     /// A live driver is signalled and awaited cooperatively; it is never aborted,
@@ -343,6 +833,8 @@ impl InteractivePairRun {
         if let Some(driver) = self.driver.take() {
             self.abort_and_cancel();
             self.record_driver_result(driver.await);
+        } else {
+            self.fail_closed_asks();
         }
         let completion = self.completion.take().unwrap_or_else(|| {
             PairRunCompletion::DriverFailed(
@@ -354,13 +846,14 @@ impl InteractivePairRun {
     }
 
     fn record_driver_result(&mut self, result: Result<PairReport, JoinError>) {
+        self.fail_closed_asks();
         let (terminal, completion) = match result {
             Ok(report) => (
                 terminal_status(report.reason()),
                 PairRunCompletion::Report(report),
             ),
             Err(error) => {
-                self.abort_and_cancel();
+                self.abort_driver_and_hosts();
                 let detail = error.to_string();
                 (
                     PairTerminalStatus::DriverFailed,
@@ -478,6 +971,16 @@ const fn other_peer(peer: PairPeer) -> PairPeer {
     }
 }
 
+fn deny_approval(call: ApprovalCall) {
+    let _ = call.reply.send(false);
+}
+
+fn dismiss_questions(call: QuestionCall) {
+    let _ = call
+        .reply
+        .send(vec![UserAnswer::Dismissed; call.questions.len()]);
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -569,6 +1072,68 @@ mod tests {
             max_rounds,
             slot_timeout: Duration::from_secs(5),
             slot_token_budget: 0,
+        }
+    }
+
+    struct AskSenders {
+        a_approvals: mpsc::UnboundedSender<ApprovalCall>,
+        a_questions: mpsc::UnboundedSender<QuestionCall>,
+        b_approvals: mpsc::UnboundedSender<ApprovalCall>,
+        b_questions: mpsc::UnboundedSender<QuestionCall>,
+    }
+
+    fn replace_ask_receivers(run: &mut InteractivePairRun) -> AskSenders {
+        let (a_approvals, a_approval_rx) = mpsc::unbounded_channel();
+        let (a_questions, a_question_rx) = mpsc::unbounded_channel();
+        let (b_approvals, b_approval_rx) = mpsc::unbounded_channel();
+        let (b_questions, b_question_rx) = mpsc::unbounded_channel();
+        run.owner.a.approvals = a_approval_rx;
+        run.owner.a.questions = a_question_rx;
+        run.owner.b.approvals = b_approval_rx;
+        run.owner.b.questions = b_question_rx;
+        AskSenders {
+            a_approvals,
+            a_questions,
+            b_approvals,
+            b_questions,
+        }
+    }
+
+    fn approval_call(tool: &str) -> (ApprovalCall, oneshot::Receiver<bool>) {
+        let (reply, answer) = oneshot::channel();
+        (
+            ApprovalCall {
+                request: ApprovalRequest {
+                    tool: tool.to_string(),
+                    target: format!("{tool}-target"),
+                    risk_class: format!("{tool}-risk"),
+                },
+                reply,
+            },
+            answer,
+        )
+    }
+
+    fn question_call(
+        label: &str,
+        count: usize,
+    ) -> (QuestionCall, oneshot::Receiver<Vec<UserAnswer>>) {
+        let (reply, answer) = oneshot::channel();
+        let questions = (0..count)
+            .map(|index| UserQuestion {
+                header: Some(format!("{label}-{index}")),
+                question: format!("{label} question {index}"),
+                options: Vec::new(),
+                multi_select: false,
+            })
+            .collect();
+        (QuestionCall { questions, reply }, answer)
+    }
+
+    async fn expect_ask(run: &mut InteractivePairRun) -> PairAsk {
+        match run.next().await {
+            Some(PairPumpEvent::Ask(ask)) => ask,
+            other => panic!("expected an attributed request, got {other:?}"),
         }
     }
 
@@ -678,6 +1243,336 @@ mod tests {
         }
         assert!(first.requests().is_empty());
         assert!(second.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn asks_are_attributed_queued_and_answer_only_their_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let setup = setup(
+            directory.path(),
+            PendingProvider::arc("first"),
+            PendingProvider::arc("second"),
+        );
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(2))
+            .unwrap()
+            .spawn();
+        let senders = replace_ask_receivers(&mut run);
+
+        let (a_approval, a_approval_answer) = approval_call("a-approval");
+        let (a_questions, mut a_question_answers) = question_call("a-questions", 1);
+        let (b_approval, mut b_approval_answer) = approval_call("b-approval");
+        let (b_questions, mut b_question_answers) = question_call("b-questions", 2);
+        senders.a_approvals.send(a_approval).unwrap();
+        senders.a_questions.send(a_questions).unwrap();
+        senders.b_approvals.send(b_approval).unwrap();
+        senders.b_questions.send(b_questions).unwrap();
+
+        let ask = expect_ask(&mut run).await;
+        assert_eq!(ask.peer, PairPeer::A);
+        assert_eq!(run.queued_asks.len(), 3);
+        assert_eq!(
+            run.active_ask.as_ref().map(PendingPairAsk::id),
+            Some(ask.id)
+        );
+        match &ask.request {
+            PairAskRequest::Approval(request) => {
+                assert_eq!(request.tool, "a-approval");
+                assert_eq!(request.target, "a-approval-target");
+            }
+            other => panic!("unexpected first request: {other:?}"),
+        }
+        assert_eq!(
+            run.answer_ask(PairAskId(999), PairAskAnswer::Approval(true)),
+            Err(PairAskAnswerError::Stale {
+                received: PairAskId(999),
+                active: ask.id,
+            })
+        );
+        assert_eq!(
+            run.answer_ask(ask.id, PairAskAnswer::Questions(Vec::new())),
+            Err(PairAskAnswerError::WrongKind {
+                id: ask.id,
+                expected: PairAskKind::Approval,
+                received: PairAskKind::Questions,
+            })
+        );
+        assert!(matches!(
+            a_question_answers.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            b_approval_answer.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            b_question_answers.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        run.answer_ask(ask.id, PairAskAnswer::Approval(true))
+            .unwrap();
+        assert!(a_approval_answer.await.unwrap());
+
+        let ask = expect_ask(&mut run).await;
+        assert_eq!(ask.peer, PairPeer::A);
+        let PairAskRequest::Questions(questions) = &ask.request else {
+            panic!("second request was not a question call");
+        };
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].header.as_deref(), Some("a-questions-0"));
+        assert_eq!(
+            run.answer_ask(ask.id, PairAskAnswer::Questions(Vec::new())),
+            Err(PairAskAnswerError::WrongQuestionCount {
+                id: ask.id,
+                expected: 1,
+                received: 0,
+            })
+        );
+        let a_answers = vec![UserAnswer::Selected(vec!["first".to_string()])];
+        run.answer_ask(ask.id, PairAskAnswer::Questions(a_answers.clone()))
+            .unwrap();
+        assert_eq!(a_question_answers.await.unwrap(), a_answers);
+
+        let ask = expect_ask(&mut run).await;
+        assert_eq!(ask.peer, PairPeer::B);
+        assert!(matches!(ask.request, PairAskRequest::Approval(_)));
+        run.answer_ask(ask.id, PairAskAnswer::Approval(false))
+            .unwrap();
+        assert!(!b_approval_answer.await.unwrap());
+
+        let ask = expect_ask(&mut run).await;
+        assert_eq!(ask.peer, PairPeer::B);
+        let PairAskRequest::Questions(questions) = &ask.request else {
+            panic!("fourth request was not a question call");
+        };
+        assert_eq!(questions.len(), 2);
+        let b_answers = vec![
+            UserAnswer::Dismissed,
+            UserAnswer::Other("second".to_string()),
+        ];
+        run.answer_ask(ask.id, PairAskAnswer::Questions(b_answers.clone()))
+            .unwrap();
+        assert_eq!(b_question_answers.await.unwrap(), b_answers);
+
+        let (orphaned, orphaned_answer) = approval_call("orphaned");
+        drop(orphaned_answer);
+        senders.a_approvals.send(orphaned).unwrap();
+        let ask = expect_ask(&mut run).await;
+        assert_eq!(
+            run.answer_ask(ask.id, PairAskAnswer::Approval(false)),
+            Err(PairAskAnswerError::RequesterGone { id: ask.id })
+        );
+        assert_eq!(
+            run.answer_ask(ask.id, PairAskAnswer::Approval(false)),
+            Err(PairAskAnswerError::NoActive { received: ask.id })
+        );
+
+        let (empty_questions, empty_answers) = question_call("empty", 0);
+        senders.b_questions.send(empty_questions).unwrap();
+        run.scan_buffered_asks().unwrap();
+        assert!(empty_answers.await.unwrap().is_empty());
+        assert!(run.active_ask.is_none());
+
+        let completion = run.shutdown().await;
+        assert!(matches!(
+            completion.report().map(PairReport::reason),
+            Some(PairOutcome::Aborted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn safe_abort_defaults_active_queued_and_buffered_asks() {
+        let directory = tempfile::tempdir().unwrap();
+        let setup = setup(
+            directory.path(),
+            PendingProvider::arc("first"),
+            PendingProvider::arc("second"),
+        );
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(2))
+            .unwrap()
+            .spawn();
+        let sessions = run.owner.sessions;
+        let senders = replace_ask_receivers(&mut run);
+
+        let (active, active_answer) = approval_call("active");
+        let (queued_questions, queued_question_answers) = question_call("queued-a", 1);
+        let (queued_approval, queued_approval_answer) = approval_call("queued-b");
+        let (queued_b_questions, queued_b_question_answers) = question_call("queued-b", 2);
+        senders.a_approvals.send(active).unwrap();
+        senders.a_questions.send(queued_questions).unwrap();
+        senders.b_approvals.send(queued_approval).unwrap();
+        senders.b_questions.send(queued_b_questions).unwrap();
+        let visible = expect_ask(&mut run).await;
+        assert_eq!(visible.peer, PairPeer::A);
+
+        let (buffered_approval, buffered_approval_answer) = approval_call("buffered-a");
+        let (buffered_questions, buffered_question_answers) = question_call("buffered-a", 2);
+        let (buffered_b_approval, buffered_b_approval_answer) = approval_call("buffered-b");
+        let (buffered_b_questions, buffered_b_question_answers) = question_call("buffered-b", 1);
+        senders.a_approvals.send(buffered_approval).unwrap();
+        senders.a_questions.send(buffered_questions).unwrap();
+        senders.b_approvals.send(buffered_b_approval).unwrap();
+        senders.b_questions.send(buffered_b_questions).unwrap();
+
+        run.abort_and_cancel();
+        assert!(!active_answer.await.unwrap());
+        assert_eq!(
+            queued_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed]
+        );
+        assert!(!queued_approval_answer.await.unwrap());
+        assert_eq!(
+            queued_b_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed; 2]
+        );
+        assert!(!buffered_approval_answer.await.unwrap());
+        assert_eq!(
+            buffered_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed; 2]
+        );
+        assert!(!buffered_b_approval_answer.await.unwrap());
+        assert_eq!(
+            buffered_b_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed]
+        );
+
+        let (after_close, _answer) = approval_call("after-close");
+        assert!(senders.a_approvals.send(after_close).is_err());
+        let (after_close, _answers) = question_call("after-close", 1);
+        assert!(senders.b_questions.send(after_close).is_err());
+
+        let completion = run.shutdown().await;
+        assert!(matches!(
+            completion.report().map(PairReport::reason),
+            Some(PairOutcome::Aborted)
+        ));
+        for session in sessions {
+            assert_session_closed(directory.path(), session);
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_channel_closure_is_attributed_once_and_aborts_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let setup = setup(
+            directory.path(),
+            PendingProvider::arc("first"),
+            PendingProvider::arc("second"),
+        );
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(2))
+            .unwrap()
+            .spawn();
+        let AskSenders {
+            a_approvals,
+            a_questions,
+            b_approvals,
+            b_questions,
+        } = replace_ask_receivers(&mut run);
+
+        let (active, active_answer) = approval_call("closing-source");
+        let (a_question, a_question_answers) = question_call("a", 1);
+        let (b_approval, b_approval_answer) = approval_call("b");
+        let (b_question, b_question_answers) = question_call("b", 2);
+        a_approvals.send(active).unwrap();
+        drop(a_approvals);
+        a_questions.send(a_question).unwrap();
+        b_approvals.send(b_approval).unwrap();
+        b_questions.send(b_question).unwrap();
+
+        let visible = expect_ask(&mut run).await;
+        assert_eq!(visible.peer, PairPeer::A);
+        assert!(matches!(visible.request, PairAskRequest::Approval(_)));
+        assert!(matches!(
+            run.next().await,
+            Some(PairPumpEvent::AskChannelClosed {
+                peer: PairPeer::A,
+                kind: PairAskKind::Approval,
+            })
+        ));
+        assert!(!active_answer.await.unwrap());
+        assert_eq!(
+            a_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed]
+        );
+        assert!(!b_approval_answer.await.unwrap());
+        assert_eq!(
+            b_question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed; 2]
+        );
+        assert!(a_questions.send(question_call("closed", 1).0).is_err());
+        assert!(b_approvals.send(approval_call("closed").0).is_err());
+        assert!(b_questions.send(question_call("closed", 1).0).is_err());
+
+        let terminal = loop {
+            match run.next().await.unwrap() {
+                PairPumpEvent::Runtime { .. }
+                | PairPumpEvent::RuntimeLagged { .. }
+                | PairPumpEvent::Progress(_) => {}
+                PairPumpEvent::Finished(status) => break status,
+                PairPumpEvent::AskChannelClosed { .. } => {
+                    panic!("closed request channel emitted more than once")
+                }
+                other => panic!("unexpected shutdown event: {other:?}"),
+            }
+        };
+        assert_eq!(
+            terminal.state,
+            PairRunState::Finished(PairTerminalStatus::Aborted)
+        );
+        assert!(run.next().await.is_none());
+        let completion = run.shutdown().await;
+        assert!(matches!(
+            completion.report().map(PairReport::reason),
+            Some(PairOutcome::Aborted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn driver_failure_defaults_asks_before_the_terminal_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let setup = setup(
+            directory.path(),
+            PendingProvider::arc("first"),
+            PendingProvider::arc("second"),
+        );
+        let mut run = PreparedPairRun::new(prepare(&setup).await, bounds(2))
+            .unwrap()
+            .spawn();
+        let senders = replace_ask_receivers(&mut run);
+        let (approval, approval_answer) = approval_call("active");
+        let (questions, question_answers) = question_call("queued", 2);
+        senders.a_approvals.send(approval).unwrap();
+        senders.a_questions.send(questions).unwrap();
+        let visible = expect_ask(&mut run).await;
+        assert!(matches!(visible.request, PairAskRequest::Approval(_)));
+
+        run.abort_driver_and_hosts();
+        let original = run.driver.take().unwrap();
+        let _report = original.await.unwrap();
+        run.driver = Some(tokio::spawn(async move {
+            panic!("forced driver task failure");
+        }));
+
+        let detail = loop {
+            match run.next().await.unwrap() {
+                PairPumpEvent::Runtime { .. }
+                | PairPumpEvent::RuntimeLagged { .. }
+                | PairPumpEvent::Progress(_) => {}
+                PairPumpEvent::DriverFailed { detail, .. } => break detail,
+                PairPumpEvent::Ask(_) => panic!("a defaulted request reached the final screen"),
+                other => panic!("unexpected driver-failure event: {other:?}"),
+            }
+        };
+        assert!(detail.contains("forced driver task failure"));
+        assert!(!approval_answer.await.unwrap());
+        assert_eq!(
+            question_answers.await.unwrap(),
+            vec![UserAnswer::Dismissed; 2]
+        );
+        assert!(run.next().await.is_none());
+        assert!(matches!(
+            run.shutdown().await,
+            PairRunCompletion::DriverFailed(_)
+        ));
     }
 
     #[tokio::test]
