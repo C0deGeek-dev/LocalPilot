@@ -2,6 +2,44 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0141: A Tool Start Retires The Open Assistant And Reasoning Segments
+
+Status: accepted. Refines ADR-0107 (the single stable-ID timeline model) and
+ADR-0129 (the full-screen host as the interactive default); neither is
+rewritten.
+
+The full-screen timeline is one ordered list of items, and the host streams
+assistant text, reasoning, and tool rows into it as they arrive. It tracked the
+currently open assistant and reasoning segments so consecutive text deltas
+append to one item, but it never closed those segments when a tool started. Text
+or reasoning streamed *after* a tool call therefore appended to the item created
+*before* it — the item that already sat above every tool row pushed since — so a
+turn shaped `text -> tool -> tool -> text` rendered all of its prose as one block
+above a wall of tool rows, in an order the model never produced. With the
+viewport following the bottom, that merged prose scrolled off the top and the
+screen became only tool rows.
+
+Decision: a tool start is a segmentation boundary. When a tool row is pushed, the
+host first finalizes the semantic styling (headings, code, links) of the open
+assistant and reasoning segments, and only then retires their pointers, so any
+text or reasoning that follows the tool opens its own item below it, in true
+stream order. Styling before retiring is load-bearing: the styling pass runs at
+the currently open segment pointers, and the later `Stopped` pass can only style a
+segment its pointer still references — a segment whose pointer was retired at the
+tool boundary would otherwise keep its raw text and lose its heading/code styles.
+This is the boundary the inline host already enforced by flushing the streaming
+assistant before committing a tool row; the full-screen host now matches it. The
+tool start is the semantic boundary and always precedes the tool's completion, so
+no second reset is needed when a tool finishes. Interleaving needs no structural
+change — the timeline already stores text and tool calls in one ordered list;
+retiring the segment pointers is what makes that order visible.
+
+Boundary: this changes only where a new item begins, not what a tool row or an
+assistant paragraph contains, and not the queued-prompt insertion barrier —
+post-tool segments still land ahead of prompts queued during the turn. Bounding
+the number of tool rows (run-collapsing) and keyboard expansion of a collapsed
+row are separate concerns, deliberately out of scope here.
+
 ## ADR-0140: Context Hygiene Is A Read-Only, Opt-In Section Of `doctor`
 
 Status: accepted. Extends ADR-0050 (the `doctor` report and its `--format`

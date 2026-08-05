@@ -1644,6 +1644,15 @@ impl AppModel {
                 }
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
+                // A tool row is a boundary in the stream. Finalize the styling of
+                // the open assistant/reasoning segments (each inter-tool segment
+                // is complete once the tool starts), then retire them so text and
+                // reasoning that arrive after the tool open their own items below
+                // it, in stream order, instead of coalescing into the item that
+                // preceded the tool.
+                Self::style_transcript_on(projection);
+                projection.active_assistant = None;
+                projection.active_reasoning = None;
                 let detail = bounded_inline_text(&detail, MAX_TOOL_DETAIL_BYTES);
                 let question = name == "ask_user";
                 let mut text = if question {
@@ -4684,8 +4693,10 @@ mod tests {
         assert_eq!(a.usage.expect("A usage").total(), 5);
         assert_eq!(a.context_usage, Some((5, 8)));
         assert_eq!(a.stream_bytes, "alpha responsealpha reasoning".len());
-        assert!(a.active_assistant.is_some());
-        assert!(a.active_reasoning.is_some());
+        // The tool boundary retires the open assistant/reasoning segments; the
+        // items themselves remain (asserted via timeline/stream_bytes below).
+        assert!(a.active_assistant.is_none());
+        assert!(a.active_reasoning.is_none());
         assert!(a.active_tools.contains_key("tool-a"));
         assert_eq!(a.active_insert_before, Some(a_insert));
         assert_eq!(a.timeline.selected_text().as_deref(), Some("alpha"));
@@ -4713,8 +4724,10 @@ mod tests {
         assert_eq!(b.usage.expect("B usage").total(), 18);
         assert_eq!(b.context_usage, Some((13, 21)));
         assert_eq!(b.stream_bytes, "beta responsebeta reasoning".len());
-        assert!(b.active_assistant.is_some());
-        assert!(b.active_reasoning.is_some());
+        // The tool boundary retires the open assistant/reasoning segments; the
+        // items themselves remain (asserted via timeline/stream_bytes below).
+        assert!(b.active_assistant.is_none());
+        assert!(b.active_reasoning.is_none());
         assert!(b.active_tools.contains_key("tool-b"));
         assert!(b.timeline.selection.is_none());
         assert_eq!(
@@ -4837,8 +4850,10 @@ mod tests {
         assert_eq!(b.plan[0].title, "beta step");
         assert_eq!(b.usage.expect("B usage").total(), 13);
         assert_eq!(b.context_usage, Some((13, 21)));
-        assert!(b.active_assistant.is_some());
-        assert!(b.active_reasoning.is_some());
+        // The tool boundary retires the open assistant/reasoning segments; the
+        // items and stream_bytes above still prove B received the updates.
+        assert!(b.active_assistant.is_none());
+        assert!(b.active_reasoning.is_none());
         assert!(b.active_tools.contains_key("tool-b"));
         assert!(b
             .timeline_search
@@ -6453,6 +6468,71 @@ mod tests {
                 "queued b"
             ]
         );
+    }
+
+    #[test]
+    fn tool_start_closes_the_active_assistant_and_reasoning_segments() {
+        let mut app = model();
+        let active = app
+            .append_prompt("active", Some("12:00".to_string()), false)
+            .expect("active");
+        app.begin_work();
+
+        app.apply_runtime(RuntimeUpdate::Text("assistant A".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("reasoning A".to_string()));
+        // Both segments are open before the tool starts.
+        assert!(app.active_projection().active_assistant.is_some());
+        assert!(app.active_projection().active_reasoning.is_some());
+        let assistant_a = app.active_timeline().items()[1].id;
+
+        // A queued prompt must remain after the entire active turn, tool and all.
+        let queued = app
+            .append_prompt("queued", Some("12:01".to_string()), true)
+            .expect("queued");
+
+        app.apply_runtime(RuntimeUpdate::ToolStarted {
+            id: "tool".to_string(),
+            name: "inspect".to_string(),
+            detail: String::new(),
+        });
+        // The tool boundary retires both open segments.
+        assert!(app.active_projection().active_assistant.is_none());
+        assert!(app.active_projection().active_reasoning.is_none());
+
+        app.apply_runtime(RuntimeUpdate::Text("assistant B".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("reasoning B".to_string()));
+        // Post-tool deltas open new segments, never the pre-tool ones.
+        assert!(app.active_projection().active_assistant.is_some());
+        assert_ne!(app.active_projection().active_assistant, Some(assistant_a));
+
+        let items: Vec<(ItemKind, &str)> = app
+            .active_timeline()
+            .items()
+            .iter()
+            .map(|item| (item.kind, item.text.as_str()))
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                (ItemKind::User, "active"),
+                (ItemKind::Assistant, "assistant A"),
+                (ItemKind::Reasoning, "reasoning A"),
+                (ItemKind::Tool, "inspect"),
+                (ItemKind::Assistant, "assistant B"),
+                (ItemKind::Reasoning, "reasoning B"),
+                (ItemKind::User, "queued"),
+            ]
+        );
+        // The active prompt leads and the queued prompt stays last: post-tool
+        // segments land ahead of user work queued during the turn.
+        let ids: Vec<_> = app
+            .active_timeline()
+            .items()
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(ids.first(), Some(&active));
+        assert_eq!(ids.last(), Some(&queued));
     }
 
     #[test]

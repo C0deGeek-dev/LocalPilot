@@ -73,7 +73,11 @@ Tool calls appear as one compact running/completed/failed/cancelled row. Clickin
 status prefix expands the permission-safe target detail and captured output;
 finished rows include elapsed time. Terminal-only output is bounded to 256 KiB
 with an explicit middle-omission marker, while the provider transcript and
-retained tool-output path keep their existing independent limits.
+retained tool-output path keep their existing independent limits. A tool row
+stays interleaved with the assistant text and reasoning that surround it: text
+streamed after a tool call opens its own row below that tool, in the order the
+model produced it, rather than merging into the assistant paragraph that came
+before the call.
 
 Interactive chat also advertises the builtin `ask_user` tool through one shared
 host-capability contract. In the full-screen host, up to four questions appear
