@@ -1566,15 +1566,22 @@ impl SessionRuntime {
 
     pub fn set_broker(&mut self, broker: Option<Broker>) {
         if let Some(broker) = &broker {
-            if broker.learning_enabled() {
-                if let Ok(Some(json)) = self.store.get_tool_output(GRADUATION_KEY) {
-                    if let Ok(names) = serde_json::from_str::<Vec<String>>(&json) {
-                        broker.seed_graduated(&names);
-                    }
+            self.seed_persisted_graduation(broker);
+        }
+        self.broker = broker;
+    }
+
+    /// Seed the latest persisted graduated-tool set through the broker's own
+    /// catalog, deduplication, and working-set-cap rules. Best-effort: missing,
+    /// unreadable, or malformed state is ignored.
+    fn seed_persisted_graduation(&self, broker: &Broker) {
+        if broker.learning_enabled() {
+            if let Ok(Some(json)) = self.store.get_tool_output(GRADUATION_KEY) {
+                if let Ok(names) = serde_json::from_str::<Vec<String>>(&json) {
+                    broker.seed_graduated(&names);
                 }
             }
         }
-        self.broker = broker;
     }
 
     /// Persist the broker's graduated tools to the local, disposable store so the
@@ -1583,6 +1590,10 @@ impl SessionRuntime {
     fn persist_graduation(&self) {
         if let Some(broker) = &self.broker {
             if broker.learning_enabled() {
+                // Re-read immediately before writing: sessions created from the
+                // same earlier snapshot then merge, rather than overwrite, the
+                // tools each learned when they close in sequence.
+                self.seed_persisted_graduation(broker);
                 if let Ok(json) = serde_json::to_string(&broker.graduated_names()) {
                     if let Err(err) = self.store.put_tool_output(GRADUATION_KEY, &json) {
                         tracing::warn!(error = %err, "failed to persist tool graduation");

@@ -72,6 +72,31 @@ fn build_broker_harness_with(
     }
 }
 
+fn build_broker_runtime_at(
+    root: &std::path::Path,
+    config: BrokerConfig,
+) -> (SessionRuntime, Broker) {
+    let broker = Broker::new(config);
+    let mut registry = ToolRegistry::with_builtins();
+    registry.register(Box::new(ToolSearch::new(broker.clone())));
+    registry.register(Box::new(ToolLoad::new(broker.clone())));
+    broker.set_catalog(registry.catalog());
+
+    let mut runtime = SessionRuntime::new(
+        Arc::new(FakeProvider::new()),
+        registry,
+        PermissionEngine::new(Profile::Default, Vec::new()),
+        Box::new(ScriptedApprover::always()),
+        Store::open(root),
+        Workspace::new(root).unwrap(),
+        RecoveryEngine::new(RecoveryBudget::default()),
+        SessionConfig::default(),
+        Vec::new(),
+    );
+    runtime.set_broker(Some(broker.clone()));
+    (runtime, broker)
+}
+
 /// The tool names advertised in the first recorded request.
 fn advertised(requests: &[ModelRequest]) -> Vec<String> {
     requests
@@ -379,6 +404,34 @@ async fn without_the_broker_an_unknown_tool_just_errors() {
 }
 
 // --- telemetry + graduation ---
+
+#[test]
+fn sequential_session_close_persists_the_union_of_graduated_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = BrokerConfig {
+        learning_enabled: true,
+        working_set_cap: 2,
+        ..BrokerConfig::default()
+    };
+
+    // Both sessions start from the same empty persisted snapshot, then learn
+    // distinct names that are valid in their shared tool catalog.
+    let (mut first, first_broker) = build_broker_runtime_at(dir.path(), config.clone());
+    let (mut second, second_broker) = build_broker_runtime_at(dir.path(), config.clone());
+    first_broker.seed_graduated(&["git_commit".to_string()]);
+    second_broker.seed_graduated(&["fetch".to_string()]);
+
+    first.close();
+    second.close();
+
+    // A later session reloads the stored result through the public broker seam.
+    // The cap is still applied, but the second close did not clobber the first.
+    let (_later, later_broker) = build_broker_runtime_at(dir.path(), config);
+    let persisted = later_broker.graduated_names();
+    assert_eq!(persisted.len(), 2, "stored union remains capped");
+    assert!(persisted.contains(&"git_commit".to_string()));
+    assert!(persisted.contains(&"fetch".to_string()));
+}
 
 fn resolution_events(store: &Store, id: localpilot_core::SessionId) -> usize {
     store
