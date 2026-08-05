@@ -3641,7 +3641,8 @@ mod tests {
     }
 
     #[test]
-    fn peer_frame_snapshot_preserves_focus_and_independent_scroll_positions() {
+    fn peer_frame_snapshot_and_resize_round_trip_preserve_focus_scroll_search_selection_and_draft()
+    {
         let mut app = AppModel::new_pair(
             snapshot_header(),
             crate::SessionHeader {
@@ -3736,6 +3737,124 @@ mod tests {
             narrow_snapshot,
             include_str!("fixtures/peer_narrow_60x24.cells")
         );
+
+        // --- Augmented resize round trip -------------------------------------
+        // The wide/narrow goldens above are captured at the base state (scroll
+        // 6/19, B active, no search or selection), so the augmentation below
+        // cannot disturb them. It layers the remaining geometry-independent
+        // state — an A-owned parked timeline search, a selection inside B's
+        // active timeline, and a shared composer draft — and asserts every piece
+        // survives a full wide->narrow->wide resize.
+        let a_rect = initial_a.timeline;
+        let b_rect = initial_b.timeline;
+
+        // Establish A's real timeline search through the public input path while
+        // A is active (empty composer -> ForwardCharOrSearch opens the search,
+        // Insert types the query), then park it by returning focus to B.
+        assert!(app.select_pair_pane(PeerPane::A));
+        let _ = app.handle_input(crate::InputAction::ForwardCharOrSearch, a_rect.width);
+        let _ = app.handle_input(
+            crate::InputAction::Insert("ALPHA".to_string()),
+            a_rect.width,
+        );
+        assert_eq!(
+            app.timeline_search().expect("A search opened").query,
+            "ALPHA"
+        );
+        assert!(app.select_pair_pane(PeerPane::B));
+        assert!(
+            app.timeline_search().is_none(),
+            "A's search parks when B is active"
+        );
+
+        // A selection inside B's active timeline and a shared composer draft;
+        // with B active the composer targets Steer Peer B.
+        let (b_item, b_len) = {
+            let item = app
+                .timeline_for(PeerPane::B)
+                .unwrap()
+                .items()
+                .iter()
+                .find(|item| item.kind == ItemKind::User)
+                .expect("a B user row");
+            (item.id, item.text.len())
+        };
+        {
+            let timeline = app.timeline_for_mut(PeerPane::B).unwrap();
+            timeline.start_selection(crate::ContentPoint {
+                item_id: b_item,
+                byte: 0,
+            });
+            timeline.extend_selection(crate::ContentPoint {
+                item_id: b_item,
+                byte: b_len,
+            });
+        }
+        app.editor.replace_draft("shared draft in flight");
+
+        // Capture the augmented, geometry-independent state the resize must keep.
+        let state = |app: &AppModel| {
+            (
+                app.active_pair_pane(),
+                app.timeline_for(PeerPane::A)
+                    .unwrap()
+                    .view(a_rect.width, a_rect.height)
+                    .start,
+                app.timeline_for(PeerPane::B)
+                    .unwrap()
+                    .view(b_rect.width, b_rect.height)
+                    .start,
+                app.editor.text().to_string(),
+                app.timeline_for(PeerPane::B).unwrap().selected_text(),
+            )
+        };
+        let before = state(&app);
+        assert_eq!(before.0, Some(PeerPane::B));
+        assert_eq!(before.3, "shared draft in flight");
+        assert!(before.4.is_some(), "B selection is present");
+
+        // Wide: both hit bundles present, composer targets Steer Peer B.
+        let (rt_wide, rt_wide_hits) = render_test_frame(&app, 120, 30);
+        let rt_wb = rt_wide_hits.timelines.as_ref().unwrap();
+        assert!(rt_wb.for_peer(PeerPane::A).is_some() && rt_wb.for_peer(PeerPane::B).is_some());
+        assert!(rect_text(&rt_wide, rt_wide.area).contains("Steer Peer B"));
+
+        // Narrow: only the active B bundle; A carries no stale off-screen hit map.
+        let (rt_narrow, rt_narrow_hits) = render_test_frame(&app, 60, 24);
+        let rt_nb = rt_narrow_hits.timelines.as_ref().unwrap();
+        assert!(
+            rt_nb.for_peer(PeerPane::A).is_none(),
+            "no stale A hits when narrow"
+        );
+        assert_eq!(
+            rt_nb
+                .for_peer(PeerPane::B)
+                .and_then(|timeline| timeline.peer),
+            Some(PeerPane::B)
+        );
+        assert!(rect_text(&rt_narrow, rt_narrow.area).contains("Peer B [active]"));
+
+        // Back to wide: both bundles return and the whole captured state is
+        // state-identical (typed state, not bytes).
+        let (rt_wide_again, rt_wide_again_hits) = render_test_frame(&app, 120, 30);
+        let rt_wa = rt_wide_again_hits.timelines.as_ref().unwrap();
+        assert!(rt_wa.for_peer(PeerPane::A).is_some() && rt_wa.for_peer(PeerPane::B).is_some());
+        assert_eq!(
+            state(&app),
+            before,
+            "typed state survives wide->narrow->wide"
+        );
+        assert!(rect_text(&rt_wide_again, rt_wide_again.area).contains("Steer Peer B"));
+
+        // The A-owned search resumes on returning focus to A; B's shared draft,
+        // selection, and viewports remain intact on switching back.
+        assert!(app.select_pair_pane(PeerPane::A));
+        assert_eq!(
+            app.timeline_search().expect("A search resumes").query,
+            "ALPHA"
+        );
+        assert!(app.select_pair_pane(PeerPane::B));
+        assert_eq!(state(&app), before, "B state intact after visiting A");
     }
 
     #[test]

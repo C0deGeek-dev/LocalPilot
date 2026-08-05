@@ -314,6 +314,23 @@ A message to a member that has already finished is **not** reported as
 delivered: it has no turn to reach and will never start another, and counting it
 would be a lie the sender then acts on.
 
+#### Pair peer messages
+
+The convergence driver for `localpilot pair` reuses this transport with a
+narrower contract. A peer's typed protocol envelope is sent only to its bound
+counterpart as `Audience::One` with `notify` delivery. It is labelled as a
+system-sourced message from the actual sender, enqueued before the recipient's
+next scheduled turn, and never broadcasts, wakes an idle session, or chooses who
+runs next. The driver alone schedules turns, so peer traffic cannot create
+concurrent model calls.
+
+User steering is a separate path: the terminal host targets one named
+`SessionHost::steer` and preserves the user source. A peer envelope therefore
+cannot masquerade as user input, and a user correction cannot be mistaken for
+protocol agreement. Messaging declares no tool effect and grants no authority;
+any later tool call still passes through that peer session's own permission
+engine.
+
 ### `search_definitions`
 
 Searches code and returns the **enclosing declaration** — function, type, module,

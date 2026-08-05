@@ -133,6 +133,7 @@ comparison on one model, not a model claim.
 | `localpilot` / `localpilot chat` | Interactive coding sessions with tools and approvals |
 | `localpilot ask` | One prompt, no tools |
 | `localpilot print` | A non-interactive agent run for scripts and pipelines |
+| `localpilot pair <task>` | Opt-in two-agent collaboration on one task; see [Pair collaboration](docs/configuration.md#pair-collaboration) |
 | `localpilot init` | Project-local configuration and ignore rules |
 | `localpilot models` | Models reported by configured OpenAI-compatible servers |
 | `localpilot session list` | Find, export, name (`session name`, or `/name` in chat), resume — by id or name — or prune durable sessions |

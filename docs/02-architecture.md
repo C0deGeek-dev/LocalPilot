@@ -31,6 +31,12 @@ and the permission engine. The permission engine is configurable from
 least-privilege (default) up to a bypass (allow-all) launch mode; the operating
 mode does not change which profile is active.
 
+The opt-in `localpilot pair` interface composes two independent Agent-mode
+session runtimes over one workspace; it does not add a third operating mode.
+An exact-two topology provides bound one-to-one messaging, a finite typed
+convergence driver schedules one model turn at a time, and one CLI-owned
+full-screen host projects both sessions and their attributed user interactions.
+
 ## Crate Responsibilities
 
 ### `localpilot-cli`
@@ -218,6 +224,15 @@ hard-cancels the current work and leaves every follow-up in its original order
 instead of steering a later prompt past it. Ctrl+C remains a distinct hard
 cancel. Runtime output is inserted before later pending operations, so visible
 and provider transcript order agree.
+
+For `localpilot pair`, the same backend-neutral model holds two cohesive session
+projections inside one shared application shell. At widths of 61 columns or
+more, the timeline is split into labelled peer panes; below 61 columns, only the
+active peer is shown at full width and F6 switches peers. Each projection keeps
+its own timeline, viewport, search, selection, runtime status, and usage, while
+the composer and dialogs are shared and explicitly target or identify a peer.
+`FrameLayout` remains the sole drawing and hit-test authority, so an off-screen
+peer has no stale pointer targets and resize does not move state between peers.
 
 `localpilot-tui` is the explicit legacy inline rollback while the remaining
 physical terminal matrix is completed. Full-screen chat is the interactive
@@ -598,12 +613,14 @@ single-agent turn takes.
   subprocess, since a swarm id is needed on every spawn. Outside a repository the
   canonical directory path is used, so non-git workspaces work rather than
   erroring. `LOCALPILOT_SWARM_ID` overrides the whole resolution.
-- **Membership.** Members keyed by `SessionId`, each with a role
-  (coordinator/worker), a status, and **one** structural edge: who it reports
-  back to. Children, ancestry, and subtrees are all derived by walking that edge
-  — a stored child list would be a second copy of the same fact and would
-  disagree the first time a member departed. A reverse index maps a session back
-  to its swarm, because a tool call knows only its own session id.
+- **Membership.** Members are keyed by `SessionId` and carry a status and role.
+  A hierarchical swarm uses coordinator/worker roles and **one** structural edge
+  per worker: who it reports back to. Children, ancestry, and subtrees are all
+  derived by walking that edge — a stored child list would be a second copy of
+  the same fact and would disagree the first time a member departed. A pair uses
+  exactly two `Peer` roles and no hierarchy edges. The two topology kinds are
+  mutually exclusive. A reverse index maps a session back to its swarm, because
+  a tool call knows only its own session id.
 - **Caps and admission.** Two bounds: a *lifetime* member cap (which counts
   departed members, so a coordinator that keeps replacing failed work is still
   stopped) and a *concurrency* budget on running members. Both are checked and
@@ -656,6 +673,31 @@ single-agent turn takes.
   at the admission seam — `--concurrency` caps how many workers (and so how many
   models) run at once, the RAM/VRAM bound; `--max-agents` is the lifetime runaway
   guard — resource containment (`SwarmLimits`), never a token or spend budget.
+
+#### Pair collaboration (opt-in)
+
+`localpilot pair <task>` adopts two fresh sessions atomically into the exact-two
+topology. Both receive the same original task and workspace, but each retains an
+independent runtime, history, tool registry, permission engine, approval and
+question channels, provider, and model. Only cloneable provider/MCP capability
+sources and the resolved agent set are shared. Pair admission rejects hierarchy
+operations and a hierarchical swarm rejects peer admission.
+
+The convergence core accepts only versioned typed `propose`, `revise`, and
+`agree` envelopes. It owns the canonical candidate, monotonic revision, digest,
+and per-peer agreement; prose and peer-claimed identity cannot change protocol
+state. The driver serializes all model turns, sends the prior envelope directly
+to the other peer as a non-waking system notification, and stops with one typed
+outcome at agreement, round/slot/token bounds, abort, failure, protocol error,
+or no progress.
+
+The CLI constructs both sessions through the ordinary interactive-session
+recipe, binds the real `SessionHost` and sender-scoped messaging view to each
+endpoint, and owns the one Crossterm event loop. Runtime events, approvals, and
+questions retain their peer identity through the host; user steering targets one
+named host and remains user-sourced. Cooperative shutdown aborts the driver,
+cancels and awaits both sessions, fails outstanding asks closed, restores the
+terminal, and never applies or commits the candidate automatically.
 
 Design constraint: **safe-only lifecycle primitives.** No `unsafe`, no
 `libc`/`nix`, no `flock`/`setsid`/`kill` — only safe `std` + `tokio`

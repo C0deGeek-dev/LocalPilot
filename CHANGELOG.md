@@ -6,6 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Opt-in two-agent collaboration: `localpilot pair <task>`.** Two ordinary,
+  independent Agent-mode sessions can now work one task in a shared workspace
+  through a typed, bounded propose/revise/agree protocol. The driver runs only
+  one model turn at a time and exits successfully only after both peers agree on
+  the current revision and digest; round and slot bounds, `/abort`, and Ctrl+C
+  stop non-converging work. The full-screen host shows labelled peer panes at
+  wide widths and an active-only, F6-switchable pane below 61 columns while
+  preserving per-peer scroll, search, selection, and attributed approvals and
+  questions. Both peers use the selected permission profile through independent
+  engines, and the command never applies or commits automatically. Startup now
+  discloses that two resident histories can consume more tokens/provider quota
+  without claiming a fixed multiplier. The swarm API's public `MemberRole` enum
+  is deliberately `#[non_exhaustive]` as it gains the exact-two `Peer` role. See
+  [docs/configuration.md](docs/configuration.md#pair-collaboration).
+
 - **Context hygiene: `localpilot doctor --hygiene`.** `doctor` gains an opt-in
   `--hygiene` flag that inspects the authored context a session assembles from
   the current directory — the `CLAUDE.md`/`AGENTS.md` instruction files and the

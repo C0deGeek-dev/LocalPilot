@@ -134,6 +134,44 @@ active file or content pane, Left/Right switches panes, `t` hides or restores
 the file tree, and Escape returns to the untouched conversation. Diff capture
 does not run external diff drivers and is bounded to 8 MiB.
 
+## Pair collaboration
+
+`localpilot pair` is an opt-in command that runs two independent Agent-mode
+sessions on one task and workspace:
+
+```powershell
+localpilot pair "review and implement the cache fix"
+```
+
+The pair-specific CLI flags are:
+
+| Flag | Meaning and default |
+|---|---|
+| `--provider-a <PROVIDER>` | Provider for peer A; the configured default provider when omitted. |
+| `--model-a <MODEL>` | Model for peer A; that provider's configured model when omitted. |
+| `--provider-b <PROVIDER>` | Provider for peer B; the configured default provider when omitted. |
+| `--model-b <MODEL>` | Model for peer B; that provider's configured model when omitted. |
+| `--permission <PROFILE>` | One profile shared by both sessions: `default`, `relaxed`, `bypass`, or `unrestricted`; default `default`. |
+| `--bypass` | Explicit shorthand for `--permission bypass`. |
+| `--max-rounds <N>` | Positive collaboration-round cap; default `3`. |
+| `--slot-timeout <SECONDS>` | Positive wall-clock limit for one peer slot; default `600`. |
+
+These flags are resolved at launch. There is no persistent pair-specific TOML
+table: normal provider/model configuration supplies the omitted provider and
+model selections, while an omitted `--permission`/`--bypass` selects the
+`default` profile.
+
+Before pruning, setup, session construction, or model work, the command prints
+a cost/quota note to stderr. Two resident histories may use more tokens and
+provider quota than one session, although only one model turn runs at a time.
+The displayed round and per-slot time bounds, `/abort`, and Ctrl+C bound or stop
+the run; they do not promise a fixed token or price multiplier.
+
+Exit status `0` means both peers agreed on the current typed candidate. A round
+cap, timeout, abort, peer/provider failure, protocol error, budget limit, no
+progress, or driver failure returns a nonzero status. The command does not apply
+or commit the agreed candidate automatically.
+
 ## Project context files
 
 Beyond `.localpilot.toml`, a project may carry free-text **instruction files**

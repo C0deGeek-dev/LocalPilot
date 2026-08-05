@@ -40,6 +40,16 @@ in two places. `CLAUDE.md` ("## The specs") routes here; ADRs in
 | [`security.md`](security.md) | Security usage notes (see also `07-security-and-privacy.md` + `SECURITY.md`) |
 | [`mvp-test-coverage.md`](mvp-test-coverage.md) | MVP test-coverage tracking |
 
+## Pair collaboration ownership
+
+| Concern | Owner |
+|---|---|
+| Command composition and the two-mode boundary | [`01-product-spec.md`](01-product-spec.md#operating-modes) |
+| Topology, convergence protocol, host, and terminal projections | [`02-architecture.md`](02-architecture.md#pair-collaboration-opt-in) |
+| CLI flags, defaults, cost/quota note, and no persistent pair config | [`configuration.md`](configuration.md#pair-collaboration) |
+| Direct peer messaging and source attribution | [`05-tool-system.md`](05-tool-system.md#pair-peer-messages) |
+| Both-peer permissions, attributed asks, and fail-closed abort | [`07-security-and-privacy.md`](07-security-and-privacy.md#pair-collaboration) |
+
 ## Wiki
 
 User-facing guides (Getting Started, How-Tos, Examples, Troubleshooting) are

@@ -41,6 +41,12 @@ Security-sensitive areas:
   Bring-your-own-key only: no "sign in with Claude/ChatGPT" and no use of
   subscription credentials (ADR-0042).
 - Logs must redact secrets; a stored key is never logged or echoed in full.
+- `localpilot pair` applies one explicitly selected profile to two independent
+  permission engines. Approval and question dialogs identify their originating
+  peer; abort or terminal shutdown denies/dismisses outstanding asks and cancels
+  both sessions.
+- Pair collaboration never applies, commits, merges, or publishes an agreed
+  candidate automatically.
 - Web research is off by default. The research loop is local-only unless the
   operator opts in for that run with the headless `localpilot research --web`
   flag, which discloses what egresses, fetches only allowlisted domains (others
@@ -49,4 +55,3 @@ Security-sensitive areas:
   cannot override. See
   [docs/07-security-and-privacy.md](docs/07-security-and-privacy.md) §Web Research
   Egress.
-

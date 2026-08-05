@@ -42,9 +42,8 @@ untestable without a frontier backend LocalPilot does not target.
 
 ## ADR-0139: A Pair Is Two Ordinary Agent Sessions Adopted Into A Symmetric Exact-Two Swarm Topology
 
-Status: accepted for the substrate; the interactive host that constructs and runs
-a pair for a user is the planned consumer and completes this decision in a later
-step. Builds on the convergence protocol (ADR-0136) and reuses the swarm
+Status: accepted and consumed by the shipped `localpilot pair` interactive
+command. Builds on the convergence protocol (ADR-0136) and reuses the swarm
 membership, one-to-one messaging, and advisory-conflict substrate
 (ADR-0124..0127, ADR-0126).
 
@@ -97,20 +96,17 @@ with no protocol change.
   than a prior turn's when a turn produces none. The driver's per-slot cancellation
   is carried to the session's lock-free cancel and the torn-down turn is awaited.
 
-Scope and boundary: this decision covers the shipped substrate — the topology,
-atomic admission, bound hosting, and the adapter that wires the ADR-0136 driver to
-real sessions. It does **not** ship a runnable pair; the interactive host and its
-entrypoint command that construct and run a pair for a user are the planned
-consumer of this substrate and will amend and complete this ADR when they land.
-The architecture decision of whether a pair is its own mode therefore spans this
-substrate step and that later host step; the answer recorded here is that the
-substrate needs no new mode.
+Scope and boundary: this decision covers the shipped topology, atomic admission,
+bound hosting, and adapter that wires the ADR-0136 driver to real sessions.
+`localpilot pair` is the runnable consumer: its interactive host constructs two
+ordinary Agent-mode sessions, adopts them, and drives the pair. The substrate and
+command add no new session mode.
 
 Consequences: the swarm layer gains a peer role, a private pair topology, atomic
 pair admission and hosting, and a private endpoint adapter binding the ADR-0136
 driver to real sessions; the runtime gains a narrow, protocol-neutral pair of
-turn-capture getters; the CLI-private pair construction surface stays staged until
-the interactive host consumes it.
+turn-capture getters; the CLI consumes its private construction surface in the
+single-terminal pair host.
 
 ## ADR-0138: The Self-Improvement Loop Is A Thin Orchestrator Over Separate Stage Crates
 
@@ -157,10 +153,9 @@ back into the owning crate, not to fuse the crates.
 
 ## ADR-0137: A Pair Uses One Frame With Two Cohesive Session Projections
 
-Status: accepted for the backend-neutral presentation component; no
-user-runnable pair host or entrypoint ships yet. Extends the full-screen terminal
-ownership boundary (ADR-0107) and presents the two ordinary Agent sessions
-adopted by ADR-0139.
+Status: accepted and consumed by the shipped `localpilot pair` host. Extends the
+full-screen terminal ownership boundary (ADR-0107) and presents the two ordinary
+Agent sessions adopted by ADR-0139.
 
 A pair does not create two terminal applications. One full-screen application
 shell presents two session projections, keeping geometry, drawing, input, and
@@ -204,9 +199,9 @@ hit-testing under the same authorities that single chat already uses.
 
 Scope and boundary: this decision owns only backend-neutral terminal state,
 geometry, rendering, and interaction. The executable host still owns Crossterm,
-runtime channels, approvals, questions, and terminal lifecycle. Until that host
-constructs and drives the two projections, these pair-presentation surfaces are
-component-only and do not expose a runnable command.
+runtime channels, approvals, questions, and terminal lifecycle. The shipped
+`localpilot pair` host constructs and drives those two projections through that
+boundary.
 
 Consequences: the terminal UI gains typed single/pair timeline geometry, an
 explicit shared-shell/session-projection split, peer-aware rendering and hit maps,
@@ -217,9 +212,9 @@ itself remains a closed two-value contract.
 
 ## ADR-0136: A Peer Pair Converges Through A Typed Envelope Over Direct One-To-One Messaging, Driver-Scheduled And Finitely Bounded
 
-Status: accepted. Reuses the in-app peer-messaging substrate from ADR-0124..0127
-(the `SessionPeers` soft-interrupt transport and its coordinator-only-broadcast
-rule).
+Status: accepted and wired to the shipped `localpilot pair` command. Reuses the
+in-app peer-messaging substrate from ADR-0124..0127 (the `SessionPeers`
+soft-interrupt transport and its coordinator-only-broadcast rule).
 
 Two *symmetric* peers work one shared artifact and converge — or a bound stops
 them. The convergence protocol is a pure state core plus a transport-agnostic
@@ -265,8 +260,8 @@ endpoints.
 Consequences: a crate-internal protocol and driver in the swarm layer beside the
 DAG driver, reusing the one messaging substrate and adding no second transport;
 its public driver/report/progress surface is wired by ADR-0139 to real
-adopted-session endpoints, though no user-runnable pair host or entrypoint ships
-yet; the parser and state internals stay crate-private.
+adopted-session endpoints and consumed by the CLI's runnable pair host; the
+parser and state internals stay crate-private.
 
 ## ADR-0135: A Swarm Worker's Model Is Verified Before And After The Build; An Unserved Model Is Refused, Never Defaulted
 

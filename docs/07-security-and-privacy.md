@@ -341,6 +341,26 @@ and unrestricted additionally removes the workspace boundary for the file
 tools. Both should be used only in disposable or sandboxed environments, or
 where the user has deliberately accepted the risk.
 
+## Pair Collaboration
+
+`localpilot pair` resolves one permission profile for the run and applies it to
+two independent permission engines. The peers do not share approval state: each
+tool call is authorized by the engine attached to the session that requested it.
+Interactive approval and `ask_user` dialogs identify the originating peer and
+provider/model, and an answer is delivered only to that request's channel.
+
+Peer protocol messages are system-sourced, direct notifications; user steering
+remains user-sourced and targets one peer. Neither path bypasses tool
+authorization. `/abort`, Ctrl+C, terminal loss, and cooperative shutdown fail
+closed: active and queued approvals are denied, questions are dismissed, both
+sessions are cancelled and awaited, and late input is rejected. The command does
+not automatically apply, commit, merge, or publish an agreed candidate.
+
+The normal profile warnings still apply. `--bypass` and `--permission
+unrestricted` are explicit launch choices for both peers, never defaults; pair
+collaboration does not alter the redaction, logging, workspace-boundary, or
+harness-rule semantics of the selected profile.
+
 ## Reliability Contract — Permission Invariants
 
 These invariants are the permission half of the reliability contract

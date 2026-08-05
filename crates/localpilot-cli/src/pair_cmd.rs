@@ -1,5 +1,6 @@
 //! Argument parsing and preflight resolution for two-agent collaboration.
 
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -101,10 +102,35 @@ impl PairArgs {
     }
 }
 
+/// Write the pre-run cost/quota note for a resolved pair run. Kept pure so it can be
+/// asserted byte-for-byte; the caller flushes it before any prune, setup, session, or
+/// model work. It states the honest bounds and never promises a fixed cost multiplier.
+pub(crate) fn write_cost_notice(
+    out: &mut dyn Write,
+    resolved: &ResolvedPairArgs,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "localpilot pair: starts two resident agent histories, so it may use more tokens and provider quota than a single session. Only one model turn runs at a time. This run is bounded to {} rounds and {} seconds per slot; /abort or Ctrl+C stops it. These bounds do not promise a fixed token or price multiplier.",
+        resolved.bounds.max_rounds,
+        resolved.bounds.slot_timeout.as_secs(),
+    )
+}
+
 pub(crate) async fn run(args: PairArgs) -> Result<crate::repl::ChatOutcome> {
     let cwd = std::env::current_dir()?;
     let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())?;
     let resolved = args.resolve(&config)?;
+
+    // Surface the required cost/quota note on stderr before any prune, setup, session,
+    // or model work begins. The disclosure is mandatory, so a failed write fails the
+    // preflight rather than starting two sessions without it.
+    {
+        let stderr = std::io::stderr();
+        let mut handle = stderr.lock();
+        write_cost_notice(&mut handle, &resolved)?;
+        handle.flush()?;
+    }
 
     if config.storage.auto_prune {
         let policy = crate::session_cmd::retention_policy(&config.storage, None, None);
@@ -416,6 +442,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved.task, "  keep my spacing  ");
+    }
+
+    #[test]
+    fn the_cost_notice_is_exact_bounds_aware_and_promises_no_multiplier() {
+        let resolved = parse(&["pair", "task", "--max-rounds", "5", "--slot-timeout", "120"])
+            .resolve(&configured())
+            .unwrap();
+        let mut buffer = Vec::new();
+        write_cost_notice(&mut buffer, &resolved).unwrap();
+        assert_eq!(
+            String::from_utf8(buffer).unwrap(),
+            "localpilot pair: starts two resident agent histories, so it may use more tokens and \
+provider quota than a single session. Only one model turn runs at a time. This run is bounded to 5 \
+rounds and 120 seconds per slot; /abort or Ctrl+C stops it. These bounds do not promise a fixed \
+token or price multiplier.\n"
+        );
     }
 
     #[test]

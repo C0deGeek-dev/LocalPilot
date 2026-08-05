@@ -29,3 +29,11 @@ which maps every area to its owning doc.
   (`--no-web`) or globally (`[research.web].enabled = false`). Both surfaces
   (interactive and headless) share the posture. See
   [`docs/07-security-and-privacy.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/07-security-and-privacy.md).
+
+## Pair collaboration
+
+- **Command and cost controls** — see the canonical
+  [`configuration.md`](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/configuration.md#pair-collaboration).
+- **Topology, messaging, terminal, and security contracts** — follow the owner
+  links in the
+  [`docs/README.md` map](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/README.md#pair-collaboration-ownership).

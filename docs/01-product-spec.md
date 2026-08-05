@@ -178,6 +178,15 @@ the harness exerts. It is independent of the interface (REPL, CLI, print). Mode
 and permission profile are selectable per launch via flags (`--mode`,
 `--permission`/`--bypass`) or config; see the harness spec.
 
+`localpilot pair <task>` is an opt-in interface command, not a third operating
+mode. It composes two ordinary, independent Agent-mode sessions over one task
+and workspace, then schedules their model turns serially until both agree on one
+typed candidate or a configured bound stops the run. Each session keeps its own
+history, provider/model selection, tools, permission engine, approvals, and
+questions; the command adds collaboration orchestration and a shared terminal
+shell, not another session mode. Harness-mode plan and commit rules do not apply,
+and the command never commits automatically.
+
 ### Agent Mode (default)
 
 A conversational coding agent. The model drives the loop, calls tools, and edits
