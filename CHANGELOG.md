@@ -6,6 +6,19 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Full-screen and pair chat now handle the takeover commands with arguments.**
+  `/help`, `/theme`, `/settings`, `/diff`, and `/search` are parsed as real
+  commands in the full-screen and pair hosts instead of being intercepted as bare
+  tokens: `/help me` reports "this command does not take arguments" rather than
+  "unknown"; `/theme <name>` applies a theme directly (an unknown name warns and
+  leaves the picker closed); `/settings <query>` pre-fills the settings filter;
+  `/diff <path>` filters the diff to matching paths; `/search <query>` seeds the
+  search. `/help`, `/theme`, and `/search` still work while a turn is running.
+  The inline composer is unchanged. Submitting `/search` with an attached image
+  now shows the same "remove image attachments" notice as any other slash command
+  (previously it opened search silently), keeping every attachment path
+  non-silent.
+
 - **Opt-in two-agent collaboration: `localpilot pair <task>`.** Two ordinary,
   independent Agent-mode sessions can now work one task in a shared workspace
   through a typed, bounded propose/revise/agree protocol. The driver runs only

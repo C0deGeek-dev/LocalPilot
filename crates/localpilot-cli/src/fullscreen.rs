@@ -39,7 +39,7 @@ use localpilot_terminal_ui::{
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
 use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
-use localpilot_tui::{parse_slash, SlashAction};
+use localpilot_tui::{parse_slash_for, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -1427,6 +1427,74 @@ fn activate_session_selection(
     }
 }
 
+/// Load the working-tree diff, optionally keeping only files whose path contains
+/// `filter` (trimmed, ASCII-case-insensitive substring; an empty filter keeps
+/// all files), then open the diff takeover. Filtering never mutates file
+/// contents. On load failure, open the "Diff unavailable" notice.
+fn open_workspace_diff(app: &mut AppModel, cwd: &Path, filter: Option<&str>) {
+    match load_workspace_diff(cwd) {
+        Ok(files) => app.open_diff(filter_diff_files(files, filter)),
+        Err(error) => {
+            app.open_diff([DiffFile {
+                status: "!".to_string(),
+                path: "Diff unavailable".to_string(),
+                additions: 0,
+                deletions: 0,
+                lines: vec![DiffLine {
+                    old_line: None,
+                    new_line: None,
+                    kind: DiffLineKind::Metadata,
+                    text: error.to_string(),
+                }],
+            }]);
+        }
+    }
+}
+
+/// Keep only diff files whose path contains `filter` (trimmed,
+/// ASCII-case-insensitive substring). An absent or empty filter keeps them all.
+/// File contents are never mutated — only the file list is narrowed.
+fn filter_diff_files(mut files: Vec<DiffFile>, filter: Option<&str>) -> Vec<DiffFile> {
+    if let Some(needle) = filter.map(|value| value.trim().to_ascii_lowercase()) {
+        if !needle.is_empty() {
+            files.retain(|file| file.path.to_ascii_lowercase().contains(&needle));
+        }
+    }
+    files
+}
+
+/// Apply a full-screen takeover action (help/theme/settings/diff/search) on the
+/// idle default host. Factored out of the `execute_fullscreen_slash` match so the
+/// idle dispatch seam is unit-testable without constructing a session runtime —
+/// production and tests drive this same function. Only the five takeover actions
+/// reach it (the grouped call site guarantees that); anything else is a no-op.
+fn open_fullscreen_takeover(
+    app: &mut AppModel,
+    config: &localpilot_config::Config,
+    cwd: &Path,
+    action: SlashAction,
+) {
+    match action {
+        SlashAction::Help => app.open_help(),
+        SlashAction::Theme(None) => app.open_theme_picker(),
+        SlashAction::Theme(Some(value)) => match value.parse::<Theme>() {
+            Ok(theme) => app.apply_theme(theme),
+            Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+        },
+        SlashAction::Settings(None) => {
+            let settings = fullscreen_settings(app, config);
+            app.open_settings(settings);
+        }
+        SlashAction::Settings(Some(query)) => {
+            let settings = fullscreen_settings(app, config);
+            app.open_settings_with_query(settings, &query);
+        }
+        SlashAction::Diff(filter) => open_workspace_diff(app, cwd, filter.as_deref()),
+        SlashAction::Search(query) => app.open_timeline_search(query.unwrap_or_default()),
+        _ => {}
+    }
+}
+
 fn load_workspace_diff(cwd: &Path) -> Result<Vec<DiffFile>> {
     let primary = read_git_diff(cwd, true)?;
     let bytes = if primary.0.success() {
@@ -2334,32 +2402,7 @@ async fn execute_fullscreen_slash(
             "image attachments were ignored for the slash command".to_string(),
         ));
     }
-    if submitted.prompt.trim() == "/settings" {
-        let settings = fullscreen_settings(app, config);
-        app.open_settings(settings);
-        return false;
-    }
-    if submitted.prompt.trim() == "/diff" {
-        match load_workspace_diff(cwd) {
-            Ok(files) => app.open_diff(files),
-            Err(error) => {
-                app.open_diff([DiffFile {
-                    status: "!".to_string(),
-                    path: "Diff unavailable".to_string(),
-                    additions: 0,
-                    deletions: 0,
-                    lines: vec![DiffLine {
-                        old_line: None,
-                        new_line: None,
-                        kind: DiffLineKind::Metadata,
-                        text: error.to_string(),
-                    }],
-                }]);
-            }
-        }
-        return false;
-    }
-    let Some(action) = parse_slash(&submitted.prompt) else {
+    let Some(action) = parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt) else {
         app.apply_runtime(RuntimeUpdate::Warning(
             "invalid slash command input".to_string(),
         ));
@@ -2536,6 +2579,11 @@ async fn execute_fullscreen_slash(
                 }
             }
         }
+        action @ (SlashAction::Help
+        | SlashAction::Theme(_)
+        | SlashAction::Settings(_)
+        | SlashAction::Diff(_)
+        | SlashAction::Search(_)) => open_fullscreen_takeover(app, config, cwd, action),
         SlashAction::Unknown(command) => {
             app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "unknown slash command: /{command}"
@@ -3074,10 +3122,6 @@ fn execute_pair_slash(
     if !submitted.images.is_empty() {
         apply_pair_notice(app, "Image attachments were ignored for the slash command.");
     }
-    if submitted.prompt.trim() == "/settings" {
-        app.open_settings(fullscreen_settings(app, config));
-        return PairHostAction::None;
-    }
     // Match `/abort` as an exact first token so `/abortive` stays an unknown command
     // rather than a mis-typed abort.
     if submitted.prompt.split_whitespace().next() == Some("/abort") {
@@ -3092,31 +3136,45 @@ fn execute_pair_slash(
         );
         return PairHostAction::None;
     }
-    if submitted.prompt.trim() == "/diff" {
-        match load_workspace_diff(cwd) {
-            Ok(files) => app.open_diff(files),
-            Err(error) => app.open_diff([DiffFile {
-                status: "!".to_string(),
-                path: "Diff unavailable".to_string(),
-                additions: 0,
-                deletions: 0,
-                lines: vec![DiffLine {
-                    old_line: None,
-                    new_line: None,
-                    kind: DiffLineKind::Metadata,
-                    text: error.to_string(),
-                }],
-            }]),
-        }
-        return PairHostAction::None;
-    }
-    match parse_slash(&submitted.prompt) {
+    match parse_slash_for(localpilot_tui::Host::Pair, &submitted.prompt) {
         Some(SlashAction::Exit { print_transcript }) => {
             app.request_exit(print_transcript);
             PairHostAction::Exit
         }
         Some(SlashAction::Invalid { command, reason }) => {
             apply_pair_warning(app, PairPeer::A, format!("invalid /{command}: {reason}"));
+            PairHostAction::None
+        }
+        Some(SlashAction::Help) => {
+            app.open_help();
+            PairHostAction::None
+        }
+        Some(SlashAction::Theme(None)) => {
+            app.open_theme_picker();
+            PairHostAction::None
+        }
+        Some(SlashAction::Theme(Some(value))) => {
+            match value.parse::<Theme>() {
+                Ok(theme) => app.apply_theme(theme),
+                Err(error) => apply_pair_warning(app, PairPeer::A, error.to_string()),
+            }
+            PairHostAction::None
+        }
+        Some(SlashAction::Settings(None)) => {
+            app.open_settings(fullscreen_settings(app, config));
+            PairHostAction::None
+        }
+        Some(SlashAction::Settings(Some(query))) => {
+            let settings = fullscreen_settings(app, config);
+            app.open_settings_with_query(settings, &query);
+            PairHostAction::None
+        }
+        Some(SlashAction::Diff(filter)) => {
+            open_workspace_diff(app, cwd, filter.as_deref());
+            PairHostAction::None
+        }
+        Some(SlashAction::Search(query)) => {
+            app.open_timeline_search(query.unwrap_or_default());
             PairHostAction::None
         }
         Some(SlashAction::Unknown(command)) => {
@@ -3891,19 +3949,46 @@ fn handle_turn_event_impl(
                     copy_to_clipboard(app, text);
                     false
                 }
-                AppCommand::RunSlash(submitted) => match parse_slash(&submitted.prompt) {
-                    Some(SlashAction::Exit { print_transcript }) => {
-                        app.request_exit(print_transcript);
-                        cancel.cancel();
-                        true
+                AppCommand::RunSlash(submitted) => {
+                    match parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt) {
+                        Some(SlashAction::Exit { print_transcript }) => {
+                            app.request_exit(print_transcript);
+                            cancel.cancel();
+                            true
+                        }
+                        // The contained takeovers stay reachable mid-operation,
+                        // matching the behaviour before they became parsed actions.
+                        Some(SlashAction::Help) => {
+                            app.open_help();
+                            false
+                        }
+                        Some(SlashAction::Theme(None)) => {
+                            app.open_theme_picker();
+                            false
+                        }
+                        Some(SlashAction::Theme(Some(value))) => {
+                            match value.parse::<Theme>() {
+                                Ok(theme) => app.apply_theme(theme),
+                                Err(error) => {
+                                    app.apply_runtime(RuntimeUpdate::Warning(error.to_string()))
+                                }
+                            }
+                            false
+                        }
+                        Some(SlashAction::Search(query)) => {
+                            app.open_timeline_search(query.unwrap_or_default());
+                            false
+                        }
+                        // Everything else — including the idle-only settings/diff
+                        // takeovers — waits for the operation to finish.
+                        _ => {
+                            app.apply_runtime(RuntimeUpdate::Notice(
+                                "slash commands run when the current operation is idle".to_string(),
+                            ));
+                            false
+                        }
                     }
-                    _ => {
-                        app.apply_runtime(RuntimeUpdate::Notice(
-                            "slash commands run when the current operation is idle".to_string(),
-                        ));
-                        false
-                    }
-                },
+                }
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
                         prepare_prompt_operation(app, history, cwd, submitted, true)
@@ -5916,6 +6001,225 @@ mod tests {
             .items()
             .iter()
             .all(|item| !item.text.contains("usage: /abort")));
+    }
+
+    #[test]
+    fn pair_routes_all_five_takeovers_and_never_reports_unknown() {
+        let config = localpilot_config::Config::default();
+        let cwd = Path::new(".");
+        let submit = |prompt: &str| SubmittedInput {
+            shown: prompt.to_string(),
+            display: prompt.to_string(),
+            prompt: prompt.to_string(),
+            pastes: Vec::new(),
+            images: Vec::new(),
+        };
+        let unknown = |app: &AppModel| {
+            app.timeline_for(PeerPane::A)
+                .map(|pane| {
+                    pane.items()
+                        .iter()
+                        .any(|item| item.text.contains("unknown slash command"))
+                })
+                .unwrap_or(false)
+        };
+
+        // `/help` opens the help takeover.
+        let mut app = pair_app();
+        assert!(matches!(
+            execute_pair_slash(&mut app, &config, cwd, submit("/help")),
+            PairHostAction::None
+        ));
+        assert!(app.has_takeover());
+        assert!(!unknown(&app));
+
+        // `/theme dim` applies a valid theme directly; a bad name warns, no panic.
+        let mut app = pair_app();
+        let _ = execute_pair_slash(&mut app, &config, cwd, submit("/theme dim"));
+        assert_eq!(app.theme, Theme::Dim);
+        let mut app = pair_app();
+        let _ = execute_pair_slash(&mut app, &config, cwd, submit("/theme nonesuch"));
+        // The warning surfaces the parser's real reason, including the accepted
+        // values — not a hand-rolled "unknown theme" string.
+        assert!(app
+            .timeline_for(PeerPane::A)
+            .expect("A timeline")
+            .items()
+            .iter()
+            .any(|item| item.text.contains("expected default")));
+        assert!(!unknown(&app));
+
+        // `/settings <query>` opens settings with the filter prefilled.
+        let mut app = pair_app();
+        let _ = execute_pair_slash(&mut app, &config, cwd, submit("/settings mouse"));
+        assert!(app.has_takeover());
+        assert!(!unknown(&app));
+
+        // `/diff <path>` and `/search <query>` route without an unknown notice.
+        let mut app = pair_app();
+        let _ = execute_pair_slash(&mut app, &config, cwd, submit("/diff src"));
+        assert!(!unknown(&app));
+        let mut app = pair_app();
+        let _ = execute_pair_slash(&mut app, &config, cwd, submit("/search foo"));
+        assert!(!unknown(&app));
+    }
+
+    #[test]
+    fn idle_fullscreen_takeovers_open_via_the_shared_seam() {
+        // Drives the exact function the idle full-screen branch uses for the five
+        // takeovers, without constructing a session runtime.
+        let config = localpilot_config::Config::default();
+        let cwd = Path::new(".");
+
+        let mut help = app();
+        open_fullscreen_takeover(&mut help, &config, cwd, SlashAction::Help);
+        assert!(help.has_takeover());
+
+        let mut picker = app();
+        open_fullscreen_takeover(&mut picker, &config, cwd, SlashAction::Theme(None));
+        assert!(picker.has_theme_picker());
+
+        let mut good = app();
+        open_fullscreen_takeover(
+            &mut good,
+            &config,
+            cwd,
+            SlashAction::Theme(Some("dim".to_string())),
+        );
+        assert_eq!(good.theme, Theme::Dim);
+        assert!(!good.has_theme_picker());
+
+        let mut bad = app();
+        let before = bad.theme;
+        open_fullscreen_takeover(
+            &mut bad,
+            &config,
+            cwd,
+            SlashAction::Theme(Some("nonesuch".to_string())),
+        );
+        assert_eq!(
+            bad.theme, before,
+            "an invalid theme leaves the theme unchanged"
+        );
+        assert!(
+            !bad.has_theme_picker(),
+            "an invalid theme never opens the picker"
+        );
+        assert!(
+            bad.active_timeline()
+                .items()
+                .iter()
+                .any(|item| item.text.contains("expected default")),
+            "the warning surfaces the parser's accepted-values reason",
+        );
+
+        let mut settings = app();
+        open_fullscreen_takeover(
+            &mut settings,
+            &config,
+            cwd,
+            SlashAction::Settings(Some("mouse".to_string())),
+        );
+        assert!(settings.has_takeover());
+
+        let mut diff = app();
+        open_fullscreen_takeover(&mut diff, &config, cwd, SlashAction::Diff(None));
+        assert!(diff.has_takeover());
+
+        let mut search = app();
+        open_fullscreen_takeover(
+            &mut search,
+            &config,
+            cwd,
+            SlashAction::Search(Some("q".to_string())),
+        );
+        // Search opens the timeline-search input overlay, not a takeover/picker.
+        assert!(search.has_input_overlay());
+        assert!(!search.has_takeover());
+        assert!(!search.has_theme_picker());
+    }
+
+    #[test]
+    fn takeovers_dispatch_correctly_during_an_active_turn() {
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cwd = Path::new(".");
+        // Submit a slash command while a turn is running and return the app state.
+        let submit_during_work = |prompt: &str| {
+            let mut app = app();
+            app.begin_work();
+            let cancel = CancellationToken::new();
+            let mut queue = VecDeque::new();
+            let _ = app.handle_input(InputAction::Insert(prompt.to_string()), 80);
+            let exit = handle_turn_event(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &cancel,
+                &event_hit_map(),
+                &mut queue,
+                &history,
+                cwd,
+                &image_capability(false),
+            );
+            assert!(!exit, "{prompt} must not exit the turn");
+            app
+        };
+        let idle_notice = |app: &AppModel| {
+            app.active_timeline()
+                .items()
+                .iter()
+                .any(|item| item.text.contains("run when the current operation is idle"))
+        };
+
+        // help/theme/search stay reachable mid-operation.
+        assert!(submit_during_work("/help").has_takeover());
+        assert_eq!(submit_during_work("/theme dim").theme, Theme::Dim);
+        let searched = submit_during_work("/search foo");
+        assert!(searched.has_input_overlay());
+        assert!(!searched.has_takeover());
+
+        // an invalid theme mid-turn surfaces the real parser reason, no picker.
+        let bad = submit_during_work("/theme nonesuch");
+        assert!(!bad.has_theme_picker());
+        assert!(bad
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("expected default")));
+
+        // settings/diff are idle-only: they emit the idle notice, never a takeover.
+        let settings = submit_during_work("/settings");
+        assert!(!settings.has_takeover());
+        assert!(idle_notice(&settings));
+        let diff = submit_during_work("/diff");
+        assert!(!diff.has_takeover());
+        assert!(idle_notice(&diff));
+    }
+
+    #[test]
+    fn diff_filter_is_trimmed_case_insensitive_substring_over_paths() {
+        let file = |path: &str| DiffFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+            lines: Vec::new(),
+        };
+        let files = vec![
+            file("src/main.rs"),
+            file("crates/localpilot-cli/SRC/lib.rs"),
+            file("docs/readme.md"),
+        ];
+        // Empty / absent filter keeps all files.
+        assert_eq!(filter_diff_files(files.clone(), None).len(), 3);
+        assert_eq!(filter_diff_files(files.clone(), Some("   ")).len(), 3);
+        // Case-insensitive, trimmed substring on the path.
+        let src = filter_diff_files(files.clone(), Some("  SrC  "));
+        assert_eq!(src.len(), 2);
+        assert!(src
+            .iter()
+            .all(|f| f.path.to_ascii_lowercase().contains("src")));
+        // No match yields an empty list (the caller opens the empty diff state).
+        assert!(filter_diff_files(files, Some("no-such-path")).is_empty());
     }
 
     #[test]

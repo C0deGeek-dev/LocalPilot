@@ -273,9 +273,11 @@ of scope unless a future ADR supersedes ADR-0006.
 The single source of truth for the slash-command surface across all three hosts
 (inline composer, full-screen picker, pair picker). Owns:
 
-- the parser (`parse_slash` and its helpers, plus `Mode`/`Profile`/`SlashAction`
-  and the argument shapes) — a behaviour-preserving relocation and refactor from
-  `localpilot-tui` into lookup-first typed dispatch, proven by the frozen tests
+- the parser (`parse_slash`/`parse_slash_for` and their helpers, plus
+  `Mode`/`Profile`/`SlashAction` and the argument shapes) — lookup-first typed
+  dispatch, host-aware: the inline host keeps its frozen behaviour while the
+  full-screen and pair hosts additionally route the five takeover commands
+  (`help`/`theme`/`settings`/`diff`/`search`) to real actions
 - one globally-ordered `SLASH_SPELLINGS` table: each spelling maps to a semantic
   `SlashCommand` id and carries an `ArgSpec`, a `StrayArgs` policy, and a
   per-host `Option<&str>` description

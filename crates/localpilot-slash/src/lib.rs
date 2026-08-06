@@ -117,6 +117,20 @@ pub enum SlashAction {
     Exit {
         print_transcript: bool,
     },
+    /// Open the help takeover. Routed for full-screen/pair only; no arguments.
+    Help,
+    /// Open the theme picker, or apply a theme directly when a name follows
+    /// (`/theme dim`). Routed for full-screen/pair only.
+    Theme(Option<String>),
+    /// Open settings, optionally pre-filling the filter (`/settings mouse`).
+    /// Routed for full-screen/pair only.
+    Settings(Option<String>),
+    /// Show the working-tree diff, optionally filtered to paths containing the
+    /// given substring (`/diff src`). Routed for full-screen/pair only.
+    Diff(Option<String>),
+    /// Search the session timeline, optionally seeding the query (`/search foo`).
+    /// Routed for full-screen/pair only.
+    Search(Option<String>),
     Invalid {
         command: String,
         reason: String,
@@ -498,13 +512,18 @@ slash_commands! {
         Exit => both_pair("exit", Optional, Reject, "Exit LocalPilot (/exit [print])"),
         // `/quit` accepts the same optional `print` argument as `/exit`.
         Exit => both_pair("quit", Optional, Reject, "Exit LocalPilot"),
-        // --- full-screen/pair takeovers (no-arg; per-host copy; not inline) ---
+        // --- full-screen/pair takeovers (per-host copy; not inline) -----------
+        // The inline host routes all five to `Unknown` — a host gate outside the
+        // builder, not a metadata quirk. For full-screen/pair they route to real
+        // actions. The `ArgSpec`/`StrayArgs` metadata stays host-independent and
+        // truthful: `help` is `NoArg`/`Reject` (a stray argument is `Invalid`
+        // "this command does not take arguments", via the table-driven `no_arg`
+        // path), while `theme`/`settings`/`diff`/`search` are `Optional` (any
+        // trailing text is the name/query/path, so `stray` never applies).
         Search => takeover(
             "search",
-            // `/search` accepts an optional query today (the timeline search
-            // command handles both bare `/search` and `/search <query>`), so its
-            // owning-host syntax is Optional even though the shared parser routes
-            // it externally (Unknown) until a later change.
+            // `/search` accepts an optional query (bare `/search` opens search;
+            // `/search <query>` seeds it), so its owning-host syntax is Optional.
             Optional,
             Fall,
             "Search messages in this session",
@@ -513,27 +532,30 @@ slash_commands! {
         Help => takeover(
             "help",
             NoArg,
-            Fall,
+            Reject,
             "Open keyboard and command help",
             "Open keyboard and command help"
         ),
         Theme => takeover(
             "theme",
-            NoArg,
+            // `/theme` opens the picker; `/theme <name>` applies a theme directly.
+            Optional,
             Fall,
             "Preview terminal color modes",
             "Preview terminal color modes"
         ),
         Settings => takeover(
             "settings",
-            NoArg,
+            // `/settings` opens settings; `/settings <query>` pre-fills the filter.
+            Optional,
             Fall,
             "Inspect terminal chat settings",
             "Inspect terminal settings"
         ),
         Diff => takeover(
             "diff",
-            NoArg,
+            // `/diff` shows all changes; `/diff <path>` filters by path substring.
+            Optional,
             Fall,
             "Review tracked workspace changes",
             "Review tracked workspace changes"
@@ -611,6 +633,11 @@ impl SlashAction {
             SlashAction::Skills(_) => C::Skills,
             SlashAction::Background(_) => C::Bg,
             SlashAction::Exit { .. } => C::Exit,
+            SlashAction::Help => C::Help,
+            SlashAction::Theme(_) => C::Theme,
+            SlashAction::Settings(_) => C::Settings,
+            SlashAction::Diff(_) => C::Diff,
+            SlashAction::Search(_) => C::Search,
             SlashAction::Invalid { .. } | SlashAction::Unknown(_) => return None,
         })
     }
@@ -624,6 +651,16 @@ impl SlashAction {
 /// no shared route and resolve to `Unknown` exactly as before this table existed.
 #[must_use]
 pub fn parse_slash(line: &str) -> Option<SlashAction> {
+    parse_slash_for(Host::Inline, line)
+}
+
+/// Host-aware parse. Identical to [`parse_slash`] for `Host::Inline`; for
+/// `Host::Fullscreen`/`Host::Pair` the five takeover spellings resolve to their
+/// real actions ([`SlashAction::Help`]/`Theme`/`Settings`/`Diff`/`Search`)
+/// instead of `Unknown`. The pair-only `abort` stays `Unknown` for every host —
+/// the pair loop owns it as an exact-token route ahead of the parser.
+#[must_use]
+pub fn parse_slash_for(host: Host, line: &str) -> Option<SlashAction> {
     let command = line.trim().strip_prefix('/')?.trim();
     let (name, args) = command
         .split_once(char::is_whitespace)
@@ -631,7 +668,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
     let Some(spelling) = lookup(name) else {
         return Some(SlashAction::Unknown(command.to_string()));
     };
-    Some(dispatch(spelling, name, args, command))
+    Some(dispatch(spelling, host, name, args, command))
 }
 
 /// Dispatch a resolved spelling to its action. One arm per [`SlashCommand`]
@@ -639,7 +676,7 @@ pub fn parse_slash(line: &str) -> Option<SlashAction> {
 /// silent fall-through. Complex payload/subcommand parsing stays inside the
 /// relevant semantic arms; simple no-argument commands defer to [`no_arg`], and
 /// the frozen stray-argument policy lives in [`stray`].
-fn dispatch(spelling: &Spelling, name: &str, args: &str, command: &str) -> SlashAction {
+fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &str) -> SlashAction {
     match spelling.command {
         C::Agent => no_arg(
             spelling,
@@ -799,13 +836,36 @@ fn dispatch(spelling: &Spelling, name: &str, args: &str, command: &str) -> Slash
             },
             _ => stray(spelling, name, command),
         },
-        // Externally routed: the five full-screen/pair takeovers and the
-        // pair-only `abort` have no shared parse route. They resolve to
-        // `Unknown` regardless of their (host-owned) argument syntax, exactly as
-        // before this table existed.
-        C::Help | C::Theme | C::Settings | C::Diff | C::Search | C::Abort => {
-            SlashAction::Unknown(command.to_string())
-        }
+        // The pair-only `abort` has no shared parse route on any host — the pair
+        // event loop owns it as an exact-token route ahead of the parser.
+        C::Abort => SlashAction::Unknown(command.to_string()),
+        // The five full-screen/pair takeovers resolve to `Unknown` for the
+        // inline host (which never routes them) and to their real actions for
+        // the full-screen and pair hosts.
+        // `help` is no-arg: the table-driven `no_arg`/`stray` path yields `Help`
+        // for a bare form and the exact `Invalid` reason for a stray argument, so
+        // the no-arg policy is not duplicated here.
+        C::Help => routed_takeover(host, command, || {
+            no_arg(spelling, name, args, command, SlashAction::Help)
+        }),
+        C::Theme => routed_takeover(host, command, || SlashAction::Theme(opt_arg(args))),
+        C::Settings => routed_takeover(host, command, || SlashAction::Settings(opt_arg(args))),
+        C::Diff => routed_takeover(host, command, || SlashAction::Diff(opt_arg(args))),
+        C::Search => routed_takeover(host, command, || SlashAction::Search(opt_arg(args))),
+    }
+}
+
+/// A trimmed argument tail as an `Option`: `None` when empty.
+fn opt_arg(args: &str) -> Option<String> {
+    (!args.is_empty()).then(|| args.to_string())
+}
+
+/// Resolve a full-screen/pair takeover: `Unknown` for the inline rollback host
+/// (which never routes these), the built action for full-screen and pair.
+fn routed_takeover(host: Host, command: &str, build: impl FnOnce() -> SlashAction) -> SlashAction {
+    match host {
+        Host::Inline => SlashAction::Unknown(command.to_string()),
+        Host::Fullscreen | Host::Pair => build(),
     }
 }
 
@@ -1049,15 +1109,16 @@ mod tests {
             assert_eq!(args(name), Some(ArgSpec::Required), "{name} is Required");
         }
         // Optional-argument commands (a bare form is valid). Includes the
-        // `search` takeover, which accepts an optional query in its owning host.
+        // `search`/`theme`/`settings`/`diff` takeovers, which accept an optional
+        // query/name/path in their owning host.
         for name in [
             "model", "localbox", "continue", "resume", "compact", "research", "ingest", "bg",
-            "agents", "skills", "exit", "quit", "q", "search",
+            "agents", "skills", "exit", "quit", "q", "search", "theme", "settings", "diff",
         ] {
             assert_eq!(args(name), Some(ArgSpec::Optional), "{name} is Optional");
         }
-        // No-argument commands: help/theme/settings/diff takeovers and the
-        // pair-only abort (search is Optional, above).
+        // No-argument commands: the `help` takeover and the pair-only `abort`
+        // (the other four takeovers are Optional, above).
         for name in [
             "agent",
             "harness",
@@ -1079,16 +1140,11 @@ mod tests {
             "wait-resume",
             "wait_resume",
             "help",
-            "theme",
-            "settings",
-            "diff",
             "abort",
         ] {
             assert_eq!(args(name), Some(ArgSpec::None), "{name} is no-arg");
         }
-        // `search` is Optional (owning host), but the shared parser still routes
-        // both forms externally as `Unknown` until a later change adds the variant.
-        assert_eq!(args("search"), Some(ArgSpec::Optional));
+        // The inline host never routes the takeovers: both forms stay `Unknown`.
         assert_eq!(
             parse_slash("/search"),
             Some(SlashAction::Unknown("search".to_string()))
@@ -1113,16 +1169,23 @@ mod tests {
         );
         // The pair host that owns `abort` rejects a stray argument.
         assert_eq!(stray("abort"), Some(StrayArgs::InvalidNoArgs));
-        // `help` is a bare takeover, not an argument-taking command.
+        // `help` is a bare takeover: no-arg metadata AND a truthful stray-reject
+        // policy (host-independent), so `/help me` is `Invalid`, never `Unknown`.
         assert_eq!(args("help"), Some(ArgSpec::None));
+        assert_eq!(stray("help"), Some(StrayArgs::InvalidNoArgs));
     }
 
     #[test]
     fn abort_is_pair_only_and_never_parsed_or_bridged() {
-        assert_eq!(
-            parse_slash("/abort"),
-            Some(SlashAction::Unknown("abort".to_string()))
-        );
+        // `abort` is external for every host, including the pair host that owns
+        // it as an exact-token route ahead of the parser.
+        for host in [Host::Inline, Host::Fullscreen, Host::Pair] {
+            assert_eq!(
+                parse_slash_for(host, "/abort"),
+                Some(SlashAction::Unknown("abort".to_string())),
+                "abort must stay external for {host:?}",
+            );
+        }
         let pair: BTreeSet<_> = specs_for(Host::Pair).into_iter().map(|(n, _)| n).collect();
         assert!(pair.contains("abort"));
         assert!(!specs_for(Host::Inline).iter().any(|(n, _)| *n == "abort"));
@@ -1132,9 +1195,9 @@ mod tests {
     }
 
     #[test]
-    fn takeovers_are_externally_routed_not_parsed() {
-        // The five takeovers have no shared parse route: bare and with-argument
-        // forms both resolve to `Unknown`, never a semantic action.
+    fn takeovers_are_unknown_for_the_inline_host() {
+        // The inline rollback host never routes the five takeovers: bare and
+        // with-argument forms both resolve to `Unknown`, never a semantic action.
         for name in ["search", "help", "theme", "settings", "diff"] {
             assert_eq!(
                 parse_slash(&format!("/{name}")),
@@ -1148,13 +1211,82 @@ mod tests {
     }
 
     #[test]
+    fn takeovers_route_for_fullscreen_and_pair() {
+        for host in [Host::Fullscreen, Host::Pair] {
+            assert_eq!(parse_slash_for(host, "/help"), Some(SlashAction::Help));
+            // `/help me` is the exact table-driven no-arg rejection, never
+            // `Unknown` — the same reason the other guarded no-arg commands give.
+            assert_eq!(
+                parse_slash_for(host, "/help me"),
+                Some(SlashAction::Invalid {
+                    command: "help".to_string(),
+                    reason: "this command does not take arguments".to_string(),
+                })
+            );
+            assert_eq!(
+                parse_slash_for(host, "/theme"),
+                Some(SlashAction::Theme(None))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/theme dim"),
+                Some(SlashAction::Theme(Some("dim".to_string())))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/settings"),
+                Some(SlashAction::Settings(None))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/settings mouse"),
+                Some(SlashAction::Settings(Some("mouse".to_string())))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/diff"),
+                Some(SlashAction::Diff(None))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/diff src"),
+                Some(SlashAction::Diff(Some("src".to_string())))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/search"),
+                Some(SlashAction::Search(None))
+            );
+            assert_eq!(
+                parse_slash_for(host, "/search foo"),
+                Some(SlashAction::Search(Some("foo".to_string())))
+            );
+            // None of the five ever resolves to `Unknown` in these hosts.
+            for name in ["help", "theme", "settings", "diff", "search"] {
+                assert!(
+                    !matches!(
+                        parse_slash_for(host, &format!("/{name}")),
+                        Some(SlashAction::Unknown(_))
+                    ),
+                    "/{name} must not be Unknown for {host:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_round_trips_over_takeovers() {
+        assert_eq!(SlashAction::Help.command(), Some(C::Help));
+        assert_eq!(SlashAction::Theme(None).command(), Some(C::Theme));
+        assert_eq!(
+            SlashAction::Theme(Some("dim".to_string())).command(),
+            Some(C::Theme)
+        );
+        assert_eq!(SlashAction::Settings(None).command(), Some(C::Settings));
+        assert_eq!(SlashAction::Diff(None).command(), Some(C::Diff));
+        assert_eq!(SlashAction::Search(None).command(), Some(C::Search));
+    }
+
+    #[test]
     fn every_semantic_name_parses_to_its_command_id() {
         for spelling in SLASH_SPELLINGS {
-            // Takeovers and the pair-only Abort have no `SlashAction` variant yet.
-            if matches!(
-                spelling.command,
-                C::Help | C::Theme | C::Settings | C::Diff | C::Search | C::Abort
-            ) {
+            // The pair-only Abort has no `SlashAction` variant — it is owned by
+            // the pair loop as an exact-token route, never bridged.
+            if matches!(spelling.command, C::Abort) {
                 continue;
             }
             let line = match (spelling.command, spelling.args) {
@@ -1163,7 +1295,11 @@ mod tests {
                 (_, ArgSpec::None | ArgSpec::Optional) => format!("/{}", spelling.name),
                 (_, ArgSpec::Required) => format!("/{} x", spelling.name),
             };
-            let action = parse_slash(&line).unwrap_or_else(|| panic!("{line} did not parse"));
+            // The five takeovers route only for full-screen/pair; every other
+            // command parses identically on every host, so the full-screen host
+            // exercises them all.
+            let action = parse_slash_for(Host::Fullscreen, &line)
+                .unwrap_or_else(|| panic!("{line} did not parse"));
             assert_eq!(
                 action.command(),
                 Some(spelling.command),

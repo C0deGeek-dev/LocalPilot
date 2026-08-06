@@ -5316,8 +5316,9 @@ mod tests {
         let _ = app
             .active_timeline_mut()
             .push(ItemKind::Assistant, "new MARKER");
-        let _ = app.handle_input(crate::InputAction::Insert("/search marker".to_string()), 76);
-        let _ = app.handle_input(crate::InputAction::Submit, 76);
+        // `/search <query>` is emitted as an ordinary slash command; the host
+        // opens timeline search seeded with the query.
+        app.open_timeline_search("marker".to_string());
         let mut hit_map = None;
         terminal
             .draw(|frame| hit_map = Some(render(frame, &app)))

@@ -1044,6 +1044,14 @@ async fn run_slash(
         SlashAction::Invalid { command, reason } => {
             state.apply(UiEvent::Notice(format!("invalid /{command}: {reason}")));
         }
+        // The full-screen/pair takeovers are never produced by the inline parser
+        // (`parse_slash`), so they are unreachable in this host; the explicit arm
+        // keeps the match exhaustive without a wildcard.
+        SlashAction::Help
+        | SlashAction::Theme(_)
+        | SlashAction::Settings(_)
+        | SlashAction::Diff(_)
+        | SlashAction::Search(_) => {}
         SlashAction::Unknown(command) => {
             state.apply(UiEvent::Notice(format!(
                 "unknown slash command: /{command}"

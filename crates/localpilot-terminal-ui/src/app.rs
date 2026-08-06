@@ -1596,18 +1596,13 @@ impl AppModel {
                                 AppCommand::RunShell(UserShellCommand { command })
                             })
                     }
-                } else if self.open_theme_for_draft()
-                    || self.open_help_for_draft()
-                    || self.open_command_values_for_draft()
-                {
-                    AppCommand::None
-                } else if let Some(query) = timeline_search_command(self.editor.text()) {
-                    // The slash command is an invocation, not a draft to restore
-                    // when search closes.
-                    self.editor.replace_draft(String::new());
-                    self.open_timeline_search(query);
+                } else if self.open_command_values_for_draft() {
                     AppCommand::None
                 } else {
+                    // `/help`, `/theme`, and `/search` are emitted as ordinary
+                    // slash commands here and routed by the host, so their
+                    // argument-bearing forms are handled truthfully rather than
+                    // intercepted as bare tokens.
                     self.submit_editor()
                 }
             }
@@ -2063,6 +2058,18 @@ impl AppModel {
         self.theme = theme;
     }
 
+    /// Apply a theme by value (e.g. from `/theme dim`), preserving the settings
+    /// invariants a raw field write would skip. Any open theme picker is
+    /// closed/restored FIRST — closing it after assignment would restore the
+    /// picker's original theme and discard the requested one.
+    pub fn apply_theme(&mut self, theme: Theme) {
+        if self.theme_picker.is_some() {
+            self.close_theme_picker(true);
+        }
+        self.theme = theme;
+        self.sync_setting_values();
+    }
+
     pub fn open_help(&mut self) {
         self.exit_armed = false;
         self.quick_help = false;
@@ -2111,6 +2118,18 @@ impl AppModel {
             selected_file: 0,
             tree_visible: true,
         });
+    }
+
+    /// Open settings with the filter pre-filled from `query` (e.g. from
+    /// `/settings mouse`). The query goes through the same sanitize, byte-cap,
+    /// and selection-reset path as interactive typing.
+    pub fn open_settings_with_query(
+        &mut self,
+        settings: impl IntoIterator<Item = SettingEntry>,
+        query: &str,
+    ) {
+        self.open_settings(settings);
+        self.append_settings_query(query);
     }
 
     fn append_settings_query(&mut self, text: &str) {
@@ -3193,7 +3212,9 @@ impl AppModel {
         self.refresh_reverse_history(None);
     }
 
-    fn open_timeline_search(&mut self, query: String) {
+    /// Open timeline search, seeding the query (empty for a blank search). The
+    /// query is sanitized and newline-flattened before it is stored.
+    pub fn open_timeline_search(&mut self, query: String) {
         self.quick_help = false;
         let original_draft = self.editor.snapshot();
         self.editor.replace_draft(String::new());
@@ -3737,38 +3758,6 @@ impl AppModel {
         self.open_command_values_with_query(&command, &query)
     }
 
-    fn open_help_for_draft(&mut self) -> bool {
-        if self.editor.text().trim() != "/help" {
-            return false;
-        }
-        if self.editor.has_images() {
-            let _ = self.push_runtime_item(
-                ItemKind::Notice,
-                "remove image attachments before opening help",
-            );
-            return true;
-        }
-        let _ = self.editor.submit_command();
-        self.open_help();
-        true
-    }
-
-    fn open_theme_for_draft(&mut self) -> bool {
-        if self.editor.text().trim() != "/theme" {
-            return false;
-        }
-        if self.editor.has_images() {
-            let _ = self.push_runtime_item(
-                ItemKind::Notice,
-                "remove image attachments before choosing a theme",
-            );
-            return true;
-        }
-        let _ = self.editor.submit_command();
-        self.open_theme_picker();
-        true
-    }
-
     fn submit_editor(&mut self) -> AppCommand {
         if self.editor.text().trim_start().starts_with('/') {
             if self.editor.has_images() {
@@ -4106,17 +4095,6 @@ fn value_completion_items(catalog: &[CompletionItem], query: &str) -> Vec<Comple
         .into_iter()
         .map(|(_, _, value)| value.clone())
         .collect()
-}
-
-fn timeline_search_command(text: &str) -> Option<String> {
-    let rest = text.strip_prefix("/search")?;
-    if rest.is_empty() {
-        return Some(String::new());
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim().to_string())
 }
 
 fn timeline_search_matches(timeline: &Timeline, query: &str) -> Vec<ContentPoint> {
@@ -5503,9 +5481,17 @@ mod tests {
         app.begin_work();
         app.editor.replace_draft("/help");
 
-        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
-        assert!(app.has_takeover());
+        // The widget now emits `/help` as an ordinary slash command; the host
+        // opens the contained, history-free help takeover (including mid-work).
+        let command = app.handle_input(InputAction::Submit, 80);
+        let AppCommand::RunSlash(submitted) = command else {
+            panic!("expected RunSlash, got {command:?}");
+        };
+        assert_eq!(submitted.prompt, "/help");
+        assert!(submitted.images.is_empty());
         assert!(app.editor.text().is_empty());
+        app.open_help();
+        assert!(app.has_takeover());
         assert_eq!(
             app.active_work(),
             WorkState::Busy {
@@ -5846,7 +5832,14 @@ mod tests {
         app.seed_history(vec!["ordinary prompt".to_string()]);
         app.begin_work();
         app.editor.replace_draft("/theme");
-        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        // `/theme` is emitted as an ordinary slash command; the host opens the
+        // picker (drive it directly here to test the picker's containment).
+        let command = app.handle_input(InputAction::Submit, 80);
+        let AppCommand::RunSlash(submitted) = command else {
+            panic!("expected RunSlash, got {command:?}");
+        };
+        assert_eq!(submitted.prompt, "/theme");
+        app.open_theme_picker();
         assert!(app.has_theme_picker());
         assert_eq!(app.theme, Theme::Default);
         assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_none());
@@ -5871,6 +5864,74 @@ mod tests {
         assert_eq!(app.theme, Theme::Dim);
         let _ = app.handle_input(InputAction::MoveUp, 80);
         assert_eq!(app.editor.text(), "ordinary prompt");
+    }
+
+    #[test]
+    fn apply_theme_by_value_supersedes_an_open_picker() {
+        let mut app = model();
+        // No picker open: the theme is applied directly.
+        app.apply_theme(Theme::Dim);
+        assert_eq!(app.theme, Theme::Dim);
+        assert!(!app.has_theme_picker());
+
+        // A picker previewing another theme must not clobber the requested one:
+        // the picker is closed/restored first, then the requested theme applies.
+        app.open_theme_picker();
+        let _ = app.handle_input(InputAction::MoveDown, 80);
+        app.apply_theme(Theme::HighContrast);
+        assert!(!app.has_theme_picker());
+        assert_eq!(app.theme, Theme::HighContrast);
+    }
+
+    #[test]
+    fn open_settings_with_query_prefills_and_caps_the_filter() {
+        let entry = |name: &str| SettingEntry {
+            section: "Input".into(),
+            name: name.into(),
+            value: "On".into(),
+            description: "Setting".into(),
+            edit: None,
+            is_default: true,
+        };
+        let mut app = model();
+        app.open_settings_with_query([entry("Mouse")], "mouse");
+        assert!(app.has_takeover());
+        assert_eq!(app.takeover().expect("settings").settings_query, "mouse");
+
+        // An over-long query is capped at the byte budget, not stored whole.
+        let long = "x".repeat(MAX_SETTINGS_QUERY_BYTES * 2);
+        app.open_settings_with_query([entry("Mouse")], &long);
+        assert!(app.takeover().expect("settings").settings_query.len() <= MAX_SETTINGS_QUERY_BYTES);
+    }
+
+    #[test]
+    fn takeover_slash_with_images_is_non_silent_and_retained() {
+        // Deleting the widget interceptions must not silently drop pasted images:
+        // `/help`, `/theme`, and `/search` fall to the generic slash guard, which
+        // warns, retains the attachment, and does not run the command.
+        for command in ["/help", "/theme", "/search foo"] {
+            let mut app = model();
+            let _ = app.handle_input(InputAction::Insert(command.to_string()), 80);
+            assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_some());
+            assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+            assert!(!app.has_takeover(), "{command} must not open a takeover");
+            assert!(!app.has_theme_picker());
+            assert!(app.timeline_search().is_none());
+            assert!(
+                app.active_timeline().items().iter().any(|item| {
+                    item.kind == ItemKind::Notice && item.text.contains("remove image attachments")
+                }),
+                "{command} must warn about attachments",
+            );
+            assert!(
+                app.editor.text().contains(command),
+                "{command} draft retained"
+            );
+            assert!(
+                app.editor.has_images(),
+                "{command} must retain the attachment, not just the text"
+            );
+        }
     }
 
     #[test]
@@ -6296,7 +6357,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_search_command_counts_messages_and_starts_at_the_newest() {
+    fn timeline_search_counts_messages_and_starts_at_the_newest() {
         let mut app = model();
         let older = app
             .active_timeline_mut()
@@ -6306,10 +6367,10 @@ mod tests {
             .active_timeline_mut()
             .push(ItemKind::Assistant, "newer MARKER")
             .expect("newer");
-        let _ = app.handle_input(InputAction::Insert("/search marker".to_string()), 80);
+        // `/search <query>` is emitted as an ordinary slash command; the host
+        // opens timeline search seeded with the query.
+        app.open_timeline_search("marker".to_string());
 
-        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
-        assert_eq!(app.editor.text(), "");
         assert_eq!(
             app.timeline_search(),
             Some(TimelineSearchView {
@@ -6388,8 +6449,8 @@ mod tests {
 
         let mut command = model();
         command.begin_work();
-        let _ = command.handle_input(InputAction::Insert("/search marker".to_string()), 80);
-        let _ = command.handle_input(InputAction::Submit, 80);
+        // The host opens timeline search from the emitted `/search` command.
+        command.open_timeline_search("marker".to_string());
         assert_eq!(
             command.handle_input(InputAction::Escape, 80),
             AppCommand::None

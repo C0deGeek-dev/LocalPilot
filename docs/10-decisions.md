@@ -4,7 +4,10 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
 
-Status: accepted. First increment of LocalHub#56.
+Status: accepted. Covers the first two increments of LocalHub#56: extracting the
+shared `localpilot-slash` surface, then making the five full-screen/pair takeover
+commands (`/help`, `/theme`, `/settings`, `/diff`, `/search`) host-aware parsed
+actions.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -41,9 +44,12 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   and they are not the same thing:
   - **Full-screen/pair takeovers** (`help`, `theme`, `settings`, `diff`,
     `search`): commands the full-screen and pair hosts service on their own
-    screens. What is temporary is only their **external string routing** —
-    `parse_slash` resolves them to `Unknown` because they have no shared parse
-    route yet; a later change gives them one. Their **catalog scope stays
+    screens. They are now routed through the **host-aware** parser: `parse_slash`
+    (the inline rollback host) still resolves them to `Unknown`, while
+    `parse_slash_for(Fullscreen | Pair, …)` resolves them to real actions
+    (`Help`, `Theme(Option)`, `Settings(Option)`, `Diff(Option)`, `Search(Option)`),
+    so their argument-bearing forms (`/theme dim`, `/diff src`) are handled
+    truthfully instead of reported "unknown". Their **catalog scope stays
     full-screen/pair-only**: they are not deferred-inline rows and never join the
     inline picker. Inline stays **34** through #56 (this change adds no inline
     command); the final full-screen catalog is **39** (34 shared + 5 takeovers)
@@ -57,18 +63,22 @@ Decision: parsing and the three host catalogs are generated from **one** table.
 
 - `ArgSpec`/`StrayArgs` metadata is **truthful against the shipped parser**, not
   decorative: `skills` is `Optional` (`/skills` → `Skills("")`), `quit` accepts
-  the optional `print` argument like `exit`, `help`/`theme`/`settings`/`diff`
-  are currently no-arg while `search` accepts an optional query (not a blanket
-  `Optional`), and `abort` is no-arg. A
-  metadata test exercises the argument shapes so they cannot silently diverge
-  from the parser again.
+  the optional `print` argument like `exit`, `help` and the pair-only `abort` are
+  no-arg (a stray argument is `Invalid`), and `theme`/`settings`/`diff`/`search`
+  are `Optional` — each takes an optional name/query/path in its owning host
+  (`/theme dim`, `/settings mouse`, `/diff src`, `/search foo`). A metadata test
+  exercises the argument shapes so they cannot silently diverge from the parser
+  again.
 
-- Stray-argument behaviour is **preserved exactly**, not normalized. `StrayArgs`
-  records the frozen per-spelling policy (`InvalidNoArgs` for the spellings the
-  old parser rejected with an arg, `FallThroughUnknown` for those that fell
-  through to the unknown-command path). Unifying the stray-arg policy across
-  spellings is deliberately deferred to a later change, so this change alters
-  no user-visible parse result.
+- Stray-argument behaviour of the **pre-existing shared commands** is preserved
+  exactly, not normalized. `StrayArgs` records the frozen per-spelling policy
+  (`InvalidNoArgs` for the spellings the old parser rejected with an arg,
+  `FallThroughUnknown` for those that fell through to the unknown-command path).
+  Unifying that policy is deliberately deferred. The inline rollback host's parse
+  results stay frozen; the only intended user-visible change is that the five
+  takeover forms are now handled truthfully in full-screen/pair — their
+  argument-bearing forms act (`/theme dim` applies, `/help me` reports
+  "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
 byte-for-byte (inline / full-screen / pair = 34 / 19 / 8 rows for this change),
@@ -91,9 +101,11 @@ durable obligations it sets up remain open for later work:
 - Mode/profile engine state and the displayed header/settings must update
   **atomically** (a later change); this change does not touch that path.
 
-Boundary: this is a pure refactor of where the surface is defined — no command
-is added, removed, renamed, or re-described; the inline composer and its
-selector are untouched; `/abort` stays pair-loop-owned.
+Boundary: the first increment was a pure relocation of where the surface is
+defined (no command added, removed, renamed, or re-described). The second
+increment adds **host-aware routing and argument behaviour** for the five
+takeovers in full-screen/pair only — the inline composer and its selector stay
+frozen, and `/abort` stays pair-loop-owned.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 
