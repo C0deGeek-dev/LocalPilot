@@ -1143,6 +1143,80 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn wait_resume_cancellation_during_wait_returns_promptly_without_delegating() {
+        // Cancellation DURING the wait (not the pre-loop short-circuit): reach the Wait branch,
+        // then cancel — with no real sleep. An isolated project config makes `ResumePolicy`
+        // allow Wait; a recently-paused, future-eligible record makes `decide_resume` return
+        // `Wait` (waited ~= 0 < max_wait, window not elapsed, not user-cancelled). The token is
+        // cancelled only AFTER the waiter parks in the wait `select!`, so `/wait-resume` prints
+        // the "waiting ..." line then returns promptly with "wait cancelled", never delegates
+        // into `resume_with_events`, and leaves the paused record intact. Hermetic: no provider
+        // or network path is built, and the nap sleep never elapses.
+        let dir = tempfile::tempdir().unwrap();
+        // Isolated project config: Wait allowed, no providers/MCP (no egress).
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[quota]\nauto_resume = \"run\"\nmax_wait_minutes = 360\n",
+        )
+        .unwrap();
+        let store = Store::open(dir.path());
+        let now = now_unix();
+        // Recent pause (waited ~= 0), eligible an hour out (window not elapsed -> Wait).
+        let paused = paused_at(now, Some(now + 3600));
+        store
+            .put_cache(QUOTA_PAUSE_KEY, &serde_json::to_vec(&paused).unwrap())
+            .unwrap();
+
+        let (events_tx, _events_rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let run = ResumeRun {
+            profile: Profile::Default,
+            interactivity: Interactivity::NonInteractive,
+            trusted: false,
+            approver: || Box::new(ScriptedApprover::new(Vec::new())) as Box<dyn Approver>,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        let waiter = wait_resume_with_events(
+            dir.path(),
+            "model",
+            None,
+            run,
+            &events_tx,
+            &cancel,
+            &mut out,
+        );
+        // `join!` polls the waiter first (it runs to the wait `select!`, registering the nap
+        // timer + cancel waker, then parks Pending); the canceller yields twice so the waiter
+        // is parked, then cancels — the `cancel.cancelled()` arm wins on the next poll and the
+        // nap sleep never elapses.
+        let canceller = async {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(waiter, canceller);
+        result.expect("wait-resume returns Ok on cancellation");
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("waiting"),
+            "it reached the Wait branch (printed the waiting line): {text}"
+        );
+        assert!(
+            text.contains("wait cancelled"),
+            "cancellation during the wait is reported: {text}"
+        );
+        assert!(
+            !text.contains("resuming paused run"),
+            "wait-resume must NOT delegate into resume_with_events on cancel: {text}"
+        );
+        assert!(
+            store.get_cache(QUOTA_PAUSE_KEY).unwrap().is_some(),
+            "the paused record is left intact (not consumed) on a cancelled wait"
+        );
+    }
+
     #[test]
     fn wait_nap_clamps_to_poll_cap_and_max_wait_and_stops_when_elapsed() {
         // Eligible in 100s, poll cap 30 → nap 30 (re-check cadence).

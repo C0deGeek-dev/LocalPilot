@@ -147,6 +147,13 @@ localpilot harness plan         # brief.md -> PROGRESS.md
 localpilot harness feature      # worked, committed steps; resume on quota
 ```
 
+Inside full-screen chat you can also resume harness work without leaving the session:
+`/harness-resume` continues plan steps and `/wait-resume` waits for quota and then
+resumes, both entering Harness mode (the footer shows it; `/agent` exits). They use the
+model, provider, and permission profile in force when you invoke them, tool approvals
+appear in the normal dialog, a single Ctrl+C stops gracefully, and the result opens as a
+bounded report.
+
 Intake can optionally gate on a guidance score (`[harness.guidance]` or
 `--guidance`): when the idea leaves load-bearing product decisions open,
 intake asks about them before writing `brief.md` instead of guessing — see

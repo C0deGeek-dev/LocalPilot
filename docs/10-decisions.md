@@ -44,7 +44,13 @@ enqueue so a mid-queue mode switch cannot reinterpret an already-queued prompt, 
 text-only research attachment contract (a Research-mode prompt carrying images is
 declined before submit with its draft and attachments preserved), and a shared
 prepared-research snapshot so the web-egress disclosure is shown and drawn before any
-request from one config load (no display/egress race).
+request from one config load (no display/egress race). A ninth increment puts the last
+two deferred inline-only resume commands — `/harness-resume` and `/wait-resume` — on the
+pump, growing the catalog to **34/36/8**; each enters `Mode::Harness` synchronously at
+dispatch (mirroring the inline oracle) and snapshots the live model/provider/sandbox
+profile plus the retained single-host session-trust grant (per ADR-0143's
+session-only/remember semantics) at dispatch rather than launch time. Bare `/harness`
+stays deferred (it has no distinct harness prompt loop); `/agent` is the hidden exit.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -224,6 +230,30 @@ that was shown. Research is text-only: a Research-mode prompt carrying images is
 declined at the submit boundary before the editor is consumed, preserving the draft
 and attachments. The catalog grows to **34/34/8** (only `/research` becomes visible;
 inline and pair unchanged); no new ADR.
+
+The ninth increment puts `/harness-resume` and `/wait-resume` on the pump — the last
+deferred inline-only resume commands. Each enters `Mode::Harness` synchronously before
+Busy (mirroring the inline oracle) and keeps it across completion, builder/result error,
+and first-cancel; `/agent` is the hidden exit, and bare `/harness` stays deferred (no
+distinct harness prompt loop drives a mode). The model, provider, sandbox profile, and
+workspace trust are LIVE dispatch-time snapshots, not launch-time values: the model and
+provider come from `runtime.active_model()`/`active_provider_id()` (a `/model` switch is
+honored, and passing the live provider makes wait-resume's provider-identity check
+observe an in-session switch and block it), the profile comes straight from the shared
+permission-engine handle, and trust comes from a new single-host `session_trusted` bool
+initialized from the launch trust-prompt result and set true on either accept branch
+(session-only or remember, per ADR-0143) — session-only trust is honored for the live
+resume but never persists, so the launch gate is unweakened; no pair-host change. The
+inner runtime runs through the existing resume builders with a cloned `TuiApprover` whose
+approvals land on the same `approval_rx` the pump already services (the only new plumbing:
+an `approval_tx` on the host context); its runtime events drain on the `Runtime` lane;
+questions are `Inert` because that runtime is prompter-less. Cancellation is
+signal-and-await through the builder's token — an in-process future, no detached worker,
+so no cancel-on-drop guard; a builder/result error becomes a bounded `Warning`, while a
+terminal I/O failure propagates out of the host. Output is buffered and presented through
+the bounded report presenter, unlike the inline host's single raw notice. The catalog
+grows to **34/36/8** (only the canonical `harness-resume`/`wait-resume` rows become
+visible; the `wait_resume` alias stays parse-only; inline and pair unchanged); no new ADR.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

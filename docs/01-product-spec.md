@@ -326,6 +326,11 @@ call without waiting for the model (ADR-0071). The rest:
 - `/continue` (alias `/resume`) reopens the previous session in this workspace.
   The harness workflows are separate: `/harness-resume` resumes harness plan
   work, and `/wait-resume` waits out a provider quota window and then resumes.
+  Both run in the full-screen host on the operation pump — entering Harness mode
+  for the run (`/agent` exits it) and presenting the result through the bounded
+  report; a resume snapshots the live model, provider, permission profile, and
+  workspace-trust at dispatch, so an in-session `/model` or profile switch is
+  honoured. Bare `/harness` remains reserved for a later increment.
 - `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
   `resume`, `preview`, `status`, `review`, and so on). The walking actions
   (`run`, `refresh`, `resume`) show a live progress loader — discovering,

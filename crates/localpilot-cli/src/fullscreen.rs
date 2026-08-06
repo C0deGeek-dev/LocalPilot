@@ -82,6 +82,11 @@ pub(crate) fn capture_local_utc_offset() {
 pub(crate) struct HostContext<'a> {
     pub(crate) runtime: &'a mut SessionRuntime,
     pub(crate) approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
+    /// The approval sender, cloned into an inner-runtime `TuiApprover` for
+    /// `/harness-resume`/`/wait-resume` so the inner runtime's approvals land on the
+    /// same `approval_rx` the pump already services. The only new plumbing this host
+    /// gains for resume; model/provider/profile/trust are dispatch-time snapshots.
+    pub(crate) approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
     pub(crate) question_rx: &'a mut mpsc::UnboundedReceiver<QuestionCall>,
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
@@ -696,6 +701,10 @@ enum PumpedSlash {
     Research {
         topic: String,
     },
+    /// `/harness-resume` — resume harness plan steps on an inner runtime.
+    HarnessResume,
+    /// `/wait-resume` — wait for quota, then resume, on an inner runtime.
+    WaitResume,
 }
 
 /// How the full-screen host dispatches a parsed slash action.
@@ -731,6 +740,8 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
         // One-shot `/research <topic>` pumps; bare `/research` (mode entry, `None`)
         // stays synchronous.
         SlashAction::Research(Some(topic)) => SlashRoute::Pumped(PumpedSlash::Research { topic }),
+        SlashAction::HarnessResume => SlashRoute::Pumped(PumpedSlash::HarnessResume),
+        SlashAction::WaitResume => SlashRoute::Pumped(PumpedSlash::WaitResume),
         other => SlashRoute::Synchronous(other),
     }
 }
@@ -3100,10 +3111,19 @@ async fn execute_fullscreen_slash_action(
         SlashAction::SetMode(localpilot_tui::Mode::Agent) => {
             app.set_shared_mode(localpilot_tui::Mode::Agent);
         }
-        // Still genuinely deferred: `/harness` (no harness turn loop in full-screen yet)
-        // and the harness/wait resume commands. Listed explicitly (not a wildcard) so a
-        // new `SlashAction` variant is a compile error, not a silent deferral.
-        SlashAction::SetMode(_) | SlashAction::HarnessResume | SlashAction::WaitResume => {
+        // The harness/wait resume commands are pumped by `route_fullscreen_slash`
+        // upstream, so these arms are unreachable defensive guards (kept explicit, not
+        // a wildcard, so a routing regression surfaces as a notice, not silence).
+        SlashAction::HarnessResume | SlashAction::WaitResume => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "internal: harness resume reached the synchronous dispatch path".to_string(),
+            ));
+        }
+        // Still genuinely deferred: `/harness` (`SetMode(Harness)`) has no distinct
+        // harness prompt loop in full-screen, so entering it as a mode drives nothing;
+        // the resume commands are the only real Harness entry. Explicit (not a wildcard)
+        // so a new `SlashAction` variant is a compile error, not a silent deferral.
+        SlashAction::SetMode(_) => {
             app.apply_runtime(RuntimeUpdate::Notice(format!(
                 "/{deferred_label} is not available in full-screen chat yet"
             )));
@@ -3706,16 +3726,23 @@ async fn run_event_loop(
     let HostContext {
         runtime,
         approval_rx,
+        approval_tx,
         question_rx,
         cwd,
         history,
         ingest,
         config,
-        trust_required: _,
+        trust_required,
     } = context;
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
     let mut paste_burst = PasteBurst::default();
+    // The authoritative in-session workspace-trust grant for this single full-screen
+    // host: trusted at launch unless a prompt was required, then set true on either
+    // accept branch (session-only or remember). Snapshotted into a resume's
+    // `ResumeRun.trusted`; it never persists, so the launch gate (driven by the store)
+    // is unweakened — a session-only grant still prompts a subsequent process.
+    let mut session_trusted = !trust_required;
     while !app.exit_requested {
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
@@ -3745,10 +3772,14 @@ async fn run_event_loop(
                 TrustEventOutcome::Pending => {}
                 TrustEventOutcome::Copy(text) => copy_to_clipboard(app, text),
                 TrustEventOutcome::ContinueSession => {
+                    // Session-only: trusted for this live session (a resume honors it),
+                    // but nothing is persisted, so a later process still prompts.
+                    grant_session_trust(&mut session_trusted);
                     accept_workspace_trust(app, cwd, false, crate::trust::remember);
                     crate::repl::start_session_knowledge_index(cwd, ingest);
                 }
                 TrustEventOutcome::Remember => {
+                    grant_session_trust(&mut session_trusted);
                     accept_workspace_trust(app, cwd, true, crate::trust::remember);
                     crate::repl::start_session_knowledge_index(cwd, ingest);
                 }
@@ -3830,6 +3861,10 @@ async fn run_event_loop(
                                     },
                                     SerialOperation::PumpedSlash(command),
                                     &mut queue,
+                                    ResumeAuthority {
+                                        approval_tx,
+                                        session_trusted,
+                                    },
                                 )
                                 .await?
                                 {
@@ -3868,6 +3903,10 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
+                            ResumeAuthority {
+                                approval_tx,
+                                session_trusted,
+                            },
                         )
                         .await?
                         {
@@ -3893,6 +3932,10 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
+                            ResumeAuthority {
+                                approval_tx,
+                                session_trusted,
+                            },
                         )
                         .await?
                         {
@@ -3938,8 +3981,9 @@ async fn run_event_loop(
 }
 
 // The dispatcher accepts the ambient owners as one by-value `SlashContext` bundle
-// (built at its two call sites) and reborrows it into the turn/shell wrappers, so
-// the growing surface no longer widens this signature.
+// (built at its three call sites — pumped slash, prompt, shell) plus a `ResumeAuthority`
+// owner bundle, and reborrows them into the turn/shell wrappers, so the growing surface
+// no longer widens this signature.
 async fn drive_operation_chain(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
@@ -3947,15 +3991,19 @@ async fn drive_operation_chain(
     mut ctx: SlashContext<'_>,
     first: SerialOperation,
     queue: &mut VecDeque<QueuedOperation>,
+    resume: ResumeAuthority<'_>,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(operation) = current {
         let next_item = queue.front().map(QueuedOperation::item_id);
         match operation {
             // A pumped slash command has no timeline item; it owns its own Busy
-            // transition (compact immediately, ingest after preflight).
+            // transition (compact immediately, ingest after preflight, resume after
+            // entering Harness mode).
             SerialOperation::PumpedSlash(command) => {
-                if drive_slash_command(terminal, app, runtime, &mut ctx, command, queue).await? {
+                if drive_slash_command(terminal, app, runtime, &mut ctx, command, queue, resume)
+                    .await?
+                {
                     discard_queued_operations(queue);
                     return Ok(true);
                 }
@@ -4025,6 +4073,7 @@ async fn drive_slash_command(
     ctx: &mut SlashContext<'_>,
     command: PumpedSlash,
     queue: &mut VecDeque<QueuedOperation>,
+    resume: ResumeAuthority<'_>,
 ) -> Result<bool> {
     match command {
         PumpedSlash::Compact { force } => {
@@ -4035,6 +4084,21 @@ async fn drive_slash_command(
         }
         PumpedSlash::Research { topic } => {
             drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
+        }
+        PumpedSlash::HarnessResume => {
+            drive_harness_resume(
+                terminal,
+                app,
+                runtime,
+                ctx,
+                queue,
+                resume,
+                ResumeKind::Harness,
+            )
+            .await
+        }
+        PumpedSlash::WaitResume => {
+            drive_harness_resume(terminal, app, runtime, ctx, queue, resume, ResumeKind::Wait).await
         }
     }
 }
@@ -4374,6 +4438,209 @@ async fn drive_research(
             let output = crate::repl::command_output_from_buffer(out, result);
             present_command_report(app, command_report("research", output));
             app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await
+}
+
+/// The resume-only ambient authority the pumped `/harness-resume` / `/wait-resume`
+/// commands need beyond the shared `SlashContext`: the approval sender their inner
+/// runtime's approver clones, and the live single-host trust snapshot. Bundled into
+/// one value so the dispatcher signature does not grow.
+#[derive(Clone, Copy)]
+struct ResumeAuthority<'a> {
+    approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
+    session_trusted: bool,
+}
+
+/// Which resume the pump runs — a typed kind (not a bare `wait` bool) so the two
+/// `PumpedSlash` arms map exhaustively and the runner selection is checkable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ResumeKind {
+    /// `/harness-resume` → `resume_with_events`.
+    Harness,
+    /// `/wait-resume` → `wait_resume_with_events`.
+    Wait,
+}
+
+impl ResumeKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Harness => "harness-resume",
+            Self::Wait => "wait-resume",
+        }
+    }
+}
+
+/// The live dispatch-time snapshot the resume builders consume, built through
+/// [`resume_dispatch_snapshot`] so a `/model` or profile switch after launch is
+/// honored (never a stale launch-time value).
+struct ResumeDispatch {
+    model: String,
+    provider_id: String,
+    profile: localpilot_sandbox::Profile,
+    trusted: bool,
+}
+
+/// Read the LIVE model/provider/profile off the runtime plus the live single-host
+/// trust — the authority the resume builders use, not launch-time values. Passing the
+/// live provider is what makes wait-resume's provider-identity check observe an
+/// in-session switch.
+fn resume_dispatch_snapshot(runtime: &SessionRuntime, session_trusted: bool) -> ResumeDispatch {
+    ResumeDispatch {
+        model: runtime.active_model().to_string(),
+        provider_id: runtime.active_provider_id().to_string(),
+        profile: runtime.permission_engine_handle().profile(),
+        trusted: session_trusted,
+    }
+}
+
+/// The synchronous entry both resume commands share: enter `Mode::Harness`, then Busy
+/// (Harness before Busy, mirroring the inline oracle). Harness then persists across the
+/// operation's completion/error/first-cancel. Used by `drive_harness_resume`.
+fn begin_harness_resume(app: &mut AppModel) {
+    app.set_shared_mode(localpilot_tui::Mode::Harness);
+    app.begin_work();
+}
+
+/// Grant workspace trust for this live full-screen session — the single-host retained
+/// state a resume snapshots into `ResumeRun.trusted`. Set by BOTH trust-accept branches
+/// (session-only and remember); never persisted itself, so the launch gate stays
+/// store-driven and a later process still prompts.
+fn grant_session_trust(session_trusted: &mut bool) {
+    *session_trusted = true;
+}
+
+/// The approver factory the resume's `ResumeRun` uses: each step mints a fresh
+/// `TuiApprover` cloning the pump's approval sender, so inner-runtime approvals land
+/// on the same `approval_rx` the pump services.
+fn resume_approver_factory(
+    approval_tx: mpsc::UnboundedSender<ApprovalCall>,
+) -> impl FnMut() -> Box<dyn localpilot_sandbox::Approver> {
+    move || {
+        Box::new(crate::interactive_session::TuiApprover::new(
+            approval_tx.clone(),
+        )) as Box<dyn localpilot_sandbox::Approver>
+    }
+}
+
+/// Present a finished resume run: buffered output through the bounded report presenter
+/// (short Notice / long Report+breadcrumb / bounded Warning), then `Stopped(Done)`.
+/// Shared so the cancel/error tests exercise the real projection, not a raw Notice.
+fn apply_resume_result(
+    app: &mut AppModel,
+    result: (anyhow::Result<()>, Vec<u8>),
+    kind: ResumeKind,
+) {
+    let (res, out) = result;
+    let output = crate::repl::command_output_from_buffer(out, res);
+    present_command_report(app, command_report(kind.title(), output));
+    app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+}
+
+/// `/harness-resume` and `/wait-resume` on the pump. Enters `Mode::Harness`
+/// synchronously (mirroring the inline oracle) and keeps it across
+/// completion/error/first-cancel; `/agent` is the hidden exit. The model, provider,
+/// sandbox profile, and trust are LIVE dispatch-time snapshots via
+/// [`resume_dispatch_snapshot`]. The inner runtime runs through the existing resume
+/// builders with a cloned `TuiApprover` ([`resume_approver_factory`]) whose approvals
+/// land on the same `approval_rx` the pump services; its runtime events drain on the
+/// `Runtime` lane; questions are `Inert` (that runtime is prompter-less). Cancellation
+/// is signal-and-await through the builder's token — in-process `async`, no detached
+/// worker, so no `CancelOnDrop`. Output is presented via [`apply_resume_result`].
+async fn drive_harness_resume(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    queue: &mut VecDeque<QueuedOperation>,
+    resume: ResumeAuthority<'_>,
+    kind: ResumeKind,
+) -> Result<bool> {
+    // Dispatch-time LIVE snapshot (never launch-time), built through the shared seam.
+    let snapshot = resume_dispatch_snapshot(runtime, resume.session_trusted);
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: snapshot.provider_id.clone(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+
+    // Enter Harness mode then Busy synchronously (shared production entry).
+    begin_harness_resume(app);
+    let cancel = CancellationToken::new();
+
+    let root = ctx.cwd.to_path_buf();
+    let approval_tx = resume.approval_tx.clone();
+    let (events_tx, mut events_rx) = broadcast::channel::<RuntimeEvent>(1024);
+    let operation = {
+        let cancel = cancel.clone();
+        async move {
+            let mut out: Vec<u8> = Vec::new();
+            let run = crate::harness_cmd::ResumeRun {
+                profile: snapshot.profile,
+                interactivity: localpilot_sandbox::Interactivity::Interactive,
+                trusted: snapshot.trusted,
+                approver: resume_approver_factory(approval_tx),
+            };
+            let provider = Some(snapshot.provider_id.as_str());
+            let result = match kind {
+                ResumeKind::Wait => {
+                    crate::harness_cmd::wait_resume_with_events(
+                        &root,
+                        &snapshot.model,
+                        provider,
+                        run,
+                        &events_tx,
+                        &cancel,
+                        &mut out,
+                    )
+                    .await
+                }
+                ResumeKind::Harness => {
+                    crate::harness_cmd::resume_with_events(
+                        &root,
+                        &snapshot.model,
+                        provider,
+                        run,
+                        &events_tx,
+                        &cancel,
+                        &mut out,
+                    )
+                    .await
+                }
+            };
+            (result, out)
+        }
+    };
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Runtime {
+            events: &mut events_rx,
+            steering: None,
+        },
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        move |app: &mut AppModel, result: (anyhow::Result<()>, Vec<u8>)| {
+            apply_resume_result(app, result, kind);
         },
     )
     .await
@@ -7236,6 +7503,42 @@ mod tests {
         (config, bundle)
     }
 
+    /// A two-provider runtime (`first`→`model-a`, `second`→`model-b`) so a test can
+    /// drive a real in-session `/model` provider switch.
+    async fn dual_provider_session(dir: &Path) -> InteractiveSessionBundle {
+        let provider = |id: &str| {
+            let seed = FakeProvider::new();
+            let mut declaration = seed.declaration().clone();
+            declaration.id = id.to_string();
+            declaration.display_name = id.to_string();
+            Arc::new(FakeProvider::new().with_declaration(declaration).text("ok"))
+                as Arc<dyn ModelProvider>
+        };
+        let providers = HashMap::from([
+            ("first".to_string(), provider("first")),
+            ("second".to_string(), provider("second")),
+        ]);
+        let models = HashMap::from([
+            ("first".to_string(), "model-a".to_string()),
+            ("second".to_string(), "model-b".to_string()),
+        ]);
+        let mut config = localpilot_config::Config::default();
+        config.provider.default = "first".to_string();
+        config
+            .providers
+            .insert("first".to_string(), ProviderConfig::default());
+        config
+            .providers
+            .insert("second".to_string(), ProviderConfig::default());
+        let setup = InteractiveSessionSetup::for_test(
+            dir.to_path_buf(),
+            config,
+            Profile::Default,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        setup.build("first", "model-a").await.unwrap()
+    }
+
     fn slash_input(prompt: &str) -> SubmittedInput {
         SubmittedInput {
             shown: prompt.to_string(),
@@ -9377,6 +9680,8 @@ mod tests {
             ("clear", "Clear the conversation view"),
             ("compact", "Summarize and compact the context"),
             ("resume", "Continue a previous session"),
+            ("harness-resume", "Resume harness plan work"),
+            ("wait-resume", "Wait for quota, then resume"),
             ("ingest", "Manage workspace ingestion"),
             ("knowledge", "Query the knowledge base"),
             ("context", "Build a context bundle"),
@@ -9401,7 +9706,7 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 34);
+        assert_eq!(full_screen.len(), 36);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
@@ -11580,7 +11885,9 @@ mod tests {
             cancel,
             image_capability,
             queue,
-            OperationKind::Turn,
+            // Production resumes run as `Command` (the accepted design), so the
+            // runtime-event-before-projection test locks the real resume config.
+            OperationKind::Command,
             EventLane::Runtime {
                 events: rx,
                 steering: None,
@@ -12113,6 +12420,313 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_resume_result_is_bounded_report_or_warning_not_a_raw_notice() {
+        // The inner-runtime resume output goes through the bounded presenter (unlike the
+        // inline host's single raw Notice): a long transcript opens the Report takeover,
+        // an error becomes a bounded Warning, a short result stays a Notice.
+        let mut long = app();
+        let lines: Vec<String> = (0..20).map(|i| format!("harness step {i}")).collect();
+        present_command_report(
+            &mut long,
+            command_report(
+                "harness-resume",
+                crate::repl::CommandOutput { lines, error: None },
+            ),
+        );
+        assert!(
+            long.has_takeover(),
+            "a long resume transcript opens the bounded Report takeover"
+        );
+
+        let mut failed = app();
+        present_command_report(
+            &mut failed,
+            command_report(
+                "wait-resume",
+                crate::repl::CommandOutput {
+                    lines: vec!["partial output".to_string()],
+                    error: Some(
+                        "command failed: the provider configuration changed during the wait"
+                            .to_string(),
+                    ),
+                },
+            ),
+        );
+        assert!(
+            !failed.has_takeover(),
+            "an error presents as a bounded Warning, not a takeover"
+        );
+        assert!(
+            timeline_has(&failed, "provider configuration changed during the wait"),
+            "the error text is preserved in the bounded warning"
+        );
+
+        let mut short = app();
+        present_command_report(
+            &mut short,
+            command_report(
+                "harness-resume",
+                crate::repl::CommandOutput {
+                    lines: vec!["resumed".to_string()],
+                    error: None,
+                },
+            ),
+        );
+        assert!(
+            !short.has_takeover(),
+            "a short resume result stays a Notice"
+        );
+    }
+
+    #[test]
+    fn harness_mode_shows_in_footer_and_settings_persists_and_agent_exits() {
+        // The PRODUCTION entry `begin_harness_resume` (used by `drive_harness_resume`) sets
+        // Harness then Busy; the footer AND the settings "Mode and profile" row reflect it;
+        // Harness PERSISTS across the production result projector on a success, a builder
+        // error, and a first-cancel partial; and `/agent` is the hidden exit back to Agent.
+        let config = localpilot_config::Config::default();
+        let check = |label: &str, res: anyhow::Result<()>, out: &[u8]| {
+            let mut app = app();
+            begin_harness_resume(&mut app); // production entry: Harness before Busy
+            assert_eq!(app.shared_mode(), "harness", "{label}: enters Harness");
+            // While Busy the settings still carry the mode (the footer shows a working
+            // indicator instead of the mode line until the operation completes).
+            assert!(
+                fullscreen_settings(&app, &config)
+                    .iter()
+                    .any(|s| s.name == "Mode and profile" && s.value.contains("harness")),
+                "{label}: the settings row shows Harness mode"
+            );
+            // The production result projector (used by drive_harness_resume's on_complete)
+            // applies Stopped(Done) → Idle; the mode is untouched, so it persists.
+            apply_resume_result(&mut app, (res, out.to_vec()), ResumeKind::Harness);
+            assert_eq!(
+                app.shared_mode(),
+                "harness",
+                "{label}: Harness persists across the resume result"
+            );
+            assert!(
+                rendered_footer(&app).contains("harness"),
+                "{label}: the footer shows Harness mode once the resume completes (idle)"
+            );
+            // `/agent` exits back to Agent (the hidden real transition).
+            app.set_shared_mode(localpilot_tui::Mode::Agent);
+            assert_eq!(app.shared_mode(), "agent", "{label}: /agent exits Harness");
+        };
+        check("success", Ok(()), b"resumed 2 steps");
+        check(
+            "builder error",
+            Err(anyhow::anyhow!("resume failed")),
+            b"partial",
+        );
+        check(
+            "first-cancel partial",
+            Ok(()),
+            b"cancelled at a step boundary (partial)",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_snapshots_the_live_target_and_profile_at_dispatch() {
+        // `drive_harness_resume` builds its authority through `resume_dispatch_snapshot`.
+        // Drive a REAL in-session provider+model switch (the same runtime action `/model`
+        // uses) and a profile switch, then assert the SEAM returns the SWITCHED target,
+        // switched profile, and the live trust — a stale/launch-time snapshot would fail.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bundle = dual_provider_session(dir.path()).await;
+
+        // Before the switch: the seam reads the launch target, default profile, given trust.
+        let before = resume_dispatch_snapshot(&bundle.runtime, false);
+        assert_eq!(before.provider_id, "first");
+        assert_eq!(before.model, "model-a");
+        assert_eq!(before.profile, localpilot_sandbox::Profile::Default);
+        assert!(!before.trusted);
+
+        // A REAL in-session provider switch (the `/model` runtime action) + profile switch.
+        bundle
+            .runtime
+            .set_active_provider("second")
+            .expect("switch provider");
+        bundle
+            .runtime
+            .set_permission_profile(localpilot_sandbox::Profile::Bypass, Vec::new());
+
+        // After: the seam returns the switched provider/model/profile + the live trust.
+        let after = resume_dispatch_snapshot(&bundle.runtime, true);
+        assert_eq!(
+            after.provider_id, "second",
+            "the seam reads the switched provider live"
+        );
+        assert_eq!(
+            after.model, "model-b",
+            "the seam reads the switched model live"
+        );
+        assert_eq!(
+            after.profile,
+            localpilot_sandbox::Profile::Bypass,
+            "the seam reads the switched profile live"
+        );
+        assert!(after.trusted, "the seam carries the live trust value");
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn resume_route_maps_each_command_to_its_kind_and_title() {
+        // The two pumped resume arms map exhaustively to the typed `ResumeKind`, which
+        // selects the builder (`Harness`→resume, `Wait`→wait-resume) and the report title.
+        assert_eq!(ResumeKind::Harness.title(), "harness-resume");
+        assert_eq!(ResumeKind::Wait.title(), "wait-resume");
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::HarnessResume),
+            SlashRoute::Pumped(PumpedSlash::HarnessResume)
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::WaitResume),
+            SlashRoute::Pumped(PumpedSlash::WaitResume)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resume_approver_factory_routes_an_approval_through_the_cloned_sender() {
+        // Production builds the resume's approver via `resume_approver_factory(approval_tx)`.
+        // The produced `TuiApprover`'s `approve` must deliver an `ApprovalCall` to the
+        // receiver the pump services and round-trip the decision. This FAILS if the resume
+        // factory ever stops cloning that sender into the approver.
+        use localpilot_sandbox::{CommandClass, Effect, Interactivity, PermissionRequest};
+        let (approval_tx, mut approvals) = mpsc::unbounded_channel::<ApprovalCall>();
+        let mut factory = resume_approver_factory(approval_tx);
+        let approver = factory();
+        let request = PermissionRequest {
+            tool: "harness_step".to_string(),
+            effect: Effect::RunCommand(CommandClass::Unknown),
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            detail: "resume step".to_string(),
+        };
+        let approval = approver.approve(&request);
+        tokio::pin!(approval);
+        let call = tokio::select! {
+            call = approvals.recv() => call.expect("approval routed to the pump receiver"),
+            answer = &mut approval => panic!("approval completed before the host answered: {answer}"),
+        };
+        assert_eq!(call.request.tool, "harness_step");
+        call.reply.send(true).expect("answer approval");
+        assert!(
+            approval.await,
+            "the allow decision round-trips through the cloned sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_cancellation_signals_and_awaits_the_partial_not_dropped() {
+        // First Ctrl+C signals the builder's cancellation token; the resume future keeps
+        // awaiting the builder (which stops at its next step boundary) and presents its
+        // buffered partial — the future is not dropped (in-process async, no CancelOnDrop).
+        let mut app = app();
+        begin_harness_resume(&mut app); // production entry (Harness + Busy), not a bare begin_work
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut io = characterization_io(
+            queued(vec![Event::Key(press(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        let awaited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation = {
+            let cancel = cancel.clone();
+            let awaited = awaited.clone();
+            async move {
+                // Fake resume builder: observes the token at its "step boundary".
+                loop {
+                    if cancel.is_cancelled() {
+                        awaited.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // The builder's `(Result, buffered output)` shape, so the
+                        // production projector presents it, not a raw test Notice.
+                        return (
+                            anyhow::Result::<()>::Ok(()),
+                            b"harness-resume: stopped at a step boundary (partial)".to_vec(),
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            operation,
+            |app: &mut AppModel, result: (anyhow::Result<()>, Vec<u8>)| {
+                apply_resume_result(app, result, ResumeKind::Harness);
+            },
+        )
+        .await
+        .expect("command loop completes");
+        assert!(!out, "first Ctrl+C cancels the resume, it does not exit");
+        assert!(
+            awaited.load(std::sync::atomic::Ordering::Relaxed),
+            "the builder was awaited to its partial, not dropped"
+        );
+        assert!(
+            timeline_has(&app, "partial"),
+            "the partial is presented through the bounded path"
+        );
+        assert_eq!(
+            app.shared_mode(),
+            "harness",
+            "the resume stays in Harness after the first-cancel partial projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_trust_grant_feeds_the_resume_dispatch_snapshot() {
+        // The single-host `session_trusted` starts from `!trust_required`; the shared
+        // `grant_session_trust` helper — called by BOTH the ContinueSession and Remember
+        // accept branches (fullscreen.rs:3777/3782) — flips it live; and
+        // `resume_dispatch_snapshot` consumes it into `ResumeRun.trusted`. The
+        // session-only (no store) vs remember (store) persistence distinction is locked
+        // separately by `session_trust_does_not_write_but_remember_uses_an_isolated_store`;
+        // this locks the live-grant → dispatch-snapshot wiring the resume trust depends on.
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dual_provider_session(dir.path()).await;
+
+        // An untrusted, prompt-required launch initializes `session_trusted = !trust_required = false`.
+        let mut session_trusted = false;
+        assert!(
+            !resume_dispatch_snapshot(&bundle.runtime, session_trusted).trusted,
+            "before any accept, the resume snapshot is untrusted"
+        );
+
+        // Both accept outcomes call the shared grant helper, which flips the live bool.
+        grant_session_trust(&mut session_trusted);
+        assert!(session_trusted, "the grant helper sets live session trust");
+        assert!(
+            resume_dispatch_snapshot(&bundle.runtime, session_trusted).trusted,
+            "the resume snapshot consumes the live session trust (ResumeRun.trusted)"
+        );
+    }
+
     #[tokio::test]
     async fn a_research_report_projects_before_the_next_queued_prompt_activates() {
         // BLOCKING contract: the research op's bounded Report takeover + breadcrumb are
@@ -12388,6 +13002,15 @@ mod tests {
         assert!(matches!(
             route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Harness)),
             SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Harness))
+        ));
+        // The two resume commands pump; bare `/harness` (SetMode(Harness)) stays deferred.
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::HarnessResume),
+            SlashRoute::Pumped(PumpedSlash::HarnessResume)
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::WaitResume),
+            SlashRoute::Pumped(PumpedSlash::WaitResume)
         ));
         // The eleven fast ingest subcommands run synchronously (never pumped).
         let fast = [

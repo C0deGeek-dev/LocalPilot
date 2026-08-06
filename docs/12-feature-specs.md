@@ -316,6 +316,15 @@ UI:
 - footer shows quota state and reset timer
 - paused sessions show next eligible resume time
 - continuous mode shows that unattended resume is enabled
+- `/harness-resume` and `/wait-resume` run in the full-screen chat host on the
+  operation pump: each enters Harness mode synchronously (`/agent` exits), snapshots
+  the live model/provider/sandbox-profile/trust at dispatch (a `/model` or profile
+  switch after launch is honoured, and the live provider makes `/wait-resume`'s
+  provider-identity check observe an in-session switch), runs the inner runtime with a
+  cloned approver whose approvals surface in the host approval dialog, and is
+  interruptible with Ctrl-C (which signals the run to stop at its next step boundary
+  and presents the partial through the bounded report path). The inner runtime has no
+  user prompter, so an inner `ask_user` is unavailable rather than blocking.
 
 ## Self-Review
 

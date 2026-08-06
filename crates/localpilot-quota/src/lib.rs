@@ -264,6 +264,30 @@ mod tests {
     }
 
     #[test]
+    fn decide_resume_blocks_a_provider_identity_change() {
+        // A provider switch between pause and resume is a hard block in every mode —
+        // the paused run was authorized against a different provider. In the full-screen
+        // host this is what makes passing the LIVE `active_provider_id()` observe an
+        // in-session `/model` switch (the inline oracle's launch-time id is often None).
+        let ctx = ResumeContext {
+            provider_identity_changed: true,
+            ..ready_ctx()
+        };
+        assert_eq!(
+            decide_resume(&policy(ResumeMode::Run), &ctx),
+            ResumeDecision::BlockedBy(
+                "the provider configuration changed during the wait".to_string()
+            ),
+        );
+        assert_eq!(
+            decide_resume(&policy(ResumeMode::Global), &ctx),
+            ResumeDecision::BlockedBy(
+                "the provider configuration changed during the wait".to_string()
+            ),
+        );
+    }
+
+    #[test]
     fn estimate_window_prefers_retry_after() {
         let window = estimate_window(&info(), 1);
         assert_eq!(window.wait, Duration::from_secs(30));

@@ -25,6 +25,14 @@ is SemVer-stable; the configuration schema stability policy is in
   attachments are preserved untouched. `[research].enabled = false` disables it;
   `[research.web].enabled = false` still runs local-only research with a truthful
   "web disabled" disclosure.
+- **`/harness-resume` and `/wait-resume` now work in full-screen chat.** Both run on
+  the same live pump against an inner runtime, entering Harness mode (the footer shows
+  it; `/agent` exits). They use the live model, provider, permission profile, and
+  workspace-trust grant as of when you invoke them — a `/model` or profile switch is
+  honored, and `/wait-resume` blocks if the provider changed during the wait. Tool
+  approvals surface in the normal dialog; a single Ctrl+C ends a run gracefully; and the
+  result opens as a bounded, scrollable report instead of flooding the transcript. Bare
+  `/harness` remains deferred.
 
 - **Synchronous commands work in full-screen chat with bounded output.** `/tree`,
   `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg` now run in the

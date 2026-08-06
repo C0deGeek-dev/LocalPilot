@@ -387,6 +387,7 @@ pub async fn run_chat(
             crate::fullscreen::HostContext {
                 runtime: &mut runtime,
                 approval_rx: &mut approval_rx,
+                approval_tx: &approval_tx,
                 question_rx: &mut question_rx,
                 cwd: &cwd,
                 history: &history,

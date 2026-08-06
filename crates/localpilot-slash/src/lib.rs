@@ -553,8 +553,8 @@ slash_commands! {
             "Compact now, even if within the budget"
         ),
         Continue => both("resume", Optional, Fall, "Continue a previous session"),
-        HarnessResume => inline_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
-        WaitResume => inline_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
+        HarnessResume => both("harness-resume", NoArg, Reject, "Resume harness plan work"),
+        WaitResume => both("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         Ingest => both("ingest", Optional, Fall, "Manage workspace ingestion"),
         Knowledge => both("knowledge", Required, Fall, "Query the knowledge base"),
         Context => both("context", Required, Fall, "Build a context bundle"),
@@ -1078,10 +1078,11 @@ mod tests {
         assert_eq!(specs_for(Host::Inline).len(), 34);
         // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
         // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
-        // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump), then
-        // 33→34 (`research` on the pump). `compact_force` stays inline-only but
-        // remains typeable in full-screen.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 34);
+        // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump),
+        // 33→34 (`research` on the pump), then 34→36 (`harness-resume` +
+        // `wait-resume` on the pump). `compact_force` and the `wait_resume` alias
+        // stay inline-only/parse-only but remain typeable in full-screen.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 36);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
