@@ -558,7 +558,7 @@ slash_commands! {
         Ingest => both("ingest", Optional, Fall, "Manage workspace ingestion"),
         Knowledge => both("knowledge", Required, Fall, "Query the knowledge base"),
         Context => both("context", Required, Fall, "Build a context bundle"),
-        Research => inline_only(
+        Research => both(
             "research",
             Optional,
             Fall,
@@ -1078,9 +1078,10 @@ mod tests {
         assert_eq!(specs_for(Host::Inline).len(), 34);
         // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
         // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
-        // `skills`/`bg`), then 31→33 (`compact` + `ingest` on the operation pump).
-        // `compact_force` stays inline-only but remains typeable in full-screen.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 33);
+        // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump), then
+        // 33→34 (`research` on the pump). `compact_force` stays inline-only but
+        // remains typeable in full-screen.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 34);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
@@ -1232,8 +1233,9 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         // A deferred inline-only name must not appear in the full-screen picker.
-        // `compact` and `ingest` now run on the operation pump, so they are `both`.
-        for deferred in ["agent", "harness", "research"] {
+        // `compact`, `ingest`, and `research` now run on the operation pump / as a
+        // mode, so they are `both`; `agent`/`harness` stay deferred.
+        for deferred in ["agent", "harness"] {
             assert!(
                 !full_screen.contains(deferred),
                 "{deferred} leaked into full-screen"

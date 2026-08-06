@@ -170,7 +170,7 @@ pub(crate) async fn run(args: PairArgs) -> Result<crate::repl::ChatOutcome> {
         workspace: cwd.display().to_string(),
         branch: git.as_ref().map(|status| status.branch.clone()),
         workspace_dirty: git.as_ref().and_then(|status| status.dirty),
-        mode: Mode::Agent.label().to_string(),
+        mode: Mode::Agent,
         profile,
         session_id: sessions[0].to_string(),
         session_name: None,

@@ -120,6 +120,25 @@ refresh`, and `/ingest resume`; the walking actions show a live progress loader
 (discovering → parsing → indexing → writing) while they run, and Ctrl-C pauses
 the job so `/ingest resume` can continue it.
 
+## Research a topic
+
+Research pulls together local sources and (by default) the web to answer a topic,
+with a loud egress disclosure shown before any request. From inside `chat`:
+
+- `/research <topic>` runs one pass and returns to your prior mode. Long output
+  opens a scrollable report — `Ctrl+C` copies it, `Esc` closes it. A single
+  `Ctrl+C` during a run ends it early with a partial report rather than losing it.
+- Bare `/research` enters a persistent research mode: every plain prompt is a new
+  topic. The footer, settings, and composer show the mode; `/agent` exits back to
+  agent mode.
+
+Research is text-only — if you submit a prompt with an attached image while in
+research mode, it is declined with a notice and your draft and attachment are kept.
+Web research is on by default and disclosed; `[research.web] enabled = false` runs
+local-only, and `[research] enabled = false` turns research off entirely (see
+[configuration.md](../configuration.md)). The headless equivalent is
+`localpilot research <topic>`.
+
 ## Run the rule-enforced harness
 
 ```sh

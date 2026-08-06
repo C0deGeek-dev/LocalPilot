@@ -183,11 +183,28 @@ pub fn options_from_config(
     if !config.research.enabled {
         return Ok(None);
     }
+    Ok(Some(options_from_loaded_config(
+        root,
+        &config,
+        write_report,
+        enqueue_memory,
+    )))
+}
+
+/// Build research run options from an already-loaded config snapshot (the caller
+/// has confirmed `[research].enabled`). No reload — shares the one snapshot the
+/// disclosure and the run also use.
+fn options_from_loaded_config(
+    root: &Path,
+    config: &localpilot_config::Config,
+    write_report: bool,
+    enqueue_memory: bool,
+) -> ResearchOptions {
     let output_dir = config.research.output_dir.clone().map_or_else(
         || root.join(".localpilot").join("research"),
         |dir| root.join(dir),
     );
-    Ok(Some(ResearchOptions {
+    ResearchOptions {
         max_questions: config.research.max_questions.max(1),
         max_rounds: config.research.max_rounds.max(1),
         per_source_evidence: config.research.per_source_evidence.max(1),
@@ -197,7 +214,7 @@ pub fn options_from_config(
         write_report,
         enqueue_memory,
         ingest_report: config.research.ingest_report,
-    }))
+    }
 }
 
 /// Chat-facing notice for entering persistent research mode. The copy states
@@ -241,6 +258,60 @@ pub async fn run_interactive_research(
     run_research_command_controlled(root, topic, options, None, Some(stop), out).await
 }
 
+/// A loaded research snapshot: the config that is the sole egress authority, the
+/// run options derived from it, and the exact disclosure text. Prepared once so the
+/// disclosure shown to the operator and the run that follows cannot disagree.
+#[cfg(feature = "tui")]
+pub struct PreparedInteractiveResearch {
+    pub options: ResearchOptions,
+    pub config: Config,
+    pub disclosure: String,
+}
+
+/// Load the config once and derive the run options plus the egress disclosure from
+/// that single snapshot. `Ok(None)` only when `[research].enabled = false`; a
+/// disabled web source still prepares (and runs local-only) with a truthful
+/// disclosure.
+#[cfg(feature = "tui")]
+pub fn prepare_interactive_research(
+    root: &Path,
+) -> anyhow::Result<Option<PreparedInteractiveResearch>> {
+    let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
+    if !config.research.enabled {
+        return Ok(None);
+    }
+    let options = options_from_loaded_config(root, &config, true, true);
+    let disclosure = research_disclosure(root, &config);
+    Ok(Some(PreparedInteractiveResearch {
+        options,
+        config,
+        disclosure,
+    }))
+}
+
+/// Run a prepared interactive research pass against the snapshot's config — no
+/// reload, so the run's effective reach matches the already-shown disclosure with
+/// no time-of-check/time-of-use gap.
+#[cfg(feature = "tui")]
+pub async fn run_prepared_interactive_research(
+    root: &Path,
+    topic: &str,
+    prepared: PreparedInteractiveResearch,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    run_research_command_with_config(
+        root,
+        topic,
+        &prepared.config,
+        &prepared.options,
+        None,
+        Some(stop),
+        out,
+    )
+    .await
+}
+
 /// Run a research pass for `topic`, gathering across local sources and the
 /// disclosed, allowlist-gated web source. Web research is **on by default**;
 /// `web_override` carries a per-run override: `Some(false)` (`--no-web`) skips
@@ -275,7 +346,24 @@ pub async fn run_research_command_controlled(
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let config = localpilot_config::load(&ConfigPaths::standard(root), &CliOverrides::default())?;
-    let model = ModelHandle::from_config(&config);
+    run_research_command_with_config(root, topic, &config, options, web_override, stop, out).await
+}
+
+/// [`run_research_command_controlled`] against an already-loaded config snapshot —
+/// the sole egress authority. No reload, so a caller (e.g. the prepared interactive
+/// path) can guarantee the shown disclosure and the run use the same config with no
+/// time-of-check/time-of-use gap. The existing loading wrappers delegate here, so
+/// their behaviour is byte-equivalent.
+pub async fn run_research_command_with_config(
+    root: &Path,
+    topic: &str,
+    config: &Config,
+    options: &ResearchOptions,
+    web_override: Option<bool>,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let model = ModelHandle::from_config(config);
 
     // One shared relevance-admission judge for local and web evidence, so
     // both are judged against the sub-question on the same basis
@@ -293,7 +381,7 @@ pub async fn run_research_command_controlled(
     let mut sources = build_local_sources(root, topic, admission.clone());
     if web {
         let web_source =
-            build_web_source(root, topic, &config, model.clone(), admission, out).await?;
+            build_web_source(root, topic, config, model.clone(), admission, out).await?;
         sources.push(Box::new(web_source));
     } else {
         writeln!(out, "web research: skipped for this run (--no-web)")?;
@@ -675,34 +763,21 @@ fn default_audit_log(root: &Path) -> PathBuf {
         .join("egress-audit.log")
 }
 
-/// Print the loud egress disclosure, record the operator's per-session opt-in,
-/// and build the networked source.
-///
-/// The source is **inert** (every host resolves to [`FetchDecision::Disabled`])
-/// when `[research.web].enabled` is false, because [`WebAccess::grant_session`]
-/// is a no-op against config-off — so no flag can override the config kill
-/// switch. With an explicitly empty allowlist every host needs confirmation,
-/// which in v1 means skipped, so the disclosure warns that nothing will be
-/// fetched.
-async fn build_web_source(
-    root: &Path,
-    topic: &str,
-    config: &Config,
-    model: Option<ModelHandle>,
-    admission: Option<Arc<AdmissionJudge>>,
+/// Write the loud egress disclosure (docs/07): the default-on posture, both
+/// off-switches, exactly what is sent, the effective reach, blocked domains, and
+/// the root-relative audit-log path. Single source of truth so the interactive
+/// host can display it before any request and the run can retain the same bytes as
+/// its audit copy.
+fn write_research_disclosure(
     out: &mut dyn Write,
-) -> anyhow::Result<WebSource> {
+    root: &Path,
+    config: &Config,
+) -> anyhow::Result<()> {
     let web_config = &config.research.web;
     let audit_log = web_config
         .audit_log
         .clone()
         .map_or_else(|| default_audit_log(root), |path| root.join(path));
-    let mut access = WebAccess::new(
-        web_config.enabled,
-        web_config.allowlist.clone(),
-        web_config.disallowlist.clone(),
-    );
-
     writeln!(out, "web research (egress disclosure):")?;
     writeln!(
         out,
@@ -750,6 +825,49 @@ async fn build_web_source(
              no request will be made"
         )?;
     }
+    Ok(())
+}
+
+/// The egress disclosure rendered to a `String`, byte-identical to
+/// [`write_research_disclosure`]. Used by the prepared interactive path to show the
+/// disclosure before any egress.
+#[cfg(feature = "tui")]
+fn research_disclosure(root: &Path, config: &Config) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    // Writing to an in-memory buffer is infallible.
+    let _ = write_research_disclosure(&mut buf, root, config);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Print the loud egress disclosure, record the operator's per-session opt-in,
+/// and build the networked source.
+///
+/// The source is **inert** (every host resolves to [`FetchDecision::Disabled`])
+/// when `[research.web].enabled` is false, because [`WebAccess::grant_session`]
+/// is a no-op against config-off — so no flag can override the config kill
+/// switch. With an explicitly empty allowlist every host needs confirmation,
+/// which in v1 means skipped, so the disclosure warns that nothing will be
+/// fetched.
+async fn build_web_source(
+    root: &Path,
+    topic: &str,
+    config: &Config,
+    model: Option<ModelHandle>,
+    admission: Option<Arc<AdmissionJudge>>,
+    out: &mut dyn Write,
+) -> anyhow::Result<WebSource> {
+    let web_config = &config.research.web;
+    let audit_log = web_config
+        .audit_log
+        .clone()
+        .map_or_else(|| default_audit_log(root), |path| root.join(path));
+    let mut access = WebAccess::new(
+        web_config.enabled,
+        web_config.allowlist.clone(),
+        web_config.disallowlist.clone(),
+    );
+
+    write_research_disclosure(out, root, config)?;
 
     let search = if web_config.enabled {
         connect_search_tools(config, out).await?
@@ -2535,6 +2653,67 @@ mod tests {
         assert!(
             notice.contains("local sources only"),
             "web-off copy must state the kill switch: {notice}"
+        );
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn prepared_research_snapshots_the_config_so_a_later_edit_cannot_change_reach() {
+        // Anti-TOCTOU, hermetic BY CONSTRUCTION — not by stop timing, and not dependent on
+        // the machine's user config/env (`prepare_interactive_research` would merge those).
+        // The A snapshot is built in-test from a known-inert `Config::default()` with every
+        // provider/search/MCP authority cleared, so the prepared run is INCAPABLE of
+        // external egress on any machine. A's web reach is the single host `a.example`; a
+        // later on-disk edit to the open web (B) must change neither the shown disclosure
+        // nor the reach the prepared run actually uses.
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut config = localpilot_config::Config::default();
+        config.providers.clear(); // no provider → model resolution is None, no model call
+        config.research.enabled = true;
+        config.research.web.enabled = true;
+        config.research.web.allowlist = vec!["a.example".to_string()];
+        config.research.web.disallowlist.clear();
+        // `research.mcp` / `mcp` stay `Config::default()` (no configured servers) → no
+        // search/MCP egress authority. There is no outbound path on any machine.
+        let options = options_from_loaded_config(dir.path(), &config, false, false);
+        let disclosure = research_disclosure(dir.path(), &config);
+        let prepared_a = PreparedInteractiveResearch {
+            options,
+            config,
+            disclosure,
+        };
+        assert!(
+            prepared_a.disclosure.contains("a.example")
+                && !prepared_a.disclosure.contains("open web"),
+            "the A snapshot's disclosure names A's reach: {}",
+            prepared_a.disclosure
+        );
+
+        // On-disk config B = the open web. A fresh prepare would see B; the prepared A run
+        // must not.
+        std::fs::write(
+            dir.path().join(".localpilot.toml"),
+            "[research]\nenabled = true\n[research.web]\nenabled = true\nallowlist = [\"*\"]\n",
+        )
+        .unwrap();
+
+        // Run the prepared A snapshot while the on-disk config is B. The runner emits its
+        // OWN egress disclosure from `prepared.config`; observe it to prove no reload. The
+        // inert config guarantees no egress; a pre-set stop keeps the run fast.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut out: Vec<u8> = Vec::new();
+        run_prepared_interactive_research(dir.path(), "topic", prepared_a, stop, &mut out)
+            .await
+            .expect("prepared run completes");
+        let emitted = String::from_utf8(out).expect("utf8");
+        assert!(
+            emitted.contains("a.example"),
+            "the prepared run emitted config A's reach: {emitted}"
+        );
+        assert!(
+            !emitted.contains("open web"),
+            "the prepared run did NOT reload config B (open web) — no display/egress TOCTOU: {emitted}"
         );
     }
 

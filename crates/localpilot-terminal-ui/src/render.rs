@@ -2417,12 +2417,19 @@ fn render_composer(frame: &mut Frame<'_>, layout: FrameLayout, app: &AppModel) -
     let scroll = cursor_row.saturating_add(1).saturating_sub(visible_rows);
     render_slim_frame(frame, layout.composer, surface_edge, left_edge, surface);
     render_pair_composer_label(frame, layout.composer, app, surface);
-    let placeholder = app.editor.text().is_empty() && app.shell_mode();
-    let composer_text = if placeholder {
-        "Run a shell command"
+    let empty = app.editor.text().is_empty();
+    let placeholder_text: Option<&str> = if empty && app.shell_mode() {
+        Some("Run a shell command")
+    } else if empty {
+        // Host-projected mode hint (e.g. Research); the renderer never parses a mode
+        // string. Shown only when the editor is empty, so the cursor stays at origin
+        // and composer geometry is unchanged.
+        app.composer_hint()
     } else {
-        app.editor.text()
+        None
     };
+    let placeholder = placeholder_text.is_some();
+    let composer_text = placeholder_text.unwrap_or_else(|| app.editor.text());
     frame.render_widget(
         Paragraph::new(composer_text.to_string())
             .style(if placeholder {
@@ -3419,7 +3426,7 @@ mod tests {
             workspace: "workspace".to_string(),
             branch: Some("main".to_string()),
             workspace_dirty: Some(false),
-            mode: "agent".to_string(),
+            mode: localpilot_slash::Mode::Agent,
             profile: "default".to_string(),
             session_id: "session".to_string(),
             session_name: None,
@@ -3447,7 +3454,7 @@ mod tests {
             workspace: "snapshot-workspace".to_string(),
             branch: Some("snapshot-branch".to_string()),
             workspace_dirty: Some(false),
-            mode: "agent".to_string(),
+            mode: localpilot_slash::Mode::Agent,
             profile: "snapshot-profile".to_string(),
             session_id: "snapshot-session-a".to_string(),
             session_name: Some("Snapshot Alpha".to_string()),
@@ -5643,7 +5650,7 @@ mod tests {
             header.workspace = "D:\\repos\\LocalX\\LocalPilot".to_string();
             header.branch = Some("terminal-chat-experience".to_string());
             header.workspace_dirty = Some(true);
-            header.mode = "agent".to_string();
+            header.mode = localpilot_slash::Mode::Agent;
             header.profile = "relaxed".to_string();
             let mut app = AppModel::new(header, TerminalCapabilities::default());
             app.set_active_usage(Some(crate::UsageTotals {
@@ -5680,7 +5687,7 @@ mod tests {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut header = header();
-        header.mode = "agent".to_string();
+        header.mode = localpilot_slash::Mode::Agent;
         header.profile = "relaxed".to_string();
         let mut app = AppModel::new(header, TerminalCapabilities::default());
 
@@ -6087,6 +6094,61 @@ mod tests {
             .backend()
             .to_string()
             .contains("Run a shell command"));
+    }
+
+    #[test]
+    fn research_mode_shows_in_footer_and_composer_hint_without_moving_geometry() {
+        // The composer renders the Research hint as an empty-editor placeholder in BOTH
+        // the normal and screen-reader configurations; it is a placeholder (empty-editor
+        // only), so it never shifts composer geometry or the cursor vs an Agent composer.
+        // Past the empty-conversation hero splash so the composer renders its editor
+        // placeholder rather than the welcome tagline.
+        let seed_turn = |app: &mut AppModel| {
+            app.begin_work();
+            app.apply_runtime(crate::RuntimeUpdate::Text("a prior answer".to_string()));
+            app.apply_runtime(crate::RuntimeUpdate::Stopped(crate::StopState::Done));
+        };
+        for screen_reader in [false, true] {
+            let mut research = AppModel::new(
+                header(),
+                TerminalCapabilities {
+                    screen_reader,
+                    ..TerminalCapabilities::default()
+                },
+            );
+            seed_turn(&mut research);
+            research.set_shared_mode(localpilot_slash::Mode::Research);
+            assert_eq!(
+                research.composer_hint(),
+                Some("Research a topic — local + web per config")
+            );
+            let (buf_r, hits_r) = render_test_frame(&research, 100, 24);
+            assert!(
+                rect_text(&buf_r, buf_r.area).contains("Research a topic"),
+                "screen_reader={screen_reader}: the empty Research composer renders the hint; buffer:\n{}",
+                character_cell_snapshot(&buf_r)
+            );
+
+            // Geometry/cursor invariance vs an empty Agent composer (same layout state).
+            let mut agent = AppModel::new(
+                header(),
+                TerminalCapabilities {
+                    screen_reader,
+                    ..TerminalCapabilities::default()
+                },
+            );
+            seed_turn(&mut agent);
+            assert_eq!(agent.composer_hint(), None);
+            let (_buf_a, hits_a) = render_test_frame(&agent, 100, 24);
+            assert_eq!(
+                hits_r.composer, hits_a.composer,
+                "screen_reader={screen_reader}: the hint does not move composer geometry"
+            );
+            assert_eq!(
+                hits_r.editor_width, hits_a.editor_width,
+                "screen_reader={screen_reader}: the hint does not change editor width"
+            );
+        }
     }
 
     #[test]

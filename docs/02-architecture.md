@@ -278,9 +278,14 @@ The single source of truth for the slash-command surface across all three hosts
   dispatch, host-aware: the inline host keeps its frozen behaviour while the
   full-screen and pair hosts additionally route the five takeover commands
   (`help`/`theme`/`settings`/`diff`/`search`) to real actions, and the full-screen
-  host runs `/compact` and the long-running `/ingest` runs on its operation pump
-  (a UI-agnostic progress lane surfaces ingest milestones without the operation and
-  the pump both mutating the model)
+  host runs `/compact`, the long-running `/ingest` runs, and `/research` on its
+  operation pump (a UI-agnostic progress lane surfaces ingest milestones without the
+  operation and the pump both mutating the model). The full-screen host owns a typed
+  live session mode (`localpilot_slash::Mode`) — bare `/research` enters a persistent
+  research mode — and captures a per-prompt `PromptKind` at enqueue time so a
+  mid-queue mode switch cannot retroactively reinterpret an already-queued prompt.
+  Interactive `/research` shares one prepared config snapshot between the shown egress
+  disclosure and the run, so what is disclosed is exactly what the run may reach
 - one globally-ordered `SLASH_SPELLINGS` table: each spelling maps to a semantic
   `SlashCommand` id and carries an `ArgSpec`, a `StrayArgs` policy, and a
   per-host `Option<&str>` description

@@ -14,6 +14,18 @@ is SemVer-stable; the configuration schema stability policy is in
   full-screen with live progress; a single Ctrl+C pauses a run (resume it with
   `/ingest resume`).
 
+- **`/research` now works in full-screen chat.** `/research <topic>` runs a
+  one-shot research pass on the same live pump, and bare `/research` enters a
+  persistent research mode where each plain prompt becomes a topic (the footer,
+  settings, and composer show the mode; `/agent` exits). The egress disclosure is
+  shown and drawn **before** any web or model request, a single Ctrl+C ends a run
+  with a partial report rather than losing it, and results open as a scrollable,
+  copyable report. Research is text-only: a prompt submitted with image
+  attachments while in research mode is declined with a notice and your draft and
+  attachments are preserved untouched. `[research].enabled = false` disables it;
+  `[research.web].enabled = false` still runs local-only research with a truthful
+  "web disabled" disclosure.
+
 - **Synchronous commands work in full-screen chat with bounded output.** `/tree`,
   `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg` now run in the
   full-screen session. Short output is shown inline; long output opens a

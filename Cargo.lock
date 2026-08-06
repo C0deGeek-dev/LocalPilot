@@ -2062,6 +2062,7 @@ dependencies = [
 name = "localpilot-terminal-ui"
 version = "2.7.0"
 dependencies = [
+ "localpilot-slash",
  "ratatui",
  "unicode-segmentation",
  "unicode-width 0.2.0",

@@ -35,7 +35,16 @@ driver (detailed in the Boundary), so the catalog stays **34/31/8**. A seventh
 increment puts `/compact` (and `/compact force`) and the three long-running ingest
 runs (`run`/`refresh`/`resume`) on that operation pump as full-screen commands,
 growing the catalog to **34/33/8** (`/compact_force` stays a hidden-but-typeable
-alias).
+alias). An eighth increment puts `/research` (one-shot `/research <topic>` and a
+persistent bare-`/research` mode) on that operation pump, growing the catalog to
+**34/34/8**; it introduces a typed live full-screen session mode
+(`localpilot_slash::Mode`, Agent/Research reachable — `/agent` the hidden-but-typeable
+research exit, `/harness` still deferred) and a per-prompt `PromptKind` captured at
+enqueue so a mid-queue mode switch cannot reinterpret an already-queued prompt, a
+text-only research attachment contract (a Research-mode prompt carrying images is
+declined before submit with its draft and attachments preserved), and a shared
+prepared-research snapshot so the web-egress disclosure is shown and drawn before any
+request from one config load (no display/egress race).
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -109,10 +118,10 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
-byte-for-byte (inline / full-screen / pair = **34 / 31 / 8** rows — the four
-permission profiles and `/effort` grew full-screen 19→24, `/think` 24→25, then the
-six synchronous commands 25→31; `ingest` stays inline-only until a later
-increment; inline and pair are unchanged), every semantic name parses to its
+byte-for-byte (inline / full-screen / pair = **34 / 34 / 8** rows — the four
+permission profiles and `/effort` grew full-screen 19→24, `/think` 24→25, the six
+synchronous commands 25→31, `/compact` + the long-running ingest runs 31→33, then
+`/research` 33→34; inline and pair are unchanged), every semantic name parses to its
 command id, all 36 identities are globally unique and equal to
 `SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
 The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
@@ -123,9 +132,11 @@ so a newly-added command cannot fall silently into "deferred" (the profiles and
 The durable obligations that remain OPEN for later work:
 
 - The default full-screen host must ultimately reach the **whole** shared
-  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **31**.
-  The shared table is the substrate that makes that a wiring task rather than a
-  re-derivation.
+  command surface; it currently reaches **34**. The shared table is the substrate
+  that makes that a wiring task rather than a re-derivation. (The earlier "→ 39 =
+  34 shared + 5 takeovers" target predates the deliberate hidden-but-typeable
+  `compact_force` choice and now the visible `/research` row; reconciling that final
+  visible-catalog count is a later-increment decision, not resolved here.)
 - The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
   the slash-command types have moved to their neutral home here; the rollback
   inline host cannot be removed until the approval types are extracted too.
@@ -192,6 +203,27 @@ throttle, so the generic driver never learns the ingest types; the preflight,
 throttle, and result formatting are shared verbatim with the inline host. The
 catalog grows to **34/33/8** (`compact_force` stays a hidden-but-typeable alias;
 pair unchanged); no new ADR.
+
+The eighth increment puts `/research` on the same pump. Research is the third
+cancellation shape: not compact's drop and not ingest's resumable pause, but
+signal-then-await-partial — a Ctrl+C sets the runner's stop flag and the future is
+kept and awaited so it returns a partial report, never dropped. The full-screen host
+owns a typed live session mode for the first time (`localpilot_slash::Mode`, a
+dependency-free leaf now on `localpilot-terminal-ui`'s path); `set_shared_mode`
+updates the typed authority and every projection (footer, settings, composer hint) in
+one synchronous arm, and `/agent` becomes a hidden-but-typeable real transition solely
+as Research mode's exit while `/harness` stays deferred. A per-prompt `PromptKind`
+captured at enqueue (Agent and Harness drain to a turn, Research reroutes) prevents a
+mid-queue mode switch from reinterpreting a queued prompt, since enqueue and drain
+straddle the queue. The web-egress disclosure — required before any request
+(`docs/07-security-and-privacy.md`) — is satisfied by a shared prepared-research
+snapshot: one config load feeds both the shown disclosure and the runner, the
+disclosure is applied and drawn before the research future is constructed, and the
+snapshot is the sole egress authority so a later config edit cannot broaden the reach
+that was shown. Research is text-only: a Research-mode prompt carrying images is
+declined at the submit boundary before the editor is consumed, preserving the draft
+and attachments. The catalog grows to **34/34/8** (only `/research` becomes visible;
+inline and pair unchanged); no new ADR.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

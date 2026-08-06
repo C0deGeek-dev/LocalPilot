@@ -252,7 +252,10 @@ to accepted memory).
 It is reachable two ways: an interactive `/research <topic>` (runs once and
 returns to the prior mode) or a bare `/research` that enters a persistent
 research mode; and a headless `localpilot research <topic>` subcommand
-(`--no-report`, `--no-memory`). When a provider and model are configured the
+(`--no-report`, `--no-memory`). The interactive forms run in the full-screen
+(default) chat host as well as the inline composer; research is text-only, so a
+prompt submitted with image attachments while in research mode is declined with a
+notice and the draft and its attachments are preserved. When a provider and model are configured the
 model decomposes the topic; synthesis stays grounded in gathered evidence, so a
 finding is always backed.
 

@@ -541,10 +541,13 @@ construction:
   can override it (the consent grant is a no-op against config-off, enforced
   and tested).
 - **Loud disclosure on every web-active run, both surfaces.** The subcommand
-  and interactive `/research` print the same egress disclosure before any
-  request: the default-on posture and both off-switches, what is sent (only
-  the redacted sub-question), the effective reach, blocked domains, and the
-  audit-log path. The per-session consent is recorded after the disclosure
+  and interactive `/research` — in both the inline composer and the full-screen
+  chat host — print the same egress disclosure before any request: the default-on
+  posture and both off-switches, what is sent (only the redacted sub-question), the
+  effective reach, blocked domains, and the audit-log path. The full-screen host
+  shows and draws the disclosure before the research run is constructed or polled,
+  from the same config snapshot the run uses, so what is disclosed is exactly what
+  the run may reach. The per-session consent is recorded after the disclosure
   and is **never persisted**.
 - **Allowlist-gated.** Each candidate URL's host is parsed with a real URL
   parser and checked against `[research.web] allowlist`. Unset means `["*"]`

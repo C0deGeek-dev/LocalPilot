@@ -596,6 +596,14 @@ impl Editor {
             .any(|unit| matches!(&unit.payload, AtomicPayload::Image(_)))
     }
 
+    #[must_use]
+    pub(crate) fn image_count(&self) -> usize {
+        self.units
+            .iter()
+            .filter(|unit| matches!(&unit.payload, AtomicPayload::Image(_)))
+            .count()
+    }
+
     pub(crate) fn exit_shell_mode(&mut self) {
         if !self.is_shell_mode() {
             return;

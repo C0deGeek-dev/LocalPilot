@@ -378,7 +378,7 @@ pub async fn run_chat(
                 workspace: cwd.display().to_string(),
                 branch: git.as_ref().map(|status| status.branch.clone()),
                 workspace_dirty: git.as_ref().and_then(|status| status.dirty),
-                mode: Mode::Agent.label().to_string(),
+                mode: Mode::Agent,
                 profile: ui_profile(profile).label().to_string(),
                 session_id: header.session_id.clone(),
                 session_name: header.session_name.clone(),

@@ -600,11 +600,23 @@ fn restore_exit_with(exit: ExitDraft, restore: impl FnOnce()) -> RestoredExit {
     exit.after_restore()
 }
 
+/// The operating mode a queued prompt was submitted under, captured at ENQUEUE
+/// time and branched at drain, so a later mode switch cannot reinterpret an
+/// already-queued prompt. `Agent` and `Harness` both drain to an ordinary model
+/// turn (inline parity); only `Research` reroutes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PromptKind {
+    Agent,
+    Harness,
+    Research,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct QueuedPrompt {
     text: String,
     attachments: Vec<ContentBlock>,
     item_id: ItemId,
+    kind: PromptKind,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -674,10 +686,16 @@ enum PumpedIngest {
 }
 
 /// A slash command that runs on the operation pump rather than synchronously.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum PumpedSlash {
-    Compact { force: bool },
+    Compact {
+        force: bool,
+    },
     Ingest(PumpedIngest),
+    /// A one-shot `/research <topic>`; bare `/research` (mode entry) is synchronous.
+    Research {
+        topic: String,
+    },
 }
 
 /// How the full-screen host dispatches a parsed slash action.
@@ -710,6 +728,9 @@ fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
         SlashAction::Ingest(localpilot_tui::IngestAction::Resume) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
         }
+        // One-shot `/research <topic>` pumps; bare `/research` (mode entry, `None`)
+        // stays synchronous.
+        SlashAction::Research(Some(topic)) => SlashRoute::Pumped(PumpedSlash::Research { topic }),
         other => SlashRoute::Synchronous(other),
     }
 }
@@ -727,6 +748,7 @@ impl std::fmt::Debug for QueuedPrompt {
                 &format_args!("<{} redacted>", self.attachments.len()),
             )
             .field("item_id", &self.item_id)
+            .field("kind", &self.kind)
             .finish()
     }
 }
@@ -2699,7 +2721,19 @@ fn prepare_prompt_operation(
         text: submitted.prompt,
         attachments,
         item_id,
+        // Captured under the mode in force NOW, so a later mode switch cannot
+        // reinterpret this prompt once it sits in the queue.
+        kind: prompt_kind(app.mode()),
     }))
+}
+
+/// Map the live operating mode to the kind a submitted prompt is pinned to.
+fn prompt_kind(mode: localpilot_tui::Mode) -> PromptKind {
+    match mode {
+        localpilot_tui::Mode::Agent => PromptKind::Agent,
+        localpilot_tui::Mode::Harness => PromptKind::Harness,
+        localpilot_tui::Mode::Research => PromptKind::Research,
+    }
 }
 
 fn prepare_shell_operation(
@@ -3044,13 +3078,32 @@ async fn execute_fullscreen_slash_action(
                 "internal: /compact reached the synchronous dispatch path".to_string(),
             ));
         }
-        // The commands the full-screen host genuinely does not dispatch yet. Listed
-        // explicitly (not a wildcard) so a new `SlashAction` variant that no one has
-        // taught this host about is a compile error, not a silent deferral.
-        SlashAction::SetMode(_)
-        | SlashAction::HarnessResume
-        | SlashAction::WaitResume
-        | SlashAction::Research(_) => {
+        // Bare `/research` enters persistent research mode. Synchronous: set the typed
+        // mode + all projections atomically, then post the exact egress-aware entry
+        // notice (naming `/agent` as the exit).
+        SlashAction::Research(None) => {
+            app.set_shared_mode(localpilot_tui::Mode::Research);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::research::research_mode_notice(cwd),
+            ));
+        }
+        // One-shot `/research <topic>` is pumped by `route_fullscreen_slash` upstream,
+        // so this arm is an unreachable defensive guard kept for exhaustiveness.
+        SlashAction::Research(Some(_)) => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "internal: one-shot /research reached the synchronous dispatch path".to_string(),
+            ));
+        }
+        // `/agent` is the advertised exit from research mode — a hidden-but-typeable
+        // real transition (Agent is the always-present default turn loop, so subject
+        // 03's "no real mode loop" objection does not apply). Not a visible catalog row.
+        SlashAction::SetMode(localpilot_tui::Mode::Agent) => {
+            app.set_shared_mode(localpilot_tui::Mode::Agent);
+        }
+        // Still genuinely deferred: `/harness` (no harness turn loop in full-screen yet)
+        // and the harness/wait resume commands. Listed explicitly (not a wildcard) so a
+        // new `SlashAction` variant is a compile error, not a silent deferral.
+        SlashAction::SetMode(_) | SlashAction::HarnessResume | SlashAction::WaitResume => {
             app.apply_runtime(RuntimeUpdate::Notice(format!(
                 "/{deferred_label} is not available in full-screen chat yet"
             )));
@@ -3910,17 +3963,37 @@ async fn drive_operation_chain(
             SerialOperation::Queued(QueuedOperation::Prompt(prompt)) => {
                 let _ = app.activate_prompt(prompt.item_id);
                 app.begin_work_before(next_item);
-                if drive_turn(
-                    terminal,
-                    app,
-                    runtime,
-                    &mut ctx,
-                    &prompt.text,
-                    &prompt.attachments,
-                    queue,
-                )
-                .await?
-                {
+                // Branch on the kind captured at ENQUEUE, so a mode switch made while
+                // this prompt sat in the queue cannot reinterpret it. Agent and Harness
+                // both take the ordinary model turn (inline parity); only Research
+                // reroutes — and it must not `begin_work` again (already Busy here).
+                let exit = match prompt.kind {
+                    PromptKind::Research => {
+                        drive_research(
+                            terminal,
+                            app,
+                            runtime,
+                            &mut ctx,
+                            &prompt.text,
+                            queue,
+                            BeginWork::AlreadyBusy,
+                        )
+                        .await?
+                    }
+                    PromptKind::Agent | PromptKind::Harness => {
+                        drive_turn(
+                            terminal,
+                            app,
+                            runtime,
+                            &mut ctx,
+                            &prompt.text,
+                            &prompt.attachments,
+                            queue,
+                        )
+                        .await?
+                    }
+                };
+                if exit {
                     discard_queued_operations(queue);
                     return Ok(true);
                 }
@@ -3959,6 +4032,9 @@ async fn drive_slash_command(
         }
         PumpedSlash::Ingest(action) => {
             drive_ingest(terminal, app, runtime, ctx, action, queue).await
+        }
+        PumpedSlash::Research { topic } => {
+            drive_research(terminal, app, runtime, ctx, &topic, queue, BeginWork::Own).await
         }
     }
 }
@@ -4177,6 +4253,126 @@ async fn drive_ingest(
             app.apply_runtime(RuntimeUpdate::Notice(
                 crate::ingest_progress::ingest_result_notice(result),
             ));
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await
+}
+
+/// Which side owns the Busy transition for a research run. A one-shot
+/// `/research <topic>` (`Own`) calls `begin_work` itself; a queued Research prompt
+/// (`AlreadyBusy`) is already activated and Busy via the chain's
+/// `begin_work_before`, so `drive_research` must NOT `begin_work` again — that would
+/// erase `active_insert_before` and let the report land after later pending rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BeginWork {
+    Own,
+    AlreadyBusy,
+}
+
+/// Run a research pass on the operation pump: preflight before Busy, show the egress
+/// disclosure and draw before any request, then a signal-then-await-partial run
+/// whose buffered output is presented through the bounded report presenter.
+async fn drive_research(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    topic: &str,
+    queue: &mut VecDeque<QueuedOperation>,
+    begin: BeginWork,
+) -> Result<bool> {
+    let prepared = match crate::research::prepare_interactive_research(ctx.cwd) {
+        Ok(Some(prepared)) => prepared,
+        other => {
+            // Disabled ([research].enabled = false) or a config error: one bounded
+            // notice, never a worker. A queued origin is already Busy, so it must
+            // return to Idle; a one-shot origin never entered Busy.
+            let notice = match other {
+                Ok(None) => "research is disabled ([research].enabled = false)".to_string(),
+                Err(error) => format!("research config error: {error}"),
+                Ok(Some(_)) => unreachable!("handled by the match arm above"),
+            };
+            app.apply_runtime(RuntimeUpdate::Notice(notice));
+            if matches!(begin, BeginWork::AlreadyBusy) {
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+            }
+            return Ok(false);
+        }
+    };
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let cancel = CancellationToken::new();
+    if matches!(begin, BeginWork::Own) {
+        app.begin_work();
+    }
+    // Disclosure BEFORE any egress: apply it as one bounded multi-line Notice and
+    // draw once, so consent is on screen before the research future is constructed
+    // or polled (docs/07). The prepared config is the sole egress authority; the run
+    // retains the same disclosure bytes as its audit copy.
+    app.apply_runtime(RuntimeUpdate::Notice(prepared.disclosure.clone()));
+    draw_synchronized(terminal, app)?;
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let root = ctx.cwd.to_path_buf();
+    let topic = topic.to_string();
+    let operation = {
+        let cancel = cancel.clone();
+        let stop = stop.clone();
+        async move {
+            let mut out: Vec<u8> = Vec::new();
+            let result = {
+                let run = crate::research::run_prepared_interactive_research(
+                    &root,
+                    &topic,
+                    prepared,
+                    stop.clone(),
+                    &mut out,
+                );
+                tokio::pin!(run);
+                tokio::select! {
+                    res = &mut run => res,
+                    // Signal-then-await-partial: set the stop flag and keep awaiting so
+                    // the run returns a partial report; the future is never dropped mid-run.
+                    _ = cancel.cancelled() => {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        (&mut run).await
+                    }
+                }
+            };
+            (result, out)
+        }
+    };
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        |app: &mut AppModel, (result, out): (anyhow::Result<()>, Vec<u8>)| {
+            let output = crate::repl::command_output_from_buffer(out, result);
+            present_command_report(app, command_report("research", output));
             app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
         },
     )
@@ -6185,7 +6381,7 @@ mod tests {
                 workspace: "fixture-workspace".to_string(),
                 branch: Some("fixture-branch".to_string()),
                 workspace_dirty: Some(true),
-                mode: "agent".to_string(),
+                mode: localpilot_tui::Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "fixture-session".to_string(),
                 session_name: None,
@@ -6207,7 +6403,7 @@ mod tests {
                 workspace: workspace.to_string(),
                 branch: Some("fixture-branch".to_string()),
                 workspace_dirty: Some(true),
-                mode: "agent".to_string(),
+                mode: localpilot_tui::Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session-a".to_string(),
                 session_name: Some("Alpha".to_string()),
@@ -7145,8 +7341,11 @@ mod tests {
             );
         }
 
-        // Modes stay deferred: /agent and /harness never relabel the shared mode.
-        for cmd in ["/agent", "/harness"] {
+        // `/harness` stays deferred in full-screen (no mode-entry loop), so it never
+        // relabels the shared mode. `/agent` is now a real hidden transition — the
+        // Research-mode exit — covered by
+        // `research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm`.
+        {
             let mut app = app();
             let before = app.shared_mode().to_string();
             let _ = execute_fullscreen_slash(
@@ -7154,10 +7353,14 @@ mod tests {
                 &mut bundle.runtime,
                 &config,
                 cwd,
-                slash_input(cmd),
+                slash_input("/harness"),
             )
             .await;
-            assert_eq!(app.shared_mode(), before, "{cmd} must not relabel the mode");
+            assert_eq!(
+                app.shared_mode(),
+                before,
+                "/harness must not relabel the mode"
+            );
         }
 
         bundle.runtime.close();
@@ -9178,6 +9381,10 @@ mod tests {
             ("knowledge", "Query the knowledge base"),
             ("context", "Build a context bundle"),
             (
+                "research",
+                "Research a topic, local + web per config (/research [topic])",
+            ),
+            (
                 "agents",
                 "List or inspect subagent definitions (/agents [show <name>])",
             ),
@@ -9194,14 +9401,15 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 33);
+        assert_eq!(full_screen.len(), 34);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
-        // `agent`/`harness` stay deferred (no real full-screen mode transition);
-        // `compact`/`ingest` now run on the operation pump.
-        for deferred in ["agent", "harness", "research"] {
-            assert!(!full_screen.iter().any(|(name, _)| name == deferred));
+        // `agent` is a hidden-but-typeable real transition (the Research-mode exit) and
+        // `harness` stays deferred; both are hidden from the full-screen catalog.
+        // `compact`/`ingest`/`research` now run on the operation pump / as a mode.
+        for hidden in ["agent", "harness"] {
+            assert!(!full_screen.iter().any(|(name, _)| name == hidden));
         }
 
         // The pair picker: 8 rows with pair-specific copy for search/settings and
@@ -11829,6 +12037,317 @@ mod tests {
     }
 
     #[test]
+    fn queued_prompts_keep_the_mode_they_were_enqueued_under() {
+        // A prompt's kind is captured at ENQUEUE from the mode in force then, so a
+        // later mode switch cannot reinterpret it while it sits in the queue. Covers
+        // all three kinds (Agent and Harness both drain to a turn; Research reroutes).
+        for (mode, expected) in [
+            (localpilot_tui::Mode::Agent, PromptKind::Agent),
+            (localpilot_tui::Mode::Harness, PromptKind::Harness),
+            (localpilot_tui::Mode::Research, PromptKind::Research),
+        ] {
+            let mut app = app();
+            app.begin_work();
+            app.set_shared_mode(mode);
+            app.editor.insert("a queued prompt");
+            let cancel = CancellationToken::new();
+            let history = localpilot_store::PromptHistory::with_store(None);
+            let cwd = Path::new("fixture");
+            let mut queue = VecDeque::new();
+            let steer = SteerQueue::default();
+            let mut pending_steer_items = VecDeque::new();
+            assert!(!handle_turn_event_with_steering(
+                &mut app,
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+                &cancel,
+                &event_hit_map(),
+                &mut queue,
+                &history,
+                cwd,
+                &image_capability(false),
+                &steer,
+                &mut pending_steer_items,
+            ));
+            // Switch the live mode AFTER the prompt is queued — the captured kind
+            // must not change.
+            app.set_shared_mode(localpilot_tui::Mode::Agent);
+            assert_eq!(
+                queue.front().expect("one queued prompt").prompt().kind,
+                expected,
+                "prompt enqueued under {mode:?} keeps its kind after a mode switch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bounded_research_result_opens_the_report_takeover() {
+        // A research transcript (many lines) presents as the scrollable/copyable Report
+        // takeover, not a flooding stream of Notices; a short result stays a Notice.
+        let mut big = app();
+        let mut short = app();
+        let lines: Vec<String> = (0..20).map(|i| format!("research finding {i}")).collect();
+        present_command_report(
+            &mut big,
+            command_report(
+                "research",
+                crate::repl::CommandOutput { lines, error: None },
+            ),
+        );
+        assert!(
+            big.has_takeover(),
+            "a >8-line research result opens the bounded Report takeover"
+        );
+        present_command_report(
+            &mut short,
+            command_report(
+                "research",
+                crate::repl::CommandOutput {
+                    lines: vec!["done".to_string()],
+                    error: None,
+                },
+            ),
+        );
+        assert!(
+            !short.has_takeover(),
+            "a short research result stays a Notice, no takeover"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_research_report_projects_before_the_next_queued_prompt_activates() {
+        // BLOCKING contract: the research op's bounded Report takeover + breadcrumb are
+        // projected at completion — before the chain pops the queue — and stay accessible
+        // while the next queued operation begins; the breadcrumb honours the insertion
+        // barrier (before the later pending row).
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+
+        // A typeahead prompt is queued behind the research op (a real pending row that
+        // sets the active insertion point).
+        let steer = SteerQueue::default();
+        let mut pending_steer_items = VecDeque::new();
+        app.editor.insert("next prompt");
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+        assert_eq!(queue.len(), 1);
+
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            std::future::ready(()),
+            |app: &mut AppModel, ()| {
+                let lines: Vec<String> = (0..20).map(|i| format!("research finding {i}")).collect();
+                present_command_report(
+                    app,
+                    command_report(
+                        "research",
+                        crate::repl::CommandOutput { lines, error: None },
+                    ),
+                );
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+            },
+        )
+        .await
+        .expect("command loop completes");
+        assert!(!out);
+        assert!(
+            app.has_takeover(),
+            "the research Report takeover is open at completion, before the chain pops the queue"
+        );
+        // The breadcrumb Notice honoured the insertion barrier (before the pending row).
+        let prompt_idx = app
+            .active_timeline()
+            .items()
+            .iter()
+            .position(|item| item.text.contains("next prompt"))
+            .expect("pending prompt row");
+        let crumb_idx = app
+            .active_timeline()
+            .items()
+            .iter()
+            .position(|item| item.text.contains("research"))
+            .expect("report breadcrumb");
+        assert!(
+            crumb_idx < prompt_idx,
+            "the research breadcrumb stays before the later pending row"
+        );
+        assert_eq!(
+            queue.len(),
+            1,
+            "the single research op did not activate the queued prompt — that is the chain's next step"
+        );
+        // Model the chain's next step. `drive_operation_chain` loops this SAME per-op
+        // driver: after the research op it pops the queue, activates the prompt with
+        // `begin_work_before`, and runs it. Reproduce that here (the chain's terminal/
+        // event I/O is not injectable without threading the seam through every leaf
+        // driver — see the pre-commit note), and prove the next op RUNS to completion
+        // while the report takeover stays accessible throughout.
+        let queued_id = queue.pop_front().expect("queued prompt").item_id();
+        assert!(app.activate_prompt(queued_id));
+        app.begin_work_before(queue.front().map(QueuedOperation::item_id));
+        assert!(
+            app.has_takeover(),
+            "the Report takeover is still open as the next queued op begins"
+        );
+        let mut io2 = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        let ran = drive_command_loop(
+            &mut app,
+            &mut io2,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            std::future::ready(()),
+            |app: &mut AppModel, ()| {
+                app.apply_runtime(RuntimeUpdate::Text("the next queued op ran".to_string()));
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+            },
+        )
+        .await
+        .expect("the next queued op runs");
+        assert!(!ran);
+        assert!(
+            timeline_has(&app, "the next queued op ran"),
+            "the next queued operation ran to completion under the chain's per-op driver"
+        );
+        assert!(
+            app.has_takeover(),
+            "the Report takeover remained accessible while the next queued op ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn research_cancellation_sets_stop_and_awaits_the_partial_report() {
+        // `drive_research`'s operation shape: on cancel, set the `Arc<AtomicBool>` stop
+        // flag and KEEP awaiting so the runner returns a partial report — the future is
+        // never dropped mid-run. Fake runner here; same select! shape as `drive_research`.
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+
+        // A single Ctrl+C on a busy app → CancelWork → cancel.cancel().
+        let mut io = characterization_io(
+            queued(vec![Event::Key(press(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))]),
+            cell(0),
+            cell(0),
+            None,
+        );
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let awaited_after_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation = {
+            let cancel = cancel.clone();
+            let stop = stop.clone();
+            let awaited = awaited_after_stop.clone();
+            async move {
+                let run = async {
+                    loop {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            awaited.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return "research: partial results (stopped by cancellation)"
+                                .to_string();
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                };
+                tokio::pin!(run);
+                tokio::select! {
+                    res = &mut run => res,
+                    _ = cancel.cancelled() => {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        (&mut run).await
+                    }
+                }
+            }
+        };
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            operation,
+            |app: &mut AppModel, partial: String| {
+                app.apply_runtime(RuntimeUpdate::Notice(partial));
+                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+            },
+        )
+        .await
+        .expect("command loop completes");
+        assert!(
+            !out,
+            "a single Ctrl+C cancels the research op, it does not exit"
+        );
+        assert!(
+            stop.load(std::sync::atomic::Ordering::Relaxed),
+            "cancel set the stop flag"
+        );
+        assert!(
+            awaited_after_stop.load(std::sync::atomic::Ordering::Relaxed),
+            "the run was awaited to its partial result, not dropped"
+        );
+        assert!(
+            timeline_has(&app, "partial results"),
+            "the partial report is presented"
+        );
+    }
+
+    #[test]
     fn route_fullscreen_slash_pumps_compact_and_long_ingest_only() {
         use localpilot_tui::IngestAction;
         assert!(matches!(
@@ -11850,6 +12369,25 @@ mod tests {
         assert!(matches!(
             route_fullscreen_slash(SlashAction::Ingest(IngestAction::Resume)),
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
+        ));
+        // Research: one-shot `/research <topic>` pumps; bare `/research` (mode entry),
+        // the hidden `/agent` research-exit, and the still-deferred `/harness` stay
+        // synchronous.
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Research(Some("a topic".to_string()))),
+            SlashRoute::Pumped(PumpedSlash::Research { .. })
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Research(None)),
+            SlashRoute::Synchronous(SlashAction::Research(None))
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Agent)),
+            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Agent))
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Harness)),
+            SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Harness))
         ));
         // The eleven fast ingest subcommands run synchronously (never pumped).
         let fast = [
@@ -11891,6 +12429,74 @@ mod tests {
             pumped_ingest_mode(PumpedIngest::Resume),
             (localpilot_localmind::RunMode::Refresh, true)
         ));
+    }
+
+    #[tokio::test]
+    async fn research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+        // Bare `/research` enters Research mode (the synchronous mode-entry arm).
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/research"),
+        )
+        .await;
+        assert_eq!(
+            app.mode(),
+            localpilot_tui::Mode::Research,
+            "bare /research enters Research mode"
+        );
+        assert!(
+            rendered_footer(&app).contains("research"),
+            "the footer renders the Research mode"
+        );
+        assert!(
+            fullscreen_settings(&app, &config)
+                .iter()
+                .any(|entry| entry.name == "Mode and profile" && entry.value.contains("research")),
+            "the settings 'Mode and profile' row reads research"
+        );
+        // Hidden-but-typeable `/agent` is the advertised research exit → back to Agent.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/agent"),
+        )
+        .await;
+        assert_eq!(
+            app.mode(),
+            localpilot_tui::Mode::Agent,
+            "/agent exits Research mode"
+        );
+        // `/harness` stays deferred — no mode transition, a "not available" notice.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/harness"),
+        )
+        .await;
+        assert_eq!(
+            app.mode(),
+            localpilot_tui::Mode::Agent,
+            "/harness does not transition the mode"
+        );
+        assert!(
+            app.active_timeline()
+                .items()
+                .iter()
+                .any(|item| item.text.contains("not available in full-screen chat")),
+            "/harness stays deferred"
+        );
+        bundle.runtime.close();
     }
 
     #[test]

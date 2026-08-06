@@ -3,6 +3,8 @@ use std::fmt;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
+use localpilot_slash::Mode;
+
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
 use crate::projection::{ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState};
@@ -44,7 +46,7 @@ pub struct Header {
     pub workspace: String,
     pub branch: Option<String>,
     pub workspace_dirty: Option<bool>,
-    pub mode: String,
+    pub mode: Mode,
     pub profile: String,
     pub session_id: String,
     pub session_name: Option<String>,
@@ -56,7 +58,7 @@ struct SharedHeader {
     workspace: String,
     branch: Option<String>,
     workspace_dirty: Option<bool>,
-    mode: String,
+    mode: Mode,
     profile: String,
 }
 
@@ -1116,7 +1118,7 @@ impl AppModel {
                 workspace: sanitize_text(&workspace),
                 branch: branch.map(|branch| sanitize_text(&branch)),
                 workspace_dirty,
-                mode: sanitize_text(&mode),
+                mode,
                 profile: sanitize_text(&profile),
             },
             Self::sanitize_session_header(SessionHeader {
@@ -1262,7 +1264,24 @@ impl AppModel {
 
     #[must_use]
     pub fn shared_mode(&self) -> &str {
-        &self.header.mode
+        self.header.mode.label()
+    }
+
+    /// The typed operating-mode authority (Agent/Harness/Research). The submit
+    /// guard and composer hint read this, never a mode string.
+    #[must_use]
+    pub const fn mode(&self) -> Mode {
+        self.header.mode
+    }
+
+    /// The composer placeholder hint for the current mode, host-projected so the
+    /// renderer never parses a mode string. Shown only when the editor is empty.
+    #[must_use]
+    pub const fn composer_hint(&self) -> Option<&'static str> {
+        match self.header.mode {
+            Mode::Research => Some("Research a topic — local + web per config"),
+            Mode::Agent | Mode::Harness => None,
+        }
     }
 
     #[must_use]
@@ -1310,6 +1329,14 @@ impl AppModel {
     /// profile never disagrees with the profile actually in force.
     pub fn set_shared_profile(&mut self, profile: &str) {
         self.header.profile = sanitize_text(profile);
+    }
+
+    /// Update the shared operating mode (Agent/Harness/Research) shown in the
+    /// footer, settings, and composer hint. The host must call this in the same
+    /// branch that updates the session's mode, so the displayed mode never
+    /// disagrees with the mode actually in force.
+    pub fn set_shared_mode(&mut self, mode: Mode) {
+        self.header.mode = mode;
     }
 
     /// Whether reasoning items are currently shown in the timeline.
@@ -3886,6 +3913,19 @@ impl AppModel {
                 .submit_command()
                 .map_or(AppCommand::None, AppCommand::RunSlash)
         } else {
+            // Research is text-only: reject a research-routed prompt carrying images
+            // BEFORE `submit()` consumes the draft, so the exact text/pastes/images
+            // are preserved with no history/queue/worker side effect.
+            if self.mode() == Mode::Research && self.editor.has_images() {
+                let count = self.editor.image_count();
+                let _ = self.push_runtime_item(
+                    ItemKind::Notice,
+                    format!(
+                        "research is text-only — remove the {count} image(s) or /agent to exit research mode"
+                    ),
+                );
+                return AppCommand::None;
+            }
             self.editor
                 .submit()
                 .map_or(AppCommand::None, AppCommand::Submit)
@@ -4322,7 +4362,7 @@ mod tests {
                 workspace: "workspace".to_string(),
                 branch: Some("main".to_string()),
                 workspace_dirty: Some(false),
-                mode: "agent".to_string(),
+                mode: Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session".to_string(),
                 session_name: None,
@@ -4340,7 +4380,7 @@ mod tests {
                 workspace: "workspace".to_string(),
                 branch: Some("main".to_string()),
                 workspace_dirty: Some(false),
-                mode: "agent".to_string(),
+                mode: Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session-a".to_string(),
                 session_name: Some("Alpha".to_string()),
@@ -4713,7 +4753,7 @@ mod tests {
                 workspace: "workspace".to_string(),
                 branch: Some("main".to_string()),
                 workspace_dirty: Some(false),
-                mode: "agent".to_string(),
+                mode: Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session-a".to_string(),
                 session_name: Some("Alpha".to_string()),
@@ -4926,7 +4966,7 @@ mod tests {
                 workspace: "workspace".to_string(),
                 branch: Some("main".to_string()),
                 workspace_dirty: Some(false),
-                mode: "agent".to_string(),
+                mode: Mode::Agent,
                 profile: "default".to_string(),
                 session_id: "session-a".to_string(),
                 session_name: Some("Alpha".to_string()),
@@ -5582,6 +5622,113 @@ mod tests {
         assert!(image.active_timeline().items().iter().any(|item| {
             item.kind == ItemKind::Notice && item.text.contains("remove image attachments")
         }));
+    }
+
+    #[test]
+    fn research_mode_rejects_a_prompt_with_images_and_preserves_the_draft() {
+        let mut app = model();
+        app.seed_history(vec!["an earlier prompt".to_string()]);
+        app.set_shared_mode(Mode::Research);
+        // A COMPLETE draft: text + a pasted unit + an image + a non-terminal cursor.
+        let _ = app.handle_input(InputAction::Insert("a research topic".to_string()), 80);
+        app.editor.insert_paste("PASTED-BLOCK");
+        assert!(app.attach_image("image/png", "IMAGE_SECRET", 128).is_some());
+        app.editor.set_cursor_from_visual(0, 4, 80); // mid-line, non-terminal cursor
+        let before = app.editor.snapshot();
+        let timeline_before = app.active_timeline().items().len();
+        // Research is text-only: the prompt is rejected BEFORE `submit()` consumes the
+        // draft — no submission, one notice, and no durable side effect.
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        assert!(
+            app.editor.snapshot() == before,
+            "the EXACT before-consume editor state (text + paste unit + image + cursor + \
+             shell_mode) is preserved on rejection"
+        );
+        // A consumed prompt would clear the editor and append to prompt history; the
+        // intact snapshot proves neither happened — nothing was recalled or persisted.
+        // (`text()` also carries the paste placeholder, so match a substring.)
+        assert!(app.editor.has_images() && app.editor.text().contains("a research topic"));
+        assert!(app.active_timeline().items().iter().any(|item| {
+            item.kind == ItemKind::Notice && item.text.contains("research is text-only")
+        }));
+        assert_eq!(
+            app.active_timeline().items().len(),
+            timeline_before + 1,
+            "only the rejection notice was added — no user prompt row"
+        );
+        assert_eq!(app.active_work(), WorkState::Idle, "no worker started");
+
+        // History: the rejected Research prompt never entered prompt recall. Clear the
+        // draft through the editor seam and recall once — the only entry is the seeded
+        // prior prompt (a submitted prompt would have appended "a research topic…").
+        app.editor.clear_all();
+        let _ = app.handle_input(InputAction::MoveUp, 80);
+        assert_eq!(
+            app.editor.text(),
+            "an earlier prompt",
+            "recall surfaces only the seeded prior prompt — the rejected prompt never entered history"
+        );
+    }
+
+    #[test]
+    fn research_slash_forms_with_images_hit_the_generic_slash_rejection() {
+        // `/research <topic>` and bare `/research` carrying images are declined by the
+        // generic images-before-slash guard (not the research-plain guard) BEFORE submit,
+        // preserving the full editor state — no user row, `AppCommand::None`, Idle.
+        for line in ["/research a topic", "/research"] {
+            let mut app = model();
+            app.set_shared_mode(Mode::Research);
+            let _ = app.handle_input(InputAction::Insert(line.to_string()), 80);
+            assert!(app.attach_image("image/png", "IMG", 64).is_some());
+            let before = app.editor.snapshot();
+            let timeline_before = app.active_timeline().items().len();
+            assert_eq!(
+                app.handle_input(InputAction::Submit, 80),
+                AppCommand::None,
+                "{line} with images is declined"
+            );
+            assert!(
+                app.editor.snapshot() == before,
+                "{line}: the full draft + image are preserved"
+            );
+            assert!(
+                app.active_timeline().items().iter().any(|item| {
+                    item.kind == ItemKind::Notice
+                        && item
+                            .text
+                            .contains("remove image attachments before running a slash command")
+                }),
+                "{line}: the generic slash-image rejection notice"
+            );
+            assert_eq!(
+                app.active_timeline().items().len(),
+                timeline_before + 1,
+                "{line}: only the notice — no user row"
+            );
+            assert_eq!(app.active_work(), WorkState::Idle);
+        }
+    }
+
+    #[test]
+    fn set_shared_mode_updates_the_typed_authority_and_composer_hint() {
+        let mut app = model();
+        assert_eq!(app.mode(), Mode::Agent);
+        assert_eq!(app.shared_mode(), "agent");
+        assert_eq!(app.composer_hint(), None);
+        app.set_shared_mode(Mode::Research);
+        assert_eq!(app.mode(), Mode::Research);
+        assert_eq!(
+            app.shared_mode(),
+            "research",
+            "footer/settings project the label"
+        );
+        assert_eq!(
+            app.composer_hint(),
+            Some("Research a topic — local + web per config")
+        );
+        app.set_shared_mode(Mode::Agent);
+        assert_eq!(app.mode(), Mode::Agent);
+        assert_eq!(app.composer_hint(), None);
     }
 
     #[test]
