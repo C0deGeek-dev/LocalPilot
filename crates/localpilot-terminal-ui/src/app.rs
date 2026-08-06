@@ -1286,6 +1286,14 @@ impl AppModel {
         self.projections.active_mut().header.session_name = session_name;
     }
 
+    /// Update the shared permission-profile label shown in the footer/settings.
+    /// Sanitized consistently with header construction. The host must call this in
+    /// the same branch that updates the permission engine, so the displayed
+    /// profile never disagrees with the profile actually in force.
+    pub fn set_shared_profile(&mut self, profile: &str) {
+        self.header.profile = sanitize_text(profile);
+    }
+
     #[must_use]
     pub const fn active_timeline(&self) -> &Timeline {
         &self.projections.active().timeline

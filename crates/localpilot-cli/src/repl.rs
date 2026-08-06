@@ -3086,7 +3086,7 @@ pub(crate) fn ui_profile(profile: Profile) -> UiProfile {
     }
 }
 
-fn sandbox_profile(profile: UiProfile) -> Profile {
+pub(crate) fn sandbox_profile(profile: UiProfile) -> Profile {
     match profile {
         UiProfile::Default => Profile::Default,
         UiProfile::Relaxed => Profile::Relaxed,

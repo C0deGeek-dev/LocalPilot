@@ -4,10 +4,16 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
 
-Status: accepted. Covers the first two increments of LocalHub#56: extracting the
-shared `localpilot-slash` surface, then making the five full-screen/pair takeover
+Status: accepted. Covers the first three increments of LocalHub#56: extracting
+the shared `localpilot-slash` surface; making the five full-screen/pair takeover
 commands (`/help`, `/theme`, `/settings`, `/diff`, `/search`) host-aware parsed
-actions.
+actions; and wiring the four permission profiles (`/default`, `/relaxed`,
+`/bypass`, `/unrestricted`) and `/effort` in the idle full-screen host — each
+updates the runtime permission engine and the shared header/settings projection
+in one synchronous branch (no intermediate frame), so the footer stays truthful.
+Modes (`/agent`/`/harness`) stay deferred: the full-screen host has no real mode
+transition today, so relabelling the footer would make it false; a real mode
+route is settled in a later increment.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -81,31 +87,44 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
-byte-for-byte (inline / full-screen / pair = 34 / 19 / 8 rows for this change),
-every semantic name parses to its command id, all 36 identities are globally
-unique and equal to `SlashCommand::ALL`, and the five stray-arg forms parse as
-the old parser did. The full-screen dispatcher's former catch-all `_ =>`
-deferred arm is replaced with an explicit 15-variant match so a newly-added
-command can no longer fall silently into "deferred".
+byte-for-byte (inline / full-screen / pair = **34 / 24 / 8** rows — the four
+permission profiles and `/effort` account for full-screen's 19→24 in the third
+increment; inline and pair are unchanged), every semantic name parses to its
+command id, all 36 identities are globally unique and equal to
+`SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
+The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
+`SlashAction` variant is either handled or listed in an explicit deferred group,
+so a newly-added command cannot fall silently into "deferred" (the profiles and
+`/effort` are now handled arms, not deferred).
 
-This change closes only the **slash-command half** of the shared surface; the
-durable obligations it sets up remain open for later work:
+The durable obligations that remain OPEN for later work:
 
 - The default full-screen host must ultimately reach the **whole** shared
-  command surface (→ 39 = 34 shared + 5 takeovers), not the 19 it dispatches
-  today; the shared table is the substrate that makes that a wiring task rather
-  than a re-derivation.
+  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **24**.
+  The shared table is the substrate that makes that a wiring task rather than a
+  re-derivation.
 - The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
   the slash-command types have moved to their neutral home here; the rollback
   inline host cannot be removed until the approval types are extracted too.
-- Mode/profile engine state and the displayed header/settings must update
-  **atomically** (a later change); this change does not touch that path.
+- A **real full-screen mode transition** (`/agent`/`/harness`) is still open —
+  the host runs one agent turn loop today, so modes stay deferred rather than
+  relabelling the footer falsely.
+
+The atomic mode/profile-and-display obligation is **closed for permission
+profiles and effort** in the third increment: each `/default`/`/relaxed`/
+`/bypass`/`/unrestricted` updates the permission engine and then the shared
+header projection in one synchronous branch (no intermediate frame), and
+`/effort` updates the runtime with its value read back single-host in settings
+(`None` → "provider default"; pair, having two runtime owners, shows no effort
+row).
 
 Boundary: the first increment was a pure relocation of where the surface is
 defined (no command added, removed, renamed, or re-described). The second
-increment adds **host-aware routing and argument behaviour** for the five
-takeovers in full-screen/pair only — the inline composer and its selector stay
-frozen, and `/abort` stays pair-loop-owned.
+increment added **host-aware routing and argument behaviour** for the five
+takeovers in full-screen/pair only. The third increment makes the four
+permission profiles and `/effort` switchable in the idle full-screen host with a
+truthful, atomically-projected footer/settings — the inline composer stays
+frozen throughout, `/abort` stays pair-loop-owned, and modes stay deferred.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

@@ -5517,6 +5517,37 @@ mod tests {
     }
 
     #[test]
+    fn set_shared_profile_updates_the_rendered_footer() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut header = header();
+        header.mode = "agent".to_string();
+        header.profile = "relaxed".to_string();
+        let mut app = AppModel::new(header, TerminalCapabilities::default());
+
+        // The seeded profile renders in the footer.
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw seeded");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
+        assert!(footer.contains("agent · relaxed → model"));
+
+        // Switching the profile updates the footer truthfully — the projection the
+        // full-screen host writes in the same branch that changes the engine.
+        app.set_shared_profile("BYPASS");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, &app)))
+            .expect("draw switched");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let footer = buffer_line(terminal.backend().buffer(), layout.footer.bottom() - 1);
+        assert!(footer.contains("agent · BYPASS → model"));
+        assert!(!footer.contains("relaxed"));
+    }
+
+    #[test]
     fn collaboration_status_is_additive_and_single_status_stays_exact() {
         let single = model();
         assert_eq!(status_right(&single), "0 tokens");

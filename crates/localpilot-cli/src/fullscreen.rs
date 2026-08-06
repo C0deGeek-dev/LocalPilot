@@ -1473,6 +1473,7 @@ fn open_fullscreen_takeover(
     config: &localpilot_config::Config,
     cwd: &Path,
     action: SlashAction,
+    effort: Option<localpilot_llm::ReasoningEffort>,
 ) {
     match action {
         SlashAction::Help => app.open_help(),
@@ -1482,17 +1483,43 @@ fn open_fullscreen_takeover(
             Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
         },
         SlashAction::Settings(None) => {
-            let settings = fullscreen_settings(app, config);
+            let settings = fullscreen_settings_with_effort(app, config, effort);
             app.open_settings(settings);
         }
         SlashAction::Settings(Some(query)) => {
-            let settings = fullscreen_settings(app, config);
+            let settings = fullscreen_settings_with_effort(app, config, effort);
             app.open_settings_with_query(settings, &query);
         }
         SlashAction::Diff(filter) => open_workspace_diff(app, cwd, filter.as_deref()),
         SlashAction::Search(query) => app.open_timeline_search(query.unwrap_or_default()),
         _ => {}
     }
+}
+
+/// Single default full-screen host settings: the shared base plus the reasoning-
+/// effort row. The base builder ([`fullscreen_settings`]) is shared with pair,
+/// which has two runtime owners and therefore no single effort to show — so the
+/// effort row is added ONLY here, never in the base. `None` is the provider
+/// default for this one runtime (a meaning pair cannot express).
+fn fullscreen_settings_with_effort(
+    app: &AppModel,
+    config: &localpilot_config::Config,
+    effort: Option<localpilot_llm::ReasoningEffort>,
+) -> Vec<SettingEntry> {
+    let mut settings = fullscreen_settings(app, config);
+    let value = match effort {
+        None => "provider default".to_string(),
+        Some(effort) => effort.as_str().to_string(),
+    };
+    settings.push(SettingEntry {
+        section: "Session".to_string(),
+        name: "Reasoning effort".to_string(),
+        value,
+        description: "Applies to subsequent model turns. Change with /effort.".to_string(),
+        edit: None,
+        is_default: effort.is_none(),
+    });
+    settings
 }
 
 fn load_workspace_diff(cwd: &Path) -> Result<Vec<DiffFile>> {
@@ -2583,7 +2610,35 @@ async fn execute_fullscreen_slash(
         | SlashAction::Theme(_)
         | SlashAction::Settings(_)
         | SlashAction::Diff(_)
-        | SlashAction::Search(_)) => open_fullscreen_takeover(app, config, cwd, action),
+        | SlashAction::Search(_)) => {
+            open_fullscreen_takeover(app, config, cwd, action, runtime.reasoning_effort());
+        }
+        // Switch the permission profile: update the enforcement engine FIRST, then
+        // the displayed projection immediately after, in this one synchronous
+        // branch (no await/render between) so the footer can never show a profile
+        // that is not in force. The label matches the seed (`Profile::label`).
+        SlashAction::SetProfile(profile) => {
+            runtime.set_permission_profile(crate::repl::sandbox_profile(profile), Vec::new());
+            app.set_shared_profile(profile.label());
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "permission profile set to {}",
+                profile.label()
+            )));
+        }
+        SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
+            Some(effort) => {
+                runtime.set_reasoning_effort(Some(effort));
+                app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "reasoning effort set to {}",
+                    effort.as_str()
+                )));
+            }
+            None => {
+                app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "invalid effort {level:?}; use minimal, low, medium, or high"
+                )));
+            }
+        },
         SlashAction::Unknown(command) => {
             app.apply_runtime(RuntimeUpdate::Warning(format!(
                 "unknown slash command: /{command}"
@@ -2593,9 +2648,7 @@ async fn execute_fullscreen_slash(
         // explicitly (not a wildcard) so a new `SlashAction` variant that no one
         // has taught this host about is a compile error, not a silent deferral.
         SlashAction::SetMode(_)
-        | SlashAction::SetProfile(_)
         | SlashAction::ToggleThinking
-        | SlashAction::SetEffort(_)
         | SlashAction::Tree
         | SlashAction::Compact { .. }
         | SlashAction::HarnessResume
@@ -5317,7 +5370,8 @@ mod tests {
 
     use super::*;
     use crate::interactive_session::{
-        InteractivePairHost, InteractivePeerSelection, InteractiveSessionSetup,
+        InteractivePairHost, InteractivePeerSelection, InteractiveSessionBundle,
+        InteractiveSessionSetup,
     };
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -6072,11 +6126,11 @@ mod tests {
         let cwd = Path::new(".");
 
         let mut help = app();
-        open_fullscreen_takeover(&mut help, &config, cwd, SlashAction::Help);
+        open_fullscreen_takeover(&mut help, &config, cwd, SlashAction::Help, None);
         assert!(help.has_takeover());
 
         let mut picker = app();
-        open_fullscreen_takeover(&mut picker, &config, cwd, SlashAction::Theme(None));
+        open_fullscreen_takeover(&mut picker, &config, cwd, SlashAction::Theme(None), None);
         assert!(picker.has_theme_picker());
 
         let mut good = app();
@@ -6085,6 +6139,7 @@ mod tests {
             &config,
             cwd,
             SlashAction::Theme(Some("dim".to_string())),
+            None,
         );
         assert_eq!(good.theme, Theme::Dim);
         assert!(!good.has_theme_picker());
@@ -6096,6 +6151,7 @@ mod tests {
             &config,
             cwd,
             SlashAction::Theme(Some("nonesuch".to_string())),
+            None,
         );
         assert_eq!(
             bad.theme, before,
@@ -6119,11 +6175,12 @@ mod tests {
             &config,
             cwd,
             SlashAction::Settings(Some("mouse".to_string())),
+            None,
         );
         assert!(settings.has_takeover());
 
         let mut diff = app();
-        open_fullscreen_takeover(&mut diff, &config, cwd, SlashAction::Diff(None));
+        open_fullscreen_takeover(&mut diff, &config, cwd, SlashAction::Diff(None), None);
         assert!(diff.has_takeover());
 
         let mut search = app();
@@ -6132,6 +6189,7 @@ mod tests {
             &config,
             cwd,
             SlashAction::Search(Some("q".to_string())),
+            None,
         );
         // Search opens the timeline-search input overlay, not a takeover/picker.
         assert!(search.has_input_overlay());
@@ -6193,6 +6251,274 @@ mod tests {
         let diff = submit_during_work("/diff");
         assert!(!diff.has_takeover());
         assert!(idle_notice(&diff));
+    }
+
+    // Build one real single-session runtime over a temp dir + a one-provider
+    // registry, for driving the production `execute_fullscreen_slash` seam.
+    async fn single_session(dir: &Path) -> (localpilot_config::Config, InteractiveSessionBundle) {
+        let seed = FakeProvider::new();
+        let mut declaration = seed.declaration().clone();
+        declaration.id = "first".to_string();
+        declaration.display_name = "first".to_string();
+        let provider = Arc::new(FakeProvider::new().with_declaration(declaration).text("ok"));
+        let providers = HashMap::from([("first".to_string(), provider as Arc<dyn ModelProvider>)]);
+        let models = HashMap::from([("first".to_string(), "model-a".to_string())]);
+        let mut config = localpilot_config::Config::default();
+        config.provider.default = "first".to_string();
+        config
+            .providers
+            .insert("first".to_string(), ProviderConfig::default());
+        let setup = InteractiveSessionSetup::for_test(
+            dir.to_path_buf(),
+            config.clone(),
+            Profile::Default,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        let bundle = setup.build("first", "model-a").await.unwrap();
+        (config, bundle)
+    }
+
+    fn slash_input(prompt: &str) -> SubmittedInput {
+        SubmittedInput {
+            shown: prompt.to_string(),
+            display: prompt.to_string(),
+            prompt: prompt.to_string(),
+            pastes: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+
+    fn rendered_footer(app: &AppModel) -> String {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut hit_map = None;
+        terminal
+            .draw(|frame| hit_map = Some(render(frame, app)))
+            .expect("draw footer");
+        let layout = hit_map.expect("hit map").frame.expect("layout");
+        let buffer = terminal.backend().buffer();
+        let y = layout.footer.bottom() - 1;
+        (0..buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    // The whole rendered screen as text — for asserting takeover-overlay content
+    // (e.g. the settings screen the `/settings` route opens).
+    fn rendered_screen(app: &AppModel) -> String {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, app);
+            })
+            .expect("draw screen");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn profile_slash_updates_both_the_permission_engine_and_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+
+        // Each profile slash updates the enforcement engine AND the projected label
+        // together (engine first, then projection — one synchronous branch).
+        for (cmd, enforce, label) in [
+            ("/default", Profile::Default, "default"),
+            ("/relaxed", Profile::Relaxed, "relaxed"),
+            ("/bypass", Profile::Bypass, "BYPASS"),
+            ("/unrestricted", Profile::Unrestricted, "UNRESTRICTED"),
+        ] {
+            let mut app = app();
+            let exited = execute_fullscreen_slash(
+                &mut app,
+                &mut bundle.runtime,
+                &config,
+                cwd,
+                slash_input(cmd),
+            )
+            .await;
+            assert!(!exited, "{cmd} must not exit");
+            assert_eq!(
+                bundle.runtime.permission_engine_handle().profile(),
+                enforce,
+                "{cmd} must set the enforcement engine",
+            );
+            assert_eq!(app.shared_profile(), label, "{cmd} must project the label");
+            let settings = fullscreen_settings(&app, &config);
+            assert!(
+                settings
+                    .iter()
+                    .any(|s| s.name == "Mode and profile" && s.value.contains(label)),
+                "{cmd} settings row must show {label}",
+            );
+        }
+
+        // A post-dispatch render shows the switched profile in the footer.
+        {
+            let mut app = app();
+            let _ = execute_fullscreen_slash(
+                &mut app,
+                &mut bundle.runtime,
+                &config,
+                cwd,
+                slash_input("/bypass"),
+            )
+            .await;
+            let footer = rendered_footer(&app);
+            assert!(
+                footer.contains("BYPASS"),
+                "footer must show the switch: {footer}"
+            );
+        }
+
+        // Modes stay deferred: /agent and /harness never relabel the shared mode.
+        for cmd in ["/agent", "/harness"] {
+            let mut app = app();
+            let before = app.shared_mode().to_string();
+            let _ = execute_fullscreen_slash(
+                &mut app,
+                &mut bundle.runtime,
+                &config,
+                cwd,
+                slash_input(cmd),
+            )
+            .await;
+            assert_eq!(app.shared_mode(), before, "{cmd} must not relabel the mode");
+        }
+
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn effort_slash_mutates_the_runtime_and_reopen_reads_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+
+        // Initially the production `/settings` route (which reads
+        // `runtime.reasoning_effort()`) shows the provider default. Drive it and
+        // render the opened settings takeover, filtered to the effort row.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/settings effort"),
+        )
+        .await;
+        let screen = rendered_screen(&app);
+        assert!(
+            screen.contains("Reasoning effort") && screen.contains("provider default"),
+            "initial settings must read the runtime as provider default:\n{screen}",
+        );
+
+        // /effort high mutates the runtime.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/effort high"),
+        )
+        .await;
+        assert_eq!(
+            bundle
+                .runtime
+                .reasoning_effort()
+                .map(|e| e.as_str().to_string()),
+            Some("high".to_string()),
+        );
+
+        // Reopening the REAL `/settings` route reads runtime state: the rendered
+        // settings screen now shows `high`, not `provider default`.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/settings effort"),
+        )
+        .await;
+        let screen = rendered_screen(&app);
+        assert!(
+            screen.contains("Reasoning effort") && screen.contains("high"),
+            "reopened settings must read the runtime effort:\n{screen}",
+        );
+        assert!(
+            !screen.contains("provider default"),
+            "the effort row must no longer read provider default:\n{screen}",
+        );
+
+        // /effort bogus leaves the runtime unchanged and surfaces the exact inline
+        // reason.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/effort bogus"),
+        )
+        .await;
+        assert_eq!(
+            bundle
+                .runtime
+                .reasoning_effort()
+                .map(|e| e.as_str().to_string()),
+            Some("high".to_string()),
+            "an invalid effort must not change the runtime",
+        );
+        assert!(
+            app.active_timeline().items().iter().any(|item| item
+                .text
+                .contains("invalid effort \"bogus\"; use minimal, low, medium, or high")),
+            "the exact inline invalid-effort reason must be surfaced",
+        );
+
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn pair_and_base_settings_have_no_effort_or_profile_switch_surface() {
+        let config = localpilot_config::Config::default();
+        let app = app();
+        // The base builder (which pair uses) never carries an effort row — pair has
+        // two runtime owners, so `None` there cannot mean "provider default".
+        let base = fullscreen_settings(&app, &config);
+        assert!(!base.iter().any(|s| s.name == "Reasoning effort"));
+        // The "Mode and profile" row stays a read-only launch-state row for pair —
+        // never an in-full-screen switch surface.
+        let mode_profile = base
+            .iter()
+            .find(|s| s.name == "Mode and profile")
+            .expect("mode/profile row");
+        assert!(mode_profile.edit.is_none());
+        // Only the single-host enrichment adds the effort row.
+        let enriched = fullscreen_settings_with_effort(&app, &config, None);
+        assert!(enriched.iter().any(|s| s.name == "Reasoning effort"));
+        // The pair catalog contains none of the four profile commands nor effort.
+        let pair: Vec<String> = pair_command_catalog()
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        for forbidden in ["default", "relaxed", "bypass", "unrestricted", "effort"] {
+            assert!(
+                !pair.iter().any(|name| name == forbidden),
+                "{forbidden} must not appear in the pair catalog",
+            );
+        }
     }
 
     #[test]
@@ -7377,14 +7703,23 @@ mod tests {
 
     #[test]
     fn fullscreen_catalog_matches_the_shared_spec_table() {
-        // The full-screen picker is generated from the shared table: 19 rows in
-        // global order (14 dispatched + 5 takeovers), byte-for-byte, and never a
-        // deferred inline-only row.
+        // The full-screen picker is generated from the shared table: 24 rows in
+        // global order (the four permission profiles + effort now dispatched here,
+        // then the previously-dispatched rows and the 5 takeovers), byte-for-byte,
+        // and never a deferred inline-only row.
         let full_screen: Vec<(String, String)> = fullscreen_command_catalog()
             .into_iter()
             .map(|command| (command.name, command.description))
             .collect();
         let expected_full_screen: &[(&str, &str)] = &[
+            ("default", "Use the default permission profile"),
+            ("relaxed", "Use the relaxed permission profile"),
+            ("bypass", "Use the bypass permission profile"),
+            (
+                "unrestricted",
+                "Approve everything, workspace boundary included — you take responsibility",
+            ),
+            ("effort", "Set reasoning effort: minimal|low|medium|high"),
             (
                 "model",
                 "Switch provider/model, or list them (/model [provider [model]])",
@@ -7411,10 +7746,12 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 19);
+        assert_eq!(full_screen.len(), 24);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
+        // `agent`/`harness` stay deferred (no real full-screen mode transition);
+        // the rest remain inline-only for now.
         for deferred in [
             "agent", "harness", "compact", "research", "skills", "bg", "tree",
         ] {

@@ -442,17 +442,20 @@ slash_commands! {
         // --- shared: 34 inline-visible rows, in the frozen order -------------
         Agent => inline_only("agent", NoArg, Reject, "Switch to agent mode"),
         Harness => inline_only("harness", NoArg, Reject, "Switch to harness mode"),
-        Default => inline_only("default", NoArg, Reject, "Use the default permission profile"),
-        Relaxed => inline_only("relaxed", NoArg, Reject, "Use the relaxed permission profile"),
-        Bypass => inline_only("bypass", NoArg, Reject, "Use the bypass permission profile"),
-        Unrestricted => inline_only(
+        // The four permission profiles and `/effort` are switchable in the
+        // full-screen host too (they update the runtime engine + projection), so
+        // they carry a full-screen description as well as the inline one.
+        Default => both("default", NoArg, Reject, "Use the default permission profile"),
+        Relaxed => both("relaxed", NoArg, Reject, "Use the relaxed permission profile"),
+        Bypass => both("bypass", NoArg, Reject, "Use the bypass permission profile"),
+        Unrestricted => both(
             "unrestricted",
             NoArg,
             Reject,
             "Approve everything, workspace boundary included — you take responsibility"
         ),
         Think => inline_only("think", NoArg, Reject, "Toggle the reasoning panel"),
-        Effort => inline_only("effort", Required, Fall, "Set reasoning effort: minimal|low|medium|high"),
+        Effort => both("effort", Required, Fall, "Set reasoning effort: minimal|low|medium|high"),
         Model => both(
             "model",
             Optional,
@@ -1006,7 +1009,9 @@ mod tests {
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
         assert_eq!(specs_for(Host::Inline).len(), 34);
-        assert_eq!(specs_for(Host::Fullscreen).len(), 19);
+        // Full-screen grew from 19 to 24: the four permission profiles and
+        // `/effort` are now switchable in the full-screen host too.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 24);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 

@@ -6,6 +6,15 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Permission profiles and reasoning effort are switchable in full-screen chat.**
+  `/default`, `/relaxed`, `/bypass`, and `/unrestricted` now change the permission
+  profile from inside the full-screen session — the enforcement engine and the
+  footer/settings update together, so the displayed profile always matches the one
+  in force. `/effort <level>` sets the reasoning effort for subsequent turns and is
+  shown in settings ("provider default" until set). Modes (`/agent`/`/harness`)
+  remain launch-time — the full-screen host has no distinct mode loop yet, so they
+  are not wired rather than shown falsely.
+
 - **Full-screen and pair chat now handle the takeover commands with arguments.**
   `/help`, `/theme`, `/settings`, `/diff`, and `/search` are parsed as real
   commands in the full-screen and pair hosts instead of being intercepted as bare
