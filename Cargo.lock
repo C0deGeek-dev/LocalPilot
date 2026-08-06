@@ -2034,6 +2034,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "localpilot-slash"
+version = "2.7.0"
+
+[[package]]
 name = "localpilot-store"
 version = "2.7.0"
 dependencies = [
@@ -2090,6 +2094,7 @@ name = "localpilot-tui"
 version = "2.7.0"
 dependencies = [
  "insta",
+ "localpilot-slash",
  "ratatui",
 ]
 

@@ -1172,79 +1172,25 @@ fn format_count(value: u64) -> String {
     formatted
 }
 
+// Both full-screen pickers are generated from the one authoritative
+// `localpilot-slash` catalog table (per-host descriptions in global order), so
+// the inline, full-screen, and pair catalogs cannot drift.
 fn fullscreen_command_catalog() -> Vec<CompletionCommand> {
-    const SUPPORTED: &[&str] = &[
-        "model", "localbox", "new", "fork", "clone", "clear", "sessions", "session", "resume",
-        "continue", "name", "rename", "exit", "quit",
-    ];
-    let mut command_catalog = localpilot_tui::AppState::slash_commands()
-        .iter()
-        .filter(|(name, _)| SUPPORTED.contains(name))
-        .map(|(name, description)| CompletionCommand {
-            name: (*name).to_string(),
-            description: (*description).to_string(),
-        })
-        .collect::<Vec<_>>();
-    command_catalog.push(CompletionCommand {
-        name: "search".to_string(),
-        description: "Search messages in this session".to_string(),
-    });
-    command_catalog.push(CompletionCommand {
-        name: "help".to_string(),
-        description: "Open keyboard and command help".to_string(),
-    });
-    command_catalog.push(CompletionCommand {
-        name: "theme".to_string(),
-        description: "Preview terminal color modes".to_string(),
-    });
-    command_catalog.push(CompletionCommand {
-        name: "settings".to_string(),
-        description: "Inspect terminal chat settings".to_string(),
-    });
-    command_catalog.push(CompletionCommand {
-        name: "diff".to_string(),
-        description: "Review tracked workspace changes".to_string(),
-    });
-    command_catalog
+    host_command_catalog(localpilot_tui::Host::Fullscreen)
 }
 
 fn pair_command_catalog() -> Vec<CompletionCommand> {
-    const SUPPORTED: &[&str] = &["exit", "quit"];
-    let mut command_catalog = localpilot_tui::AppState::slash_commands()
-        .iter()
-        .filter(|(name, _)| SUPPORTED.contains(name))
+    host_command_catalog(localpilot_tui::Host::Pair)
+}
+
+fn host_command_catalog(host: localpilot_tui::Host) -> Vec<CompletionCommand> {
+    localpilot_tui::specs_for(host)
+        .into_iter()
         .map(|(name, description)| CompletionCommand {
-            name: (*name).to_string(),
-            description: (*description).to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
         })
-        .collect::<Vec<_>>();
-    command_catalog.extend([
-        CompletionCommand {
-            name: "search".to_string(),
-            description: "Search messages for the selected peer".to_string(),
-        },
-        CompletionCommand {
-            name: "help".to_string(),
-            description: "Open keyboard and command help".to_string(),
-        },
-        CompletionCommand {
-            name: "theme".to_string(),
-            description: "Preview terminal color modes".to_string(),
-        },
-        CompletionCommand {
-            name: "settings".to_string(),
-            description: "Inspect terminal settings".to_string(),
-        },
-        CompletionCommand {
-            name: "diff".to_string(),
-            description: "Review tracked workspace changes".to_string(),
-        },
-        CompletionCommand {
-            name: "abort".to_string(),
-            description: "Stop the collaboration and both peers".to_string(),
-        },
-    ]);
-    command_catalog
+        .collect()
 }
 
 const fn pair_pane(peer: PairPeer) -> PeerPane {
@@ -2595,7 +2541,24 @@ async fn execute_fullscreen_slash(
                 "unknown slash command: /{command}"
             )));
         }
-        _ => {
+        // The commands the full-screen host does not dispatch yet. Listed
+        // explicitly (not a wildcard) so a new `SlashAction` variant that no one
+        // has taught this host about is a compile error, not a silent deferral.
+        SlashAction::SetMode(_)
+        | SlashAction::SetProfile(_)
+        | SlashAction::ToggleThinking
+        | SlashAction::SetEffort(_)
+        | SlashAction::Tree
+        | SlashAction::Compact { .. }
+        | SlashAction::HarnessResume
+        | SlashAction::WaitResume
+        | SlashAction::Ingest(_)
+        | SlashAction::Knowledge(_)
+        | SlashAction::ContextBuild(_)
+        | SlashAction::Research(_)
+        | SlashAction::Agents(_)
+        | SlashAction::Skills(_)
+        | SlashAction::Background(_) => {
             let command = submitted
                 .prompt
                 .trim()
@@ -7109,25 +7072,70 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_catalog_exposes_only_commands_with_a_real_fullscreen_path() {
-        assert!(!localpilot_tui::AppState::slash_commands()
-            .iter()
-            .any(|(name, _)| *name == "search"));
-        let catalog = fullscreen_command_catalog();
-        let search = catalog
-            .iter()
-            .filter(|command| command.name == "search")
-            .collect::<Vec<_>>();
-        assert_eq!(search.len(), 1);
-        assert_eq!(search[0].description, "Search messages in this session");
-        for supported in [
-            "model", "new", "fork", "clone", "clear", "sessions", "session", "resume", "continue",
-            "name", "rename", "exit", "quit", "help", "theme", "settings", "diff",
-        ] {
-            assert!(catalog.iter().any(|command| command.name == supported));
+    fn fullscreen_catalog_matches_the_shared_spec_table() {
+        // The full-screen picker is generated from the shared table: 19 rows in
+        // global order (14 dispatched + 5 takeovers), byte-for-byte, and never a
+        // deferred inline-only row.
+        let full_screen: Vec<(String, String)> = fullscreen_command_catalog()
+            .into_iter()
+            .map(|command| (command.name, command.description))
+            .collect();
+        let expected_full_screen: &[(&str, &str)] = &[
+            (
+                "model",
+                "Switch provider/model, or list them (/model [provider [model]])",
+            ),
+            (
+                "localbox",
+                "Adopt a running LocalBox server into your config (/localbox adopt)",
+            ),
+            ("new", "Start a fresh session"),
+            ("fork", "Branch the conversation into a new session"),
+            ("clone", "Copy the conversation into a new session"),
+            ("sessions", "List this workspace's sessions"),
+            ("session", "Resume a session by id"),
+            ("name", "Name this session (/name <text>)"),
+            ("rename", "Rename this session (/rename <text>)"),
+            ("continue", "Continue the previous session"),
+            ("clear", "Clear the conversation view"),
+            ("resume", "Continue a previous session"),
+            ("exit", "Exit LocalPilot (/exit [print])"),
+            ("quit", "Exit LocalPilot"),
+            ("search", "Search messages in this session"),
+            ("help", "Open keyboard and command help"),
+            ("theme", "Preview terminal color modes"),
+            ("settings", "Inspect terminal chat settings"),
+            ("diff", "Review tracked workspace changes"),
+        ];
+        assert_eq!(full_screen.len(), 19);
+        for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
+            assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
-        for deferred in ["compact", "research", "skills"] {
-            assert!(!catalog.iter().any(|command| command.name == deferred));
+        for deferred in [
+            "agent", "harness", "compact", "research", "skills", "bg", "tree",
+        ] {
+            assert!(!full_screen.iter().any(|(name, _)| name == deferred));
+        }
+
+        // The pair picker: 8 rows with pair-specific copy for search/settings and
+        // the permanent pair-only `abort`.
+        let pair: Vec<(String, String)> = pair_command_catalog()
+            .into_iter()
+            .map(|command| (command.name, command.description))
+            .collect();
+        let expected_pair: &[(&str, &str)] = &[
+            ("exit", "Exit LocalPilot (/exit [print])"),
+            ("quit", "Exit LocalPilot"),
+            ("search", "Search messages for the selected peer"),
+            ("help", "Open keyboard and command help"),
+            ("theme", "Preview terminal color modes"),
+            ("settings", "Inspect terminal settings"),
+            ("diff", "Review tracked workspace changes"),
+            ("abort", "Stop the collaboration and both peers"),
+        ];
+        assert_eq!(pair.len(), 8);
+        for (got, want) in pair.iter().zip(expected_pair.iter()) {
+            assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
     }
 

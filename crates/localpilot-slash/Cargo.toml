@@ -1,0 +1,15 @@
+[package]
+name = "localpilot-slash"
+version = "2.7.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+# Dependency-free by design: the shared slash-command surface (parser, action
+# types, and the one authoritative command+spelling catalog table) has no
+# dependency floor beyond std, so both interactive hosts and the CLI share one
+# source of command knowledge.
+[dependencies]

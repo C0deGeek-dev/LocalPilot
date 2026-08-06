@@ -9,6 +9,7 @@ members = [
     "crates/localpilot-llm-anthropic",
     "crates/localpilot-tools",
     "crates/localpilot-harness",
+    "crates/localpilot-slash",
     "crates/localpilot-tui",
     "crates/localpilot-terminal-ui",
     "crates/localpilot-store",

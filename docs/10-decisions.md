@@ -2,6 +2,99 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
+
+Status: accepted. First increment of LocalHub#56.
+
+The slash-command surface was defined three times: the inline composer parsed
+and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
+second (a `SUPPORTED` allow-list filtered against the inline table plus
+hand-pushed takeover rows in `localpilot-cli::fullscreen`), and the pair picker
+hand-pushed a third. Three lists drift: a command added to one host silently
+skips the others, and the "why is `/search` in full-screen but not inline"
+knowledge lived only in a test.
+
+Decision: parsing and the three host catalogs are generated from **one** table.
+
+- A new dependency-free crate, **`localpilot-slash`**, owns the parser
+  (`parse_slash` and its helpers — a behaviour-preserving relocation and refactor
+  into lookup-first typed dispatch, proven byte-for-byte by the relocated parser
+  tests) and one globally-ordered `SLASH_SPELLINGS` table. The
+  `SlashCommand` enum, the table, and a `SlashCommand::ALL` identity list are
+  generated from **one** `slash_commands!` macro invocation, so a table row can
+  only name a real variant (a typo is a compile error) and a `the_table_
+  identities_equal_the_generated_command_set` test asserts set equality between
+  the table's identities and `ALL` (an omitted variant or orphan row fails it —
+  no count that can't see a missing variant). Each spelling carries an `ArgSpec`,
+  a `StrayArgs` policy, and a per-host `Option<&str>` description
+  (inline / full-screen / pair). `specs_for(Host)` filters the table by "does
+  this host describe this spelling" and yields that host's catalog in global
+  order. `parse_slash` is **lookup-first**: it resolves the name to its spelling
+  once, then dispatches on the spelling's typed `SlashCommand` through one
+  wildcard-free match (a new identity is a compile error there too), reading the
+  `compact` force flag from table metadata rather than re-matching the spelling
+  string. `localpilot-tui` and `localpilot-cli` both consume it; no host owns a
+  private list.
+
+- The surface is **36 command identities** = 30 shared + 5 takeovers + 1
+  pair-only. This ADR is explicit that two kinds of host-specific routing exist,
+  and they are not the same thing:
+  - **Full-screen/pair takeovers** (`help`, `theme`, `settings`, `diff`,
+    `search`): commands the full-screen and pair hosts service on their own
+    screens. What is temporary is only their **external string routing** —
+    `parse_slash` resolves them to `Unknown` because they have no shared parse
+    route yet; a later change gives them one. Their **catalog scope stays
+    full-screen/pair-only**: they are not deferred-inline rows and never join the
+    inline picker. Inline stays **34** through #56 (this change adds no inline
+    command); the final full-screen catalog is **39** (34 shared + 5 takeovers)
+    precisely because the takeovers are additive to full-screen while inline is
+    unchanged. A future command could still grow the inline catalog on its own.
+  - **The permanent pair-only `abort`**: `/abort` is owned by the pair
+    collaboration loop, never parsed by `parse_slash`, and never bridged into
+    the inline or full-screen hosts. It is structurally pair-scoped, so it lives
+    only in the pair catalog. Its metadata reflects that owning host: no-arg,
+    rejecting a stray argument with the pair usage notice.
+
+- `ArgSpec`/`StrayArgs` metadata is **truthful against the shipped parser**, not
+  decorative: `skills` is `Optional` (`/skills` → `Skills("")`), `quit` accepts
+  the optional `print` argument like `exit`, `help`/`theme`/`settings`/`diff`
+  are currently no-arg while `search` accepts an optional query (not a blanket
+  `Optional`), and `abort` is no-arg. A
+  metadata test exercises the argument shapes so they cannot silently diverge
+  from the parser again.
+
+- Stray-argument behaviour is **preserved exactly**, not normalized. `StrayArgs`
+  records the frozen per-spelling policy (`InvalidNoArgs` for the spellings the
+  old parser rejected with an arg, `FallThroughUnknown` for those that fell
+  through to the unknown-command path). Unifying the stray-arg policy across
+  spellings is deliberately deferred to a later change, so this change alters
+  no user-visible parse result.
+
+Invariants are locked by tests, not prose: the three catalogs are asserted
+byte-for-byte (inline / full-screen / pair = 34 / 19 / 8 rows for this change),
+every semantic name parses to its command id, all 36 identities are globally
+unique and equal to `SlashCommand::ALL`, and the five stray-arg forms parse as
+the old parser did. The full-screen dispatcher's former catch-all `_ =>`
+deferred arm is replaced with an explicit 15-variant match so a newly-added
+command can no longer fall silently into "deferred".
+
+This change closes only the **slash-command half** of the shared surface; the
+durable obligations it sets up remain open for later work:
+
+- The default full-screen host must ultimately reach the **whole** shared
+  command surface (→ 39 = 34 shared + 5 takeovers), not the 19 it dispatches
+  today; the shared table is the substrate that makes that a wiring task rather
+  than a re-derivation.
+- The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
+  the slash-command types have moved to their neutral home here; the rollback
+  inline host cannot be removed until the approval types are extracted too.
+- Mode/profile engine state and the displayed header/settings must update
+  **atomically** (a later change); this change does not touch that path.
+
+Boundary: this is a pure refactor of where the surface is defined — no command
+is added, removed, renamed, or re-described; the inline composer and its
+selector are untouched; `/abort` stays pair-loop-owned.
+
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 
 Status: accepted. Closes LocalHub#57.

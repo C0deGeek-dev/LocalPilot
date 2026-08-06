@@ -14,16 +14,20 @@ mod app;
 mod render;
 mod state;
 
-pub use app::{
-    handle_input, parse_slash, run, AppInput, BackgroundCommand, IngestAction, Key, SlashAction,
+pub use app::{handle_input, run, AppInput, Key};
+// The shared slash-command surface lives in the dependency-free `localpilot-slash`
+// crate; re-exported here so existing `localpilot_tui::…` call sites are unchanged.
+pub use localpilot_slash::{
+    lookup, parse_slash, specs_for, ArgSpec, BackgroundCommand, Host, IngestAction, Mode, Profile,
+    SlashAction, SlashCommand, Spelling, StrayArgs,
 };
 pub use render::{
     banner_text, blocking_prompt_height, history_block_text, live_region_height, render,
 };
 pub use state::{
     scrub_text, ActiveTool, AppState, ApprovalRequest, BackgroundProcess, FooterStats, Header,
-    ImageAttachment, Mode, Paste, PlanItem, Profile, QuestionPrompt, RecallEntry, SubmittedInput,
-    ThinkingPanel, TranscriptLine, TrustPrompt, UiEvent,
+    ImageAttachment, Paste, PlanItem, QuestionPrompt, RecallEntry, SubmittedInput, ThinkingPanel,
+    TranscriptLine, TrustPrompt, UiEvent,
 };
 
 /// The product name shown in the UI.

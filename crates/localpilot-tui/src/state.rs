@@ -6,49 +6,11 @@
 
 const MAX_INPUT_HISTORY: usize = 100;
 
-/// Operating mode shown in the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Agent,
-    Harness,
-    /// Research mode: a bare prompt is treated as a topic to research —
-    /// local sources plus disclosed, allowlist-gated web per config
-    /// (ADR-0076) — rather than a model turn.
-    Research,
-}
-
-impl Mode {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Agent => "agent",
-            Mode::Harness => "harness",
-            Mode::Research => "research",
-        }
-    }
-}
-
-/// Permission profile shown in the UI. `bypass` and `unrestricted` are always
-/// surfaced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
-    Default,
-    Relaxed,
-    Bypass,
-    Unrestricted,
-}
-
-impl Profile {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Profile::Default => "default",
-            Profile::Relaxed => "relaxed",
-            Profile::Bypass => "BYPASS",
-            Profile::Unrestricted => "UNRESTRICTED",
-        }
-    }
-}
+// `Mode`, `Profile`, and the slash-command surface live in the dependency-free
+// `localpilot-slash` crate so the inline and full-screen hosts share one source.
+// Re-exported here so `crate::state::{Mode, Profile}` call sites are unchanged.
+use localpilot_slash::Host;
+pub use localpilot_slash::{Mode, Profile};
 
 /// Header identity fields.
 #[derive(Debug, Clone)]
@@ -829,70 +791,13 @@ impl AppState {
 
     // --- Slash picker --------------------------------------------------------
 
-    /// The slash commands offered by the autocomplete picker, each with a short
-    /// description. This is the single source of truth for the picker; the names
-    /// mirror the commands parsed by `parse_slash`.
-    const SLASH_COMMANDS: &'static [(&'static str, &'static str)] = &[
-        ("agent", "Switch to agent mode"),
-        ("harness", "Switch to harness mode"),
-        ("default", "Use the default permission profile"),
-        ("relaxed", "Use the relaxed permission profile"),
-        ("bypass", "Use the bypass permission profile"),
-        (
-            "unrestricted",
-            "Approve everything, workspace boundary included — you take responsibility",
-        ),
-        ("think", "Toggle the reasoning panel"),
-        ("effort", "Set reasoning effort: minimal|low|medium|high"),
-        (
-            "model",
-            "Switch provider/model, or list them (/model [provider [model]])",
-        ),
-        (
-            "localbox",
-            "Adopt a running LocalBox server into your config (/localbox adopt)",
-        ),
-        ("new", "Start a fresh session"),
-        ("fork", "Branch the conversation into a new session"),
-        ("clone", "Copy the conversation into a new session"),
-        ("tree", "Show the session event tree"),
-        ("sessions", "List this workspace's sessions"),
-        ("session", "Resume a session by id"),
-        ("name", "Name this session (/name <text>)"),
-        ("rename", "Rename this session (/rename <text>)"),
-        ("continue", "Continue the previous session"),
-        ("clear", "Clear the conversation view"),
-        ("compact", "Summarize and compact the context"),
-        ("compact_force", "Compact now, even if within the budget"),
-        ("resume", "Continue a previous session"),
-        ("harness-resume", "Resume harness plan work"),
-        ("wait-resume", "Wait for quota, then resume"),
-        ("ingest", "Manage workspace ingestion"),
-        ("knowledge", "Query the knowledge base"),
-        ("context", "Build a context bundle"),
-        (
-            "research",
-            "Research a topic, local + web per config (/research [topic])",
-        ),
-        (
-            "agents",
-            "List or inspect subagent definitions (/agents [show <name>])",
-        ),
-        (
-            "skills",
-            "Manage skills: repos, install, list (/skills <subcommand>)",
-        ),
-        ("bg", "List background processes (/bg stop <id>|all)"),
-        ("exit", "Exit LocalPilot (/exit [print])"),
-        ("quit", "Exit LocalPilot"),
-    ];
-
-    /// The shipped interactive command catalog. Full-screen hosts adapt this
-    /// product-semantic source into their own picker model so command names and
-    /// descriptions cannot drift between the rollback and replacement UIs.
+    /// The shipped interactive inline command catalog, generated from the one
+    /// authoritative `localpilot-slash` table so command names and descriptions
+    /// cannot drift between the rollback (inline) and replacement (full-screen)
+    /// UIs.
     #[must_use]
-    pub const fn slash_commands() -> &'static [(&'static str, &'static str)] {
-        Self::SLASH_COMMANDS
+    pub fn slash_commands() -> Vec<(&'static str, &'static str)> {
+        localpilot_slash::specs_for(Host::Inline)
     }
 
     /// Matching suggestions for `query` (e.g. "/se" or "/"). A query is matched on
@@ -901,7 +806,7 @@ impl AppState {
     #[must_use]
     fn slash_suggestions(query: &str) -> Vec<SlashSuggestion> {
         let prefix = query.strip_prefix('/').unwrap_or(query);
-        Self::SLASH_COMMANDS
+        localpilot_slash::specs_for(Host::Inline)
             .iter()
             .filter(|(name, _)| name.starts_with(prefix))
             .map(|(name, description)| SlashSuggestion {
@@ -1717,7 +1622,7 @@ mod tests {
         let mut s = state();
         s.open_slash_picker("/".to_string());
         let picker = s.slash_picker.as_ref().expect("picker open");
-        assert_eq!(picker.items.len(), AppState::SLASH_COMMANDS.len());
+        assert_eq!(picker.items.len(), AppState::slash_commands().len());
     }
 
     #[test]

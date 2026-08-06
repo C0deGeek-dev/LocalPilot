@@ -259,11 +259,35 @@ finished transcript blocks are written once into native scrollback and a fixed-
 height bottom band holds the only redrawn surface (ADR-0039). The new host uses
 an alternate buffer, full-frame rendering, captured mouse input, and application-
 owned content selection (ADR-0107). The rollback and its selector are removed
-once the remaining terminal matrix is accepted and the slash-command/approval
-types shared with the full-screen host have moved to a neutral home.
+once the remaining terminal matrix is accepted **and** the approval types shared
+with the full-screen host have moved to a neutral home — that half of ADR-0129's
+extraction gate is still open. The slash-command half is complete: the shared
+slash-command surface has already moved to its neutral home
+(`localpilot-slash`, ADR-0144).
 
 `ratatui` is the committed TUI framework, not a suggestion. Alternatives are out
 of scope unless a future ADR supersedes ADR-0006.
+
+### `localpilot-slash`
+
+The single source of truth for the slash-command surface across all three hosts
+(inline composer, full-screen picker, pair picker). Owns:
+
+- the parser (`parse_slash` and its helpers, plus `Mode`/`Profile`/`SlashAction`
+  and the argument shapes) — a behaviour-preserving relocation and refactor from
+  `localpilot-tui` into lookup-first typed dispatch, proven by the frozen tests
+- one globally-ordered `SLASH_SPELLINGS` table: each spelling maps to a semantic
+  `SlashCommand` id and carries an `ArgSpec`, a `StrayArgs` policy, and a
+  per-host `Option<&str>` description
+- `specs_for(Host)`, which projects the table into any one host's catalog in
+  global order, so no host keeps a private list (ADR-0144)
+
+Must remain:
+
+- dependency-free (no other workspace crate, no third-party crate) so both
+  `localpilot-tui` and `localpilot-cli` can depend on it without a cycle
+- free of rendering, I/O, and host-specific dispatch — it defines *what* the
+  commands are, not *how* a host services them
 
 ### `localpilot-store`
 
