@@ -4,16 +4,19 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
 
-Status: accepted. Covers the first three increments of LocalHub#56: extracting
+Status: accepted. Covers the first four increments of LocalHub#56: extracting
 the shared `localpilot-slash` surface; making the five full-screen/pair takeover
 commands (`/help`, `/theme`, `/settings`, `/diff`, `/search`) host-aware parsed
-actions; and wiring the four permission profiles (`/default`, `/relaxed`,
+actions; wiring the four permission profiles (`/default`, `/relaxed`,
 `/bypass`, `/unrestricted`) and `/effort` in the idle full-screen host — each
 updates the runtime permission engine and the shared header/settings projection
-in one synchronous branch (no intermediate frame), so the footer stays truthful.
-Modes (`/agent`/`/harness`) stay deferred: the full-screen host has no real mode
-transition today, so relabelling the footer would make it false; a real mode
-route is settled in a later increment.
+in one synchronous branch (no intermediate frame), so the footer stays truthful;
+and `/think`, a host-level toggle that hides `ItemKind::Reasoning` items from the
+full-screen timeline (render, scroll geometry, search, selection, and
+new-content — the raw items are retained and the `/exit print` path keeps its
+own independent reasoning drop). Modes (`/agent`/`/harness`) stay deferred: the
+full-screen host has no real mode transition today, so relabelling the footer
+would make it false; a real mode route is settled in a later increment.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -87,9 +90,9 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
-byte-for-byte (inline / full-screen / pair = **34 / 24 / 8** rows — the four
-permission profiles and `/effort` account for full-screen's 19→24 in the third
-increment; inline and pair are unchanged), every semantic name parses to its
+byte-for-byte (inline / full-screen / pair = **34 / 25 / 8** rows — the four
+permission profiles and `/effort` grew full-screen 19→24, then `/think` 24→25;
+inline and pair are unchanged), every semantic name parses to its
 command id, all 36 identities are globally unique and equal to
 `SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
 The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
@@ -100,7 +103,7 @@ so a newly-added command cannot fall silently into "deferred" (the profiles and
 The durable obligations that remain OPEN for later work:
 
 - The default full-screen host must ultimately reach the **whole** shared
-  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **24**.
+  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **25**.
   The shared table is the substrate that makes that a wiring task rather than a
   re-derivation.
 - The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
@@ -124,7 +127,13 @@ increment added **host-aware routing and argument behaviour** for the five
 takeovers in full-screen/pair only. The third increment makes the four
 permission profiles and `/effort` switchable in the idle full-screen host with a
 truthful, atomically-projected footer/settings — the inline composer stays
-frozen throughout, `/abort` stays pair-loop-owned, and modes stay deferred.
+frozen throughout, `/abort` stays pair-loop-owned, and modes stay deferred. The
+fourth increment adds `/think`, a host-level reasoning-visibility toggle that
+hides `ItemKind::Reasoning` items from the full-screen timeline (render, scroll
+geometry, search, selection, and new-content route through one visibility
+authority; hidden items are zero-height layout entries so index identity holds)
+while retaining the raw items and leaving the `/exit print` path's independent
+reasoning drop unchanged.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

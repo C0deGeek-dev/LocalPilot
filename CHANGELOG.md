@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`/think` hides or shows reasoning in full-screen chat.** Toggling reasoning
+  off removes reasoning items from the timeline — render, scrolling, search, and
+  copy all skip them — while the underlying reasoning is retained (streaming
+  continues in the background and reappears when you show it again). It works
+  while a turn is running. The `/exit print` transcript already omits reasoning
+  and is unaffected.
+
 - **Permission profiles and reasoning effort are switchable in full-screen chat.**
   `/default`, `/relaxed`, `/bypass`, and `/unrestricted` now change the permission
   profile from inside the full-screen session — the enforcement engine and the

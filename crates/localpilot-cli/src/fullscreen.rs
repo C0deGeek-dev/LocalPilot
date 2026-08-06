@@ -1522,6 +1522,15 @@ fn fullscreen_settings_with_effort(
     settings
 }
 
+/// The exact `/think` confirmation, shared by the idle and active-turn routes.
+const fn reasoning_visibility_notice(visible: bool) -> &'static str {
+    if visible {
+        "reasoning shown"
+    } else {
+        "reasoning hidden"
+    }
+}
+
 fn load_workspace_diff(cwd: &Path) -> Result<Vec<DiffFile>> {
     let primary = read_git_diff(cwd, true)?;
     let bytes = if primary.0.success() {
@@ -2613,6 +2622,13 @@ async fn execute_fullscreen_slash(
         | SlashAction::Search(_)) => {
             open_fullscreen_takeover(app, config, cwd, action, runtime.reasoning_effort());
         }
+        // Toggle reasoning visibility in the timeline (a pure display toggle).
+        SlashAction::ToggleThinking => {
+            let visible = app.toggle_reasoning();
+            app.apply_runtime(RuntimeUpdate::Notice(
+                reasoning_visibility_notice(visible).to_string(),
+            ));
+        }
         // Switch the permission profile: update the enforcement engine FIRST, then
         // the displayed projection immediately after, in this one synchronous
         // branch (no await/render between) so the footer can never show a profile
@@ -2648,7 +2664,6 @@ async fn execute_fullscreen_slash(
         // explicitly (not a wildcard) so a new `SlashAction` variant that no one
         // has taught this host about is a compile error, not a silent deferral.
         SlashAction::SetMode(_)
-        | SlashAction::ToggleThinking
         | SlashAction::Tree
         | SlashAction::Compact { .. }
         | SlashAction::HarnessResume
@@ -4013,6 +4028,16 @@ fn handle_turn_event_impl(
                         // matching the behaviour before they became parsed actions.
                         Some(SlashAction::Help) => {
                             app.open_help();
+                            false
+                        }
+                        // `/think` is a pure display toggle — reasoning streams
+                        // during a turn, so it must work mid-operation too, with the
+                        // same confirmation the idle route emits.
+                        Some(SlashAction::ToggleThinking) => {
+                            let visible = app.toggle_reasoning();
+                            app.apply_runtime(RuntimeUpdate::Notice(
+                                reasoning_visibility_notice(visible).to_string(),
+                            ));
                             false
                         }
                         Some(SlashAction::Theme(None)) => {
@@ -6521,6 +6546,152 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn think_toggles_reasoning_idle_and_mid_turn_with_one_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+        app.apply_runtime(RuntimeUpdate::Reasoning("streaming thoughts".into()));
+        assert!(app.reasoning_visible());
+        // Count exact notice items so a route emitting a duplicate would fail.
+        let notice_count = |app: &AppModel, text: &str| {
+            app.active_timeline()
+                .items()
+                .iter()
+                .filter(|item| item.text == text)
+                .count()
+        };
+
+        // Idle route hides reasoning and confirms exactly "reasoning hidden".
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/think"),
+        )
+        .await;
+        assert!(!app.reasoning_visible());
+        assert_eq!(
+            notice_count(&app, "reasoning hidden"),
+            1,
+            "exactly one confirmation"
+        );
+        // Again → shown, same exact wording.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/think"),
+        )
+        .await;
+        assert!(app.reasoning_visible());
+        assert_eq!(notice_count(&app, "reasoning shown"), 1);
+
+        // Active-turn route: the same toggle mid-operation, same confirmation.
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let _ = app.handle_input(InputAction::Insert("/think".to_string()), 80);
+        let exit = handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            cwd,
+            &image_capability(false),
+        );
+        assert!(!exit);
+        assert!(
+            !app.reasoning_visible(),
+            "mid-turn /think toggled reasoning"
+        );
+        // One more "reasoning hidden" from the active route — a delta of exactly
+        // one, so neither route emits a duplicate confirmation.
+        assert_eq!(notice_count(&app, "reasoning hidden"), 2);
+
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn hidden_reasoning_keeps_streaming_and_reappears_via_the_alias_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+        // First reasoning chunk creates the active reasoning item.
+        app.apply_runtime(RuntimeUpdate::Reasoning("part one".into()));
+        // Hide via the real /think idle host route.
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/think"),
+        )
+        .await;
+        assert!(!app.reasoning_visible());
+        // A second chunk streams while hidden — it must target the retained item.
+        app.apply_runtime(RuntimeUpdate::Reasoning(" part two".into()));
+        assert!(!app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .any(|row| row.text.contains("part")));
+        // Show via the `/thinking` ALIAS through the active-turn host route.
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let _ = app.handle_input(InputAction::Insert("/thinking".to_string()), 80);
+        let _ = handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            cwd,
+            &image_capability(false),
+        );
+        assert!(
+            app.reasoning_visible(),
+            "the /thinking alias reached the active host route"
+        );
+        // The retained, combined reasoning reappears.
+        assert!(app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .any(|row| row.text.contains("part one part two")));
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn print_transcript_drops_reasoning_regardless_of_think_visibility() {
+        let mut app = app();
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "the question");
+        app.apply_runtime(RuntimeUpdate::Reasoning("secret reasoning".into()));
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "the answer");
+        // The print path drops reasoning independently of the interactive toggle:
+        // visible…
+        assert!(!visible_transcript(&app).contains("secret reasoning"));
+        assert!(visible_transcript(&app).contains("the answer"));
+        // …and hidden.
+        app.toggle_reasoning();
+        assert!(!visible_transcript(&app).contains("secret reasoning"));
+        assert!(visible_transcript(&app).contains("the answer"));
+    }
+
     #[test]
     fn diff_filter_is_trimmed_case_insensitive_substring_over_paths() {
         let file = |path: &str| DiffFile {
@@ -7719,6 +7890,7 @@ mod tests {
                 "unrestricted",
                 "Approve everything, workspace boundary included — you take responsibility",
             ),
+            ("think", "Show or hide reasoning in the timeline"),
             ("effort", "Set reasoning effort: minimal|low|medium|high"),
             (
                 "model",
@@ -7746,7 +7918,7 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 24);
+        assert_eq!(full_screen.len(), 25);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }

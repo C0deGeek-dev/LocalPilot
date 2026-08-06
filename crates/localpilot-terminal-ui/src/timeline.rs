@@ -258,6 +258,10 @@ pub struct Timeline {
     pub viewport: ViewportAnchor,
     pub selection: Option<Selection>,
     new_content: Cell<bool>,
+    /// When false, `ItemKind::Reasoning` items are hidden from render, scroll
+    /// geometry, search, selection, and new-content notification — the raw items
+    /// are retained (streaming continues; the print path drops them separately).
+    reasoning_visible: bool,
 }
 
 impl Default for Timeline {
@@ -278,12 +282,57 @@ impl Timeline {
             viewport: ViewportAnchor::FollowBottom,
             selection: None,
             new_content: Cell::new(false),
+            reasoning_visible: true,
         }
     }
 
     #[must_use]
     pub fn items(&self) -> &[TimelineItem] {
         &self.items
+    }
+
+    /// Whether reasoning items are currently shown.
+    #[must_use]
+    pub const fn reasoning_visible(&self) -> bool {
+        self.reasoning_visible
+    }
+
+    /// Set reasoning visibility. Invalidates the layout cache so scroll geometry
+    /// is recomputed with the new set of visible rows.
+    pub fn set_reasoning_visible(&mut self, visible: bool) {
+        if self.reasoning_visible != visible {
+            self.reasoning_visible = visible;
+            self.invalidate_layout();
+        }
+    }
+
+    /// The single visibility authority: whether an item of this kind is currently
+    /// hidden. Every render/layout/search/selection/new-content path routes
+    /// through this, so a future visibility rule cannot drift between them.
+    fn kind_hidden(&self, kind: ItemKind) -> bool {
+        !self.reasoning_visible && kind == ItemKind::Reasoning
+    }
+
+    /// Whether `item` is currently hidden. Hidden items stay in `self.items`
+    /// (index-stable) but contribute no rows/geometry.
+    fn is_reasoning_hidden(&self, item: &TimelineItem) -> bool {
+        self.kind_hidden(item.kind)
+    }
+
+    /// Whether `item` currently occupies a row — the inverse of the hidden
+    /// authority. `pub(crate)` so out-of-module search/selection use the same rule
+    /// (raw `items()` stays raw).
+    #[must_use]
+    pub(crate) fn item_is_visible(&self, item: &TimelineItem) -> bool {
+        !self.kind_hidden(item.kind)
+    }
+
+    /// Note new content below a held viewport, unless the appended item is a
+    /// currently-hidden item (which has no visible row).
+    fn note_new_content(&self, kind: ItemKind) {
+        if !self.kind_hidden(kind) && !matches!(self.viewport, ViewportAnchor::FollowBottom) {
+            self.new_content.set(true);
+        }
     }
 
     #[must_use]
@@ -300,9 +349,7 @@ impl Timeline {
         let text = sanitize_text(&text.into());
         self.item_positions.insert(id, self.items.len());
         self.items.push(TimelineItem::new(id, kind, text));
-        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
-            self.new_content.set(true);
-        }
+        self.note_new_content(kind);
         self.invalidate_layout();
         Some(id)
     }
@@ -343,9 +390,7 @@ impl Timeline {
             self.item_positions
                 .insert(self.items[position].id, position);
         }
-        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
-            self.new_content.set(true);
-        }
+        self.note_new_content(self.items[index].kind);
         self.invalidate_layout();
         Some(id)
     }
@@ -372,9 +417,7 @@ impl Timeline {
             });
         }
         self.wrap_cache.borrow_mut().remove(&id);
-        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
-            self.new_content.set(true);
-        }
+        self.note_new_content(self.items[index].kind);
         self.invalidate_layout();
         true
     }
@@ -387,9 +430,7 @@ impl Timeline {
         item.text = sanitize_text(&text.into());
         item.styles = full_range_style(&item.text, TextStyle::new(item.kind.into()));
         self.wrap_cache.borrow_mut().remove(&id);
-        if !matches!(self.viewport, ViewportAnchor::FollowBottom) {
-            self.new_content.set(true);
-        }
+        self.note_new_content(self.items[index].kind);
         self.invalidate_layout();
         true
     }
@@ -463,6 +504,7 @@ impl Timeline {
     pub fn rows(&self, width: u16) -> Vec<VisualRow> {
         self.items
             .iter()
+            .filter(|item| !self.is_reasoning_hidden(item))
             .flat_map(|item| {
                 let ranges = self.row_ranges(item, item_content_width(item, width));
                 project_item_rows(item, &ranges, 0, item_visual_row_count(item, &ranges))
@@ -592,6 +634,11 @@ impl Timeline {
         let mut selected_any = false;
         for (index, item) in self.items[start_index..=end_index].iter().enumerate() {
             let index = start_index + index;
+            // A hidden reasoning item has no visible row, so a selection spanning
+            // it must not splice its text into the copy.
+            if self.is_reasoning_hidden(item) {
+                continue;
+            }
             let visible_len = displayed_text(item).len();
             let from = if index == start_index {
                 start_byte.min(visible_len)
@@ -718,6 +765,12 @@ impl Timeline {
             return layout.total_rows.saturating_sub(1);
         };
         let item = &self.items[index];
+        // A hidden reasoning item is zero-height: a held anchor pointing inside it
+        // must collapse to its boundary, never a wrapped-row offset that would land
+        // in a later visible item or past the total.
+        if self.is_reasoning_hidden(item) {
+            return entry.start.min(layout.total_rows.saturating_sub(1));
+        }
         let ranges = self.row_ranges(item, item_content_width(item, width));
         let within = ranges
             .iter()
@@ -843,8 +896,16 @@ impl Timeline {
             .items
             .iter()
             .map(|item| {
-                let ranges = self.row_ranges(item, item_content_width(item, width));
-                let end = start.saturating_add(item_visual_row_count(item, &ranges));
+                // A hidden reasoning item stays in the entries vector (index
+                // identity with `self.items`) but is zero-height, so it occupies
+                // no rows and later entries keep the same start offsets.
+                let height = if self.is_reasoning_hidden(item) {
+                    0
+                } else {
+                    let ranges = self.row_ranges(item, item_content_width(item, width));
+                    item_visual_row_count(item, &ranges)
+                };
+                let end = start.saturating_add(height);
                 let entry = ItemLayout { start, end };
                 start = end;
                 entry
@@ -1381,6 +1442,172 @@ mod tests {
         assert!(!timeline.item(tool).expect("tool").expanded);
         assert!(timeline.toggle_expandable(tool));
         assert!(timeline.item(tool).expect("tool").expanded);
+    }
+
+    #[test]
+    fn hidden_reasoning_leaves_geometry_index_stable_with_items_on_both_sides() {
+        let mut t = Timeline::new();
+        let user = t.push(ItemKind::User, "the question").expect("user");
+        let reasoning = t
+            .push(ItemKind::Reasoning, "thinking hard")
+            .expect("reasoning");
+        let assistant = t
+            .push(ItemKind::Assistant, "the answer")
+            .expect("assistant");
+
+        // Visible: reasoning has rows and contributes to total height.
+        assert!(t.rows(80).iter().any(|r| r.text.contains("thinking hard")));
+        let total_visible = t.total_rows(80);
+
+        t.set_reasoning_visible(false);
+
+        // Hidden from render, but the items on both sides remain.
+        let hidden_rows = t.rows(80);
+        assert!(!hidden_rows.iter().any(|r| r.text.contains("thinking hard")));
+        assert!(hidden_rows.iter().any(|r| r.text.contains("the question")));
+        assert!(hidden_rows.iter().any(|r| r.text.contains("the answer")));
+        assert!(
+            t.total_rows(80) < total_visible,
+            "hidden reasoning shrank the height"
+        );
+
+        // The layout keeps one entry per item (index identity), the hidden entry is
+        // zero-height, and a row that used to belong to the assistant still resolves
+        // to the assistant — not the hidden reasoning between them.
+        let layout = t.layout_index(80);
+        assert_eq!(layout.entries.len(), t.items().len());
+        let r_index = t.item_positions[&reasoning];
+        assert_eq!(
+            layout.entries[r_index].start, layout.entries[r_index].end,
+            "hidden reasoning is a zero-height entry"
+        );
+        let a_index = t.item_positions[&assistant];
+        let a_start = layout.entries[a_index].start;
+        let point = t.point_at_row(80, a_start).expect("point");
+        assert_eq!(
+            point.item_id, assistant,
+            "the row maps past the hidden reasoning"
+        );
+        // Anchoring on the assistant still resolves to its (now-lower) row.
+        let anchored = t.resolve_anchor(
+            80,
+            ContentPoint {
+                item_id: assistant,
+                byte: 0,
+            },
+        );
+        assert_eq!(anchored, a_start);
+        let _ = user;
+    }
+
+    #[test]
+    fn held_anchor_inside_hidden_reasoning_collapses_to_its_boundary() {
+        let mut t = Timeline::new();
+        let _ = t.push(ItemKind::User, "the question").expect("user");
+        let reasoning = t
+            .push(ItemKind::Reasoning, "line one\nline two\nline three")
+            .expect("reasoning");
+        let assistant = t
+            .push(ItemKind::Assistant, "the answer")
+            .expect("assistant");
+
+        // Hold at a non-zero byte deep inside the multi-line reasoning while visible.
+        let mid = t
+            .item(reasoning)
+            .expect("reasoning")
+            .text
+            .find("line two")
+            .expect("byte");
+        assert!(t.hold_at(ContentPoint {
+            item_id: reasoning,
+            byte: mid,
+        }));
+        let anchor = ContentPoint {
+            item_id: reasoning,
+            byte: mid,
+        };
+        assert!(t.resolve_anchor(80, anchor) < t.total_rows(80));
+
+        // Hide: the held anchor must collapse to the (zero-height) reasoning
+        // boundary — never a wrapped-row offset into a later item or past the end.
+        t.set_reasoning_visible(false);
+        let total_hidden = t.total_rows(80);
+        let layout = t.layout_index(80);
+        let r_start = layout.entries[t.item_positions[&reasoning]].start;
+        let resolved = t.resolve_anchor(80, anchor);
+        assert_eq!(resolved, r_start.min(total_hidden.saturating_sub(1)));
+        assert!(resolved < total_hidden, "no phantom scroll past the total");
+
+        // The viewport start stays bounded and the assistant still maps correctly.
+        let view = t.view(80, 6);
+        assert!(view.start < total_hidden);
+        let a_start = layout.entries[t.item_positions[&assistant]].start;
+        assert_eq!(
+            t.point_at_row(80, a_start).expect("point").item_id,
+            assistant
+        );
+    }
+
+    #[test]
+    fn hidden_reasoning_is_retained_and_reappears_on_show() {
+        let mut t = Timeline::new();
+        let reasoning = t.push(ItemKind::Reasoning, "part one").expect("reasoning");
+        t.set_reasoning_visible(false);
+        // Streaming continues while hidden.
+        assert!(t.append_text(reasoning, " part two"));
+        assert!(!t.rows(80).iter().any(|r| r.text.contains("part")));
+        // The raw item is retained (combined).
+        assert_eq!(t.item(reasoning).expect("item").text, "part one part two");
+        // Showing it again reveals the accumulated text.
+        t.set_reasoning_visible(true);
+        assert!(t
+            .rows(80)
+            .iter()
+            .any(|r| r.text.contains("part one part two")));
+    }
+
+    #[test]
+    fn selection_does_not_copy_hidden_reasoning() {
+        let mut t = Timeline::new();
+        let user = t.push(ItemKind::User, "alpha").expect("user");
+        let _reasoning = t.push(ItemKind::Reasoning, "SECRET").expect("reasoning");
+        let assistant = t.push(ItemKind::Assistant, "omega").expect("assistant");
+        t.start_selection(ContentPoint {
+            item_id: user,
+            byte: 0,
+        });
+        t.extend_selection(ContentPoint {
+            item_id: assistant,
+            byte: t.item(assistant).expect("assistant").text.len(),
+        });
+        // Visible: the selection spans all three.
+        assert_eq!(t.selected_text().as_deref(), Some("alpha\nSECRET\nomega"));
+        // Hidden: the reasoning text is not spliced into the copy.
+        t.set_reasoning_visible(false);
+        assert_eq!(t.selected_text().as_deref(), Some("alpha\nomega"));
+    }
+
+    #[test]
+    fn appending_hidden_reasoning_under_a_held_viewport_raises_no_new_content() {
+        let mut t = Timeline::new();
+        let prompt = t.push(ItemKind::User, "prompt").expect("user");
+        // Hold the viewport away from the bottom.
+        assert!(t.hold_at(ContentPoint {
+            item_id: prompt,
+            byte: 0,
+        }));
+        assert!(!matches!(t.viewport, ViewportAnchor::FollowBottom));
+        t.set_reasoning_visible(false);
+        let _ = t
+            .push(ItemKind::Reasoning, "hidden stream")
+            .expect("reasoning");
+        assert!(
+            !t.has_new_content(),
+            "a hidden reasoning append must not raise new content"
+        );
+        // A visible append still does.
+        let _ = t.push(ItemKind::Assistant, "visible").expect("assistant");
+        assert!(t.has_new_content());
     }
 
     #[test]

@@ -146,6 +146,15 @@ impl ProjectionSet {
         }
     }
 
+    /// Every projection (the one single session, or both pair panes) — for a
+    /// host-level toggle that must apply to all timelines.
+    pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, SessionProjection> {
+        match self {
+            Self::Single(projection) => std::slice::from_mut(projection).iter_mut(),
+            Self::Pair { projections, .. } => projections.iter_mut(),
+        }
+    }
+
     pub(super) const fn is_pair(&self) -> bool {
         matches!(self, Self::Pair { .. })
     }

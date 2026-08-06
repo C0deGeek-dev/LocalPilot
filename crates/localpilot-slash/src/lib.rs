@@ -274,6 +274,30 @@ impl Spelling {
         }
     }
 
+    /// Inline + full-screen with DISTINCT per-host copy (no pair row). For a
+    /// command whose behaviour reads differently between hosts — e.g. `/think`
+    /// toggles an inline reasoning *panel* but hides *timeline items* in
+    /// full-screen — so the inline description cannot be reused verbatim.
+    const fn inline_and_fullscreen(
+        command: SlashCommand,
+        name: &'static str,
+        args: ArgSpec,
+        stray: StrayArgs,
+        inline_desc: &'static str,
+        fullscreen_desc: &'static str,
+    ) -> Self {
+        Self {
+            command,
+            name,
+            args,
+            stray,
+            force: false,
+            inline: Some(inline_desc),
+            fullscreen: Some(fullscreen_desc),
+            pair: None,
+        }
+    }
+
     /// A full-screen/pair takeover: no shared inline route yet, its own per-host
     /// copy, and its true argument syntax for the host that services it.
     const fn takeover(
@@ -454,7 +478,16 @@ slash_commands! {
             Reject,
             "Approve everything, workspace boundary included — you take responsibility"
         ),
-        Think => inline_only("think", NoArg, Reject, "Toggle the reasoning panel"),
+        // `/think` toggles the inline reasoning panel, but in full-screen it hides
+        // reasoning timeline items — so the per-host copy differs (the inline copy
+        // stays byte-for-byte). Full-screen catalog gains this row (24→25).
+        Think => inline_and_fullscreen(
+            "think",
+            NoArg,
+            Reject,
+            "Toggle the reasoning panel",
+            "Show or hide reasoning in the timeline"
+        ),
         Effort => both("effort", Required, Fall, "Set reasoning effort: minimal|low|medium|high"),
         Model => both(
             "model",
@@ -1009,9 +1042,9 @@ mod tests {
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
         assert_eq!(specs_for(Host::Inline).len(), 34);
-        // Full-screen grew from 19 to 24: the four permission profiles and
-        // `/effort` are now switchable in the full-screen host too.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 24);
+        // Full-screen grew 19→24 (the four permission profiles + `/effort`), then
+        // 24→25 (`/think` reasoning visibility).
+        assert_eq!(specs_for(Host::Fullscreen).len(), 25);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
@@ -1418,6 +1451,17 @@ mod tests {
             Some(SlashAction::ContinueSession(Some("x".to_string()))),
         );
         assert_eq!(parse_slash("/think"), Some(SlashAction::ToggleThinking));
+        // The hidden `/thinking` alias shares the action (no picker row) on every
+        // host — `/think` is a shared command, not a host-gated takeover.
+        assert_eq!(parse_slash("/thinking"), Some(SlashAction::ToggleThinking));
+        assert_eq!(
+            parse_slash_for(Host::Fullscreen, "/thinking"),
+            Some(SlashAction::ToggleThinking)
+        );
+        assert_eq!(
+            parse_slash_for(Host::Fullscreen, "/think"),
+            Some(SlashAction::ToggleThinking)
+        );
         assert_eq!(parse_slash("/wait-resume"), Some(SlashAction::WaitResume));
         assert_eq!(parse_slash("/wait_resume"), Some(SlashAction::WaitResume));
     }

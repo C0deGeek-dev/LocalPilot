@@ -5104,6 +5104,74 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_hidden_in_ordinary_render_mode() {
+        // Ordinary (non-screen-reader) mode: the reasoning text itself must vanish.
+        let mut app = model();
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "the question");
+        app.apply_runtime(crate::RuntimeUpdate::Reasoning("Checking context".into()));
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "the answer");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw visible");
+        assert!(terminal.backend().to_string().contains("Checking context"));
+        app.toggle_reasoning();
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw hidden");
+        let hidden = terminal.backend().to_string();
+        assert!(!hidden.contains("Checking context"));
+        assert!(hidden.contains("the answer"));
+    }
+
+    #[test]
+    fn reasoning_hidden_is_omitted_from_the_render() {
+        let mut app = model();
+        app.capabilities.screen_reader = true; // surfaces the "Reasoning: …" label
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::User, "the question");
+        app.apply_runtime(crate::RuntimeUpdate::Reasoning("Checking context".into()));
+        let _ = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "the answer");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw visible");
+        let visible = terminal.backend().to_string();
+        assert!(visible.contains("Reasoning: Checking context"));
+        assert!(visible.contains("the answer"));
+
+        // `/think` hides reasoning from both the screen-reader label and the
+        // ordinary rendered text; surrounding items stay.
+        app.toggle_reasoning();
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw hidden");
+        let hidden = terminal.backend().to_string();
+        assert!(!hidden.contains("Reasoning: Checking context"));
+        assert!(!hidden.contains("Checking context"));
+        assert!(
+            hidden.contains("the answer"),
+            "surrounding items still render"
+        );
+    }
+
+    #[test]
     fn screen_reader_projection_linearizes_roles_chrome_dialogs_and_scrollbars() {
         let mut app = model();
         app.capabilities.screen_reader = true;

@@ -1039,6 +1039,9 @@ pub struct AppModel {
     takeover: Option<TakeoverState>,
     theme_picker: Option<ThemePickerState>,
     quick_help: bool,
+    /// Host-level canonical reasoning visibility (`/think`). Propagated to every
+    /// projection timeline; reapplied when a timeline is reset.
+    reasoning_visible: bool,
     input_overlay: Option<InputOverlay>,
     external_edit_snapshot: Option<EditorSnapshot>,
     stashed_draft: Option<EditorSnapshot>,
@@ -1147,6 +1150,7 @@ impl AppModel {
             takeover: None,
             theme_picker: None,
             quick_help: false,
+            reasoning_visible: true,
             input_overlay: None,
             external_edit_snapshot: None,
             stashed_draft: None,
@@ -1292,6 +1296,38 @@ impl AppModel {
     /// profile never disagrees with the profile actually in force.
     pub fn set_shared_profile(&mut self, profile: &str) {
         self.header.profile = sanitize_text(profile);
+    }
+
+    /// Whether reasoning items are currently shown in the timeline.
+    #[must_use]
+    pub const fn reasoning_visible(&self) -> bool {
+        self.reasoning_visible
+    }
+
+    /// Toggle reasoning visibility (`/think`) across every projection timeline and
+    /// return the new state. Raw reasoning items are retained (streaming continues
+    /// while hidden); the layout, render, search, selection, and new-content
+    /// surfaces all follow the flag, and any open search is refreshed so a hidden
+    /// reasoning match cannot survive without a row.
+    pub fn toggle_reasoning(&mut self) -> bool {
+        self.reasoning_visible = !self.reasoning_visible;
+        let visible = self.reasoning_visible;
+        for projection in self.projections.iter_mut() {
+            projection.timeline.set_reasoning_visible(visible);
+            if projection.timeline_search.is_some() {
+                Self::refresh_timeline_search_on(projection);
+            }
+        }
+        visible
+    }
+
+    /// Reapply the canonical reasoning visibility to every projection timeline —
+    /// called after a timeline reset (clear/new session) so hiding survives.
+    fn reapply_reasoning_visibility(&mut self) {
+        let visible = self.reasoning_visible;
+        for projection in self.projections.iter_mut() {
+            projection.timeline.set_reasoning_visible(visible);
+        }
     }
 
     #[must_use]
@@ -2455,6 +2491,9 @@ impl AppModel {
         self.quick_help = false;
         self.input_overlay = None;
         self.external_edit_snapshot = None;
+        // The reset installed a fresh (default-visible) timeline; reapply the
+        // host-level reasoning visibility so hiding survives a clear/new session.
+        self.reapply_reasoning_visibility();
     }
 
     #[must_use]
@@ -4112,6 +4151,9 @@ fn timeline_search_matches(timeline: &Timeline, query: &str) -> Vec<ContentPoint
     timeline
         .items()
         .iter()
+        // A hidden item has no visible row, so it must not produce a search match
+        // (a match the UI could not scroll to). Same authority as render/layout.
+        .filter(|item| timeline.item_is_visible(item))
         .filter_map(|item| {
             case_insensitive_match_byte(&item.text, query).map(|byte| ContentPoint {
                 item_id: item.id,
@@ -6702,6 +6744,59 @@ mod tests {
             .collect();
         assert_eq!(ids.first(), Some(&active));
         assert_eq!(ids.last(), Some(&queued));
+    }
+
+    #[test]
+    fn timeline_search_skips_hidden_reasoning() {
+        let mut timeline = Timeline::new();
+        let _ = timeline.push(ItemKind::Assistant, "find MARKER here");
+        let _ = timeline.push(ItemKind::Reasoning, "reasoning MARKER inside");
+        // Visible: both items match.
+        assert_eq!(timeline_search_matches(&timeline, "MARKER").len(), 2);
+        // Hidden: only the assistant matches — a hidden reasoning item has no row,
+        // so it must not surface as a search hit the UI cannot scroll to.
+        timeline.set_reasoning_visible(false);
+        let matches = timeline_search_matches(&timeline, "MARKER");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            timeline.item(matches[0].item_id).map(|item| item.kind),
+            Some(ItemKind::Assistant),
+        );
+    }
+
+    #[test]
+    fn toggling_reasoning_refreshes_an_open_search_to_drop_hidden_matches() {
+        let mut app = model();
+        // The only item that matches the query is a reasoning item.
+        app.apply_runtime(RuntimeUpdate::Reasoning(
+            "a unique NEEDLE token".to_string(),
+        ));
+        app.open_timeline_search("NEEDLE".to_string());
+        assert_eq!(app.timeline_search().map(|view| view.total), Some(1));
+        // Hiding reasoning refreshes the OPEN search — its only match had no row.
+        app.toggle_reasoning();
+        assert_eq!(app.timeline_search().map(|view| view.total), Some(0));
+        // Showing again brings the match back.
+        app.toggle_reasoning();
+        assert_eq!(app.timeline_search().map(|view| view.total), Some(1));
+    }
+
+    #[test]
+    fn hiding_reasoning_survives_a_conversation_clear() {
+        let mut app = model();
+        app.apply_runtime(RuntimeUpdate::Reasoning("thinking".to_string()));
+        assert!(!app.toggle_reasoning(), "toggled to hidden");
+        assert!(!app.reasoning_visible());
+        // Clearing installs a fresh timeline; the hidden state must be reapplied.
+        app.clear_conversation();
+        assert!(!app.reasoning_visible());
+        app.apply_runtime(RuntimeUpdate::Reasoning("more thinking".to_string()));
+        assert!(!app.active_timeline().reasoning_visible());
+        assert!(!app
+            .active_timeline()
+            .rows(80)
+            .iter()
+            .any(|row| row.text.contains("more thinking")));
     }
 
     #[test]
