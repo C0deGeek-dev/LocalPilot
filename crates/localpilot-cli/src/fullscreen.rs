@@ -3679,15 +3679,17 @@ async fn run_event_loop(
                             terminal,
                             app,
                             runtime,
-                            approval_rx,
-                            question_rx,
+                            SlashContext {
+                                approval_rx: &mut *approval_rx,
+                                question_rx: &mut *question_rx,
+                                cwd,
+                                history,
+                                mouse_state: &mut mouse_state,
+                                paste_burst: &mut paste_burst,
+                                workspace_index: &mut *workspace_index,
+                            },
                             operation,
                             &mut queue,
-                            history,
-                            cwd,
-                            &mut mouse_state,
-                            &mut paste_burst,
-                            workspace_index,
                         )
                         .await?
                         {
@@ -3702,15 +3704,17 @@ async fn run_event_loop(
                             terminal,
                             app,
                             runtime,
-                            approval_rx,
-                            question_rx,
+                            SlashContext {
+                                approval_rx: &mut *approval_rx,
+                                question_rx: &mut *question_rx,
+                                cwd,
+                                history,
+                                mouse_state: &mut mouse_state,
+                                paste_burst: &mut paste_burst,
+                                workspace_index: &mut *workspace_index,
+                            },
                             operation,
                             &mut queue,
-                            history,
-                            cwd,
-                            &mut mouse_state,
-                            &mut paste_burst,
-                            workspace_index,
                         )
                         .await?
                         {
@@ -3755,20 +3759,16 @@ async fn run_event_loop(
     Ok(LoopExit::Normal)
 }
 
-#[allow(clippy::too_many_arguments)]
+// The dispatcher accepts the ambient owners as one by-value `SlashContext` bundle
+// (built at its two call sites) and reborrows it into the turn/shell wrappers, so
+// the growing surface no longer widens this signature.
 async fn drive_operation_chain(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+    mut ctx: SlashContext<'_>,
     first: QueuedOperation,
     queue: &mut VecDeque<QueuedOperation>,
-    history: &localpilot_store::PromptHistory,
-    cwd: &Path,
-    mouse_state: &mut MouseState,
-    paste_burst: &mut PasteBurst,
-    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(operation) = current {
@@ -3781,16 +3781,10 @@ async fn drive_operation_chain(
                     terminal,
                     app,
                     runtime,
-                    approval_rx,
-                    question_rx,
+                    &mut ctx,
                     &prompt.text,
                     &prompt.attachments,
                     queue,
-                    history,
-                    cwd,
-                    mouse_state,
-                    paste_burst,
-                    workspace_index,
                 )
                 .await?
                 {
@@ -3801,21 +3795,7 @@ async fn drive_operation_chain(
             QueuedOperation::Shell(shell) => {
                 app.begin_work_before(next_item);
                 let _ = app.activate_shell(shell.item_id);
-                if drive_shell(
-                    terminal,
-                    app,
-                    runtime,
-                    approval_rx,
-                    shell,
-                    queue,
-                    history,
-                    cwd,
-                    mouse_state,
-                    paste_burst,
-                    workspace_index,
-                )
-                .await?
-                {
+                if drive_shell(terminal, app, runtime, &mut ctx, shell, queue).await? {
                     discard_queued_operations(queue);
                     return Ok(true);
                 }
@@ -3830,152 +3810,331 @@ fn discard_queued_operations(queue: &mut VecDeque<QueuedOperation>) {
     queue.clear();
 }
 
-#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
+/// The terminal I/O the full-screen operation pump depends on. Production wraps
+/// the exact crossterm calls; tests supply a bounded event queue and a canned
+/// hit map. A bundle of closures, not a public trait, so the loop stays generic
+/// over its input/draw without exposing a new abstraction.
+struct TerminalIo<P, R, D> {
+    poll: P,
+    read: R,
+    draw: D,
+}
+
+/// Runtime-event coupling for one full-screen operation. Steering promotion
+/// reconciles against loop-local pending items fed by the same broadcast lane, so
+/// it can only exist alongside a runtime-event receiver: `Bare` has neither, while
+/// `Runtime` always applies and drains events and may optionally promote steering.
+enum EventLane<'a> {
+    Bare,
+    Runtime {
+        events: &'a mut broadcast::Receiver<RuntimeEvent>,
+        steering: Option<&'a SteerQueue>,
+    },
+}
+
+/// Whether the ambient `question_rx` is serviced this operation. The lane is the
+/// authority: `Inert` never polls the receiver and never drains it at the
+/// boundary, even though it is present in `SlashContext`.
+enum QuestionMode {
+    Inert,
+    Serviced,
+}
+
+/// Which operation this is, purely so the poll/read/paste diagnostics keep their
+/// distinct wording across the merged pump.
+#[derive(Clone, Copy)]
+enum OperationKind {
+    Turn,
+    Shell,
+}
+
+impl OperationKind {
+    fn poll_context(self) -> &'static str {
+        match self {
+            Self::Turn => "poll full-screen turn input",
+            Self::Shell => "poll full-screen shell input",
+        }
+    }
+
+    fn read_context(self) -> &'static str {
+        match self {
+            Self::Turn => "read full-screen turn input",
+            Self::Shell => "read full-screen shell input",
+        }
+    }
+
+    fn paste_context(self) -> &'static str {
+        match self {
+            Self::Turn => "poll after active full-screen paste key",
+            Self::Shell => "poll after active shell paste key",
+        }
+    }
+}
+
+/// The ambient owners every full-screen operation threads through its pump. Moved
+/// in by value (a bundle of references) and destructured to locals so the pump's
+/// `select!` arms keep their existing disjoint borrows.
+struct SlashContext<'a> {
+    approval_rx: &'a mut mpsc::UnboundedReceiver<ApprovalCall>,
+    question_rx: &'a mut mpsc::UnboundedReceiver<QuestionCall>,
+    cwd: &'a Path,
+    history: &'a localpilot_store::PromptHistory,
+    mouse_state: &'a mut MouseState,
+    paste_burst: &'a mut PasteBurst,
+    workspace_index: &'a mut WorkspaceFileIndex,
+}
+
 async fn drive_shell(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+    ctx: &mut SlashContext<'_>,
     shell: QueuedShell,
     queue: &mut VecDeque<QueuedOperation>,
-    history: &localpilot_store::PromptHistory,
-    cwd: &Path,
-    mouse_state: &mut MouseState,
-    paste_burst: &mut PasteBurst,
-    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let cancel = CancellationToken::new();
     let image_capability = ImageCapabilitySnapshot {
         provider_id: runtime.active_provider_id().to_string(),
         vision_capable: runtime.active_accepts_images(),
     };
-    let mut pending: Option<oneshot::Sender<bool>> = None;
-    let outcome = {
-        let operation =
-            runtime.run_user_shell_command_detailed(shell.command.as_str(), &cancel, false);
-        tokio::pin!(operation);
-        let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        async {
-            loop {
-        tokio::select! {
-            biased;
-            _ = tick.tick() => {
-                workspace_index.refresh(app);
-                let mut hit_map = draw_synchronized(terminal, app)?;
-                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
-                    if pending.is_none() {
-                        let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
-                    }
-                }
-                for _ in 0..64 {
-                    if !event::poll(Duration::ZERO).context("poll full-screen shell input")? {
-                        break;
-                    }
-                    let next = event::read().context("read full-screen shell input")?;
-                    if let Event::Key(key) = &next {
-                        if is_key_action(*key) {
-                            let buffered_after = buffered_after_fullscreen_key(*key)
-                                .context("poll after active shell paste key")?;
-                            let consumed = if pending.is_some() {
-                                handle_dialog_paste_burst(
-                                    app,
-                                    paste_burst,
-                                    *key,
-                                    buffered_after,
-                                    false,
-                                )
-                            } else {
-                                handle_fullscreen_paste_burst(
-                                    app,
-                                    paste_burst,
-                                    *key,
-                                    buffered_after,
-                                    hit_map.editor_width,
-                                )
-                            };
-                            if consumed {
-                                continue;
-                            }
-                        }
-                    }
-                    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
-                    let exit = if pending.is_some() {
-                        handle_approval_event(app, next, &mut pending, &cancel)
-                    } else {
-                        match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
-                            RoutedEvent::Handled => false,
-                            RoutedEvent::Copy(text) => {
-                                copy_to_clipboard(app, text);
-                                false
-                            }
-                            RoutedEvent::PasteClipboard => {
-                                paste_text_from_clipboard(app, hit_map.editor_width);
-                                false
-                            }
-                            RoutedEvent::Unhandled => handle_turn_event(
-                                app,
-                                next,
-                                &cancel,
-                                &hit_map,
-                                queue,
-                                history,
-                                cwd,
-                                &image_capability,
-                            ),
-                        }
-                    };
-                    if exit {
-                        cancel.cancel();
-                        return Ok(true);
-                    }
-                    if geometry_event {
-                        hit_map = draw_synchronized(terminal, app)?;
-                    }
-                }
-                advance_mouse_selection(app, &hit_map, mouse_state);
-                let _ = draw_synchronized(terminal, app)?;
-            }
-            result = &mut operation => {
-                let output = result.presentation.map_or_else(
-                    || {
-                        UserShellOutput::diagnostic(
-                            result.result.is_error(),
-                            present_shell_diagnostic(&result.result.output),
-                        )
-                    },
-                    |presentation| match presentation {
-                        ToolOutputPresentation::Shell(captured) => UserShellOutput::captured(
-                            captured.exit_code,
-                            &captured.stdout,
-                            &captured.stderr,
-                        ),
-                    },
-                );
-                let _ = app.finish_shell(shell.item_id, &shell.command, &output);
-                app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
-                let _ = draw_synchronized(terminal, app)?;
-                return Ok(false);
-            }
-            Some(call) = approval_rx.recv(), if pending.is_none() => {
-                mouse_state.reset_gesture();
-                if let Some(text) = paste_burst.flush_pending() {
-                    let _ = app.handle_input(InputAction::Paste(text), 1);
-                }
-                app.request_approval(
-                    call.request.tool,
-                    call.request.target,
-                    call.request.risk_class,
-                );
-                pending = Some(call.reply);
-            }
-        }
-            }
-        }
-        .await
+    let operation = runtime.run_user_shell_command_detailed(shell.command.as_str(), &cancel, false);
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
     };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Shell,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        operation,
+        |app: &mut AppModel, result| {
+            let output = result.presentation.map_or_else(
+                || {
+                    UserShellOutput::diagnostic(
+                        result.result.is_error(),
+                        present_shell_diagnostic(&result.result.output),
+                    )
+                },
+                |presentation| match presentation {
+                    ToolOutputPresentation::Shell(captured) => UserShellOutput::captured(
+                        captured.exit_code,
+                        &captured.stdout,
+                        &captured.stderr,
+                    ),
+                },
+            );
+            let _ = app.finish_shell(shell.item_id, &shell.command, &output);
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await
+}
+
+// The one full-screen operation pump. Turn and shell differ only in the typed
+// `EventLane`/`QuestionMode`/`OperationKind` config and the supplied future +
+// completion projection; the loop body is otherwise shared verbatim.
+#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
+async fn drive_fullscreen_operation<F, T, P, R, D>(
+    app: &mut AppModel,
+    ctx: SlashContext<'_>,
+    io: &mut TerminalIo<P, R, D>,
+    cancel: &CancellationToken,
+    image_capability: &ImageCapabilitySnapshot,
+    queue: &mut VecDeque<QueuedOperation>,
+    kind: OperationKind,
+    lane: EventLane<'_>,
+    questions: QuestionMode,
+    operation: F,
+    on_complete: impl FnOnce(&mut AppModel, T),
+) -> Result<bool>
+where
+    F: std::future::Future<Output = T>,
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+    D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+{
+    let SlashContext {
+        approval_rx,
+        question_rx,
+        cwd,
+        history,
+        mouse_state,
+        paste_burst,
+        workspace_index,
+    } = ctx;
+    // A `Bare` operation still binds a receiver so the runtime-event arm and the
+    // completion drain stay uniform; its sender is held open, so it simply never
+    // yields and drains empty.
+    let (_bare_sender, mut bare_rx) = broadcast::channel::<RuntimeEvent>(1);
+    let (lane_events, steer): (&mut broadcast::Receiver<RuntimeEvent>, Option<&SteerQueue>) =
+        match lane {
+            EventLane::Bare => (&mut bare_rx, None),
+            EventLane::Runtime { events, steering } => (events, steering),
+        };
+    let servicing = matches!(questions, QuestionMode::Serviced);
+    tokio::pin!(operation);
+    let mut pending: Option<oneshot::Sender<bool>> = None;
+    let mut pending_questions: Option<PendingQuestions> = None;
+    let mut pending_steer_items = VecDeque::new();
+    let mut on_complete = Some(on_complete);
+    let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let outcome = async {
+        loop {
+            tokio::select! {
+                biased;
+                _ = tick.tick() => {
+                    workspace_index.refresh(app);
+                    let mut hit_map = (io.draw)(app)?;
+                    if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
+                        if pending.is_none() && pending_questions.is_none() {
+                            let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
+                        } else if pending_questions.is_some() {
+                            let _ = app.handle_question_input(InputAction::Paste(text));
+                        }
+                    }
+                    for _ in 0..64 {
+                        if !(io.poll)(Duration::ZERO).context(kind.poll_context())? {
+                            break;
+                        }
+                        let next = (io.read)().context(kind.read_context())?;
+                        if let Event::Key(key) = &next {
+                            if is_key_action(*key) {
+                                let buffered_after =
+                                    buffered_after_fullscreen_key_with(*key, &mut io.poll)
+                                        .context(kind.paste_context())?;
+                                let consumed = if pending.is_some() || pending_questions.is_some() {
+                                    handle_dialog_paste_burst(
+                                        app,
+                                        paste_burst,
+                                        *key,
+                                        buffered_after,
+                                        pending_questions.is_some(),
+                                    )
+                                } else {
+                                    handle_fullscreen_paste_burst(
+                                        app,
+                                        paste_burst,
+                                        *key,
+                                        buffered_after,
+                                        hit_map.editor_width,
+                                    )
+                                };
+                                if consumed {
+                                    continue;
+                                }
+                            }
+                        }
+                        let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
+                        let exit = if pending_questions.is_some() {
+                            handle_question_event(app, next, &mut pending_questions, cancel, &hit_map)
+                        } else if pending.is_some() {
+                            handle_approval_event(app, next, &mut pending, cancel)
+                        } else {
+                            match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
+                                RoutedEvent::Handled => false,
+                                RoutedEvent::Copy(text) => {
+                                    copy_to_clipboard(app, text);
+                                    false
+                                }
+                                RoutedEvent::PasteClipboard => {
+                                    paste_text_from_clipboard(app, hit_map.editor_width);
+                                    false
+                                }
+                                RoutedEvent::Unhandled => handle_turn_event_impl(
+                                    app,
+                                    next,
+                                    cancel,
+                                    &hit_map,
+                                    queue,
+                                    history,
+                                    cwd,
+                                    image_capability,
+                                    steer.map(|steer| (steer, &mut pending_steer_items)),
+                                ),
+                            }
+                        };
+                        if exit {
+                            cancel.cancel();
+                            return Ok(true);
+                        }
+                        if geometry_event {
+                            hit_map = (io.draw)(app)?;
+                        }
+                    }
+                    advance_mouse_selection(app, &hit_map, mouse_state);
+                    let _ = (io.draw)(app)?;
+                }
+                reason = &mut operation => {
+                    drain_runtime_events(app, lane_events, &mut pending_steer_items);
+                    if let Some(done) = on_complete.take() {
+                        done(app, reason);
+                    }
+                    let _ = (io.draw)(app)?;
+                    return Ok(false);
+                }
+                Some(call) = approval_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
+                    mouse_state.reset_gesture();
+                    if let Some(text) = paste_burst.flush_pending() {
+                        let _ = app.handle_input(InputAction::Paste(text), 1);
+                    }
+                    app.request_approval(
+                        call.request.tool,
+                        call.request.target,
+                        call.request.risk_class,
+                    );
+                    pending = Some(call.reply);
+                }
+                received = lane_events.recv() => {
+                    match received {
+                        Ok(event) => apply_runtime_event(app, event, &mut pending_steer_items),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
+                Some(call) = question_rx.recv(), if servicing && pending.is_none() && pending_questions.is_none() => {
+                    mouse_state.reset_gesture();
+                    if let Some(text) = paste_burst.flush_pending() {
+                        let _ = app.handle_input(InputAction::Paste(text), 1);
+                    }
+                    if call.questions.is_empty() {
+                        let _ = call.reply.send(Vec::new());
+                    } else {
+                        let questions = PendingQuestions {
+                            questions: call.questions,
+                            index: 0,
+                            answers: Vec::new(),
+                            reply: call.reply,
+                        };
+                        questions.show_current(app);
+                        pending_questions = Some(questions);
+                    }
+                }
+            }
+        }
+    }
+    .await;
     deny_pending(app, &mut pending);
     deny_buffered_approvals(approval_rx);
+    if servicing {
+        dismiss_pending_questions(app, &mut pending_questions);
+        dismiss_buffered_questions(question_rx);
+    }
     outcome
 }
 
@@ -4061,21 +4220,14 @@ fn handle_trust_event(app: &mut AppModel, event: Event, hit_map: &HitMap) -> Tru
     }
 }
 
-#[allow(clippy::too_many_arguments)] // the live terminal pump threads these owners
 async fn drive_turn(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
-    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
-    question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+    ctx: &mut SlashContext<'_>,
     prompt: &str,
     attachments: &[ContentBlock],
     queue: &mut VecDeque<QueuedOperation>,
-    history: &localpilot_store::PromptHistory,
-    cwd: &Path,
-    mouse_state: &mut MouseState,
-    paste_burst: &mut PasteBurst,
-    workspace_index: &mut WorkspaceFileIndex,
 ) -> Result<bool> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
@@ -4086,160 +4238,40 @@ async fn drive_turn(
         provider_id: runtime.active_provider_id().to_string(),
         vision_capable: runtime.active_accepts_images(),
     };
-    let mut pending: Option<oneshot::Sender<bool>> = None;
-    let mut pending_questions: Option<PendingQuestions> = None;
-    let mut pending_steer_items = VecDeque::new();
     let steer = runtime.steer_queue();
-    let outcome = {
-        let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
-        tokio::pin!(operation);
-        let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        async {
-            loop {
-        tokio::select! {
-            biased;
-            _ = tick.tick() => {
-                workspace_index.refresh(app);
-                let mut hit_map = draw_synchronized(terminal, app)?;
-                if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
-                    if pending.is_none() && pending_questions.is_none() {
-                        let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
-                    } else if pending_questions.is_some() {
-                        let _ = app.handle_question_input(InputAction::Paste(text));
-                    }
-                }
-                for _ in 0..64 {
-                    if !event::poll(Duration::ZERO).context("poll full-screen turn input")? {
-                        break;
-                    }
-                    let next = event::read().context("read full-screen turn input")?;
-                    if let Event::Key(key) = &next {
-                        if is_key_action(*key) {
-                            let buffered_after = buffered_after_fullscreen_key(*key)
-                                .context("poll after active full-screen paste key")?;
-                            let consumed = if pending.is_some() || pending_questions.is_some() {
-                                handle_dialog_paste_burst(
-                                    app,
-                                    paste_burst,
-                                    *key,
-                                    buffered_after,
-                                    pending_questions.is_some(),
-                                )
-                            } else {
-                                handle_fullscreen_paste_burst(
-                                    app,
-                                    paste_burst,
-                                    *key,
-                                    buffered_after,
-                                    hit_map.editor_width,
-                                )
-                            };
-                            if consumed {
-                                continue;
-                            }
-                        }
-                    }
-                    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
-                    let exit = if pending_questions.is_some() {
-                        handle_question_event(
-                            app,
-                            next,
-                            &mut pending_questions,
-                            &cancel,
-                            &hit_map,
-                        )
-                    } else if pending.is_some() {
-                        handle_approval_event(app, next, &mut pending, &cancel)
-                    } else {
-                        match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
-                            RoutedEvent::Handled => false,
-                            RoutedEvent::Copy(text) => {
-                                copy_to_clipboard(app, text);
-                                false
-                            }
-                            RoutedEvent::PasteClipboard => {
-                                paste_text_from_clipboard(app, hit_map.editor_width);
-                                false
-                            }
-                            RoutedEvent::Unhandled => handle_turn_event_with_steering(
-                                app,
-                                next,
-                                &cancel,
-                                &hit_map,
-                                queue,
-                                history,
-                                cwd,
-                                &image_capability,
-                                &steer,
-                                &mut pending_steer_items,
-                            ),
-                        }
-                    };
-                    if exit {
-                        cancel.cancel();
-                        return Ok(true);
-                    }
-                    if geometry_event {
-                        hit_map = draw_synchronized(terminal, app)?;
-                    }
-                }
-                advance_mouse_selection(app, &hit_map, mouse_state);
-                let _ = draw_synchronized(terminal, app)?;
-            }
-            reason = &mut operation => {
-                drain_runtime_events(app, &mut rx, &mut pending_steer_items);
-                app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
-                let _ = draw_synchronized(terminal, app)?;
-                return Ok(false);
-            }
-            Some(call) = approval_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
-                mouse_state.reset_gesture();
-                if let Some(text) = paste_burst.flush_pending() {
-                    let _ = app.handle_input(InputAction::Paste(text), 1);
-                }
-                app.request_approval(
-                    call.request.tool,
-                    call.request.target,
-                    call.request.risk_class,
-                );
-                pending = Some(call.reply);
-            }
-            received = rx.recv() => {
-                match received {
-                    Ok(event) => apply_runtime_event(app, event, &mut pending_steer_items),
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => {}
-                }
-            }
-            Some(call) = question_rx.recv(), if pending.is_none() && pending_questions.is_none() => {
-                mouse_state.reset_gesture();
-                if let Some(text) = paste_burst.flush_pending() {
-                    let _ = app.handle_input(InputAction::Paste(text), 1);
-                }
-                if call.questions.is_empty() {
-                    let _ = call.reply.send(Vec::new());
-                } else {
-                    let questions = PendingQuestions {
-                        questions: call.questions,
-                        index: 0,
-                        answers: Vec::new(),
-                        reply: call.reply,
-                    };
-                    questions.show_current(app);
-                    pending_questions = Some(questions);
-                }
-            }
-        }
-            }
-        }
-        .await
+    let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
     };
-    deny_pending(app, &mut pending);
-    deny_buffered_approvals(approval_rx);
-    dismiss_pending_questions(app, &mut pending_questions);
-    dismiss_buffered_questions(question_rx);
-    outcome
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Turn,
+        EventLane::Runtime {
+            events: &mut rx,
+            steering: Some(&steer),
+        },
+        QuestionMode::Serviced,
+        operation,
+        |app: &mut AppModel, reason| {
+            app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
+        },
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)] // the live input router threads each state owner explicitly
@@ -4403,7 +4435,11 @@ fn handle_turn_event_impl(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // the non-steering adapter preserves the shared router inputs
+#[allow(clippy::too_many_arguments)]
+// the non-steering adapter preserves the shared router inputs
+// Retained for the focused event-handling tests; production routes through
+// `handle_turn_event_impl` directly via the merged operation pump.
+#[cfg(test)]
 fn handle_turn_event(
     app: &mut AppModel,
     event: Event,
@@ -4427,6 +4463,9 @@ fn handle_turn_event(
     )
 }
 
+// Retained for the focused steering tests; production routes through
+// `handle_turn_event_impl` directly via the merged operation pump.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn handle_turn_event_with_steering(
     app: &mut AppModel,
@@ -5410,6 +5449,16 @@ fn is_enqueue_key(key: KeyEvent) -> bool {
 }
 
 fn buffered_after_fullscreen_key(key: KeyEvent) -> io::Result<bool> {
+    buffered_after_fullscreen_key_with(key, &mut |timeout| event::poll(timeout))
+}
+
+/// The paste-probe with its input poll injected, so the operation pump can route
+/// it through the same seam as the batch poll while production still calls the
+/// exact `crossterm::event::poll`.
+fn buffered_after_fullscreen_key_with(
+    key: KeyEvent,
+    poll: &mut impl FnMut(Duration) -> io::Result<bool>,
+) -> io::Result<bool> {
     if !may_be_unbracketed_paste_key(key) {
         return Ok(false);
     }
@@ -5418,7 +5467,7 @@ fn buffered_after_fullscreen_key(key: KeyEvent) -> io::Result<bool> {
     } else {
         Duration::from_millis(3)
     };
-    event::poll(timeout)
+    poll(timeout)
 }
 
 /// Normalize Windows terminals that deliver paste as a rapid key-record burst.
@@ -10714,6 +10763,1122 @@ mod tests {
         for mut answer in answers {
             assert_eq!(answer.try_recv(), Ok(vec![UserAnswer::Dismissed]));
         }
+    }
+
+    // Characterization of the full-screen operation pump: each case drives the real
+    // `drive_fullscreen_operation` (via the turn/shell adapters below) through the
+    // injected `TerminalIo` seam with a bounded event queue and a controlled future,
+    // pinning the pump's observable behaviour for both the turn and shell configs.
+
+    type CharacterizationIo = TerminalIo<
+        Box<dyn FnMut(Duration) -> io::Result<bool>>,
+        Box<dyn FnMut() -> io::Result<Event>>,
+        Box<dyn FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>>,
+    >;
+
+    fn characterization_io(
+        events: std::rc::Rc<std::cell::RefCell<VecDeque<Event>>>,
+        reads: std::rc::Rc<std::cell::Cell<usize>>,
+        draws: std::rc::Rc<std::cell::Cell<usize>>,
+        err_at: Option<usize>,
+    ) -> CharacterizationIo {
+        let poll_events = events.clone();
+        let read_events = events;
+        let read_count = reads;
+        let draw_count = draws;
+        TerminalIo {
+            poll: Box::new(move |_timeout: Duration| Ok(!poll_events.borrow().is_empty())),
+            read: Box::new(move || {
+                read_count.set(read_count.get() + 1);
+                Ok(read_events
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Event::FocusGained))
+            }),
+            draw: Box::new(move |app: &AppModel| {
+                let n = draw_count.get() + 1;
+                draw_count.set(n);
+                if err_at == Some(n) {
+                    return Err(anyhow::anyhow!("injected draw failure"));
+                }
+                Ok(draw_hit_map(app, 80, 24))
+            }),
+        }
+    }
+
+    fn cell(value: usize) -> std::rc::Rc<std::cell::Cell<usize>> {
+        std::rc::Rc::new(std::cell::Cell::new(value))
+    }
+
+    fn queued(events: Vec<Event>) -> std::rc::Rc<std::cell::RefCell<VecDeque<Event>>> {
+        std::rc::Rc::new(std::cell::RefCell::new(events.into_iter().collect()))
+    }
+
+    // Completes only when the returned sender fires or drops; hold it to keep the
+    // operation pending forever.
+    fn gate() -> (oneshot::Sender<()>, impl std::future::Future<Output = ()>) {
+        let (tx, rx) = oneshot::channel::<()>();
+        (tx, async move {
+            let _ = rx.await;
+        })
+    }
+
+    fn complete_after(delay_ms: u64) -> impl std::future::Future<Output = ()> {
+        let (tx, operation) = gate();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let _ = tx.send(());
+        });
+        operation
+    }
+
+    // Test harness: the turn and shell call shapes over the merged driver, so the
+    // characterization cases exercise `drive_fullscreen_operation` for the turn
+    // (Runtime + steering + serviced questions) and shell (Bare + inert) configs.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_turn_loop<F, T, P, R, D>(
+        app: &mut AppModel,
+        io: &mut TerminalIo<P, R, D>,
+        approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+        question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+        rx: &mut broadcast::Receiver<RuntimeEvent>,
+        steer: &SteerQueue,
+        cancel: &CancellationToken,
+        image_capability: &ImageCapabilitySnapshot,
+        queue: &mut VecDeque<QueuedOperation>,
+        history: &localpilot_store::PromptHistory,
+        cwd: &Path,
+        mouse_state: &mut MouseState,
+        paste_burst: &mut PasteBurst,
+        workspace_index: &mut WorkspaceFileIndex,
+        operation: F,
+        on_complete: impl FnOnce(&mut AppModel, T),
+    ) -> Result<bool>
+    where
+        F: std::future::Future<Output = T>,
+        P: FnMut(Duration) -> io::Result<bool>,
+        R: FnMut() -> io::Result<Event>,
+        D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+    {
+        drive_fullscreen_operation(
+            app,
+            SlashContext {
+                approval_rx,
+                question_rx,
+                cwd,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+            },
+            io,
+            cancel,
+            image_capability,
+            queue,
+            OperationKind::Turn,
+            EventLane::Runtime {
+                events: rx,
+                steering: Some(steer),
+            },
+            QuestionMode::Serviced,
+            operation,
+            on_complete,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_shell_loop<F, T, P, R, D>(
+        app: &mut AppModel,
+        io: &mut TerminalIo<P, R, D>,
+        approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+        question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+        cancel: &CancellationToken,
+        image_capability: &ImageCapabilitySnapshot,
+        queue: &mut VecDeque<QueuedOperation>,
+        history: &localpilot_store::PromptHistory,
+        cwd: &Path,
+        mouse_state: &mut MouseState,
+        paste_burst: &mut PasteBurst,
+        workspace_index: &mut WorkspaceFileIndex,
+        operation: F,
+        on_complete: impl FnOnce(&mut AppModel, T),
+    ) -> Result<bool>
+    where
+        F: std::future::Future<Output = T>,
+        P: FnMut(Duration) -> io::Result<bool>,
+        R: FnMut() -> io::Result<Event>,
+        D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+    {
+        // The ambient question receiver is the caller's; `Inert` guarantees it is
+        // never serviced or drained, so a live preloaded call stays queued.
+        drive_fullscreen_operation(
+            app,
+            SlashContext {
+                approval_rx,
+                question_rx,
+                cwd,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+            },
+            io,
+            cancel,
+            image_capability,
+            queue,
+            OperationKind::Shell,
+            EventLane::Bare,
+            QuestionMode::Inert,
+            operation,
+            on_complete,
+        )
+        .await
+    }
+
+    // The subject-09 harness-resume seam: runtime events without ordinary-turn
+    // steering (`Runtime { steering: None }`). Events still apply and drain; nothing
+    // is promoted.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_runtime_resume_loop<F, T, P, R, D>(
+        app: &mut AppModel,
+        io: &mut TerminalIo<P, R, D>,
+        approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+        question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+        rx: &mut broadcast::Receiver<RuntimeEvent>,
+        cancel: &CancellationToken,
+        image_capability: &ImageCapabilitySnapshot,
+        queue: &mut VecDeque<QueuedOperation>,
+        history: &localpilot_store::PromptHistory,
+        cwd: &Path,
+        mouse_state: &mut MouseState,
+        paste_burst: &mut PasteBurst,
+        workspace_index: &mut WorkspaceFileIndex,
+        operation: F,
+        on_complete: impl FnOnce(&mut AppModel, T),
+    ) -> Result<bool>
+    where
+        F: std::future::Future<Output = T>,
+        P: FnMut(Duration) -> io::Result<bool>,
+        R: FnMut() -> io::Result<Event>,
+        D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+    {
+        drive_fullscreen_operation(
+            app,
+            SlashContext {
+                approval_rx,
+                question_rx,
+                cwd,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+            },
+            io,
+            cancel,
+            image_capability,
+            queue,
+            OperationKind::Turn,
+            EventLane::Runtime {
+                events: rx,
+                steering: None,
+            },
+            QuestionMode::Inert,
+            operation,
+            on_complete,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn turn_loop_runs_projection_then_returns_false() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let draws = cell(0);
+        let mut io = characterization_io(queued(vec![]), cell(0), draws.clone(), None);
+        let projected = std::rc::Rc::new(std::cell::Cell::new(false));
+        let recorder = projected.clone();
+        let out = drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            move |_app: &mut AppModel, _reason: ()| recorder.set(true),
+        )
+        .await
+        .expect("turn loop completes");
+        assert!(!out, "natural completion returns false");
+        assert!(projected.get(), "on_complete projection ran");
+        assert!(draws.get() >= 1, "the loop drew at least once");
+        assert!(!cancel.is_cancelled(), "completion does not cancel");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_exit_cancels_and_returns_true() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        // An idle app arms on the first Ctrl+C and exits on the second, so the
+        // batch carries both to exercise the exit path.
+        let mut io = characterization_io(
+            queued(vec![
+                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        let (_hold, operation) = gate();
+        let out = drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            operation,
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop returns");
+        assert!(out, "exit returns true");
+        assert!(cancel.is_cancelled(), "exit cancels the shared token");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_denies_buffered_approval_at_completion_boundary() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        approvals
+            .send(ApprovalCall {
+                request: localpilot_tui::ApprovalRequest {
+                    tool: "tool".to_string(),
+                    target: "fixture".to_string(),
+                    risk_class: "test".to_string(),
+                },
+                reply,
+            })
+            .expect("queue approval");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        assert_eq!(answer.try_recv(), Ok(false), "buffered approval denied");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_denies_pending_approval_after_it_is_shown() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        approvals
+            .send(ApprovalCall {
+                request: localpilot_tui::ApprovalRequest {
+                    tool: "tool".to_string(),
+                    target: "fixture".to_string(),
+                    risk_class: "test".to_string(),
+                },
+                reply,
+            })
+            .expect("queue approval");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        // Stay pending long enough for the approval arm to fire, then complete.
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(20),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        assert!(app.dialog.is_none(), "the shown approval was dismissed");
+        assert_eq!(answer.try_recv(), Ok(false), "pending approval denied");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_dismisses_a_pending_question_at_the_boundary() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (questions, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        questions
+            .send(QuestionCall {
+                questions: vec![UserQuestion {
+                    header: None,
+                    question: "fixture".to_string(),
+                    options: vec![localpilot_tools::QuestionOption {
+                        label: "A".to_string(),
+                        description: None,
+                    }],
+                    multi_select: false,
+                }],
+                reply,
+            })
+            .expect("queue question");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(20),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        assert_eq!(
+            answer.try_recv(),
+            Ok(vec![UserAnswer::Dismissed]),
+            "the serviced question was dismissed at the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_runs_cleanup_when_a_draw_errors() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        approvals
+            .send(ApprovalCall {
+                request: localpilot_tui::ApprovalRequest {
+                    tool: "tool".to_string(),
+                    target: "fixture".to_string(),
+                    risk_class: "test".to_string(),
+                },
+                reply,
+            })
+            .expect("queue approval");
+        // The first tick draws twice; the approval arm then fires; the next tick's
+        // opening draw (call 3) errors, so cleanup must still deny the pending call.
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), Some(3));
+        let (_hold, operation) = gate();
+        let out = drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            operation,
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await;
+        assert!(out.is_err(), "a draw error propagates out of the loop");
+        assert_eq!(
+            answer.try_recv(),
+            Ok(false),
+            "cleanup denied the pending approval despite the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_redraws_on_resize() {
+        async fn draws_for(events: Vec<Event>) -> usize {
+            let mut app = app();
+            let history = localpilot_store::PromptHistory::with_store(None);
+            let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+            let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+            let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+            let steer = SteerQueue::default();
+            let cancel = CancellationToken::new();
+            let mut queue = VecDeque::new();
+            let mut mouse_state = MouseState::default();
+            let mut paste_burst = PasteBurst::default();
+            let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+            let draws = cell(0);
+            let mut io = characterization_io(queued(events), cell(0), draws.clone(), None);
+            drive_turn_loop(
+                &mut app,
+                &mut io,
+                &mut approval_rx,
+                &mut question_rx,
+                &mut rx,
+                &steer,
+                &cancel,
+                &image_capability(false),
+                &mut queue,
+                &history,
+                std::path::Path::new("."),
+                &mut mouse_state,
+                &mut paste_burst,
+                &mut workspace_index,
+                complete_after(20),
+                |_app: &mut AppModel, _reason: ()| {},
+            )
+            .await
+            .expect("turn loop completes");
+            draws.get()
+        }
+        let baseline = draws_for(vec![]).await;
+        let with_resize = draws_for(vec![Event::Resize(100, 30)]).await;
+        assert!(
+            with_resize > baseline,
+            "a resize forces an extra redraw ({with_resize} > {baseline})"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_caps_the_event_batch_at_64_per_tick() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        // 130 inert events; a single tick may drain at most 64 before yielding.
+        let reads = cell(0);
+        let mut io = characterization_io(
+            queued(vec![Event::FocusGained; 130]),
+            reads.clone(),
+            cell(0),
+            None,
+        );
+        // Complete after the first tick so exactly one batch runs.
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(20),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        assert_eq!(reads.get(), 64, "the batch is capped at 64 reads per tick");
+    }
+
+    #[tokio::test]
+    async fn shell_loop_runs_projection_then_returns_false() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let draws = cell(0);
+        let mut io = characterization_io(queued(vec![]), cell(0), draws.clone(), None);
+        let projected = std::rc::Rc::new(std::cell::Cell::new(false));
+        let recorder = projected.clone();
+        let out = drive_shell_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            move |_app: &mut AppModel, _result: ()| recorder.set(true),
+        )
+        .await
+        .expect("shell loop completes");
+        assert!(!out, "natural completion returns false");
+        assert!(projected.get(), "on_complete projection ran");
+        assert!(draws.get() >= 1, "the loop drew at least once");
+    }
+
+    #[tokio::test]
+    async fn shell_loop_exit_cancels_and_returns_true() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut io = characterization_io(
+            queued(vec![
+                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        let (_hold, operation) = gate();
+        let out = drive_shell_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            operation,
+            |_app: &mut AppModel, _result: ()| {},
+        )
+        .await
+        .expect("shell loop returns");
+        assert!(out, "exit returns true");
+        assert!(cancel.is_cancelled(), "exit cancels the shared token");
+    }
+
+    #[tokio::test]
+    async fn shell_loop_denies_buffered_approval_at_completion_boundary() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        approvals
+            .send(ApprovalCall {
+                request: localpilot_tui::ApprovalRequest {
+                    tool: "tool".to_string(),
+                    target: "fixture".to_string(),
+                    risk_class: "test".to_string(),
+                },
+                reply,
+            })
+            .expect("queue approval");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        drive_shell_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            |_app: &mut AppModel, _result: ()| {},
+        )
+        .await
+        .expect("shell loop completes");
+        assert_eq!(answer.try_recv(), Ok(false), "buffered approval denied");
+    }
+
+    #[tokio::test]
+    async fn shell_loop_runs_cleanup_when_a_draw_errors() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (approvals, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        approvals
+            .send(ApprovalCall {
+                request: localpilot_tui::ApprovalRequest {
+                    tool: "tool".to_string(),
+                    target: "fixture".to_string(),
+                    risk_class: "test".to_string(),
+                },
+                reply,
+            })
+            .expect("queue approval");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), Some(3));
+        let (_hold, operation) = gate();
+        let out = drive_shell_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            operation,
+            |_app: &mut AppModel, _result: ()| {},
+        )
+        .await;
+        assert!(out.is_err(), "a draw error propagates out of the loop");
+        assert_eq!(
+            answer.try_recv(),
+            Ok(false),
+            "cleanup denied the pending approval despite the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_lane_without_steering_drains_before_projection_and_draws_after() {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (events_tx, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        // Buffer a runtime event before completion; with steering absent, the
+        // completion arm must still drain + apply it BEFORE the projection, and the
+        // completion draw must follow the projection.
+        events_tx
+            .send(RuntimeEvent::Text("DRAINED".to_string()))
+            .expect("send runtime event");
+        let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let draw_trace = trace.clone();
+        let events = queued(vec![]);
+        let poll_events = events.clone();
+        let read_events = events;
+        let mut io = TerminalIo {
+            poll: move |_t: Duration| Ok(!poll_events.borrow().is_empty()),
+            read: move || {
+                Ok(read_events
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Event::FocusGained))
+            },
+            draw: move |a: &AppModel| {
+                draw_trace.borrow_mut().push("draw");
+                Ok(draw_hit_map(a, 80, 24))
+            },
+        };
+        let drained_before_projection = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = drained_before_projection.clone();
+        let projection_trace = trace.clone();
+        let out = drive_runtime_resume_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            move |app: &mut AppModel, _t: ()| {
+                let drained = app
+                    .active_timeline()
+                    .items()
+                    .iter()
+                    .any(|item| item.text.contains("DRAINED"));
+                seen.set(drained);
+                projection_trace.borrow_mut().push("projection");
+            },
+        )
+        .await
+        .expect("resume loop completes");
+        assert!(!out, "natural completion returns false");
+        assert!(
+            drained_before_projection.get(),
+            "the buffered runtime event was drained and applied before the projection"
+        );
+        let order = trace.borrow();
+        assert_eq!(
+            &order[order.len() - 2..],
+            ["projection", "draw"],
+            "the completion draw follows the projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_advances_and_answers_a_serviced_question() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (questions, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, answer) = oneshot::channel();
+        questions
+            .send(QuestionCall {
+                questions: vec![pair_question("A"), pair_question("B")],
+                reply,
+            })
+            .expect("queue question");
+        // Input is withheld until the question dialog is drawn, and released one
+        // event per tick (the draw keeps exactly one event releasable), so each key
+        // is read from an otherwise-empty batch — it answers the dialog instead of
+        // paste-bursting, with no reliance on timing. The paste must land on the
+        // free-text `Other` entry (the dialog ignores paste while an ordinary option
+        // is selected): Down → Other, Enter → edit, paste, Enter → submit, then Enter
+        // answers the second question by selection.
+        let events = queued(vec![
+            Event::Key(press(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("dialog paste".to_string()),
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        let released = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let consumed = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let poll_events = events.clone();
+        let poll_released = released.clone();
+        let poll_consumed = consumed.clone();
+        let read_events = events;
+        let read_consumed = consumed.clone();
+        let draw_released = released;
+        let draw_consumed = consumed;
+        let mut io = TerminalIo {
+            poll: move |_t: Duration| {
+                Ok(poll_consumed.get() < poll_released.get() && !poll_events.borrow().is_empty())
+            },
+            read: move || {
+                read_consumed.set(read_consumed.get() + 1);
+                Ok(read_events
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Event::FocusGained))
+            },
+            draw: move |a: &AppModel| {
+                if a.dialog.is_some() {
+                    draw_released.set(draw_consumed.get() + 1);
+                }
+                Ok(draw_hit_map(a, 80, 24))
+            },
+        };
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(500),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        let mut answer = answer;
+        let answers = answer
+            .try_recv()
+            .expect("both serviced questions were answered");
+        assert_eq!(
+            answers,
+            vec![
+                UserAnswer::Other("dialog paste".to_string()),
+                UserAnswer::Selected(vec!["B".to_string()]),
+            ],
+            "the first question is answered via the pasted Other free-text, the second by selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_loop_leaves_a_live_ambient_question_untouched() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (questions, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let (reply, mut answer) = oneshot::channel();
+        questions
+            .send(QuestionCall {
+                questions: vec![pair_question("A")],
+                reply,
+            })
+            .expect("queue question");
+        let mut io = characterization_io(queued(vec![]), cell(0), cell(0), None);
+        drive_shell_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            std::future::ready(()),
+            |_app: &mut AppModel, _result: ()| {},
+        )
+        .await
+        .expect("shell loop completes");
+        // Inert: the reply was never sent, and the live call is still queued.
+        assert_eq!(
+            answer.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty),
+            "the ambient question was never serviced or dismissed"
+        );
+        assert!(
+            question_rx.try_recv().is_ok(),
+            "the ambient question call remains queued (never polled)"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_promotes_and_activates_a_queued_prompt_via_steering() {
+        let mut app = app();
+        app.begin_work();
+        app.editor.insert("queued prompt");
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (events_tx, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        // Setup: queue a real timeline-backed prompt through the router; retain its id.
+        assert!(!handle_turn_event_impl(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &image_capability(false),
+            None,
+        ));
+        assert_eq!(queue.len(), 1, "a prompt is queued");
+        let item_id = queue.front().expect("queued").item_id();
+        assert!(
+            app.active_timeline()
+                .item(item_id)
+                .expect("queued item")
+                .pending,
+            "the queued prompt starts pending"
+        );
+        // Reconciliation driver: once Escape has promoted the prompt to the urgent
+        // steer queue, inject a user soft-interrupt and release the operation, so the
+        // driver's completion drain (or rx arm) applies it and pops
+        // `pending_steer_items` to activate the retained item.
+        let (gate_tx, operation) = gate();
+        let steer_probe = steer.clone();
+        let event_tx = events_tx.clone();
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                if !steer_probe.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let _ = event_tx.send(RuntimeEvent::SoftInterruptInjected {
+                point: "safe-point".to_string(),
+                source: "user".to_string(),
+            });
+            let _ = gate_tx.send(());
+        });
+        // Escape through the merged driver's `Runtime{Some}` glue promotes it.
+        let mut io = characterization_io(
+            queued(vec![Event::Key(press(KeyCode::Esc, KeyModifiers::NONE))]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            operation,
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+        assert!(queue.is_empty(), "the prompt left the queue");
+        assert!(
+            !steer.is_empty(),
+            "the prompt reached the urgent steer queue"
+        );
+        let snapshot = steer.snapshot();
+        assert!(
+            snapshot
+                .iter()
+                .any(|interrupt| interrupt.content.contains("queued prompt") && interrupt.urgent),
+            "the promoted prompt is an urgent user interrupt: {snapshot:?}"
+        );
+        assert!(
+            !app.active_timeline().item(item_id).expect("item").pending,
+            "the user soft-interrupt reconciled pending_steer_items and activated the item"
+        );
     }
 
     #[test]

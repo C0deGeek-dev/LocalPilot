@@ -28,7 +28,10 @@ full-screen timeline (render, scroll geometry, search, selection, and
 new-content — the raw items are retained and the `/exit print` path keeps its
 own independent reasoning drop). Modes (`/agent`/`/harness`) stay deferred: the
 full-screen host has no real mode transition today, so relabelling the footer
-would make it false; a real mode route is settled in a later increment.
+would make it false; a real mode route is settled in a later increment. A sixth
+increment restructures the full-screen operation pump with no surface change:
+the ~90%-duplicated turn and shell input loops become one generic operation
+driver (detailed in the Boundary), so the catalog stays **34/31/8**.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -156,6 +159,19 @@ The commands stay effectful; a shared UI-neutral `CommandOutput` result feeds th
 inline host (byte/item-equivalent) and the full-screen presenter. `/ingest`'s row
 stays deferred until its three long-running actions dispatch (its bare form is a
 long-running action); a production `Fast`/`LongRunning` classifier routes ingest.
+The sixth increment is a pure internal realization with no surface change: the
+full-screen turn and shell input pumps — previously duplicated arm-for-arm — are
+unified into one generic operation driver behind a small injected terminal-I/O
+seam (poll/read/draw closures; production still calls the exact `crossterm`
+functions) and a by-value context of the ambient owners, parameterised by a typed
+runtime-event/steering/question lane config. The typing carries the real
+invariants: a shell (`Bare`) operation binds an inert receiver and never services
+or drains questions, and steering promotion cannot exist without its runtime-event
+lane. Behaviour is preserved exactly — the poll/read/paste diagnostics stay
+operation-specific, and the completion order (runtime-event drain → projection →
+draw → boundary cleanup) is unchanged, with post-loop approval/question denial
+still running when a draw or input error propagates. The catalog stays **34/31/8**
+and no parser, provider-input routing, Report presenter, or pair pump changes.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 
