@@ -31,8 +31,14 @@ is SemVer-stable; the configuration schema stability policy is in
   workspace-trust grant as of when you invoke them — a `/model` or profile switch is
   honored, and `/wait-resume` blocks if the provider changed during the wait. Tool
   approvals surface in the normal dialog; a single Ctrl+C ends a run gracefully; and the
-  result opens as a bounded, scrollable report instead of flooding the transcript. Bare
-  `/harness` remains deferred.
+  result opens as a bounded, scrollable report instead of flooding the transcript.
+
+- **The full-screen slash surface is complete.** `/agent` and `/harness` now appear in
+  the full-screen picker as mode switches — `/harness` enters harness mode (a plain
+  prompt runs an ordinary turn, exactly as inline; the footer and settings show the mode
+  and `/agent` switches back). Every full-screen command now reaches a real route, so the
+  "not available in full-screen chat yet" message is gone. `/compact force` stays the way
+  to force a compaction (there is no separate `compact_force` picker entry).
 
 - **Synchronous commands work in full-screen chat with bounded output.** `/tree`,
   `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg` now run in the

@@ -26,9 +26,10 @@ in one synchronous branch (no intermediate frame), so the footer stays truthful;
 and `/think`, a host-level toggle that hides `ItemKind::Reasoning` items from the
 full-screen timeline (render, scroll geometry, search, selection, and
 new-content — the raw items are retained and the `/exit print` path keeps its
-own independent reasoning drop). Modes (`/agent`/`/harness`) stay deferred: the
-full-screen host has no real mode transition today, so relabelling the footer
-would make it false; a real mode route is settled in a later increment. A sixth
+own independent reasoning drop). Modes (`/agent`/`/harness`) stay deferred at this
+increment: the full-screen host has no real mode transition yet, so relabelling the
+footer would make it false; a real mode route is settled in the tenth increment below
+(bare `/harness` proved to be exact inline parity — a silent label flip). A sixth
 increment restructures the full-screen operation pump with no surface change:
 the ~90%-duplicated turn and shell input loops become one generic operation
 driver (detailed in the Boundary), so the catalog stays **34/31/8**. A seventh
@@ -51,6 +52,22 @@ dispatch (mirroring the inline oracle) and snapshots the live model/provider/san
 profile plus the retained single-host session-trust grant (per ADR-0143's
 session-only/remember semantics) at dispatch rather than launch time. Bare `/harness`
 stays deferred (it has no distinct harness prompt loop); `/agent` is the hidden exit.
+A tenth increment closes the loop and corrects the final count. Bare `/harness` becomes
+a real SILENT typed mode entry — exact inline parity (a label flip whose plain prompts
+take the ordinary turn, identical to Agent; the resume commands remain the only real
+harness loop in both hosts), so the earlier "no distinct loop → keep deferred" stance was
+stricter than inline. The two canonical mode commands `/agent` and `/harness` become
+visible full-screen rows (`SetMode` handled by one exhaustive arm where each typed mode
+selects itself — `SetMode(Research)`, though never produced by a spelling, keeps
+`Research(None)`'s egress disclosure rather than a silent bypass). The redundant forcing
+alias `compact_force` stays hidden-but-typeable (`/compact` + `/compact force` already
+cover it; a visible row would duplicate `compact`), so the truthful final full-screen
+surface is **34/38/8** — not the earlier over-counted 39, which only reached 39 by shipping
+`compact_force` as a duplicate. With every `SlashAction` now reaching a real or defensive
+route, the deferred arm and its "not available in full-screen chat yet" notice are deleted,
+and a generated dispatch matrix (derived from the shared spec table, not a hand-maintained
+allow-list) proves every visible full-screen row parses host-aware without `Unknown` and
+reaches a typed pumped/synchronous route; no new ADR.
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -95,9 +112,11 @@ Decision: parsing and the three host catalogs are generated from **one** table.
     truthfully instead of reported "unknown". Their **catalog scope stays
     full-screen/pair-only**: they are not deferred-inline rows and never join the
     inline picker. Inline stays **34** through #56 (this change adds no inline
-    command); the final full-screen catalog is **39** (34 shared + 5 takeovers)
-    precisely because the takeovers are additive to full-screen while inline is
-    unchanged. A future command could still grow the inline catalog on its own.
+    command); the final full-screen catalog is **38** (33 visible shared rows + 5
+    takeovers — the redundant forcing alias `compact_force` stays hidden-but-typeable,
+    so it is not a full-screen row; see the tenth increment), the takeovers being
+    additive to full-screen while inline is unchanged. A future command could still
+    grow the inline catalog on its own.
   - **The permanent pair-only `abort`**: `/abort` is owned by the pair
     collaboration loop, never parsed by `parse_slash`, and never bridged into
     the inline or full-screen hosts. It is structurally pair-scoped, so it lives
@@ -124,10 +143,11 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
-byte-for-byte (inline / full-screen / pair = **34 / 34 / 8** rows — the four
+byte-for-byte (inline / full-screen / pair = **34 / 38 / 8** rows — the four
 permission profiles and `/effort` grew full-screen 19→24, `/think` 24→25, the six
-synchronous commands 25→31, `/compact` + the long-running ingest runs 31→33, then
-`/research` 33→34; inline and pair are unchanged), every semantic name parses to its
+synchronous commands 25→31, `/compact` + the long-running ingest runs 31→33,
+`/research` 33→34, `/harness-resume` + `/wait-resume` 34→36, then the `/agent` +
+`/harness` mode entries 36→38; inline and pair are unchanged), every semantic name parses to its
 command id, all 36 identities are globally unique and equal to
 `SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
 The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
@@ -137,18 +157,19 @@ so a newly-added command cannot fall silently into "deferred" (the profiles and
 
 The durable obligations that remain OPEN for later work:
 
-- The default full-screen host must ultimately reach the **whole** shared
-  command surface; it currently reaches **34**. The shared table is the substrate
-  that makes that a wiring task rather than a re-derivation. (The earlier "→ 39 =
-  34 shared + 5 takeovers" target predates the deliberate hidden-but-typeable
-  `compact_force` choice and now the visible `/research` row; reconciling that final
-  visible-catalog count is a later-increment decision, not resolved here.)
+- The default full-screen host reaches the **whole** shared command surface —
+  **CLOSED** by the tenth increment at the truthful final **34/38/8**. (The earlier
+  "→ 39 = 34 shared + 5 takeovers" target over-counted: it only reached 39 by shipping
+  the redundant forcing alias `compact_force` as a duplicate `compact` picker row.
+  `compact_force` stays hidden-but-typeable — `/compact` and `/compact force` already
+  cover it — so 38, not 39, is the truthful whole surface.)
 - The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
   the slash-command types have moved to their neutral home here; the rollback
   inline host cannot be removed until the approval types are extracted too.
-- A **real full-screen mode transition** (`/agent`/`/harness`) is still open —
-  the host runs one agent turn loop today, so modes stay deferred rather than
-  relabelling the footer falsely.
+- A **real full-screen mode transition** (`/agent`/`/harness`) is **CLOSED** by the
+  tenth increment: both are silent typed mode entries at exact inline parity (a label
+  flip whose plain prompts take the ordinary turn, same as Agent), so the footer
+  relabels truthfully rather than falsely — no fabricated distinct loop.
 
 The atomic mode/profile-and-display obligation is **closed for permission
 profiles and effort** in the third increment: each `/default`/`/relaxed`/
@@ -254,6 +275,22 @@ terminal I/O failure propagates out of the host. Output is buffered and presente
 the bounded report presenter, unlike the inline host's single raw notice. The catalog
 grows to **34/36/8** (only the canonical `harness-resume`/`wait-resume` rows become
 visible; the `wait_resume` alias stays parse-only; inline and pair unchanged); no new ADR.
+
+The tenth increment closes the loop. `SetMode` is now one exhaustive arm where each typed
+mode selects itself: `/agent` and `/harness` are silent label flips (no notice, no synthetic
+timeline row — exact inline parity, since inline `/harness` is `state.mode = Harness` and its
+plain prompts take the ordinary turn just like Agent), while a `SetMode(Research)` — never
+produced by a spelling but required for exhaustiveness — keeps `Research(None)`'s egress
+disclosure rather than a silent bypass. The two canonical mode commands flip to `both`, so the
+full-screen catalog reaches its truthful final **34/38/8**; the redundant forcing alias
+`compact_force` stays hidden-but-typeable (a visible row would duplicate `compact`, which is
+why the earlier "39" over-counted). Every `SlashAction` now reaches a real or defensive route,
+so the deferred arm, its "not available in full-screen chat yet" notice, and the orphaned
+`deferred_label` map are deleted; a generated visible-catalog dispatch matrix — derived from
+`specs_for(Host::Fullscreen)`, not a hand-maintained list — proves every visible row parses
+host-aware without `Unknown` and reaches a typed pumped/synchronous route, and the picker,
+autocomplete, and `/help` agree because they project the one shared catalog. Inline and pair
+byte-unchanged (pair stays 8); no new ADR.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

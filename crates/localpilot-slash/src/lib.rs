@@ -251,25 +251,6 @@ pub struct Spelling {
 }
 
 impl Spelling {
-    const fn inline_only(
-        command: SlashCommand,
-        name: &'static str,
-        args: ArgSpec,
-        stray: StrayArgs,
-        desc: &'static str,
-    ) -> Self {
-        Self {
-            command,
-            name,
-            args,
-            stray,
-            force: false,
-            inline: Some(desc),
-            fullscreen: None,
-            pair: None,
-        }
-    }
-
     const fn both(
         command: SlashCommand,
         name: &'static str,
@@ -488,9 +469,10 @@ slash_commands! {
         Model, Localbox, New, Fork, Clone, Tree, Sessions, Session, Name,
         Continue, Clear, Compact, HarnessResume, WaitResume, Ingest, Knowledge,
         Context, Research, Agents, Skills, Bg, Exit,
-        // Full-screen/pair takeover identities. Their external string routing
-        // (parse_slash -> Unknown) is temporary until a later change gives them
-        // a shared route; their catalog scope stays full-screen/pair-only.
+        // Full-screen/pair takeover identities. `parse_slash` (the inline rollback
+        // host) intentionally keeps them `Unknown` — a deliberate host gate, not a
+        // gap — while `parse_slash_for(Fullscreen|Pair)` routes them to real actions;
+        // their catalog scope stays full-screen/pair-only.
         Help, Theme, Settings, Diff, Search,
         // Permanent pair-only identity: `/abort` is owned by the pair event
         // loop, never parsed by `parse_slash`, present only in the pair picker.
@@ -498,8 +480,8 @@ slash_commands! {
     }
     spellings {
         // --- shared: 34 inline-visible rows, in the frozen order -------------
-        Agent => inline_only("agent", NoArg, Reject, "Switch to agent mode"),
-        Harness => inline_only("harness", NoArg, Reject, "Switch to harness mode"),
+        Agent => both("agent", NoArg, Reject, "Switch to agent mode"),
+        Harness => both("harness", NoArg, Reject, "Switch to harness mode"),
         // The four permission profiles and `/effort` are switchable in the
         // full-screen host too (they update the runtime engine + projection), so
         // they carry a full-screen description as well as the inline one.
@@ -1079,10 +1061,11 @@ mod tests {
         // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
         // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
         // `skills`/`bg`), 31→33 (`compact` + `ingest` on the operation pump),
-        // 33→34 (`research` on the pump), then 34→36 (`harness-resume` +
-        // `wait-resume` on the pump). `compact_force` and the `wait_resume` alias
-        // stay inline-only/parse-only but remain typeable in full-screen.
-        assert_eq!(specs_for(Host::Fullscreen).len(), 36);
+        // 33→34 (`research` on the pump), 34→36 (`harness-resume` + `wait-resume`
+        // on the pump), then 36→38 (`agent` + `harness` mode entries). `compact_force`
+        // (a redundant forcing alias of `compact`) and the `wait_resume`/`compact-force`
+        // parse-only aliases stay hidden but remain typeable in full-screen.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 38);
         assert_eq!(specs_for(Host::Pair).len(), 8);
     }
 
@@ -1233,15 +1216,15 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        // A deferred inline-only name must not appear in the full-screen picker.
-        // `compact`, `ingest`, and `research` now run on the operation pump / as a
-        // mode, so they are `both`; `agent`/`harness` stay deferred.
-        for deferred in ["agent", "harness"] {
-            assert!(
-                !full_screen.contains(deferred),
-                "{deferred} leaked into full-screen"
-            );
-        }
+        // An inline-only hidden spelling must not appear in the full-screen picker.
+        // `agent` and `harness` are now `both` (real full-screen mode entries), so the
+        // only remaining inline-only row is `compact_force` — a redundant forcing alias
+        // of `compact`, intentionally hidden (typeable via `/compact force`), never a
+        // duplicate picker row.
+        assert!(
+            !full_screen.contains("compact_force"),
+            "compact_force (a redundant forcing alias) leaked into the full-screen picker"
+        );
     }
 
     #[test]
@@ -1458,6 +1441,77 @@ mod tests {
                 "{line} -> {action:?}",
             );
         }
+    }
+
+    #[test]
+    fn hidden_but_parseable_aliases_map_to_their_action_and_stay_out_of_full_screen() {
+        // Generated from spelling metadata, not a hard-coded list: a row is a
+        // hidden-but-parseable full-screen alias iff it has NO full-screen catalog
+        // description yet still parses to a real action on the full-screen host. That
+        // set is exactly the parse-only spellings (`thinking`/`compact-force`/
+        // `wait_resume`/`q`) plus the forcing alias `compact_force`. Pair-only `abort`
+        // has no full-screen parse, so it is correctly EXCLUDED (never a full-screen
+        // alias, never promoted).
+        let full_screen: BTreeSet<_> = specs_for(Host::Fullscreen)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        // No command-identity special case: a row qualifies purely by (a) having NO
+        // full-screen catalog description and (b) PARSING to a real semantic action on
+        // the full-screen host. Pair-only `abort` is excluded NATURALLY by (b) — its
+        // full-screen parse yields no semantic command — never by naming its id.
+        let mut aliases: Vec<&str> = Vec::new();
+        for spelling in SLASH_SPELLINGS {
+            if spelling.description_for(Host::Fullscreen).is_some() {
+                continue; // visible in the full-screen catalog — not a hidden alias.
+            }
+            let line = match spelling.args {
+                ArgSpec::Required => format!("/{} x", spelling.name),
+                ArgSpec::None | ArgSpec::Optional => format!("/{}", spelling.name),
+            };
+            // Retain only rows that parse to a real semantic action (a `command()`,
+            // never `Unknown`). This is what excludes `abort` — no naming it.
+            let action = match parse_slash_for(Host::Fullscreen, &line) {
+                Some(action) if action.command().is_some() => action,
+                _ => continue,
+            };
+            assert_eq!(
+                action.command(),
+                Some(spelling.command),
+                "hidden alias {} parses to the wrong action: {action:?}",
+                spelling.name
+            );
+            assert!(
+                !full_screen.contains(spelling.name),
+                "hidden alias {} leaked into the full-screen visible catalog",
+                spelling.name
+            );
+            aliases.push(spelling.name);
+        }
+        // Lock the exact set so a new hidden alias — or an accidental promotion — is caught.
+        aliases.sort_unstable();
+        assert_eq!(
+            aliases,
+            [
+                "compact-force",
+                "compact_force",
+                "q",
+                "thinking",
+                "wait_resume"
+            ],
+            "hidden-but-parseable full-screen aliases drifted"
+        );
+        // Explicit `/abort` guard: pair-owned, so its full-screen parse has NO semantic
+        // action, and it never appears in the full-screen visible catalog.
+        let abort = parse_slash_for(Host::Fullscreen, "/abort");
+        assert!(
+            matches!(abort, Some(SlashAction::Unknown(_))),
+            "/abort must parse to `Unknown` on the full-screen host (pair-owned, no shared route), got {abort:?}"
+        );
+        assert!(
+            !full_screen.contains("abort"),
+            "pair-only abort leaked into the full-screen picker"
+        );
     }
 
     #[test]

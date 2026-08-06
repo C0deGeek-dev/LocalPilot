@@ -132,13 +132,15 @@ placeholder text only—not compact-paste or image payload bytes—and edited in
 is capped at 8 MiB.
 
 The full-screen slash picker lists the commands that have a real replacement-host
-path: session and model management (`/model`, `/new`, `/fork`, `/clone`, `/clear`,
-`/quit`), the `/help`/`/theme`/`/settings`/`/diff`/`/search` takeovers, the
-permission-profile / `/effort` / `/think` toggles, the synchronous report commands
-(`/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, `/bg`), `/compact`
-and the long-running `/ingest` runs on the operation pump, `/research`
-(one-shot `/research <topic>` and the persistent bare-`/research` mode), and the
-`/harness-resume` / `/wait-resume` resume commands on the pump. `/model` opens
+path: the `/agent` and `/harness` mode switches, session and model management
+(`/model`, `/new`, `/fork`, `/clone`, `/clear`, `/quit`), the
+`/help`/`/theme`/`/settings`/`/diff`/`/search` takeovers, the permission-profile /
+`/effort` / `/think` toggles, the synchronous report commands (`/tree`, `/knowledge`,
+`/context`, `/agents`, `/skills`, `/bg`), `/compact` and the long-running `/ingest`
+runs on the operation pump, `/research` (one-shot `/research <topic>` and the
+persistent bare-`/research` mode), and the `/harness-resume` / `/wait-resume` resume
+commands on the pump — every full-screen command reaches a real route (nothing is
+"not available in full-screen chat yet"). `/model` opens
 a second-level picker built from configured providers; an exact
 `/model <provider>` also executes directly.
 `/help` opens a scrollable full-screen keyboard and command reference; Escape

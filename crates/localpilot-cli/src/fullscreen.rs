@@ -2790,17 +2790,6 @@ async fn execute_fullscreen_slash_action(
     cwd: &Path,
     action: SlashAction,
 ) -> bool {
-    // The command word for the still-deferred arms, derived from the parsed action
-    // (the raw prompt is no longer threaded here).
-    let deferred_label = match &action {
-        SlashAction::SetMode(localpilot_tui::Mode::Agent) => "agent",
-        SlashAction::SetMode(localpilot_tui::Mode::Harness) => "harness",
-        SlashAction::SetMode(localpilot_tui::Mode::Research) => "research",
-        SlashAction::HarnessResume => "harness-resume",
-        SlashAction::WaitResume => "wait-resume",
-        SlashAction::Research(_) => "research",
-        _ => "command",
-    };
     match action {
         SlashAction::Model {
             provider: Some(provider),
@@ -3105,11 +3094,26 @@ async fn execute_fullscreen_slash_action(
                 "internal: one-shot /research reached the synchronous dispatch path".to_string(),
             ));
         }
-        // `/agent` is the advertised exit from research mode — a hidden-but-typeable
-        // real transition (Agent is the always-present default turn loop, so subject
-        // 03's "no real mode loop" objection does not apply). Not a visible catalog row.
-        SlashAction::SetMode(localpilot_tui::Mode::Agent) => {
-            app.set_shared_mode(localpilot_tui::Mode::Agent);
+        // `/agent` and `/harness` are silent typed mode transitions — exact inline
+        // parity (inline `/harness` is `state.mode = Harness` and nothing else; plain
+        // prompts in Agent OR Harness mode take the ordinary model turn). `/agent` is
+        // the advertised exit from research/harness. No notice, no synthetic timeline
+        // item; the footer/settings render the mode, and a queued prompt captures
+        // `PromptKind::Harness`, which drains through the ordinary turn path.
+        SlashAction::SetMode(
+            mode @ (localpilot_tui::Mode::Agent | localpilot_tui::Mode::Harness),
+        ) => {
+            app.set_shared_mode(mode);
+        }
+        // `SetMode(Research)` is never produced by a spelling (bare `/research` parses to
+        // `Research(None)`), but the exhaustive match must select Research TRUTHFULLY —
+        // entering research mode WITH its egress disclosure, never a silent bypass of the
+        // `Research(None)` contract.
+        SlashAction::SetMode(localpilot_tui::Mode::Research) => {
+            app.set_shared_mode(localpilot_tui::Mode::Research);
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::research::research_mode_notice(cwd),
+            ));
         }
         // The harness/wait resume commands are pumped by `route_fullscreen_slash`
         // upstream, so these arms are unreachable defensive guards (kept explicit, not
@@ -3118,15 +3122,6 @@ async fn execute_fullscreen_slash_action(
             app.apply_runtime(RuntimeUpdate::Notice(
                 "internal: harness resume reached the synchronous dispatch path".to_string(),
             ));
-        }
-        // Still genuinely deferred: `/harness` (`SetMode(Harness)`) has no distinct
-        // harness prompt loop in full-screen, so entering it as a mode drives nothing;
-        // the resume commands are the only real Harness entry. Explicit (not a wildcard)
-        // so a new `SlashAction` variant is a compile error, not a silent deferral.
-        SlashAction::SetMode(_) => {
-            app.apply_runtime(RuntimeUpdate::Notice(format!(
-                "/{deferred_label} is not available in full-screen chat yet"
-            )));
         }
     }
     false
@@ -7644,13 +7639,12 @@ mod tests {
             );
         }
 
-        // `/harness` stays deferred in full-screen (no mode-entry loop), so it never
-        // relabels the shared mode. `/agent` is now a real hidden transition — the
-        // Research-mode exit — covered by
-        // `research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm`.
+        // `/harness` is now a real SILENT typed mode entry — exact inline parity (a
+        // label flip, no notice, no synthetic timeline row). `/agent` is the exit,
+        // covered by `research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm`.
         {
             let mut app = app();
-            let before = app.shared_mode().to_string();
+            let before_rows = app.active_timeline().items().len();
             let _ = execute_fullscreen_slash(
                 &mut app,
                 &mut bundle.runtime,
@@ -7659,10 +7653,11 @@ mod tests {
                 slash_input("/harness"),
             )
             .await;
+            assert_eq!(app.shared_mode(), "harness", "/harness enters harness mode");
             assert_eq!(
-                app.shared_mode(),
-                before,
-                "/harness must not relabel the mode"
+                app.active_timeline().items().len(),
+                before_rows,
+                "/harness is silent — no notice, no synthetic timeline row"
             );
         }
 
@@ -8192,18 +8187,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn synchronous_commands_route_through_the_presenter_not_the_deferred_notice() {
+    async fn synchronous_commands_route_through_the_presenter_with_one_bounded_item() {
         let dir = tempfile::tempdir().unwrap();
         let (config, mut bundle) = single_session(dir.path()).await;
         let cwd = dir.path();
-        let deferred = |app: &AppModel| {
+        // Regression guard: the "not available in full-screen chat" notice was
+        // deleted with the deferred arm; it must never reappear for these commands.
+        let shows_unavailable_notice = |app: &AppModel| {
             app.active_timeline()
                 .items()
                 .iter()
                 .any(|item| item.text.contains("is not available in full-screen chat"))
         };
         // The six synchronous families + all 11 fast ingest subcommands route
-        // through the presenter: no deferred notice, exactly one bounded item (a
+        // through the presenter: no unavailable notice, exactly one bounded item (a
         // Notice/Warning or a Report breadcrumb), and no model turn.
         for cmd in [
             "/tree",
@@ -8233,7 +8230,10 @@ mod tests {
                 slash_input(cmd),
             )
             .await;
-            assert!(!deferred(&app), "{cmd} must route through the presenter");
+            assert!(
+                !shows_unavailable_notice(&app),
+                "{cmd} must route through the presenter"
+            );
             assert_eq!(
                 app.active_timeline().items().len(),
                 1,
@@ -9642,15 +9642,17 @@ mod tests {
 
     #[test]
     fn fullscreen_catalog_matches_the_shared_spec_table() {
-        // The full-screen picker is generated from the shared table: 24 rows in
-        // global order (the four permission profiles + effort now dispatched here,
-        // then the previously-dispatched rows and the 5 takeovers), byte-for-byte,
-        // and never a deferred inline-only row.
+        // The full-screen picker is generated from the shared table: 38 rows in global
+        // order (the `agent`/`harness` mode entries, the four permission profiles +
+        // effort, the pumped + synchronous command tiers, and the 5 takeovers),
+        // byte-for-byte, and never a hidden inline-only forcing alias.
         let full_screen: Vec<(String, String)> = fullscreen_command_catalog()
             .into_iter()
             .map(|command| (command.name, command.description))
             .collect();
         let expected_full_screen: &[(&str, &str)] = &[
+            ("agent", "Switch to agent mode"),
+            ("harness", "Switch to harness mode"),
             ("default", "Use the default permission profile"),
             ("relaxed", "Use the relaxed permission profile"),
             ("bypass", "Use the bypass permission profile"),
@@ -9706,16 +9708,13 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 36);
+        assert_eq!(full_screen.len(), 38);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
-        // `agent` is a hidden-but-typeable real transition (the Research-mode exit) and
-        // `harness` stays deferred; both are hidden from the full-screen catalog.
-        // `compact`/`ingest`/`research` now run on the operation pump / as a mode.
-        for hidden in ["agent", "harness"] {
-            assert!(!full_screen.iter().any(|(name, _)| name == hidden));
-        }
+        // `compact_force` (a redundant forcing alias of `compact`) stays hidden from the
+        // full-screen catalog — typeable via `/compact force`, never a duplicate row.
+        assert!(!full_screen.iter().any(|(name, _)| name == "compact_force"));
 
         // The pair picker: 8 rows with pair-specific copy for search/settings and
         // the permanent pair-only `abort`.
@@ -9736,6 +9735,40 @@ mod tests {
         assert_eq!(pair.len(), 8);
         for (got, want) in pair.iter().zip(expected_pair.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
+        }
+    }
+
+    #[test]
+    fn every_visible_full_screen_row_reaches_a_typed_real_route() {
+        // Generated from the shared spec metadata (NOT a hand-maintained 38-row list):
+        // every visible full-screen catalog row parses host-aware without `Unknown` and
+        // reaches a typed route — `Pumped` for the pumped operations, `Synchronous` for
+        // the rest. The production `execute_fullscreen_slash_action` match is exhaustive
+        // and wildcard-free with NO deferred arm, so a `Synchronous` row is guaranteed a
+        // real handler; this test does not re-assert each synchronous action's behaviour
+        // and makes no claim about environment-dependent execution.
+        for (name, _desc) in localpilot_tui::specs_for(localpilot_tui::Host::Fullscreen) {
+            let spelling = localpilot_tui::lookup(name).expect("catalog row has a spelling");
+            let line = match (name, spelling.args) {
+                ("context", _) => "/context build a task".to_string(),
+                (_, localpilot_tui::ArgSpec::None | localpilot_tui::ArgSpec::Optional) => {
+                    format!("/{name}")
+                }
+                (_, localpilot_tui::ArgSpec::Required) => format!("/{name} x"),
+            };
+            let action = parse_slash_for(localpilot_tui::Host::Fullscreen, &line)
+                .unwrap_or_else(|| panic!("{line} did not parse on the full-screen host"));
+            assert!(
+                !matches!(action, SlashAction::Unknown(_)),
+                "{line} -> Unknown (no real full-screen route)"
+            );
+            match route_fullscreen_slash(action) {
+                SlashRoute::Pumped(_) => {}
+                SlashRoute::Synchronous(routed) => assert!(
+                    !matches!(routed, SlashAction::Unknown(_)),
+                    "{line} routed to Synchronous(Unknown)"
+                ),
+            }
         }
     }
 
@@ -12984,9 +13017,8 @@ mod tests {
             route_fullscreen_slash(SlashAction::Ingest(IngestAction::Resume)),
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
         ));
-        // Research: one-shot `/research <topic>` pumps; bare `/research` (mode entry),
-        // the hidden `/agent` research-exit, and the still-deferred `/harness` stay
-        // synchronous.
+        // Research: one-shot `/research <topic>` pumps; bare `/research` (mode entry)
+        // and the `/agent`/`/harness` mode transitions stay synchronous (real arms).
         assert!(matches!(
             route_fullscreen_slash(SlashAction::Research(Some("a topic".to_string()))),
             SlashRoute::Pumped(PumpedSlash::Research { .. })
@@ -13003,7 +13035,7 @@ mod tests {
             route_fullscreen_slash(SlashAction::SetMode(localpilot_tui::Mode::Harness)),
             SlashRoute::Synchronous(SlashAction::SetMode(localpilot_tui::Mode::Harness))
         ));
-        // The two resume commands pump; bare `/harness` (SetMode(Harness)) stays deferred.
+        // The two resume commands pump; bare `/harness` is a synchronous real mode entry (above).
         assert!(matches!(
             route_fullscreen_slash(SlashAction::HarnessResume),
             SlashRoute::Pumped(PumpedSlash::HarnessResume)
@@ -13054,6 +13086,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn route_fullscreen_slash_pumps_exactly_the_long_running_ingest_tier() {
+        use localpilot_tui::{IngestAction, IngestTier};
+        // Every IngestAction variant (the enum has no generated iterator — a NEW variant
+        // MUST be added here). Locks that `route_fullscreen_slash` pumps EXACTLY the
+        // `LongRunning` tier and routes the `Fast` tier synchronously, so a one-sided edit
+        // to the tier↔route mapping fails this test instead of only surfacing at runtime as
+        // an "internal: … reached the synchronous dispatch path" notice.
+        let actions = [
+            IngestAction::Run,
+            IngestAction::Preview,
+            IngestAction::Status,
+            IngestAction::Pause,
+            IngestAction::Resume,
+            IngestAction::Cancel,
+            IngestAction::Refresh,
+            IngestAction::Rebuild,
+            IngestAction::Skipped,
+            IngestAction::Include("x".to_string()),
+            IngestAction::Exclude("x".to_string()),
+            IngestAction::Forget("x".to_string()),
+            IngestAction::Review,
+            IngestAction::Promote("x".to_string()),
+        ];
+        for action in actions {
+            let label = format!("{action:?}");
+            let tier = action.tier();
+            let route = route_fullscreen_slash(SlashAction::Ingest(action));
+            match tier {
+                IngestTier::LongRunning => assert!(
+                    matches!(route, SlashRoute::Pumped(PumpedSlash::Ingest(_))),
+                    "{label} is LongRunning → route_fullscreen_slash must pump it"
+                ),
+                IngestTier::Fast => assert!(
+                    matches!(route, SlashRoute::Synchronous(_)),
+                    "{label} is Fast → route_fullscreen_slash must route it synchronously"
+                ),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn research_mode_entry_exit_and_harness_stay_correct_in_the_synchronous_arm() {
         let dir = tempfile::tempdir().unwrap();
@@ -13098,7 +13171,10 @@ mod tests {
             localpilot_tui::Mode::Agent,
             "/agent exits Research mode"
         );
-        // `/harness` stays deferred — no mode transition, a "not available" notice.
+        // `/harness` is now a real SILENT typed mode entry — it transitions to Harness
+        // and emits no "not available" notice (inline parity: a label flip and nothing
+        // else; plain Harness prompts take the ordinary turn, same as Agent).
+        let before_rows = app.active_timeline().items().len();
         let _ = execute_fullscreen_slash(
             &mut app,
             &mut bundle.runtime,
@@ -13109,15 +13185,87 @@ mod tests {
         .await;
         assert_eq!(
             app.mode(),
-            localpilot_tui::Mode::Agent,
-            "/harness does not transition the mode"
+            localpilot_tui::Mode::Harness,
+            "/harness enters Harness mode"
         );
+        assert!(
+            !app.active_timeline()
+                .items()
+                .iter()
+                .any(|item| item.text.contains("not available in full-screen chat")),
+            "/harness is no longer deferred — no 'not available' notice"
+        );
+        assert_eq!(
+            app.active_timeline().items().len(),
+            before_rows,
+            "/harness is silent — no notice, no synthetic timeline row"
+        );
+        assert!(
+            rendered_footer(&app).contains("harness"),
+            "the footer renders Harness mode"
+        );
+        assert!(
+            fullscreen_settings(&app, &config)
+                .iter()
+                .any(|entry| entry.name == "Mode and profile" && entry.value.contains("harness")),
+            "the settings 'Mode and profile' row reads harness"
+        );
+        // The route-derived Harness mode captures `PromptKind::Harness`, which drains to
+        // the ordinary turn (inline parity — same as Agent). Ordinary text/image handling
+        // + drain/persistence are covered by `queued_prompts_keep_the_mode_they_were_enqueued_under`
+        // and the exhaustive `PromptKind::Harness => drive_turn` arm.
+        assert_eq!(
+            prompt_kind(app.mode()),
+            PromptKind::Harness,
+            "Harness mode captures PromptKind::Harness"
+        );
+        // `/agent` exits Harness via the REAL route (not a direct `set_shared_mode`).
+        let _ = execute_fullscreen_slash(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            slash_input("/agent"),
+        )
+        .await;
+        assert_eq!(
+            app.mode(),
+            localpilot_tui::Mode::Agent,
+            "/agent exits Harness mode via the real route"
+        );
+        bundle.runtime.close();
+    }
+
+    #[tokio::test]
+    async fn set_mode_research_action_enters_research_with_the_same_disclosure() {
+        // `SlashAction::SetMode(Mode::Research)` is never produced by a spelling (bare
+        // `/research` parses to `Research(None)`), so ONLY a direct action test protects
+        // its semantics: the exhaustive arm must enter Research mode AND emit the SAME
+        // egress disclosure as `Research(None)` — never a silent bypass of that contract.
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let mut app = app();
+        let _ = execute_fullscreen_slash_action(
+            &mut app,
+            &mut bundle.runtime,
+            &config,
+            cwd,
+            SlashAction::SetMode(localpilot_tui::Mode::Research),
+        )
+        .await;
+        assert_eq!(
+            app.mode(),
+            localpilot_tui::Mode::Research,
+            "SetMode(Research) enters Research mode"
+        );
+        let disclosure = crate::research::research_mode_notice(cwd);
         assert!(
             app.active_timeline()
                 .items()
                 .iter()
-                .any(|item| item.text.contains("not available in full-screen chat")),
-            "/harness stays deferred"
+                .any(|item| item.text == disclosure),
+            "SetMode(Research) emits the same egress disclosure as Research(None), not a silent bypass"
         );
         bundle.runtime.close();
     }

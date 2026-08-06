@@ -330,7 +330,9 @@ call without waiting for the model (ADR-0071). The rest:
   for the run (`/agent` exits it) and presenting the result through the bounded
   report; a resume snapshots the live model, provider, permission profile, and
   workspace-trust at dispatch, so an in-session `/model` or profile switch is
-  honoured. Bare `/harness` remains reserved for a later increment.
+  honoured. Bare `/agent` and `/harness` switch the session mode in the full-screen
+  host too — silent label flips at exact parity with the inline host (a plain prompt
+  in either mode runs an ordinary turn; the footer and settings show the mode).
 - `/ingest <action>` manages project-local folder ingestion (`run`, `refresh`,
   `resume`, `preview`, `status`, `review`, and so on). The walking actions
   (`run`, `refresh`, `resume`) show a live progress loader — discovering,
