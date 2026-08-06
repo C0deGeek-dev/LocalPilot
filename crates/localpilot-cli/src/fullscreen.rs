@@ -1522,6 +1522,240 @@ fn fullscreen_settings_with_effort(
     settings
 }
 
+// --- Bounded command-report presenter -------------------------------------
+// A short timeline item must satisfy BOTH ceilings; a huge single line routes to
+// a Report on bytes. All size checks are on the serialized sanitized body
+// INCLUDING newline separators AND the truncation marker.
+const NOTICE_MAX_LINES: usize = 8;
+const NOTICE_MAX_BYTES: usize = 4 * 1024;
+const MAX_REPORT_LINES: usize = 1000;
+const MAX_REPORT_BYTES: usize = 128 * 1024;
+const MAX_TITLE_BYTES: usize = 256;
+const MARKER_MAX_BYTES: usize = 96;
+
+/// A command's output as data, before any presentation decision.
+pub(crate) struct CommandReport {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub failed: bool,
+}
+
+/// How a `CommandReport` is presented to the full-screen host.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    /// One multi-line timeline `Notice` (short success).
+    Notice(String),
+    /// A scrollable, copyable Report takeover plus one breadcrumb `Notice`.
+    Report {
+        title: String,
+        lines: Vec<String>,
+        breadcrumb: String,
+    },
+    /// One inline `Warning` (a failure, bounded to the short ceiling).
+    Warning(String),
+}
+
+/// Serialized UTF-8 byte length of `lines` joined with `\n` — the newline
+/// separators are counted (this is what `lines.join("\n").len()` would be).
+fn serialized_bytes(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(lines.len().saturating_sub(1))
+}
+
+/// The largest UTF-8-boundary prefix of `s` no longer than `max` bytes.
+fn char_boundary_prefix(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Sanitize each string and normalize into logical lines: an embedded `\n`
+/// becomes extra lines, so it cannot bypass the line ceiling.
+fn logical_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .flat_map(|line| {
+            sanitize_text(line)
+                .split('\n')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Bound `source` to `max_lines`/`max_bytes`, appending a truncation marker when
+/// anything is dropped. The returned vec — INCLUDING the marker and separators —
+/// always satisfies both ceilings.
+fn truncate_report(source: &[String], max_lines: usize, max_bytes: usize) -> Vec<String> {
+    if source.len() <= max_lines && serialized_bytes(source) <= max_bytes {
+        return source.to_vec();
+    }
+    let content_line_cap = max_lines.saturating_sub(1);
+    let content_byte_cap = max_bytes.saturating_sub(MARKER_MAX_BYTES + 1);
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for line in source.iter().take(content_line_cap) {
+        let sep = usize::from(!kept.is_empty());
+        if used + sep + line.len() <= content_byte_cap {
+            used += sep + line.len();
+            kept.push(line.clone());
+        } else {
+            let remaining = content_byte_cap.saturating_sub(used + sep);
+            let trimmed = char_boundary_prefix(line, remaining);
+            if !trimmed.is_empty() {
+                kept.push(trimmed);
+            }
+            break;
+        }
+    }
+    let dropped_lines = source.len().saturating_sub(kept.len());
+    let dropped_bytes = serialized_bytes(source).saturating_sub(serialized_bytes(&kept));
+    let marker = char_boundary_prefix(
+        &format!("… (truncated: {dropped_lines} more lines, {dropped_bytes} more bytes)"),
+        MARKER_MAX_BYTES,
+    );
+    kept.push(marker);
+    kept
+}
+
+/// Bound a FAILED command's output for a single Warning within `max_lines` /
+/// `max_bytes` (including separators). The COMPLETE error survives when it fits;
+/// otherwise its UTF-8-safe bounded prefix survives, and a marker records the
+/// omitted lines/bytes (against the full sanitized source) — for dropped partial
+/// output OR a shortened error. `partial` are the sanitized output lines; `error`
+/// is the failure text, kept last. The returned vec always satisfies both
+/// ceilings.
+fn bound_failure(
+    partial: &[String],
+    error: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Vec<String> {
+    // Fast path: the complete partial output + error already fits both ceilings —
+    // return it byte-for-byte with no marker.
+    let mut whole: Vec<String> = partial.to_vec();
+    whole.push(error.to_string());
+    if whole.len() <= max_lines && serialized_bytes(&whole) <= max_bytes {
+        return whole;
+    }
+    // Truncation required. The error is the priority payload: keep it whole if it
+    // fits alongside a marker, else keep its UTF-8-safe prefix. Reserve one line
+    // each for the marker and the error.
+    let error_room = max_bytes.saturating_sub(MARKER_MAX_BYTES + 2);
+    let error_line = if error.len() <= error_room {
+        error.to_string()
+    } else {
+        char_boundary_prefix(error, error_room)
+    };
+    let content_line_cap = max_lines.saturating_sub(2);
+    let content_byte_cap = max_bytes.saturating_sub(error_line.len() + 1 + MARKER_MAX_BYTES + 1);
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for line in partial.iter().take(content_line_cap) {
+        let sep = usize::from(!kept.is_empty());
+        if used + sep + line.len() <= content_byte_cap {
+            used += sep + line.len();
+            kept.push(line.clone());
+        } else {
+            let remaining = content_byte_cap.saturating_sub(used + sep);
+            let trimmed = char_boundary_prefix(line, remaining);
+            if !trimmed.is_empty() {
+                kept.push(trimmed);
+            }
+            break;
+        }
+    }
+    // Omission is measured against the FULL sanitized failure source: dropped
+    // partial lines + bytes lost from partial + bytes lost from the shortened
+    // error.
+    let omitted_lines = partial.len().saturating_sub(kept.len());
+    let omitted_bytes = serialized_bytes(partial).saturating_sub(serialized_bytes(&kept))
+        + error.len().saturating_sub(error_line.len());
+    let marker = char_boundary_prefix(
+        &format!("… (truncated: {omitted_lines} more lines, {omitted_bytes} more bytes)"),
+        MARKER_MAX_BYTES,
+    );
+    kept.push(marker);
+    kept.push(error_line);
+    kept
+}
+
+/// Decide how to present a command's output. Routing uses the PRE-truncation
+/// sanitized logical line/byte totals; the data returned is already bounded.
+pub(crate) fn present(report: &CommandReport) -> Presentation {
+    let title = char_boundary_prefix(&sanitize_text(&report.title), MAX_TITLE_BYTES);
+    let logical = logical_lines(&report.lines);
+    if report.failed {
+        // The error is the last logical line (`command_report` appended it); bound
+        // so the error survives alongside bounded partial output, never dropped by
+        // a prefix-only truncation.
+        let bounded = match logical.split_last() {
+            Some((error, partial)) => {
+                bound_failure(partial, error, NOTICE_MAX_LINES, NOTICE_MAX_BYTES)
+            }
+            None => Vec::new(),
+        };
+        return Presentation::Warning(bounded.join("\n"));
+    }
+    let total_lines = logical.len();
+    let total_bytes = serialized_bytes(&logical);
+    if total_lines <= NOTICE_MAX_LINES && total_bytes <= NOTICE_MAX_BYTES {
+        return Presentation::Notice(logical.join("\n"));
+    }
+    let bounded = truncate_report(&logical, MAX_REPORT_LINES, MAX_REPORT_BYTES);
+    let breadcrumb = char_boundary_prefix(
+        &format!("/{title} — {total_lines} lines (Esc to close, Ctrl+C to copy)"),
+        MAX_TITLE_BYTES + 64,
+    );
+    Presentation::Report {
+        title,
+        lines: bounded,
+        breadcrumb,
+    }
+}
+
+/// Present a command's output on the full-screen host: a short success is one
+/// multi-line Notice; a long success opens a Report takeover plus one breadcrumb
+/// Notice (the body never floods the timeline); a failure is one inline Warning.
+fn present_command_report(app: &mut AppModel, report: CommandReport) {
+    match present(&report) {
+        Presentation::Notice(text) => app.apply_runtime(RuntimeUpdate::Notice(text)),
+        Presentation::Warning(text) => app.apply_runtime(RuntimeUpdate::Warning(text)),
+        Presentation::Report {
+            title,
+            lines,
+            breadcrumb,
+        } => {
+            app.open_report(title, lines);
+            app.apply_runtime(RuntimeUpdate::Notice(breadcrumb));
+        }
+    }
+}
+
+/// Convert the shared UI-neutral [`crate::repl::CommandOutput`] into a full-screen
+/// `CommandReport`: the output lines plus the exact failure text appended as a
+/// final line, with `failed` set from the error. The presenter then bounds it.
+fn command_report(title: &str, output: crate::repl::CommandOutput) -> CommandReport {
+    let failed = output.error.is_some();
+    let mut lines = output.lines;
+    if let Some(error) = output.error {
+        lines.push(error);
+    }
+    CommandReport {
+        title: title.to_string(),
+        lines,
+        failed,
+    }
+}
+
 /// The exact `/think` confirmation, shared by the idle and active-turn routes.
 const fn reasoning_visibility_notice(visible: bool) -> &'static str {
     if visible {
@@ -2660,21 +2894,74 @@ async fn execute_fullscreen_slash(
                 "unknown slash command: /{command}"
             )));
         }
+        // The synchronous command tier: run the effectful command, then present
+        // its output through the bounded report presenter (short → one Notice,
+        // long → a scrollable Report takeover + one breadcrumb, failure → one
+        // Warning). The body never floods the timeline.
+        SlashAction::Tree => {
+            let output = match runtime.store().read_events(runtime.session_id()) {
+                Ok(events) => crate::repl::CommandOutput {
+                    lines: crate::repl::render_session_tree(&events),
+                    error: None,
+                },
+                Err(error) => crate::repl::CommandOutput {
+                    lines: Vec::new(),
+                    error: Some(format!("event log unreadable: {error}")),
+                },
+            };
+            present_command_report(app, command_report("tree", output));
+        }
+        SlashAction::Knowledge(query) => {
+            let mut output = Vec::new();
+            let result = crate::ingest_cmd::knowledge_search(cwd, &query, &mut output);
+            let out = crate::repl::command_output_from_buffer(output, result);
+            present_command_report(app, command_report("knowledge", out));
+        }
+        SlashAction::ContextBuild(task) => {
+            let mut output = Vec::new();
+            let result = crate::ingest_cmd::knowledge_pack(cwd, &task, &mut output);
+            let out = crate::repl::command_output_from_buffer(output, result);
+            present_command_report(app, command_report("context", out));
+        }
+        SlashAction::Agents(raw) => {
+            let mut output = Vec::new();
+            let result = crate::repl::run_agents_slash(cwd, &raw, &mut output);
+            let out = crate::repl::command_output_from_buffer(output, result);
+            present_command_report(app, command_report("agents", out));
+        }
+        SlashAction::Skills(raw) => {
+            let mut output = Vec::new();
+            let result = crate::repl::run_skills_slash(cwd, &raw, &mut output).await;
+            let out = crate::repl::command_output_from_buffer(output, result);
+            present_command_report(app, command_report("skills", out));
+        }
+        SlashAction::Background(command) => {
+            let out =
+                crate::repl::background_command_output(runtime.background_registry(), command);
+            present_command_report(app, command_report("bg", out));
+        }
+        // Fast ingest subcommands present here; the three long-running ones stay
+        // deferred (a later change wires them through the pumped progress path).
+        SlashAction::Ingest(action) => match action.tier() {
+            localpilot_tui::IngestTier::Fast => {
+                let (output, result) = crate::repl::ingest_slash_output(cwd, action);
+                let out = crate::repl::command_output_from_buffer(output, result);
+                present_command_report(app, command_report("ingest", out));
+            }
+            localpilot_tui::IngestTier::LongRunning => {
+                app.apply_runtime(RuntimeUpdate::Notice(
+                    "/ingest is not available in full-screen chat yet".to_string(),
+                ));
+            }
+        },
         // The commands the full-screen host does not dispatch yet. Listed
         // explicitly (not a wildcard) so a new `SlashAction` variant that no one
         // has taught this host about is a compile error, not a silent deferral.
         SlashAction::SetMode(_)
-        | SlashAction::Tree
         | SlashAction::Compact { .. }
         | SlashAction::HarnessResume
         | SlashAction::WaitResume
-        | SlashAction::Ingest(_)
-        | SlashAction::Knowledge(_)
-        | SlashAction::ContextBuild(_)
-        | SlashAction::Research(_)
-        | SlashAction::Agents(_)
-        | SlashAction::Skills(_)
-        | SlashAction::Background(_) => {
+        | SlashAction::Research(_) => {
             let command = submitted
                 .prompt
                 .trim()
@@ -6693,6 +6980,542 @@ mod tests {
     }
 
     #[test]
+    fn presenter_routes_by_both_logical_lines_and_bytes() {
+        let report = |lines: Vec<String>| CommandReport {
+            title: "t".to_string(),
+            lines,
+            failed: false,
+        };
+        // Short (≤8 lines AND ≤4 KiB) → one multi-line Notice.
+        assert!(matches!(
+            present(&report(vec!["a".to_string(), "b".to_string()])),
+            Presentation::Notice(_)
+        ));
+        // A single huge line → Report on BYTES (1 line, but over 4 KiB).
+        assert!(matches!(
+            present(&report(vec!["x".repeat(NOTICE_MAX_BYTES + 1)])),
+            Presentation::Report { .. }
+        ));
+        // Embedded newlines count as logical lines: 9 → Report on LINES.
+        assert!(matches!(
+            present(&report(vec!["a\nb\nc\nd\ne\nf\ng\nh\ni".to_string()])),
+            Presentation::Report { .. }
+        ));
+        // 8 lines but over 4 KiB total → Report on BYTES.
+        assert!(matches!(
+            present(&report((0..8).map(|_| "y".repeat(600)).collect())),
+            Presentation::Report { .. }
+        ));
+        // Exact byte boundary: one line of exactly the ceiling → Notice; +1 → Report.
+        assert!(matches!(
+            present(&report(vec!["z".repeat(NOTICE_MAX_BYTES)])),
+            Presentation::Notice(_)
+        ));
+        assert!(matches!(
+            present(&report(vec!["z".repeat(NOTICE_MAX_BYTES + 1)])),
+            Presentation::Report { .. }
+        ));
+    }
+
+    #[test]
+    fn presenter_failure_is_one_bounded_warning_never_a_report() {
+        let failed = CommandReport {
+            title: "tree".to_string(),
+            lines: (0..500).map(|i| format!("detail line {i}")).collect(),
+            failed: true,
+        };
+        match present(&failed) {
+            Presentation::Warning(text) => {
+                assert!(text.split('\n').count() <= NOTICE_MAX_LINES);
+                assert!(text.len() <= NOTICE_MAX_BYTES);
+            }
+            other => panic!("a failure must be a Warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncate_report_stays_within_ceilings_including_marker_and_separators() {
+        // Line-forced truncation.
+        let many: Vec<String> = (0..3000).map(|i| format!("row {i}")).collect();
+        let out = truncate_report(&many, MAX_REPORT_LINES, MAX_REPORT_BYTES);
+        assert!(out.len() <= MAX_REPORT_LINES);
+        assert!(serialized_bytes(&out) <= MAX_REPORT_BYTES);
+        assert!(out.last().expect("marker").contains("truncated"));
+        // Byte-forced truncation through a multibyte line: char-boundary safe, and
+        // the serialized body INCLUDING the marker and separators fits the ceiling.
+        let multibyte = vec!["€".repeat(60_000)];
+        let out = truncate_report(&multibyte, MAX_REPORT_LINES, MAX_REPORT_BYTES);
+        assert!(serialized_bytes(&out) <= MAX_REPORT_BYTES);
+        assert!(out.iter().all(|line| line.is_char_boundary(line.len())));
+    }
+
+    #[test]
+    fn long_command_output_opens_a_report_takeover_instead_of_flooding_the_timeline() {
+        let mut app = app();
+        let report = CommandReport {
+            title: "tree".to_string(),
+            lines: (0..200).map(|i| format!("line {i}")).collect(),
+            failed: false,
+        };
+        present_command_report(&mut app, report);
+        // The timeline grows by exactly ONE item — the breadcrumb; the body is
+        // takeover-only and never floods the timeline.
+        assert!(app.has_takeover());
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert!(app.active_timeline().items()[0].text.contains("200 lines"));
+        assert!(!app
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("line 150")));
+        // The body is also absent from the print transcript…
+        assert!(!visible_transcript(&app).contains("line 150"));
+        // …and therefore from timeline search, which reads only the timeline
+        // items: the sole item is the breadcrumb, and the body lives only in the
+        // takeover — so a search can never find a body line with no row.
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert!(!app
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("line 0")));
+    }
+
+    #[test]
+    fn report_renders_at_narrow_and_screen_reader_widths() {
+        for (width, screen_reader) in [(120u16, false), (40, false), (120, true)] {
+            let mut app = app();
+            app.capabilities.screen_reader = screen_reader;
+            app.open_report(
+                "tree".to_string(),
+                (0..40)
+                    .map(|i| format!("event {i} with enough text to wrap"))
+                    .collect(),
+            );
+            let backend = TestBackend::new(width, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let _ = render(frame, &app);
+                })
+                .expect("draw report");
+            let screen = terminal.backend().to_string();
+            assert!(
+                screen.contains("event 0"),
+                "report body renders (w={width}, sr={screen_reader})"
+            );
+            assert!(screen.contains("copy all"), "the copy footer shows");
+        }
+    }
+
+    #[test]
+    fn opening_a_report_preserves_the_held_timeline_anchor_and_new_content() {
+        let mut app = app();
+        let first = app
+            .active_timeline_mut()
+            .push(ItemKind::Assistant, "earlier answer")
+            .expect("first");
+        for i in 0..20 {
+            let _ = app
+                .active_timeline_mut()
+                .push(ItemKind::Assistant, format!("filler {i}"));
+        }
+        // Hold the viewport at the first item (scrolled up).
+        assert!(app
+            .active_timeline_mut()
+            .hold_at(localpilot_terminal_ui::ContentPoint {
+                item_id: first,
+                byte: 0,
+            }));
+        let held = app.active_timeline().viewport;
+        let before = app.active_timeline().items().len();
+        // A held view starts with no new content (the fill pushed under
+        // FollowBottom before the hold).
+        assert!(!app.active_timeline().has_new_content());
+        // A long Report adds exactly ONE breadcrumb; the held anchor is unchanged
+        // (the takeover overlays; it does not move the underlying timeline) and the
+        // single breadcrumb raises the normal held-view new-content flag.
+        present_command_report(
+            &mut app,
+            CommandReport {
+                title: "tree".to_string(),
+                lines: (0..200).map(|i| format!("line {i}")).collect(),
+                failed: false,
+            },
+        );
+        assert!(app.has_takeover());
+        assert_eq!(app.active_timeline().items().len(), before + 1);
+        assert_eq!(
+            app.active_timeline().viewport,
+            held,
+            "held anchor preserved"
+        );
+        assert!(
+            app.active_timeline().has_new_content(),
+            "the one breadcrumb raised new content under the held view",
+        );
+        // Dismissing the Report leaves the held anchor and the truthful
+        // new-content state unchanged.
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert!(!app.has_takeover(), "Esc dismissed the report");
+        assert_eq!(
+            app.active_timeline().viewport,
+            held,
+            "anchor unchanged after dismiss"
+        );
+        assert!(
+            app.active_timeline().has_new_content(),
+            "new-content state unchanged after dismiss",
+        );
+    }
+
+    #[test]
+    fn report_ctrl_c_copies_the_bounded_body_and_esc_dismisses() {
+        let mut app = app();
+        let report = CommandReport {
+            title: "tree".to_string(),
+            lines: (0..200).map(|i| format!("line {i}")).collect(),
+            failed: false,
+        };
+        // The exact bounded body the presenter admitted (marker included where
+        // truncated); the copy must equal it byte-for-byte, breadcrumb excluded.
+        let Presentation::Report {
+            lines: expected, ..
+        } = present(&report)
+        else {
+            panic!("expected a Report");
+        };
+        present_command_report(&mut app, report);
+        assert!(app.has_takeover());
+        match app.handle_input(InputAction::CancelOrExit, 80) {
+            AppCommand::Copy(text) => {
+                assert_eq!(text, expected.join("\n"), "copy is the exact bounded body");
+                assert!(!text.contains("200 lines"), "breadcrumb is not in the body");
+            }
+            other => panic!("Ctrl+C on a Report must copy, got {other:?}"),
+        }
+        assert!(app.has_takeover(), "copy does not dismiss");
+        let _ = app.handle_input(InputAction::Escape, 80);
+        assert!(!app.has_takeover(), "Esc dismisses the report");
+    }
+
+    #[test]
+    fn short_command_output_posts_one_multiline_notice_no_takeover() {
+        let mut app = app();
+        present_command_report(
+            &mut app,
+            CommandReport {
+                title: "bg".to_string(),
+                lines: vec!["no background processes".to_string()],
+                failed: false,
+            },
+        );
+        assert!(!app.has_takeover());
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert!(app.active_timeline().items()[0]
+            .text
+            .contains("no background processes"));
+    }
+
+    #[test]
+    fn failed_command_output_is_one_item_never_a_takeover() {
+        let mut app = app();
+        present_command_report(
+            &mut app,
+            CommandReport {
+                title: "tree".to_string(),
+                lines: vec!["event log unreadable: boom".to_string()],
+                failed: true,
+            },
+        );
+        assert!(!app.has_takeover());
+        assert_eq!(app.active_timeline().items().len(), 1);
+        assert!(app.active_timeline().items()[0]
+            .text
+            .contains("event log unreadable: boom"));
+    }
+
+    #[tokio::test]
+    async fn synchronous_commands_route_through_the_presenter_not_the_deferred_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, mut bundle) = single_session(dir.path()).await;
+        let cwd = dir.path();
+        let deferred = |app: &AppModel| {
+            app.active_timeline()
+                .items()
+                .iter()
+                .any(|item| item.text.contains("is not available in full-screen chat"))
+        };
+        // The six synchronous families + all 11 fast ingest subcommands route
+        // through the presenter: no deferred notice, exactly one bounded item (a
+        // Notice/Warning or a Report breadcrumb), and no model turn.
+        for cmd in [
+            "/tree",
+            "/knowledge foo",
+            "/context build task",
+            "/agents",
+            "/skills",
+            "/bg",
+            "/ingest preview",
+            "/ingest status",
+            "/ingest pause",
+            "/ingest cancel",
+            "/ingest rebuild",
+            "/ingest skipped",
+            "/ingest include x",
+            "/ingest exclude x",
+            "/ingest forget x",
+            "/ingest review",
+            "/ingest promote x",
+        ] {
+            let mut app = app();
+            let _ = execute_fullscreen_slash(
+                &mut app,
+                &mut bundle.runtime,
+                &config,
+                cwd,
+                slash_input(cmd),
+            )
+            .await;
+            assert!(!deferred(&app), "{cmd} must route through the presenter");
+            assert_eq!(
+                app.active_timeline().items().len(),
+                1,
+                "{cmd} produces exactly one bounded item (Notice/Warning or breadcrumb)",
+            );
+            assert!(
+                !app.active_timeline()
+                    .items()
+                    .iter()
+                    .any(|item| item.kind == ItemKind::Assistant),
+                "{cmd} must not start a model turn",
+            );
+        }
+        // The three long-running ingest forms stay deferred with no takeover.
+        for cmd in ["/ingest", "/ingest refresh", "/ingest resume"] {
+            let mut app = app();
+            let _ = execute_fullscreen_slash(
+                &mut app,
+                &mut bundle.runtime,
+                &config,
+                cwd,
+                slash_input(cmd),
+            )
+            .await;
+            assert!(deferred(&app), "{cmd} stays deferred this subject");
+            assert!(!app.has_takeover(), "{cmd} opens no takeover");
+        }
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn partial_failure_is_one_bounded_warning_with_output_and_error() {
+        // Partial stdout + an Err → exactly one Warning carrying BOTH, never a
+        // takeover.
+        {
+            let mut app = app();
+            let out = crate::repl::CommandOutput {
+                lines: vec!["partial line A".to_string(), "partial line B".to_string()],
+                error: Some("command failed: boom".to_string()),
+            };
+            present_command_report(&mut app, command_report("ingest", out));
+            assert!(!app.has_takeover());
+            assert_eq!(app.active_timeline().items().len(), 1);
+            let text = app.active_timeline().items()[0].text.clone();
+            assert!(
+                text.contains("partial line A"),
+                "partial output kept: {text}"
+            );
+            assert!(
+                text.contains("command failed: boom"),
+                "exact error kept: {text}"
+            );
+        }
+        // Oversized partial output → still one bounded Warning, with a marker and
+        // within the short (4 KiB) ceiling incl. separators + marker.
+        {
+            let mut app = app();
+            let big = crate::repl::CommandOutput {
+                lines: (0..50)
+                    .map(|i| format!("partial output line {i}"))
+                    .collect(),
+                error: Some("command failed: big".to_string()),
+            };
+            present_command_report(&mut app, command_report("ingest", big));
+            assert!(!app.has_takeover(), "a failure never opens a takeover");
+            assert_eq!(app.active_timeline().items().len(), 1);
+            let text = app.active_timeline().items()[0].text.clone();
+            // The exact error MUST survive truncation (it is not a prefix-dropped
+            // trailing line), alongside a marker for the dropped partial output.
+            assert!(
+                text.contains("command failed: big"),
+                "the exact error survives truncation: {text}"
+            );
+            assert!(
+                text.contains("truncated"),
+                "oversized failure carries a marker"
+            );
+            // The whole Warning stays within the short ceiling — at most 8 logical
+            // lines and 4 KiB, the joined string being the serialized body.
+            assert!(
+                text.lines().count() <= NOTICE_MAX_LINES,
+                "at most 8 logical lines: {}",
+                text.lines().count()
+            );
+            assert!(
+                text.len() <= NOTICE_MAX_BYTES,
+                "the bounded Warning fits the short ceiling incl. separators + marker",
+            );
+        }
+    }
+
+    #[test]
+    fn bound_failure_preserves_in_ceiling_output_and_marks_real_truncation() {
+        let has_marker = |v: &[String]| v.iter().any(|l| l.contains("truncated"));
+
+        // 1. Seven short partial lines + a short error = exactly 8 lines under the
+        //    byte ceiling → all kept, NO spurious marker.
+        let partial: Vec<String> = (0..7).map(|i| format!("line {i}")).collect();
+        let r = bound_failure(
+            &partial,
+            "command failed: e",
+            NOTICE_MAX_LINES,
+            NOTICE_MAX_BYTES,
+        );
+        assert_eq!(r.len(), 8, "all seven partial lines + the error are kept");
+        assert!(!has_marker(&r), "no marker at an exact valid boundary");
+        assert_eq!(r.last().map(String::as_str), Some("command failed: e"));
+
+        // 2. No partial + an error exactly NOTICE_MAX_BYTES → byte-for-byte, no marker.
+        let exact_err = "x".repeat(NOTICE_MAX_BYTES);
+        let r = bound_failure(&[], &exact_err, NOTICE_MAX_LINES, NOTICE_MAX_BYTES);
+        assert_eq!(
+            r,
+            vec![exact_err.clone()],
+            "an in-ceiling error survives whole"
+        );
+        assert!(!has_marker(&r));
+        assert_eq!(serialized_bytes(&r), NOTICE_MAX_BYTES);
+
+        // 3. No partial + an oversized error → one bounded Warning with an explicit
+        //    marker, UTF-8-safe, within both ceilings.
+        let big_err = "y".repeat(NOTICE_MAX_BYTES + 1);
+        let r = bound_failure(&[], &big_err, NOTICE_MAX_LINES, NOTICE_MAX_BYTES);
+        assert!(has_marker(&r), "a shortened error is explicitly marked");
+        assert!(r.len() <= NOTICE_MAX_LINES);
+        assert!(serialized_bytes(&r) <= NOTICE_MAX_BYTES);
+        assert!(
+            r.last().is_some_and(|l| l.contains('y')),
+            "the error prefix survives"
+        );
+
+        // 4. One oversized partial line + a short error → the marker records omitted
+        //    BYTES, the short error survives, and the body stays within both ceilings.
+        let big_partial = vec!["z".repeat(NOTICE_MAX_BYTES * 2)];
+        let r = bound_failure(
+            &big_partial,
+            "command failed: short",
+            NOTICE_MAX_LINES,
+            NOTICE_MAX_BYTES,
+        );
+        assert!(
+            r.iter()
+                .any(|l| l.contains("truncated") && l.contains("more bytes")),
+            "the marker records omitted bytes",
+        );
+        assert!(
+            r.iter().any(|l| l == "command failed: short"),
+            "the short error survives",
+        );
+        assert!(r.len() <= NOTICE_MAX_LINES);
+        assert!(serialized_bytes(&r) <= NOTICE_MAX_BYTES);
+    }
+
+    #[test]
+    fn presenter_respects_the_exact_outer_report_ceiling() {
+        // Exactly MAX_REPORT_BYTES (a single line of that size — routes to Report
+        // because it exceeds the Notice byte ceiling): the body is preserved
+        // byte-for-byte, serialized bytes equal the ceiling, and no marker exists.
+        let exact_body = "x".repeat(MAX_REPORT_BYTES);
+        let exact = CommandReport {
+            title: "t".to_string(),
+            lines: vec![exact_body.clone()],
+            failed: false,
+        };
+        let Presentation::Report { lines, .. } = present(&exact) else {
+            panic!("an over-Notice body must be a Report");
+        };
+        assert_eq!(
+            serialized_bytes(&lines),
+            MAX_REPORT_BYTES,
+            "serialized == ceiling"
+        );
+        assert_eq!(lines, vec![exact_body], "the body is kept byte-for-byte");
+        assert!(
+            !lines.iter().any(|l| l.contains("truncated")),
+            "no marker at exactly the ceiling",
+        );
+
+        // MAX_REPORT_BYTES + 1: a marker is inserted and the admitted serialized
+        // body still fits the ceiling (marker + separators counted).
+        let over = CommandReport {
+            title: "t".to_string(),
+            lines: vec!["x".repeat(MAX_REPORT_BYTES + 1)],
+            failed: false,
+        };
+        let Presentation::Report { lines, .. } = present(&over) else {
+            panic!("expected a Report");
+        };
+        assert!(
+            serialized_bytes(&lines) <= MAX_REPORT_BYTES,
+            "over-ceiling body admitted within the ceiling: {}",
+            serialized_bytes(&lines)
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("truncated")),
+            "a marker is present at +1",
+        );
+    }
+
+    #[test]
+    fn report_scroll_advances_the_takeover_not_the_conversation() {
+        for (width, screen_reader) in [(120u16, false), (40, false), (120, true)] {
+            let mut app = app();
+            app.capabilities.screen_reader = screen_reader;
+            app.open_report(
+                "tree".to_string(),
+                (0..80).map(|i| format!("event line number {i}")).collect(),
+            );
+            let conversation_viewport = app.active_timeline().viewport;
+            // The takeover scroll starts at the top.
+            assert_eq!(
+                draw_hit_map(&app, width, 20).takeover_scrollbar.start,
+                0,
+                "the Report starts at the top (w={width}, sr={screen_reader})",
+            );
+            for _ in 0..12 {
+                let hit_map = draw_hit_map(&app, width, 20);
+                if let AppCommand::NavigateTakeover(nav) =
+                    app.handle_input(InputAction::MoveDown, width)
+                {
+                    apply_takeover_navigation(&mut app, nav, &hit_map);
+                }
+            }
+            // The takeover scrollbar advanced…
+            assert!(
+                draw_hit_map(&app, width, 20).takeover_scrollbar.start > 0,
+                "the Report scrolled (w={width}, sr={screen_reader})",
+            );
+            // …while the conversation viewport did not move.
+            assert_eq!(
+                app.active_timeline().viewport,
+                conversation_viewport,
+                "the conversation viewport did not move while scrolling the Report",
+            );
+        }
+    }
+
+    #[test]
     fn diff_filter_is_trimmed_case_insensitive_substring_over_paths() {
         let file = |path: &str| DiffFile {
             status: "M".to_string(),
@@ -7903,6 +8726,7 @@ mod tests {
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
             ("clone", "Copy the conversation into a new session"),
+            ("tree", "Show the session event tree"),
             ("sessions", "List this workspace's sessions"),
             ("session", "Resume a session by id"),
             ("name", "Name this session (/name <text>)"),
@@ -7910,6 +8734,17 @@ mod tests {
             ("continue", "Continue the previous session"),
             ("clear", "Clear the conversation view"),
             ("resume", "Continue a previous session"),
+            ("knowledge", "Query the knowledge base"),
+            ("context", "Build a context bundle"),
+            (
+                "agents",
+                "List or inspect subagent definitions (/agents [show <name>])",
+            ),
+            (
+                "skills",
+                "Manage skills: repos, install, list (/skills <subcommand>)",
+            ),
+            ("bg", "List background processes (/bg stop <id>|all)"),
             ("exit", "Exit LocalPilot (/exit [print])"),
             ("quit", "Exit LocalPilot"),
             ("search", "Search messages in this session"),
@@ -7918,15 +8753,13 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 25);
+        assert_eq!(full_screen.len(), 31);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
         // `agent`/`harness` stay deferred (no real full-screen mode transition);
-        // the rest remain inline-only for now.
-        for deferred in [
-            "agent", "harness", "compact", "research", "skills", "bg", "tree",
-        ] {
+        // `ingest` stays deferred for now (bare `/ingest` is long-running).
+        for deferred in ["agent", "harness", "compact", "research", "ingest"] {
             assert!(!full_screen.iter().any(|(name, _)| name == deferred));
         }
 

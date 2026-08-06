@@ -1069,7 +1069,7 @@ async fn run_slash(
 /// a notice instead of aborting the REPL.
 /// `/agents` — the same read-only surface as `localpilot agents`, so the TUI and
 /// the CLI cannot drift into two different answers about which agents exist.
-fn run_agents_slash(
+pub(crate) fn run_agents_slash(
     cwd: &std::path::Path,
     raw: &str,
     out: &mut dyn std::io::Write,
@@ -1089,7 +1089,7 @@ fn run_agents_slash(
     }
 }
 
-async fn run_skills_slash(
+pub(crate) async fn run_skills_slash(
     cwd: &std::path::Path,
     raw: &str,
     out: &mut dyn std::io::Write,
@@ -1390,44 +1390,101 @@ fn run_live_slash(
     }
 }
 
-fn apply_background_command(
-    state: &mut AppState,
+/// Run a `/bg` command (effectful: `stop`/`stop all` mutate the registry) and
+/// The one UI-neutral execution result shared by every synchronous command:
+/// its (partial) output lines plus an optional exact failure text. The inline
+/// host adapts it byte/item-equivalently ([`apply_command_output_result`]); the
+/// full-screen host converts it into a bounded `CommandReport`. The commands
+/// themselves stay effectful — this is only the output-conversion seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandOutput {
+    pub lines: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Normalize a buffer + result into a [`CommandOutput`]: nonblank lines in order,
+/// and the generic `command failed: …` text on `Err` (tree supplies its own
+/// distinct error instead of using this).
+pub(crate) fn command_output_from_buffer(
+    output: Vec<u8>,
+    result: anyhow::Result<()>,
+) -> CommandOutput {
+    let text = String::from_utf8_lossy(&output);
+    let lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    let error = result.err().map(|error| format!("command failed: {error}"));
+    CommandOutput { lines, error }
+}
+
+/// The background-command producer as a [`CommandOutput`] (it never fails).
+pub(crate) fn background_command_output(
     processes: &BackgroundProcesses,
     command: BackgroundCommand,
-) {
+) -> CommandOutput {
+    CommandOutput {
+        lines: background_command_lines(processes, command),
+        error: None,
+    }
+}
+
+/// The inline adapter: push each output line as a Notice in order, then the exact
+/// failure text where present — byte/item-equivalent to the pre-seam behaviour.
+fn apply_command_output_result(state: &mut AppState, output: CommandOutput) {
+    for line in output.lines {
+        state.apply(UiEvent::Notice(line));
+    }
+    if let Some(error) = output.error {
+        state.apply(UiEvent::Notice(error));
+    }
+}
+
+pub(crate) fn background_command_lines(
+    processes: &BackgroundProcesses,
+    command: BackgroundCommand,
+) -> Vec<String> {
     match command {
         BackgroundCommand::List => {
             let listed = processes.list();
             if listed.is_empty() {
-                state.apply(UiEvent::Notice("no background processes".to_string()));
+                vec!["no background processes".to_string()]
             } else {
-                state.apply(UiEvent::Notice(
+                let mut lines = vec![
                     "background processes (stop with /bg stop <id> or /bg stop all):".to_string(),
-                ));
+                ];
                 for process in listed {
                     let status = if process.alive { "running" } else { "exited" };
-                    state.apply(UiEvent::Notice(format!(
+                    lines.push(format!(
                         "  {} [{}] {}s · {}",
                         process.id, status, process.age_secs, process.command
-                    )));
+                    ));
                 }
+                lines
             }
         }
         BackgroundCommand::Stop(id) => {
             if processes.stop_now(&id) {
-                state.apply(UiEvent::Notice(format!("stopped background process {id}")));
+                vec![format!("stopped background process {id}")]
             } else {
-                state.apply(UiEvent::Notice(format!("no background process {id}")));
+                vec![format!("no background process {id}")]
             }
         }
         BackgroundCommand::StopAll => {
             let count = processes.list().len();
             processes.kill_all();
-            state.apply(UiEvent::Notice(format!(
-                "stopped {count} background process(es)"
-            )));
+            vec![format!("stopped {count} background process(es)")]
         }
     }
+}
+
+fn apply_background_command(
+    state: &mut AppState,
+    processes: &BackgroundProcesses,
+    command: BackgroundCommand,
+) {
+    apply_command_output_result(state, background_command_output(processes, command));
 }
 
 /// Push the current background-process set into the UI so the status-line
@@ -1591,6 +1648,17 @@ fn replay_selection(
 /// loader instead; the arms for them here are a correct fallback if this is ever
 /// called directly.
 fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestAction) {
+    let (output, result) = ingest_slash_output(cwd, action);
+    apply_command_result(state, output, result);
+}
+
+/// Run an ingest subcommand (effectful — several actions mutate workspace state)
+/// and return its raw output buffer + result — the presentation-neutral seam
+/// shared by the inline host and the full-screen presenter.
+pub(crate) fn ingest_slash_output(
+    cwd: &std::path::Path,
+    action: IngestAction,
+) -> (Vec<u8>, anyhow::Result<()>) {
     let mut output = Vec::new();
     let result = match action {
         IngestAction::Run => {
@@ -1626,7 +1694,7 @@ fn run_ingest_slash(state: &mut AppState, cwd: &std::path::Path, action: IngestA
         IngestAction::Review => crate::ingest_cmd::review(cwd, &mut output),
         IngestAction::Promote(id) => crate::ingest_cmd::promote(cwd, &id, &mut output),
     };
-    apply_command_result(state, output, result);
+    (output, result)
 }
 
 /// Run a folder-ingestion walk on a blocking task while keeping the TUI live:
@@ -1832,10 +1900,7 @@ fn drain_ingest_progress(
 }
 
 fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::Result<()>) {
-    apply_command_output(state, output);
-    if let Err(error) = result {
-        state.apply(UiEvent::Notice(format!("command failed: {error}")));
-    }
+    apply_command_output_result(state, command_output_from_buffer(output, result));
 }
 
 /// Run a research pass for `topic` and post its output to the transcript.
@@ -1913,13 +1978,6 @@ async fn run_research_prompt(
         None => state.apply(UiEvent::Notice("research cancelled".to_string())),
     }
     Ok(())
-}
-
-fn apply_command_output(state: &mut AppState, output: Vec<u8>) {
-    let text = String::from_utf8_lossy(&output);
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        state.apply(UiEvent::Notice(line.to_string()));
-    }
 }
 
 async fn run_harness_command(
@@ -3034,7 +3092,7 @@ fn map_event(event: RuntimeEvent, elapsed_secs: f64) -> Option<UiEvent> {
 
 /// Render the session's durable event log as an indented tree of lifecycle
 /// landmarks: opens, turns, steps, branch closures, and forks.
-fn render_session_tree(events: &[localpilot_store::SessionEvent]) -> Vec<String> {
+pub(crate) fn render_session_tree(events: &[localpilot_store::SessionEvent]) -> Vec<String> {
     use localpilot_store::SessionEventKind as Kind;
     let mut lines = Vec::new();
     let mut in_step = false;
@@ -3310,6 +3368,41 @@ mod tests {
     //! interactive driver must keep: committed history is never silently dropped.
 
     use super::*;
+
+    #[test]
+    fn command_output_from_buffer_keeps_partial_lines_then_the_exact_error() {
+        // The shared UI-neutral result for a buffer-producing command with partial
+        // output plus a failure: nonblank lines in order, then the exact
+        // `command failed: …` text. The inline adapter pushes exactly these as
+        // Notices (one per line, then the error), so the buffer inline contract is
+        // byte/item-equivalent to the pre-seam behaviour.
+        let buffer = b"first line\n\n   \nsecond line\n".to_vec();
+        let out = command_output_from_buffer(buffer, Err(anyhow::anyhow!("boom")));
+        assert_eq!(
+            out.lines,
+            vec!["first line".to_string(), "second line".to_string()],
+        );
+        assert_eq!(out.error, Some("command failed: boom".to_string()));
+        // A success carries no error line.
+        let ok = command_output_from_buffer(b"only line\n".to_vec(), Ok(()));
+        assert_eq!(ok.lines, vec!["only line".to_string()]);
+        assert_eq!(ok.error, None);
+    }
+
+    #[test]
+    fn background_command_lines_match_the_inline_notice_strings() {
+        // The presentation-neutral producer returns exactly the strings the inline
+        // host pushes as Notices (byte/item-equivalent), one per line, in order.
+        let procs = BackgroundProcesses::new();
+        assert_eq!(
+            background_command_lines(&procs, BackgroundCommand::List),
+            vec!["no background processes".to_string()],
+        );
+        assert_eq!(
+            background_command_lines(&procs, BackgroundCommand::Stop("x".to_string())),
+            vec!["no background process x".to_string()],
+        );
+    }
     use localpilot_tui::TranscriptLine;
 
     #[test]

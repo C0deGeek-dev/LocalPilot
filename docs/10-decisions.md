@@ -4,7 +4,19 @@ This file starts the decision log. Add new records at the top.
 
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
 
-Status: accepted. Covers the first four increments of LocalHub#56: extracting
+Status: accepted. A fifth increment adds the **synchronous command + bounded
+report tier**: `/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg`
+run in the full-screen host and present their output through a bounded presenter
+— a short result is one multi-line `Notice`; a long one opens a scrollable,
+copyable `TakeoverKind::Report` plus one breadcrumb (the body never floods the
+timeline, and is excluded from search and the print transcript); a failure is one
+inline `Warning`. Ceilings are applied to the serialized sanitized body
+(separators and truncation marker included). The 11 fast ingest subcommands route
+here via a production `IngestTier` (`Fast`/`LongRunning`) classifier; the three
+long-running ingest actions and the `/ingest` picker row stay deferred to a later
+increment. The command execution helpers are shared through a presentation-neutral
+seam (the inline host keeps its byte/item-equivalent Notice behaviour). Covers the
+first five increments of LocalHub#56: extracting
 the shared `localpilot-slash` surface; making the five full-screen/pair takeover
 commands (`/help`, `/theme`, `/settings`, `/diff`, `/search`) host-aware parsed
 actions; wiring the four permission profiles (`/default`, `/relaxed`,
@@ -90,9 +102,10 @@ Decision: parsing and the three host catalogs are generated from **one** table.
   "takes no arguments") instead of reporting "unknown".
 
 Invariants are locked by tests, not prose: the three catalogs are asserted
-byte-for-byte (inline / full-screen / pair = **34 / 25 / 8** rows — the four
-permission profiles and `/effort` grew full-screen 19→24, then `/think` 24→25;
-inline and pair are unchanged), every semantic name parses to its
+byte-for-byte (inline / full-screen / pair = **34 / 31 / 8** rows — the four
+permission profiles and `/effort` grew full-screen 19→24, `/think` 24→25, then the
+six synchronous commands 25→31; `ingest` stays inline-only until a later
+increment; inline and pair are unchanged), every semantic name parses to its
 command id, all 36 identities are globally unique and equal to
 `SlashCommand::ALL`, and the frozen stray-arg forms parse as the old parser did.
 The full-screen dispatcher is an **exhaustive, wildcard-free match** — every
@@ -103,7 +116,7 @@ so a newly-added command cannot fall silently into "deferred" (the profiles and
 The durable obligations that remain OPEN for later work:
 
 - The default full-screen host must ultimately reach the **whole** shared
-  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **25**.
+  command surface (→ 39 = 34 shared + 5 takeovers); it currently reaches **31**.
   The shared table is the substrate that makes that a wiring task rather than a
   re-derivation.
 - The **approval-type half of ADR-0129's extraction gate remains OPEN** — only
@@ -133,7 +146,16 @@ hides `ItemKind::Reasoning` items from the full-screen timeline (render, scroll
 geometry, search, selection, and new-content route through one visibility
 authority; hidden items are zero-height layout entries so index identity holds)
 while retaining the raw items and leaving the `/exit print` path's independent
-reasoning drop unchanged.
+reasoning drop unchanged. The fifth increment wires the six synchronous commands
+(`/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, `/bg`) plus the 11 fast
+`/ingest` subcommands through a bounded report presenter: short output is one
+multi-line Notice, long output opens a scrollable, copyable `Report` takeover
+plus one breadcrumb, and a failure is one bounded Warning — every size measured
+on the serialized sanitized body including separators and the truncation marker.
+The commands stay effectful; a shared UI-neutral `CommandOutput` result feeds the
+inline host (byte/item-equivalent) and the full-screen presenter. `/ingest`'s row
+stays deferred until its three long-running actions dispatch (its bare form is a
+long-running action); a production `Fast`/`LongRunning` classifier routes ingest.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

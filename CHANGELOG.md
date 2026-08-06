@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Synchronous commands work in full-screen chat with bounded output.** `/tree`,
+  `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg` now run in the
+  full-screen session. Short output is shown inline; long output opens a
+  scrollable report you can copy with `Ctrl+C` and close with `Esc`, instead of
+  flooding the conversation with dozens of lines. The fast `/ingest` subcommands
+  (status, preview, pause, and the rest) run the same way; the long-running ingest
+  runs remain a later addition.
+
 - **`/think` hides or shows reasoning in full-screen chat.** Toggling reasoning
   off removes reasoning items from the timeline — render, scrolling, search, and
   copy all skip them — while the underlying reasoning is retained (streaming

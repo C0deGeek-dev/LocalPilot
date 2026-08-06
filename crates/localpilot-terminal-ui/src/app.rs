@@ -180,6 +180,8 @@ pub enum TakeoverKind {
     Help,
     Sessions,
     Settings,
+    /// A bounded, scrollable, copyable command report (`/tree`, `/skills`, …).
+    Report,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +260,8 @@ struct TakeoverState {
     diff_pane: DiffPane,
     selected_file: usize,
     tree_visible: bool,
+    report_title: String,
+    report_lines: Vec<String>,
 }
 
 impl fmt::Debug for TakeoverState {
@@ -278,6 +282,14 @@ impl fmt::Debug for TakeoverState {
             .field("diff_pane", &self.diff_pane)
             .field("selected_file", &self.selected_file)
             .field("tree_visible", &self.tree_visible)
+            .field(
+                "report",
+                &format_args!(
+                    "<{} lines, {} bytes redacted>",
+                    self.report_lines.len(),
+                    self.report_lines.iter().map(String::len).sum::<usize>()
+                ),
+            )
             .finish()
     }
 }
@@ -296,6 +308,8 @@ pub(crate) struct TakeoverView<'a> {
     pub diff_pane: DiffPane,
     pub selected_file: usize,
     pub tree_visible: bool,
+    pub report_title: &'a str,
+    pub report_lines: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1457,6 +1471,13 @@ impl AppModel {
         }
         if matches!(action, InputAction::CancelOrExit) && self.takeover.is_some() {
             self.exit_armed = false;
+            // Ctrl+C on a Report copies the whole bounded body (not the
+            // breadcrumb); Esc still dismisses it via `handle_takeover_input`.
+            if let Some(state) = &self.takeover {
+                if state.kind == TakeoverKind::Report {
+                    return AppCommand::Copy(state.report_lines.join("\n"));
+                }
+            }
             self.takeover = None;
             return AppCommand::None;
         }
@@ -2045,6 +2066,8 @@ impl AppModel {
             diff_pane: state.diff_pane,
             selected_file: state.selected_file,
             tree_visible: state.tree_visible,
+            report_title: &state.report_title,
+            report_lines: &state.report_lines,
         })
     }
 
@@ -2131,6 +2154,44 @@ impl AppModel {
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
+            report_title: String::new(),
+            report_lines: Vec::new(),
+        });
+    }
+
+    /// Open a bounded, scrollable, copyable command-report takeover. The title
+    /// and body are defensively sanitized (the presenter is the bounding
+    /// authority for length/bytes); Ctrl+C copies the body, Esc dismisses.
+    pub fn open_report(&mut self, title: String, lines: Vec<String>) {
+        self.exit_armed = false;
+        self.quick_help = false;
+        self.close_theme_picker(true);
+        self.input_overlay = None;
+        let title = {
+            // Inline sanitize flattens newlines/tabs so the title bar can never
+            // become multi-line; then clamp to the byte budget on a char boundary.
+            let sanitized = sanitize_inline(&title);
+            let mut end = sanitized.len().min(256);
+            while end > 0 && !sanitized.is_char_boundary(end) {
+                end -= 1;
+            }
+            sanitized[..end].to_string()
+        };
+        let report_lines: Vec<String> = lines.iter().map(|line| sanitize_text(line)).collect();
+        self.takeover = Some(TakeoverState {
+            kind: TakeoverKind::Report,
+            scroll: 0,
+            file_scroll: 0,
+            selected: 0,
+            settings: Vec::new(),
+            settings_query: String::new(),
+            sessions: Vec::new(),
+            diff_files: Vec::new(),
+            diff_pane: DiffPane::Content,
+            selected_file: 0,
+            tree_visible: true,
+            report_title: title,
+            report_lines,
         });
     }
 
@@ -2161,6 +2222,8 @@ impl AppModel {
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
+            report_title: String::new(),
+            report_lines: Vec::new(),
         });
     }
 
@@ -2287,6 +2350,8 @@ impl AppModel {
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
+            report_title: String::new(),
+            report_lines: Vec::new(),
         });
     }
 
@@ -2318,6 +2383,8 @@ impl AppModel {
             diff_pane: DiffPane::Content,
             selected_file: 0,
             tree_visible: true,
+            report_title: String::new(),
+            report_lines: Vec::new(),
         });
     }
 
@@ -2343,7 +2410,8 @@ impl AppModel {
             TakeoverKind::Diff
             | TakeoverKind::Help
             | TakeoverKind::Sessions
-            | TakeoverKind::Settings => {}
+            | TakeoverKind::Settings
+            | TakeoverKind::Report => {}
         }
     }
 
@@ -6744,6 +6812,24 @@ mod tests {
             .collect();
         assert_eq!(ids.first(), Some(&active));
         assert_eq!(ids.last(), Some(&queued));
+    }
+
+    #[test]
+    fn a_report_body_is_absent_from_timeline_search() {
+        let mut app = model();
+        // The report body lives only in the takeover, never as a timeline item.
+        app.open_report(
+            "tree".to_string(),
+            vec!["a body line containing SEARCHTOKEN inside".to_string()],
+        );
+        app.open_timeline_search("SEARCHTOKEN".to_string());
+        // A search over the timeline finds no match — a hit with no row would leak.
+        assert_eq!(app.timeline_search().map(|view| view.total), Some(0));
+        assert!(!app
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("SEARCHTOKEN")));
     }
 
     #[test]

@@ -687,14 +687,32 @@ fn render_takeover(
     }
 
     let theme = theme(app);
-    let title = match takeover.kind {
-        TakeoverKind::Help => " Help ",
-        TakeoverKind::Sessions => " Sessions ",
-        TakeoverKind::Settings => " Settings ",
-        TakeoverKind::Diff => " Diff ",
+    let title: String = match takeover.kind {
+        TakeoverKind::Help => " Help ".to_string(),
+        TakeoverKind::Sessions => " Sessions ".to_string(),
+        TakeoverKind::Settings => " Settings ".to_string(),
+        TakeoverKind::Diff => " Diff ".to_string(),
+        // Clip the bounded report title to the title bar width so a long title
+        // cannot overflow at narrow widths.
+        TakeoverKind::Report => {
+            // Clip the sanitized report title by DISPLAY WIDTH (not scalar count)
+            // so a wide/CJK grapheme cannot overflow the title bar at narrow widths.
+            let budget = usize::from(area.width).saturating_sub(4).max(1);
+            let mut clipped = String::new();
+            let mut used = 0usize;
+            for ch in takeover.report_title.chars() {
+                let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + width > budget {
+                    break;
+                }
+                used += width;
+                clipped.push(ch);
+            }
+            format!(" {clipped} ")
+        }
     };
     frame.render_widget(
-        Paragraph::new(title).style(theme.ui(UiRole::TabActive)),
+        Paragraph::new(title.as_str()).style(theme.ui(UiRole::TabActive)),
         Rect::new(
             area.x.saturating_add(1),
             area.y,
@@ -726,7 +744,7 @@ fn render_takeover(
     let footer_height = match takeover.kind {
         TakeoverKind::Settings => 3,
         TakeoverKind::Sessions => 2,
-        TakeoverKind::Diff | TakeoverKind::Help => 1,
+        TakeoverKind::Diff | TakeoverKind::Help | TakeoverKind::Report => 1,
     };
     let content = Rect::new(
         area.x.saturating_add(2),
@@ -745,6 +763,32 @@ fn render_takeover(
                 app.capabilities.mouse_capture,
                 app.is_pair(),
             );
+            let maximum = lines.len().saturating_sub(viewport_rows);
+            let start = takeover.scroll.min(maximum);
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .iter()
+                        .skip(start)
+                        .take(viewport_rows)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                content,
+            );
+            (start, lines.len(), viewport_rows, Vec::new(), Vec::new())
+        }
+        TakeoverKind::Report => {
+            // A plain scrollable list of the bounded report lines, wrapped and
+            // styled through the shared takeover line helper (same as Help). The
+            // body is the content the user opened the takeover to read, so it is
+            // Foreground (Muted is reserved for secondary chrome).
+            let source: Vec<(String, UiRole)> = takeover
+                .report_lines
+                .iter()
+                .map(|line| (line.clone(), UiRole::Foreground))
+                .collect();
+            let lines = text_takeover_lines(&source, content.width, theme);
             let maximum = lines.len().saturating_sub(viewport_rows);
             let start = takeover.scroll.min(maximum);
             frame.render_widget(
@@ -1000,6 +1044,7 @@ fn render_takeover(
     }
     let footer = match takeover.kind {
         TakeoverKind::Help => "↑/↓ scroll · Page Up/Page Down · Esc close".to_string(),
+        TakeoverKind::Report => "↑/↓ scroll · Ctrl+C copy all · Esc close".to_string(),
         TakeoverKind::Sessions if area.width < 50 => "Enter resume · Esc return".to_string(),
         TakeoverKind::Sessions => "↑/↓ select · Enter resume · Esc return".to_string(),
         TakeoverKind::Settings => settings_footer(takeover, &setting_indices, area.width),
@@ -1480,12 +1525,23 @@ fn help_lines(
         ),
     ]);
 
+    text_takeover_lines(&source, width, theme)
+}
+
+/// Wrap and style a takeover's `(text, role)` source into rendered lines. Shared
+/// by the Help takeover and the command Report takeover so their line-list
+/// wrapping and styling cannot drift apart.
+fn text_takeover_lines(
+    source: &[(String, UiRole)],
+    width: u16,
+    theme: ThemeResolver,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for (text, role) in source {
-        for range in crate::text::wrap_ranges(&text, width) {
+        for range in crate::text::wrap_ranges(text, width) {
             lines.push(Line::styled(
                 text[range.start_byte..range.end_byte].to_string(),
-                theme.ui(role),
+                theme.ui(*role),
             ));
         }
     }
@@ -5101,6 +5157,41 @@ mod tests {
                 assert_eq!(layout.footer.height, 1);
             }
         }
+    }
+
+    #[test]
+    fn report_title_is_one_sanitized_display_width_clipped_line() {
+        let mut app = model();
+        // A title with a newline, a control char, and wide CJK graphemes that
+        // exceed a narrow title bar.
+        app.open_report(
+            "first\u{0007}\nline 日本語テスト padding padding padding".to_string(),
+            vec!["body".to_string()],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).expect("terminal");
+        // Renders without panic at narrow width with wide/control characters — a
+        // scalar-count clip would overflow the title bar.
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw narrow report");
+        let rendered = terminal.backend().to_string();
+        assert!(
+            !rendered.contains('\u{0007}'),
+            "control char stripped from the title"
+        );
+        assert!(
+            !rendered.contains("first\nline"),
+            "the newline did not split the title"
+        );
+        // The title is one line on the top border row (the display-width clip kept
+        // the wide-character title inside the bar without panicking above).
+        let top = rendered.lines().next().unwrap_or_default();
+        assert!(
+            top.contains("first") || top.contains("line"),
+            "the sanitized title renders on the top row: {top:?}",
+        );
     }
 
     #[test]

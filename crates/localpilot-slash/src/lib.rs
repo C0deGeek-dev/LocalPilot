@@ -168,6 +168,40 @@ pub enum IngestAction {
     Promote(String),
 }
 
+/// Execution lane of an ingest subcommand. `LongRunning` actions walk the
+/// workspace under a spinner (an async, pumped path); `Fast` actions return
+/// promptly and can be presented directly. This is the production dispatch
+/// authority — hosts route on it, so a new variant is a compile error here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestTier {
+    Fast,
+    LongRunning,
+}
+
+impl IngestAction {
+    /// Classify this action's execution lane. Wildcard-free so a new
+    /// `IngestAction` variant cannot be silently routed through the wrong lane.
+    #[must_use]
+    pub const fn tier(&self) -> IngestTier {
+        match self {
+            IngestAction::Run | IngestAction::Refresh | IngestAction::Resume => {
+                IngestTier::LongRunning
+            }
+            IngestAction::Preview
+            | IngestAction::Status
+            | IngestAction::Pause
+            | IngestAction::Cancel
+            | IngestAction::Rebuild
+            | IngestAction::Skipped
+            | IngestAction::Include(_)
+            | IngestAction::Exclude(_)
+            | IngestAction::Forget(_)
+            | IngestAction::Review
+            | IngestAction::Promote(_) => IngestTier::Fast,
+        }
+    }
+}
+
 /// The argument shape a spelling accepts (syntax metadata). This is the
 /// authoritative syntax for the host that owns the command, including the
 /// externally-routed takeovers and the pair-only `abort`.
@@ -504,7 +538,7 @@ slash_commands! {
         New => both("new", NoArg, Fall, "Start a fresh session"),
         Fork => both("fork", NoArg, Fall, "Branch the conversation into a new session"),
         Clone => both("clone", NoArg, Fall, "Copy the conversation into a new session"),
-        Tree => inline_only("tree", NoArg, Fall, "Show the session event tree"),
+        Tree => both("tree", NoArg, Fall, "Show the session event tree"),
         Sessions => both("sessions", NoArg, Fall, "List this workspace's sessions"),
         Session => both("session", Required, Fall, "Resume a session by id"),
         Name => both("name", Required, Fall, "Name this session (/name <text>)"),
@@ -522,15 +556,15 @@ slash_commands! {
         HarnessResume => inline_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
         WaitResume => inline_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
         Ingest => inline_only("ingest", Optional, Fall, "Manage workspace ingestion"),
-        Knowledge => inline_only("knowledge", Required, Fall, "Query the knowledge base"),
-        Context => inline_only("context", Required, Fall, "Build a context bundle"),
+        Knowledge => both("knowledge", Required, Fall, "Query the knowledge base"),
+        Context => both("context", Required, Fall, "Build a context bundle"),
         Research => inline_only(
             "research",
             Optional,
             Fall,
             "Research a topic, local + web per config (/research [topic])"
         ),
-        Agents => inline_only(
+        Agents => both(
             "agents",
             Optional,
             Fall,
@@ -538,13 +572,13 @@ slash_commands! {
         ),
         // `/skills` opens the skills surface with no subcommand (`Skills("")`),
         // so it is Optional, not Required.
-        Skills => inline_only(
+        Skills => both(
             "skills",
             Optional,
             Fall,
             "Manage skills: repos, install, list (/skills <subcommand>)"
         ),
-        Bg => inline_only("bg", Optional, Fall, "List background processes (/bg stop <id>|all)"),
+        Bg => both("bg", Optional, Fall, "List background processes (/bg stop <id>|all)"),
         Exit => both_pair("exit", Optional, Reject, "Exit LocalPilot (/exit [print])"),
         // `/quit` accepts the same optional `print` argument as `/exit`.
         Exit => both_pair("quit", Optional, Reject, "Exit LocalPilot"),
@@ -1042,10 +1076,40 @@ mod tests {
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
         assert_eq!(specs_for(Host::Inline).len(), 34);
-        // Full-screen grew 19→24 (the four permission profiles + `/effort`), then
-        // 24→25 (`/think` reasoning visibility).
-        assert_eq!(specs_for(Host::Fullscreen).len(), 25);
+        // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), then
+        // 25→31 (the six synchronous commands `tree`/`knowledge`/`context`/
+        // `agents`/`skills`/`bg`; `ingest` stays inline-only for now).
+        assert_eq!(specs_for(Host::Fullscreen).len(), 31);
         assert_eq!(specs_for(Host::Pair).len(), 8);
+    }
+
+    #[test]
+    fn ingest_tier_classifies_all_fourteen_variants() {
+        use IngestAction::{
+            Cancel, Exclude, Forget, Include, Pause, Preview, Promote, Rebuild, Refresh, Resume,
+            Review, Run, Skipped, Status,
+        };
+        let long = [Run, Refresh, Resume];
+        for action in &long {
+            assert_eq!(action.tier(), IngestTier::LongRunning, "{action:?}");
+        }
+        let fast = [
+            Preview,
+            Status,
+            Pause,
+            Cancel,
+            Rebuild,
+            Skipped,
+            Include("x".to_string()),
+            Exclude("x".to_string()),
+            Forget("x".to_string()),
+            Review,
+            Promote("x".to_string()),
+        ];
+        for action in &fast {
+            assert_eq!(action.tier(), IngestTier::Fast, "{action:?}");
+        }
+        assert_eq!(long.len() + fast.len(), 14, "all 14 IngestAction variants");
     }
 
     #[test]
@@ -1120,9 +1184,8 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         // A deferred inline-only name must not appear in the full-screen picker.
-        for deferred in [
-            "agent", "harness", "compact", "research", "skills", "bg", "tree",
-        ] {
+        // `ingest` stays here for now (bare `/ingest` is long-running).
+        for deferred in ["agent", "harness", "compact", "research", "ingest"] {
             assert!(
                 !full_screen.contains(deferred),
                 "{deferred} leaked into full-screen"
