@@ -21,6 +21,8 @@ mod harness_cmd;
 mod import_cmd;
 mod ingest_cmd;
 #[cfg(feature = "tui")]
+mod ingest_progress;
+#[cfg(feature = "tui")]
 mod interactive_session;
 #[cfg(feature = "tui")]
 mod key_input;

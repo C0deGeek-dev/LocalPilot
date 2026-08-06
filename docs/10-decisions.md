@@ -13,8 +13,8 @@ timeline, and is excluded from search and the print transcript); a failure is on
 inline `Warning`. Ceilings are applied to the serialized sanitized body
 (separators and truncation marker included). The 11 fast ingest subcommands route
 here via a production `IngestTier` (`Fast`/`LongRunning`) classifier; the three
-long-running ingest actions and the `/ingest` picker row stay deferred to a later
-increment. The command execution helpers are shared through a presentation-neutral
+long-running ingest actions and the `/ingest` picker row remained deferred through
+this fifth increment and are delivered by the seventh increment below. The command execution helpers are shared through a presentation-neutral
 seam (the inline host keeps its byte/item-equivalent Notice behaviour). Covers the
 first five increments of LocalHub#56: extracting
 the shared `localpilot-slash` surface; making the five full-screen/pair takeover
@@ -31,7 +31,11 @@ full-screen host has no real mode transition today, so relabelling the footer
 would make it false; a real mode route is settled in a later increment. A sixth
 increment restructures the full-screen operation pump with no surface change:
 the ~90%-duplicated turn and shell input loops become one generic operation
-driver (detailed in the Boundary), so the catalog stays **34/31/8**.
+driver (detailed in the Boundary), so the catalog stays **34/31/8**. A seventh
+increment puts `/compact` (and `/compact force`) and the three long-running ingest
+runs (`run`/`refresh`/`resume`) on that operation pump as full-screen commands,
+growing the catalog to **34/33/8** (`/compact_force` stays a hidden-but-typeable
+alias).
 
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
@@ -157,8 +161,9 @@ plus one breadcrumb, and a failure is one bounded Warning — every size measure
 on the serialized sanitized body including separators and the truncation marker.
 The commands stay effectful; a shared UI-neutral `CommandOutput` result feeds the
 inline host (byte/item-equivalent) and the full-screen presenter. `/ingest`'s row
-stays deferred until its three long-running actions dispatch (its bare form is a
-long-running action); a production `Fast`/`LongRunning` classifier routes ingest.
+stayed deferred through that increment pending its three long-running actions (its
+bare form is a long-running action), now dispatched by the seventh increment below;
+a production `Fast`/`LongRunning` classifier routes ingest.
 The sixth increment is a pure internal realization with no surface change: the
 full-screen turn and shell input pumps — previously duplicated arm-for-arm — are
 unified into one generic operation driver behind a small injected terminal-I/O
@@ -172,6 +177,21 @@ operation-specific, and the completion order (runtime-event drain → projection
 draw → boundary cleanup) is unchanged, with post-loop approval/question denial
 still running when a draw or input error propagates. The catalog stays **34/31/8**
 and no parser, provider-input routing, Report presenter, or pair pump changes.
+The seventh increment makes `/compact` (and `/compact force`) and the three
+long-running ingest runs (`run`/`refresh`/`resume`) full-screen commands on that
+operation pump. A pumped slash command enters the serial chain as a head variant
+with no timeline item (so no synthetic transcript row); it runs busy, so a single
+Ctrl+C cancels only the command and returns to chat — never an exit: compaction's
+summarizer future is dropped before its history mutation (leaving the conversation
+unchanged), and an ingest walk pauses (resumable). Compaction has no approvals and
+no inner runtime; ingest is a `spawn_blocking` walk whose `Fn() -> bool` predicate
+is a cloned cancellation token plus a cancel-on-drop owner, so every future-drop
+path signals the walk rather than orphaning it. Ingest progress reaches the
+timeline through a UI-agnostic progress lane draining a shared quarter-mark
+throttle, so the generic driver never learns the ingest types; the preflight,
+throttle, and result formatting are shared verbatim with the inline host. The
+catalog grows to **34/33/8** (`compact_force` stays a hidden-but-typeable alias;
+pair unchanged); no new ADR.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 

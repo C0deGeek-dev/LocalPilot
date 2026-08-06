@@ -6,13 +6,21 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`/compact` and the long-running ingest runs now work in full-screen chat.**
+  `/compact` (and `/compact force`) summarize the conversation on the same live
+  pump a turn uses — a single Ctrl+C cancels the compaction and returns to the
+  chat, leaving the conversation unchanged, without leaving full-screen. `/ingest
+  run`, `/ingest refresh`, and `/ingest resume` run the workspace walk in
+  full-screen with live progress; a single Ctrl+C pauses a run (resume it with
+  `/ingest resume`).
+
 - **Synchronous commands work in full-screen chat with bounded output.** `/tree`,
   `/knowledge`, `/context`, `/agents`, `/skills`, and `/bg` now run in the
   full-screen session. Short output is shown inline; long output opens a
   scrollable report you can copy with `Ctrl+C` and close with `Esc`, instead of
   flooding the conversation with dozens of lines. The fast `/ingest` subcommands
   (status, preview, pause, and the rest) run the same way; the long-running ingest
-  runs remain a later addition.
+  runs are covered in the entry above.
 
 - **`/think` hides or shows reasoning in full-screen chat.** Toggling reasoning
   off removes reasoning items from the timeline — render, scrolling, search, and

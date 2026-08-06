@@ -131,9 +131,12 @@ temporary draft before it is removed. The temporary file contains visible
 placeholder text only—not compact-paste or image payload bytes—and edited input
 is capped at 8 MiB.
 
-The full-screen slash picker lists only commands that have a real replacement-
-host path: `/model`, `/new`, `/fork`, `/clone`, `/clear`, `/quit`, `/help`,
-`/theme`, `/settings`, `/diff`, and the local `/search` overlay. `/model` opens
+The full-screen slash picker lists the commands that have a real replacement-host
+path: session and model management (`/model`, `/new`, `/fork`, `/clone`, `/clear`,
+`/quit`), the `/help`/`/theme`/`/settings`/`/diff`/`/search` takeovers, the
+permission-profile / `/effort` / `/think` toggles, the synchronous report commands
+(`/tree`, `/knowledge`, `/context`, `/agents`, `/skills`, `/bg`), and `/compact`
+and the long-running `/ingest` runs on the operation pump. `/model` opens
 a second-level picker built from configured providers; an exact
 `/model <provider>` also executes directly.
 `/help` opens a scrollable full-screen keyboard and command reference; Escape

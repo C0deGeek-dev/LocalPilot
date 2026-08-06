@@ -663,6 +663,57 @@ impl std::fmt::Debug for QueuedOperation {
     }
 }
 
+/// A pumped ingest run — the three long-running variants only, so a fast ingest
+/// subcommand cannot be represented in a pumped slash (a misroute is a compile
+/// error, not a comment).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PumpedIngest {
+    Run,
+    Refresh,
+    Resume,
+}
+
+/// A slash command that runs on the operation pump rather than synchronously.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PumpedSlash {
+    Compact { force: bool },
+    Ingest(PumpedIngest),
+}
+
+/// How the full-screen host dispatches a parsed slash action.
+enum SlashRoute {
+    Pumped(PumpedSlash),
+    Synchronous(SlashAction),
+}
+
+/// One entry in the serial operation chain. Only the head may be a pumped slash
+/// command; the queue itself stays prompt/shell-only, so `QueuedOperation::item_id`
+/// stays total and no synthetic slash timeline row is minted.
+enum SerialOperation {
+    Queued(QueuedOperation),
+    PumpedSlash(PumpedSlash),
+}
+
+/// Route a parsed full-screen slash action: `/compact[ force]` and the three
+/// long-running ingest actions pump; everything else — including the eleven fast
+/// ingest subcommands and every other command — runs synchronously. Consumes the
+/// action, so there is no reparse or clone.
+fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
+    match action {
+        SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
+        SlashAction::Ingest(localpilot_tui::IngestAction::Run) => {
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
+        }
+        SlashAction::Ingest(localpilot_tui::IngestAction::Refresh) => {
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Refresh))
+        }
+        SlashAction::Ingest(localpilot_tui::IngestAction::Resume) => {
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
+        }
+        other => SlashRoute::Synchronous(other),
+    }
+}
+
 impl std::fmt::Debug for QueuedPrompt {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2660,6 +2711,9 @@ fn prepare_shell_operation(
     Some(QueuedOperation::Shell(QueuedShell { command, item_id }))
 }
 
+// Parse + delegate wrapper retained for the focused slash tests; production parses
+// once at the idle dispatch site and routes to the pump or `_action` directly.
+#[cfg(test)]
 async fn execute_fullscreen_slash(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
@@ -2677,6 +2731,30 @@ async fn execute_fullscreen_slash(
             "invalid slash command input".to_string(),
         ));
         return false;
+    };
+    execute_fullscreen_slash_action(app, runtime, config, cwd, action).await
+}
+
+/// Execute an already-parsed synchronous full-screen slash action. Pumped actions
+/// (`/compact`, long-running `/ingest`) are intercepted by `route_fullscreen_slash`
+/// at the idle dispatch site before reaching here.
+async fn execute_fullscreen_slash_action(
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &localpilot_config::Config,
+    cwd: &Path,
+    action: SlashAction,
+) -> bool {
+    // The command word for the still-deferred arms, derived from the parsed action
+    // (the raw prompt is no longer threaded here).
+    let deferred_label = match &action {
+        SlashAction::SetMode(localpilot_tui::Mode::Agent) => "agent",
+        SlashAction::SetMode(localpilot_tui::Mode::Harness) => "harness",
+        SlashAction::SetMode(localpilot_tui::Mode::Research) => "research",
+        SlashAction::HarnessResume => "harness-resume",
+        SlashAction::WaitResume => "wait-resume",
+        SlashAction::Research(_) => "research",
+        _ => "command",
     };
     match action {
         SlashAction::Model {
@@ -2940,8 +3018,11 @@ async fn execute_fullscreen_slash(
                 crate::repl::background_command_output(runtime.background_registry(), command);
             present_command_report(app, command_report("bg", out));
         }
-        // Fast ingest subcommands present here; the three long-running ones stay
-        // deferred (a later change wires them through the pumped progress path).
+        // Only the Fast ingest subcommands are dispatched synchronously here.
+        // `route_fullscreen_slash` intercepts the long-running runs upstream and
+        // drives them on the operation pump, so the long-running arm is an
+        // unreachable defensive guard, kept for exhaustiveness so a routing
+        // regression surfaces as a notice rather than silently doing nothing.
         SlashAction::Ingest(action) => match action.tier() {
             localpilot_tui::IngestTier::Fast => {
                 let (output, result) = crate::repl::ingest_slash_output(cwd, action);
@@ -2950,27 +3031,28 @@ async fn execute_fullscreen_slash(
             }
             localpilot_tui::IngestTier::LongRunning => {
                 app.apply_runtime(RuntimeUpdate::Notice(
-                    "/ingest is not available in full-screen chat yet".to_string(),
+                    "internal: long-running ingest reached the synchronous dispatch path"
+                        .to_string(),
                 ));
             }
         },
-        // The commands the full-screen host does not dispatch yet. Listed
-        // explicitly (not a wildcard) so a new `SlashAction` variant that no one
-        // has taught this host about is a compile error, not a silent deferral.
+        // `/compact` is pumped by `route_fullscreen_slash` upstream, so this arm is
+        // an unreachable defensive guard (kept explicit, not a wildcard, so a new
+        // `SlashAction` variant is a compile error rather than a silent deferral).
+        SlashAction::Compact { .. } => {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                "internal: /compact reached the synchronous dispatch path".to_string(),
+            ));
+        }
+        // The commands the full-screen host genuinely does not dispatch yet. Listed
+        // explicitly (not a wildcard) so a new `SlashAction` variant that no one has
+        // taught this host about is a compile error, not a silent deferral.
         SlashAction::SetMode(_)
-        | SlashAction::Compact { .. }
         | SlashAction::HarnessResume
         | SlashAction::WaitResume
         | SlashAction::Research(_) => {
-            let command = submitted
-                .prompt
-                .trim()
-                .trim_start_matches('/')
-                .split_whitespace()
-                .next()
-                .unwrap_or("command");
             app.apply_runtime(RuntimeUpdate::Notice(format!(
-                "/{command} is not available in full-screen chat yet"
+                "/{deferred_label} is not available in full-screen chat yet"
             )));
         }
     }
@@ -3665,8 +3747,51 @@ async fn run_event_loop(
                         edit_composer_externally(terminal, modes, app).await?;
                     }
                     AppCommand::RunSlash(submitted) => {
-                        if execute_fullscreen_slash(app, runtime, config, cwd, submitted).await {
-                            break;
+                        if !submitted.images.is_empty() {
+                            app.apply_runtime(RuntimeUpdate::Notice(
+                                "image attachments were ignored for the slash command".to_string(),
+                            ));
+                        }
+                        let Some(action) =
+                            parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt)
+                        else {
+                            app.apply_runtime(RuntimeUpdate::Warning(
+                                "invalid slash command input".to_string(),
+                            ));
+                            continue;
+                        };
+                        match route_fullscreen_slash(action) {
+                            SlashRoute::Pumped(command) => {
+                                if drive_operation_chain(
+                                    terminal,
+                                    app,
+                                    runtime,
+                                    SlashContext {
+                                        approval_rx: &mut *approval_rx,
+                                        question_rx: &mut *question_rx,
+                                        cwd,
+                                        history,
+                                        mouse_state: &mut mouse_state,
+                                        paste_burst: &mut paste_burst,
+                                        workspace_index: &mut *workspace_index,
+                                    },
+                                    SerialOperation::PumpedSlash(command),
+                                    &mut queue,
+                                )
+                                .await?
+                                {
+                                    break;
+                                }
+                            }
+                            SlashRoute::Synchronous(action) => {
+                                if execute_fullscreen_slash_action(
+                                    app, runtime, config, cwd, action,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
                     AppCommand::Submit(submitted) => {
@@ -3688,7 +3813,7 @@ async fn run_event_loop(
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
                             },
-                            operation,
+                            SerialOperation::Queued(operation),
                             &mut queue,
                         )
                         .await?
@@ -3713,7 +3838,7 @@ async fn run_event_loop(
                                 paste_burst: &mut paste_burst,
                                 workspace_index: &mut *workspace_index,
                             },
-                            operation,
+                            SerialOperation::Queued(operation),
                             &mut queue,
                         )
                         .await?
@@ -3767,14 +3892,22 @@ async fn drive_operation_chain(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,
     mut ctx: SlashContext<'_>,
-    first: QueuedOperation,
+    first: SerialOperation,
     queue: &mut VecDeque<QueuedOperation>,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(operation) = current {
         let next_item = queue.front().map(QueuedOperation::item_id);
         match operation {
-            QueuedOperation::Prompt(prompt) => {
+            // A pumped slash command has no timeline item; it owns its own Busy
+            // transition (compact immediately, ingest after preflight).
+            SerialOperation::PumpedSlash(command) => {
+                if drive_slash_command(terminal, app, runtime, &mut ctx, command, queue).await? {
+                    discard_queued_operations(queue);
+                    return Ok(true);
+                }
+            }
+            SerialOperation::Queued(QueuedOperation::Prompt(prompt)) => {
                 let _ = app.activate_prompt(prompt.item_id);
                 app.begin_work_before(next_item);
                 if drive_turn(
@@ -3792,7 +3925,7 @@ async fn drive_operation_chain(
                     return Ok(true);
                 }
             }
-            QueuedOperation::Shell(shell) => {
+            SerialOperation::Queued(QueuedOperation::Shell(shell)) => {
                 app.begin_work_before(next_item);
                 let _ = app.activate_shell(shell.item_id);
                 if drive_shell(terminal, app, runtime, &mut ctx, shell, queue).await? {
@@ -3801,13 +3934,253 @@ async fn drive_operation_chain(
                 }
             }
         }
-        current = queue.pop_front();
+        current = queue.pop_front().map(SerialOperation::Queued);
     }
     Ok(false)
 }
 
 fn discard_queued_operations(queue: &mut VecDeque<QueuedOperation>) {
     queue.clear();
+}
+
+/// Run a pumped slash command on the operation pump. Each variant owns its own
+/// Busy transition (compact immediately; ingest only after a successful preflight).
+async fn drive_slash_command(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    command: PumpedSlash,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    match command {
+        PumpedSlash::Compact { force } => {
+            drive_compact(terminal, app, runtime, ctx, force, queue).await
+        }
+        PumpedSlash::Ingest(action) => {
+            drive_ingest(terminal, app, runtime, ctx, action, queue).await
+        }
+    }
+}
+
+/// `/compact` and `/compact force` on the pump. No approvals, no inner runtime; the
+/// summarizer future is dropped on cancel (its history mutation happens only on
+/// completion), so a single Ctrl+C leaves the conversation unchanged and returns to
+/// idle without exiting full-screen chat.
+async fn drive_compact(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    force: bool,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+    };
+    // The two methods return distinct opaque future types, so the branch awaits
+    // inside a single `async` block rather than selecting a value.
+    let operation = async {
+        tokio::select! {
+            summary = async {
+                if force {
+                    runtime.compact_conversation_force().await
+                } else {
+                    runtime.compact_conversation().await
+                }
+            } => Some(summary),
+            _ = cancel.cancelled() => None,
+        }
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        move |app: &mut AppModel, summary| apply_compact_result(app, summary, force),
+    )
+    .await
+}
+
+/// Project a compaction result into the full-screen host: a cancelled run posts the
+/// parity notice; a completed run posts `ContextUsage` plus the shared result notice;
+/// either way the operation ends. Extracted so the projection is unit-testable
+/// without a live runtime.
+fn apply_compact_result(
+    app: &mut AppModel,
+    summary: Option<localpilot_harness::ManualCompaction>,
+    force: bool,
+) {
+    match summary {
+        None => app.apply_runtime(RuntimeUpdate::Notice("compaction cancelled".to_string())),
+        Some(result) => {
+            app.apply_runtime(RuntimeUpdate::ContextUsage {
+                used: result.context_used,
+                limit: result.context_limit,
+            });
+            app.apply_runtime(RuntimeUpdate::Notice(crate::repl::compact_result_notice(
+                &result, force,
+            )));
+        }
+    }
+    app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+}
+
+/// The run mode + resume flag for a pumped ingest action. `Resume` requests a
+/// refresh whose planned mode the preflight resolves.
+fn pumped_ingest_mode(action: PumpedIngest) -> (localpilot_localmind::RunMode, bool) {
+    match action {
+        PumpedIngest::Run => (localpilot_localmind::RunMode::Full, false),
+        PumpedIngest::Refresh => (localpilot_localmind::RunMode::Refresh, false),
+        PumpedIngest::Resume => (localpilot_localmind::RunMode::Refresh, true),
+    }
+}
+
+/// Cancel-on-drop owner for the blocking ingest walk: if the operation future is
+/// dropped before a normal join (a second Ctrl+C `Exit`, `/exit`, or a driver I/O
+/// error), the walk's shared token is cancelled so the still-running `spawn_blocking`
+/// worker pauses at its next per-file check instead of orphaning a full ingest. A
+/// normal join disarms it, so a completed walk is not re-cancelled.
+struct CancelOnDrop(Option<CancellationToken>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(token) = &self.0 {
+            token.cancel();
+        }
+    }
+}
+
+impl CancelOnDrop {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+/// `ingest run|refresh|resume` on the pump. Preflight runs before Busy; the walk is
+/// a `spawn_blocking` worker whose `Fn() -> bool` predicate is a cloned
+/// `CancellationToken`, so a single Ctrl+C (`CancelWork`) pauses it (resumable) and a
+/// dropped future still cancels it. Progress rides a `ProgressLane` closure that owns
+/// the receiver + throttle state.
+async fn drive_ingest(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    ctx: &mut SlashContext<'_>,
+    action: PumpedIngest,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let (requested_mode, resume) = pumped_ingest_mode(action);
+    let prepared = match crate::ingest_progress::ingest_preflight(ctx.cwd, requested_mode, resume) {
+        crate::ingest_progress::IngestPreflight::EarlyExit(notice) => {
+            // Never enters Busy, never starts a worker.
+            app.apply_runtime(RuntimeUpdate::Notice(notice));
+            return Ok(false);
+        }
+        crate::ingest_progress::IngestPreflight::Proceed(prepared) => prepared,
+    };
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    let cancel = CancellationToken::new();
+    app.begin_work();
+    app.apply_runtime(RuntimeUpdate::Notice(prepared.start_notice));
+
+    let (tx, mut progress_rx) = mpsc::unbounded_channel::<localpilot_localmind::IngestProgress>();
+    let root = ctx.cwd.to_path_buf();
+    let config = prepared.config;
+    let mode = prepared.mode;
+    let predicate = cancel.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        localpilot_localmind::ingest_run_with_progress(
+            &root,
+            &config,
+            mode,
+            &|| predicate.is_cancelled(),
+            &mut |stage| {
+                let _ = tx.send(stage);
+            },
+        )
+    });
+    // The guard is live BEFORE the future exists and is captured by it, so every
+    // drop path cancels the walk — including the pump returning `Exit`/error before
+    // the operation is ever polled (a dropped `JoinHandle` would otherwise detach the
+    // already-running `spawn_blocking` and never cancel the token). Correctness does
+    // not depend on the operation being polled at all; disarm only after a normal join.
+    let guard = CancelOnDrop(Some(cancel.clone()));
+    let operation = async move {
+        let result = handle.await;
+        guard.disarm();
+        result
+    };
+
+    let mut total = 0_u64;
+    let mut bucket = 0_u64;
+    let mut progress = |app: &mut AppModel| {
+        crate::ingest_progress::drain_ingest_progress_with(
+            &mut progress_rx,
+            &mut total,
+            &mut bucket,
+            |message| app.apply_runtime(RuntimeUpdate::Notice(message)),
+        );
+    };
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::Tick(&mut progress),
+        operation,
+        |app: &mut AppModel, result| {
+            app.apply_runtime(RuntimeUpdate::Notice(
+                crate::ingest_progress::ingest_result_notice(result),
+            ));
+            app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        },
+    )
+    .await
 }
 
 /// The terminal I/O the full-screen operation pump depends on. Production wraps
@@ -3846,6 +4219,8 @@ enum QuestionMode {
 enum OperationKind {
     Turn,
     Shell,
+    /// A pumped slash command (`/compact`, long-running `/ingest`).
+    Command,
 }
 
 impl OperationKind {
@@ -3853,6 +4228,7 @@ impl OperationKind {
         match self {
             Self::Turn => "poll full-screen turn input",
             Self::Shell => "poll full-screen shell input",
+            Self::Command => "poll full-screen command input",
         }
     }
 
@@ -3860,6 +4236,7 @@ impl OperationKind {
         match self {
             Self::Turn => "read full-screen turn input",
             Self::Shell => "read full-screen shell input",
+            Self::Command => "read full-screen command input",
         }
     }
 
@@ -3867,6 +4244,25 @@ impl OperationKind {
         match self {
             Self::Turn => "poll after active full-screen paste key",
             Self::Shell => "poll after active shell paste key",
+            Self::Command => "poll after active command paste key",
+        }
+    }
+}
+
+/// A UI-agnostic progress hook the pump drains before each tick draw and once at
+/// completion (before the projection), so a long-running operation can surface
+/// milestones without the operation future and the pump both mutably borrowing
+/// `AppModel`. The generic driver never learns what the closure does — the ingest
+/// consumer supplies a closure owning its receiver + throttle state.
+enum ProgressLane<'a> {
+    None,
+    Tick(&'a mut dyn FnMut(&mut AppModel)),
+}
+
+impl ProgressLane<'_> {
+    fn drain(&mut self, app: &mut AppModel) {
+        if let ProgressLane::Tick(sink) = self {
+            sink(app);
         }
     }
 }
@@ -3921,6 +4317,7 @@ async fn drive_shell(
         OperationKind::Shell,
         EventLane::Bare,
         QuestionMode::Inert,
+        ProgressLane::None,
         operation,
         |app: &mut AppModel, result| {
             let output = result.presentation.map_or_else(
@@ -3959,6 +4356,7 @@ async fn drive_fullscreen_operation<F, T, P, R, D>(
     kind: OperationKind,
     lane: EventLane<'_>,
     questions: QuestionMode,
+    mut progress: ProgressLane<'_>,
     operation: F,
     on_complete: impl FnOnce(&mut AppModel, T),
 ) -> Result<bool>
@@ -4000,6 +4398,7 @@ where
                 biased;
                 _ = tick.tick() => {
                     workspace_index.refresh(app);
+                    progress.drain(app);
                     let mut hit_map = (io.draw)(app)?;
                     if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
                         if pending.is_none() && pending_questions.is_none() {
@@ -4082,6 +4481,7 @@ where
                 }
                 reason = &mut operation => {
                     drain_runtime_events(app, lane_events, &mut pending_steer_items);
+                    progress.drain(app);
                     if let Some(done) = on_complete.take() {
                         done(app, reason);
                     }
@@ -4266,6 +4666,7 @@ async fn drive_turn(
             steering: Some(&steer),
         },
         QuestionMode::Serviced,
+        ProgressLane::None,
         operation,
         |app: &mut AppModel, reason| {
             app.apply_runtime(map_runtime_event(RuntimeEvent::Stopped(reason)));
@@ -7340,20 +7741,9 @@ mod tests {
                 "{cmd} must not start a model turn",
             );
         }
-        // The three long-running ingest forms stay deferred with no takeover.
-        for cmd in ["/ingest", "/ingest refresh", "/ingest resume"] {
-            let mut app = app();
-            let _ = execute_fullscreen_slash(
-                &mut app,
-                &mut bundle.runtime,
-                &config,
-                cwd,
-                slash_input(cmd),
-            )
-            .await;
-            assert!(deferred(&app), "{cmd} stays deferred this subject");
-            assert!(!app.has_takeover(), "{cmd} opens no takeover");
-        }
+        // The long-running ingest runs and `/compact` are pumped by
+        // `route_fullscreen_slash` before dispatch, never routed synchronously — that
+        // routing is locked by `route_fullscreen_slash_pumps_compact_and_long_ingest_only`.
         bundle.runtime.close();
     }
 
@@ -8782,7 +9172,9 @@ mod tests {
             ("rename", "Rename this session (/rename <text>)"),
             ("continue", "Continue the previous session"),
             ("clear", "Clear the conversation view"),
+            ("compact", "Summarize and compact the context"),
             ("resume", "Continue a previous session"),
+            ("ingest", "Manage workspace ingestion"),
             ("knowledge", "Query the knowledge base"),
             ("context", "Build a context bundle"),
             (
@@ -8802,13 +9194,13 @@ mod tests {
             ("settings", "Inspect terminal chat settings"),
             ("diff", "Review tracked workspace changes"),
         ];
-        assert_eq!(full_screen.len(), 31);
+        assert_eq!(full_screen.len(), 33);
         for (got, want) in full_screen.iter().zip(expected_full_screen.iter()) {
             assert_eq!((got.0.as_str(), got.1.as_str()), *want);
         }
         // `agent`/`harness` stay deferred (no real full-screen mode transition);
-        // `ingest` stays deferred for now (bare `/ingest` is long-running).
-        for deferred in ["agent", "harness", "compact", "research", "ingest"] {
+        // `compact`/`ingest` now run on the operation pump.
+        for deferred in ["agent", "harness", "research"] {
             assert!(!full_screen.iter().any(|(name, _)| name == deferred));
         }
 
@@ -10881,6 +11273,7 @@ mod tests {
                 steering: Some(steer),
             },
             QuestionMode::Serviced,
+            ProgressLane::None,
             operation,
             on_complete,
         )
@@ -10930,6 +11323,7 @@ mod tests {
             OperationKind::Shell,
             EventLane::Bare,
             QuestionMode::Inert,
+            ProgressLane::None,
             operation,
             on_complete,
         )
@@ -10984,10 +11378,538 @@ mod tests {
                 steering: None,
             },
             QuestionMode::Inert,
+            ProgressLane::None,
             operation,
             on_complete,
         )
         .await
+    }
+
+    // Test harness for the pumped-command config (Bare / Inert / Command) with an
+    // injectable `ProgressLane` — the seam the compact and ingest wrappers use.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_command_loop<F, T, P, R, D>(
+        app: &mut AppModel,
+        io: &mut TerminalIo<P, R, D>,
+        approval_rx: &mut mpsc::UnboundedReceiver<ApprovalCall>,
+        question_rx: &mut mpsc::UnboundedReceiver<QuestionCall>,
+        cancel: &CancellationToken,
+        image_capability: &ImageCapabilitySnapshot,
+        queue: &mut VecDeque<QueuedOperation>,
+        history: &localpilot_store::PromptHistory,
+        cwd: &Path,
+        mouse_state: &mut MouseState,
+        paste_burst: &mut PasteBurst,
+        workspace_index: &mut WorkspaceFileIndex,
+        progress: ProgressLane<'_>,
+        operation: F,
+        on_complete: impl FnOnce(&mut AppModel, T),
+    ) -> Result<bool>
+    where
+        F: std::future::Future<Output = T>,
+        P: FnMut(Duration) -> io::Result<bool>,
+        R: FnMut() -> io::Result<Event>,
+        D: FnMut(&AppModel) -> Result<localpilot_terminal_ui::HitMap>,
+    {
+        drive_fullscreen_operation(
+            app,
+            SlashContext {
+                approval_rx,
+                question_rx,
+                cwd,
+                history,
+                mouse_state,
+                paste_burst,
+                workspace_index,
+            },
+            io,
+            cancel,
+            image_capability,
+            queue,
+            OperationKind::Command,
+            EventLane::Bare,
+            QuestionMode::Inert,
+            progress,
+            operation,
+            on_complete,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn progress_lane_drains_before_the_draw_and_before_the_completion_projection() {
+        let mut app = app();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let draw_trace = trace.clone();
+        let mut io = TerminalIo {
+            poll: |_t: Duration| Ok(false),
+            read: || Ok(Event::FocusGained),
+            draw: move |a: &AppModel| {
+                draw_trace.borrow_mut().push("draw");
+                Ok(draw_hit_map(a, 80, 24))
+            },
+        };
+        let progress_trace = trace.clone();
+        let mut progress_sink =
+            move |_app: &mut AppModel| progress_trace.borrow_mut().push("progress");
+        let projection_trace = trace.clone();
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::Tick(&mut progress_sink),
+            complete_after(80),
+            move |_app: &mut AppModel, _t: ()| projection_trace.borrow_mut().push("projection"),
+        )
+        .await
+        .expect("command loop completes");
+        assert!(!out, "natural completion returns false");
+        let trace = trace.borrow();
+        // At least one tick fires before completion: progress drains before its draw.
+        assert_eq!(
+            trace.first(),
+            Some(&"progress"),
+            "progress drains before the first draw"
+        );
+        assert_eq!(trace.get(1), Some(&"draw"));
+        // Completion: progress drains before the projection, then the final draw — a
+        // milestone queued just before completion is not lost.
+        assert_eq!(
+            &trace[trace.len() - 3..],
+            &["progress", "projection", "draw"],
+            "progress drains before the completion projection, then the final draw"
+        );
+        assert_eq!(
+            trace.iter().filter(|entry| **entry == "projection").count(),
+            1,
+            "exactly one projection"
+        );
+    }
+
+    fn manual_compaction(
+        compacted: bool,
+        fallback: Option<&str>,
+    ) -> localpilot_harness::ManualCompaction {
+        localpilot_harness::ManualCompaction {
+            compacted,
+            context_used: 100,
+            context_limit: 1000,
+            requested_mode: localpilot_harness::CompactionMode::Deterministic,
+            used_mode: localpilot_harness::CompactionMode::SmartWithFallback,
+            fallback_reason: fallback.map(str::to_string),
+        }
+    }
+
+    fn timeline_has(app: &AppModel, needle: &str) -> bool {
+        app.active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains(needle))
+    }
+
+    #[test]
+    fn compact_projection_posts_context_usage_and_the_completed_notice() {
+        let mut app = app();
+        app.begin_work();
+        apply_compact_result(&mut app, Some(manual_compaction(true, None)), false);
+        assert!(
+            timeline_has(&app, "compacted conversation history"),
+            "the completed compaction notice is posted"
+        );
+    }
+
+    #[test]
+    fn compact_projection_reports_fallback_and_no_op_variants() {
+        let mut fallback_app = app();
+        fallback_app.begin_work();
+        apply_compact_result(
+            &mut fallback_app,
+            Some(manual_compaction(true, Some("summarizer unavailable"))),
+            false,
+        );
+        assert!(timeline_has(
+            &fallback_app,
+            "fallback: summarizer unavailable"
+        ));
+
+        let mut forced_app = app();
+        forced_app.begin_work();
+        apply_compact_result(&mut forced_app, Some(manual_compaction(false, None)), true);
+        assert!(
+            timeline_has(&forced_app, "nothing left to compact"),
+            "force + not compacted reports the no-op line"
+        );
+
+        let mut ordinary_app = app();
+        ordinary_app.begin_work();
+        apply_compact_result(
+            &mut ordinary_app,
+            Some(manual_compaction(false, None)),
+            false,
+        );
+        assert!(
+            timeline_has(&ordinary_app, "already compact enough"),
+            "ordinary + not compacted reports the already-compact line"
+        );
+    }
+
+    #[test]
+    fn compact_projection_cancelled_posts_only_the_parity_notice() {
+        let mut app = app();
+        app.begin_work();
+        apply_compact_result(&mut app, None, false);
+        assert!(timeline_has(&app, "compaction cancelled"));
+        assert!(
+            !timeline_has(&app, "context 100/1000"),
+            "a cancelled compaction posts no ContextUsage/result line"
+        );
+    }
+
+    struct DropWitness(std::rc::Rc<std::cell::Cell<bool>>);
+    impl Drop for DropWitness {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_pumped_slash_command_leaves_the_conversation_unchanged() {
+        let mut app = app();
+        app.begin_work(); // busy → Ctrl+C is CancelWork (cancel), not Exit
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let mut io = characterization_io(
+            queued(vec![Event::Key(press(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))]),
+            cell(0),
+            cell(0),
+            None,
+        );
+        let dropped = std::rc::Rc::new(std::cell::Cell::new(false));
+        // The inner "summarizer" future carries a Drop witness and never completes;
+        // cancellation must drop it (its history mutation would only run on completion)
+        // and yield `None`.
+        let operation = {
+            let witness = dropped.clone();
+            let cancel = cancel.clone();
+            async move {
+                let summarizer = async move {
+                    let _guard = DropWitness(witness);
+                    std::future::pending::<localpilot_harness::ManualCompaction>().await
+                };
+                tokio::select! {
+                    summary = summarizer => Some(summary),
+                    _ = cancel.cancelled() => None,
+                }
+            }
+        };
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            operation,
+            |app: &mut AppModel, summary| apply_compact_result(app, summary, false),
+        )
+        .await
+        .expect("command loop completes");
+        assert!(
+            !out,
+            "a single Ctrl+C cancels the command and does NOT exit full-screen chat"
+        );
+        assert!(
+            dropped.get(),
+            "the inner summarizer future was dropped on cancel (never awaited to its mutation)"
+        );
+        assert!(cancel.is_cancelled());
+        assert!(timeline_has(&app, "compaction cancelled"));
+        assert!(
+            !timeline_has(&app, "compacted conversation history"),
+            "no success projection ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pump_error_drops_the_ingest_operation_and_cancels_the_walk() {
+        // Real command-driver seam: a draw error tears down the pump and drops the
+        // pinned operation future. Because the `CancelOnDrop` guard is captured by that
+        // future (built before it, exactly like `drive_ingest`), the drop cancels the
+        // walk — a dropped `JoinHandle` would otherwise detach the running
+        // `spawn_blocking` with the token uncancelled.
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_q, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let pump_cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+
+        // A separate token that ONLY the captured guard can cancel — the pump never
+        // touches it, so its cancellation proves the drop path, not a pump cancel.
+        let walk = CancellationToken::new();
+        let guard = CancelOnDrop(Some(walk.clone()));
+        let operation = async move {
+            let _guard = guard; // captured live, exactly like `drive_ingest`
+            std::future::pending::<()>().await
+        };
+
+        let mut io = TerminalIo {
+            poll: |_t: Duration| Ok(false),
+            read: || Ok(Event::FocusGained),
+            draw: |_a: &AppModel| Err(anyhow::anyhow!("draw failed")),
+        };
+        let out = drive_command_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &pump_cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            ProgressLane::None,
+            operation,
+            |_app: &mut AppModel, _t: ()| {},
+        )
+        .await;
+        assert!(out.is_err(), "a draw error propagates as Err");
+        assert!(
+            walk.is_cancelled(),
+            "the pump error dropped the operation future, whose captured guard cancels the walk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_never_polled_ingest_future_cancels_the_walk_via_the_captured_guard() {
+        // `drive_ingest` builds the `CancelOnDrop` guard BEFORE the async operation and
+        // captures it, so dropping the future without EVER polling it still cancels the
+        // walk. A guard built inside the body would never run on the never-polled path,
+        // detaching the running `spawn_blocking` with the token uncancelled. Locks the
+        // exact construction (the CX-accepted explicit unpolled-future form).
+        let walk = CancellationToken::new();
+        let guard = CancelOnDrop(Some(walk.clone()));
+        let operation = async move {
+            let _guard = guard; // captured live before the future is ever polled
+            std::future::pending::<()>().await
+        };
+        assert!(!walk.is_cancelled());
+        drop(operation); // never polled
+        assert!(
+            walk.is_cancelled(),
+            "dropping the never-polled future cancels the walk via the captured guard"
+        );
+    }
+
+    #[test]
+    fn pumped_slash_notices_stay_before_a_typeahead_prompt_then_it_activates_in_order() {
+        // A pumped slash runs Busy while the user types ahead. The typeahead prompt is
+        // enqueued as a pending row; the operation's later progress/result notices must
+        // still land BEFORE that row (the `active_insert_before` mechanism the pumped
+        // path relies on via `begin_work` → append-pending → insert-before), then the
+        // queued prompt activates in serial order once the queue drains.
+        let mut app = app();
+        app.begin_work(); // the pumped op's Busy transition (insert-before = None)
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let cwd = Path::new("fixture");
+        let mut queue = VecDeque::new();
+        let steer = SteerQueue::default();
+        let mut pending_steer_items = VecDeque::new();
+
+        // Start notice, emitted before any typeahead — appends at the end.
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "ingesting project knowledge (full)…".to_string(),
+        ));
+
+        // The user types ahead and submits during the operation → a pending prompt row,
+        // which sets the active insertion point to just before itself.
+        app.editor.insert("next prompt");
+        assert!(!handle_turn_event_with_steering(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            cwd,
+            &image_capability(false),
+            &steer,
+            &mut pending_steer_items,
+        ));
+        let queued_id = queue.front().expect("typeahead queued").item_id();
+        assert!(
+            app.active_timeline()
+                .item(queued_id)
+                .expect("queued item")
+                .pending,
+            "the typeahead prompt is a pending row"
+        );
+
+        // Progress + result notices arrive AFTER the prompt was queued; they must still
+        // insert before the pending row via the active insertion point.
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "ingest: parsed 1/1 file(s)".to_string(),
+        ));
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "ingestion completed: 1 file(s), 1 chunk(s)".to_string(),
+        ));
+
+        fn idx(app: &AppModel, needle: &str) -> usize {
+            app.active_timeline()
+                .items()
+                .iter()
+                .position(|item| item.text.contains(needle))
+                .unwrap_or_else(|| panic!("missing timeline item: {needle}"))
+        }
+        let prompt_idx = idx(&app, "next prompt");
+        assert!(idx(&app, "ingesting project knowledge") < prompt_idx);
+        assert!(idx(&app, "ingest: parsed 1/1") < prompt_idx);
+        assert!(idx(&app, "ingestion completed") < prompt_idx);
+        assert_eq!(
+            prompt_idx,
+            app.active_timeline().items().len() - 1,
+            "the queued prompt row stays last — every pumped notice is before it"
+        );
+
+        // Serial activation: draining the queue activates the prompt (the chain's
+        // `activate_prompt` step); the row de-pends and its order is unchanged.
+        let queued = queue.pop_front().expect("one queued prompt");
+        assert_eq!(queued.prompt().text, "next prompt");
+        assert!(app.activate_prompt(queued.item_id()));
+        assert!(
+            !app.active_timeline().item(queued_id).expect("row").pending,
+            "activation clears pending"
+        );
+        assert_eq!(
+            idx(&app, "next prompt"),
+            app.active_timeline().items().len() - 1,
+            "activation preserves serial order (prompt still after every notice)"
+        );
+    }
+
+    #[test]
+    fn route_fullscreen_slash_pumps_compact_and_long_ingest_only() {
+        use localpilot_tui::IngestAction;
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Compact { force: false }),
+            SlashRoute::Pumped(PumpedSlash::Compact { force: false })
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Compact { force: true }),
+            SlashRoute::Pumped(PumpedSlash::Compact { force: true })
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Ingest(IngestAction::Run)),
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Ingest(IngestAction::Refresh)),
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Refresh))
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Ingest(IngestAction::Resume)),
+            SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Resume))
+        ));
+        // The eleven fast ingest subcommands run synchronously (never pumped).
+        let fast = [
+            IngestAction::Preview,
+            IngestAction::Status,
+            IngestAction::Pause,
+            IngestAction::Cancel,
+            IngestAction::Rebuild,
+            IngestAction::Skipped,
+            IngestAction::Include("x".to_string()),
+            IngestAction::Exclude("x".to_string()),
+            IngestAction::Forget("x".to_string()),
+            IngestAction::Review,
+            IngestAction::Promote("x".to_string()),
+        ];
+        for action in fast {
+            assert!(
+                matches!(
+                    route_fullscreen_slash(SlashAction::Ingest(action.clone())),
+                    SlashRoute::Synchronous(_)
+                ),
+                "{action:?} is a fast ingest and runs synchronously"
+            );
+        }
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::Help),
+            SlashRoute::Synchronous(_)
+        ));
+        // The exact three pumped configs.
+        assert!(matches!(
+            pumped_ingest_mode(PumpedIngest::Run),
+            (localpilot_localmind::RunMode::Full, false)
+        ));
+        assert!(matches!(
+            pumped_ingest_mode(PumpedIngest::Refresh),
+            (localpilot_localmind::RunMode::Refresh, false)
+        ));
+        assert!(matches!(
+            pumped_ingest_mode(PumpedIngest::Resume),
+            (localpilot_localmind::RunMode::Refresh, true)
+        ));
+    }
+
+    #[test]
+    fn cancel_on_drop_cancels_the_walk_unless_disarmed() {
+        let token = CancellationToken::new();
+        {
+            let _guard = CancelOnDrop(Some(token.clone()));
+        }
+        assert!(
+            token.is_cancelled(),
+            "a dropped guard signals the blocking walk (no orphan ingest)"
+        );
+
+        let disarmed = CancellationToken::new();
+        CancelOnDrop(Some(disarmed.clone())).disarm();
+        assert!(
+            !disarmed.is_cancelled(),
+            "a normal join disarms the guard, so a completed walk is not re-cancelled"
+        );
     }
 
     #[tokio::test]

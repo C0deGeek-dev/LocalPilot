@@ -545,7 +545,7 @@ slash_commands! {
         Name => both("rename", Required, Fall, "Rename this session (/rename <text>)"),
         Continue => both("continue", Optional, Fall, "Continue the previous session"),
         Clear => both("clear", NoArg, Reject, "Clear the conversation view"),
-        Compact => inline_only("compact", Optional, Fall, "Summarize and compact the context"),
+        Compact => both("compact", Optional, Fall, "Summarize and compact the context"),
         Compact => inline_forcing(
             "compact_force",
             NoArg,
@@ -555,7 +555,7 @@ slash_commands! {
         Continue => both("resume", Optional, Fall, "Continue a previous session"),
         HarnessResume => inline_only("harness-resume", NoArg, Reject, "Resume harness plan work"),
         WaitResume => inline_only("wait-resume", NoArg, Reject, "Wait for quota, then resume"),
-        Ingest => inline_only("ingest", Optional, Fall, "Manage workspace ingestion"),
+        Ingest => both("ingest", Optional, Fall, "Manage workspace ingestion"),
         Knowledge => both("knowledge", Required, Fall, "Query the knowledge base"),
         Context => both("context", Required, Fall, "Build a context bundle"),
         Research => inline_only(
@@ -1076,11 +1076,59 @@ mod tests {
     #[test]
     fn catalogs_have_the_frozen_cardinalities() {
         assert_eq!(specs_for(Host::Inline).len(), 34);
-        // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), then
-        // 25→31 (the six synchronous commands `tree`/`knowledge`/`context`/
-        // `agents`/`skills`/`bg`; `ingest` stays inline-only for now).
-        assert_eq!(specs_for(Host::Fullscreen).len(), 31);
+        // Full-screen grew 19→24 (profiles + `/effort`), 24→25 (`/think`), 25→31
+        // (the six synchronous commands `tree`/`knowledge`/`context`/`agents`/
+        // `skills`/`bg`), then 31→33 (`compact` + `ingest` on the operation pump).
+        // `compact_force` stays inline-only but remains typeable in full-screen.
+        assert_eq!(specs_for(Host::Fullscreen).len(), 33);
         assert_eq!(specs_for(Host::Pair).len(), 8);
+    }
+
+    #[test]
+    fn full_screen_pumps_parse_regardless_of_picker_visibility() {
+        // Host visibility controls picker projection, not lookup/dispatch.
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/compact"),
+            Some(SlashAction::Compact { force: false })
+        ));
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/compact force"),
+            Some(SlashAction::Compact { force: true })
+        ));
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/compact_force"),
+            Some(SlashAction::Compact { force: true })
+        ));
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/compact-force"),
+            Some(SlashAction::Compact { force: true })
+        ));
+        let full_screen: BTreeSet<_> = specs_for(Host::Fullscreen)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            full_screen.contains("compact"),
+            "base compact is a picker row"
+        );
+        assert!(
+            !full_screen.contains("compact_force"),
+            "compact_force stays hidden but is still typeable"
+        );
+        assert!(full_screen.contains("ingest"), "ingest is now a picker row");
+        // The three long-running ingest forms parse in full-screen for the pump route.
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/ingest"),
+            Some(SlashAction::Ingest(IngestAction::Run))
+        ));
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/ingest refresh"),
+            Some(SlashAction::Ingest(IngestAction::Refresh))
+        ));
+        assert!(matches!(
+            parse_slash_for(Host::Fullscreen, "/ingest resume"),
+            Some(SlashAction::Ingest(IngestAction::Resume))
+        ));
     }
 
     #[test]
@@ -1184,8 +1232,8 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         // A deferred inline-only name must not appear in the full-screen picker.
-        // `ingest` stays here for now (bare `/ingest` is long-running).
-        for deferred in ["agent", "harness", "compact", "research", "ingest"] {
+        // `compact` and `ingest` now run on the operation pump, so they are `both`.
+        for deferred in ["agent", "harness", "research"] {
             assert!(
                 !full_screen.contains(deferred),
                 "{deferred} leaked into full-screen"

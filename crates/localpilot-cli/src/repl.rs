@@ -921,34 +921,7 @@ async fn run_slash(
                 context_used: summary.context_used,
                 context_limit: summary.context_limit,
             });
-            let notice = if summary.compacted {
-                let fallback = summary
-                    .fallback_reason
-                    .map(|reason| format!("; fallback: {reason}"))
-                    .unwrap_or_default();
-                format!(
-                    "compacted conversation history using {}; context {}/{}{}",
-                    harness_compaction_mode_label(summary.used_mode),
-                    summary.context_used,
-                    summary.context_limit,
-                    fallback
-                )
-            } else if force {
-                format!(
-                    "nothing left to compact using {}; context {}/{}",
-                    harness_compaction_mode_label(summary.requested_mode),
-                    summary.context_used,
-                    summary.context_limit
-                )
-            } else {
-                format!(
-                    "conversation already compact enough using {}; context {}/{}",
-                    harness_compaction_mode_label(summary.requested_mode),
-                    summary.context_used,
-                    summary.context_limit
-                )
-            };
-            state.apply(UiEvent::Notice(notice));
+            state.apply(UiEvent::Notice(compact_result_notice(&summary, force)));
         }
         SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
@@ -1709,49 +1682,22 @@ async fn run_ingest_progress(
     requested_mode: localpilot_localmind::RunMode,
     resume: bool,
 ) -> anyhow::Result<()> {
-    use localpilot_localmind::{JobStatus, RunMode};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let config = match crate::ingest_cmd::load_ingest_config(cwd) {
-        Ok(config) => config,
-        Err(error) => {
-            state.apply(UiEvent::Notice(format!("ingest config error: {error}")));
-            return Ok(());
-        }
-    };
-
-    // `resume` resolves the same decision the session-open trigger uses: resume an
-    // interrupted job, rebuild, or report nothing-to-do.
-    let mode = if resume {
-        match localpilot_localmind::ingest_status(cwd) {
-            Ok(Some(job)) => {
-                let has_index = localpilot_localmind::has_chunk_index(cwd);
-                match localpilot_localmind::planned_run_mode(Some(&job), has_index) {
-                    Some(mode) => mode,
-                    None => {
-                        state.apply(UiEvent::Notice(
-                            "ingest job already completed; run /ingest refresh to update"
-                                .to_string(),
-                        ));
-                        return Ok(());
-                    }
-                }
-            }
-            Ok(None) => {
-                state.apply(UiEvent::Notice("no ingest job to resume".to_string()));
+    // Preflight runs before any Busy transition: an early exit posts one notice and
+    // returns without entering Busy or starting a walk. Shared with the full-screen
+    // host so the decisions and copy cannot drift.
+    let (config, mode, start_notice) =
+        match crate::ingest_progress::ingest_preflight(cwd, requested_mode, resume) {
+            crate::ingest_progress::IngestPreflight::EarlyExit(notice) => {
+                state.apply(UiEvent::Notice(notice));
                 return Ok(());
             }
-            Err(error) => {
-                state.apply(UiEvent::Notice(format!(
-                    "ingest status unreadable: {error}"
-                )));
-                return Ok(());
+            crate::ingest_progress::IngestPreflight::Proceed(prepared) => {
+                (prepared.config, prepared.mode, prepared.start_notice)
             }
-        }
-    } else {
-        requested_mode
-    };
+        };
 
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_task = cancel.clone();
@@ -1769,14 +1715,8 @@ async fn run_ingest_progress(
         )
     });
 
-    let mode_label = match mode {
-        RunMode::Full => "full",
-        RunMode::Refresh => "refresh",
-    };
     state.busy = true;
-    state.apply(UiEvent::Notice(format!(
-        "ingesting project knowledge ({mode_label})…"
-    )));
+    state.apply(UiEvent::Notice(start_notice));
     let started = std::time::Instant::now();
     let mut total = 0_u64;
     let mut parse_bucket = 0_u64;
@@ -1812,91 +1752,24 @@ async fn run_ingest_progress(
     drain_ingest_progress(state, &mut progress_rx, &mut total, &mut parse_bucket);
     state.busy = false;
 
-    match outcome {
-        Ok(Ok(summary)) => {
-            let interrupted =
-                matches!(summary.job.status, JobStatus::Paused | JobStatus::Cancelled);
-            let status = match summary.job.status {
-                JobStatus::Completed => "completed",
-                JobStatus::Paused => "paused",
-                JobStatus::Cancelled => "cancelled",
-                JobStatus::Failed => "failed",
-                JobStatus::Running => "running",
-                JobStatus::Queued => "queued",
-            };
-            let suffix = if interrupted {
-                " — resume with /ingest resume"
-            } else {
-                ""
-            };
-            state.apply(UiEvent::Notice(format!(
-                "ingestion {status}: {} file(s), {} chunk(s){suffix}",
-                summary.job.completed_files, summary.chunks_written
-            )));
-        }
-        Ok(Err(error)) => {
-            state.apply(UiEvent::Notice(format!("ingestion failed: {error}")));
-        }
-        Err(error) => {
-            state.apply(UiEvent::Notice(format!("ingestion task error: {error}")));
-        }
-    }
+    state.apply(UiEvent::Notice(
+        crate::ingest_progress::ingest_result_notice(outcome),
+    ));
     draw_ui(terminal, state)?;
     Ok(())
 }
 
-/// Drain queued ingestion progress into notices. Milestone stages post once;
-/// per-file `Parsing` ticks are throttled to quarter marks so a large walk does
-/// not flood the transcript. `total`/`bucket` carry the throttle state across
-/// calls.
+/// Drain queued ingestion progress into inline notices through the host-shared
+/// throttle. `total`/`bucket` carry the quarter-mark state across calls.
 fn drain_ingest_progress(
     state: &mut AppState,
     rx: &mut mpsc::UnboundedReceiver<localpilot_localmind::IngestProgress>,
     total: &mut u64,
     bucket: &mut u64,
 ) {
-    use localpilot_localmind::IngestProgress;
-    while let Ok(stage) = rx.try_recv() {
-        match stage {
-            IngestProgress::Discovering => {
-                state.apply(UiEvent::Notice("ingest: discovering files…".to_string()));
-            }
-            IngestProgress::Discovered {
-                candidates,
-                skipped,
-            } => {
-                *total = candidates;
-                state.apply(UiEvent::Notice(format!(
-                    "ingest: {candidates} file(s) to parse ({skipped} skipped)"
-                )));
-            }
-            IngestProgress::Parsing {
-                completed,
-                total: count,
-            } => {
-                *total = count;
-                if count > 0 && completed > 0 {
-                    let quarter = completed.saturating_mul(4) / count;
-                    if quarter > *bucket {
-                        *bucket = quarter;
-                        state.apply(UiEvent::Notice(format!(
-                            "ingest: parsed {completed}/{count} file(s)"
-                        )));
-                    }
-                }
-            }
-            IngestProgress::Indexing => {
-                state.apply(UiEvent::Notice(
-                    "ingest: indexing project context…".to_string(),
-                ));
-            }
-            IngestProgress::Writing => {
-                state.apply(UiEvent::Notice("ingest: writing index…".to_string()));
-            }
-            // The caller posts the final summary line from the run result.
-            IngestProgress::Completed { .. } => {}
-        }
-    }
+    crate::ingest_progress::drain_ingest_progress_with(rx, total, bucket, |message| {
+        state.apply(UiEvent::Notice(message));
+    });
 }
 
 fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::Result<()>) {
@@ -3150,6 +3023,43 @@ pub(crate) fn sandbox_profile(profile: UiProfile) -> Profile {
         UiProfile::Relaxed => Profile::Relaxed,
         UiProfile::Bypass => Profile::Bypass,
         UiProfile::Unrestricted => Profile::Unrestricted,
+    }
+}
+
+/// The manual-compaction result notice, shared by the inline and full-screen
+/// hosts so their copy cannot drift. `ContextUsage` and the cancelled case are
+/// applied by each host around it.
+pub(crate) fn compact_result_notice(
+    summary: &localpilot_harness::ManualCompaction,
+    force: bool,
+) -> String {
+    if summary.compacted {
+        let fallback = summary
+            .fallback_reason
+            .as_ref()
+            .map(|reason| format!("; fallback: {reason}"))
+            .unwrap_or_default();
+        format!(
+            "compacted conversation history using {}; context {}/{}{}",
+            harness_compaction_mode_label(summary.used_mode),
+            summary.context_used,
+            summary.context_limit,
+            fallback
+        )
+    } else if force {
+        format!(
+            "nothing left to compact using {}; context {}/{}",
+            harness_compaction_mode_label(summary.requested_mode),
+            summary.context_used,
+            summary.context_limit
+        )
+    } else {
+        format!(
+            "conversation already compact enough using {}; context {}/{}",
+            harness_compaction_mode_label(summary.requested_mode),
+            summary.context_used,
+            summary.context_limit
+        )
     }
 }
 
