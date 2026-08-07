@@ -398,6 +398,19 @@ impl SoftInterruptSource {
     }
 }
 
+/// The result of draining and admitting queued soft interrupts at a safe
+/// boundary, computed from every drained interrupt. `any` is `true` when at
+/// least one interrupt was admitted (a would-be-final turn keeps going instead
+/// of ending); `user` is `true` when at least one admitted interrupt was a real
+/// user steer — the trigger to reset the per-turn progress breakers, since the
+/// user has changed the turn's trajectory. A System- or BackgroundTask-only
+/// batch leaves `user` false.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SoftInterruptAdmission {
+    any: bool,
+    user: bool,
+}
+
 /// One message injected into a running turn at a safe boundary. Text plus who
 /// sent it and whether it is urgent (an urgent interrupt is admitted between
 /// tool calls, skipping the rest of the batch; a normal one waits for the batch
@@ -1927,18 +1940,22 @@ impl SessionRuntime {
     /// Admit every queued soft interrupt at a safe boundary: inject each as a
     /// user-role message (a non-user source is labelled so it does not read as
     /// user-typed input) and record a durable `SoftInterruptInjected` event.
-    /// Returns whether any were admitted, so a would-be-final turn can decide to
-    /// keep going instead of ending (Point B).
+    /// Returns a [`SoftInterruptAdmission`] computed from every drained interrupt:
+    /// `any` lets a would-be-final turn keep going (Point B); `user` tells the
+    /// caller to reset the per-turn progress breakers (the user steered).
     fn admit_soft_interrupts(
         &mut self,
         point: &str,
         events: &broadcast::Sender<RuntimeEvent>,
-    ) -> bool {
-        let interrupts = self.steer.drain();
-        let admitted = !interrupts.is_empty();
-        for interrupt in interrupts {
+    ) -> SoftInterruptAdmission {
+        let mut admission = SoftInterruptAdmission::default();
+        for interrupt in self.steer.drain() {
+            admission.any = true;
             let source = match interrupt.source {
-                SoftInterruptSource::User => "user",
+                SoftInterruptSource::User => {
+                    admission.user = true;
+                    "user"
+                }
                 SoftInterruptSource::System => "system",
                 SoftInterruptSource::BackgroundTask => "background_task",
             };
@@ -1952,7 +1969,28 @@ impl SessionRuntime {
                 source: source.to_string(),
             });
         }
-        admitted
+        admission
+    }
+
+    /// Reset the per-turn progress breakers after a user steer admitted at a safe
+    /// boundary: the user has changed the turn's trajectory, so the same
+    /// repetition should take a fresh full round to re-trip. Resets the
+    /// no-progress detector (observation history, the dynamic and monotone
+    /// signals, and any pending grace — while preserving the per-turn one-shot
+    /// `nudged` state), the consecutive-failure streak, and the error /
+    /// tool-failure breakers. Deliberately does NOT touch cost accounting
+    /// (`tool_calls_used`, the budget, the timeout/deadline) or the `nudged`
+    /// state, so a steer never mints a second nudge/hint/grace or extends the
+    /// cost bound. System- and BackgroundTask-only admissions never call this.
+    fn reset_progress_breakers(
+        &mut self,
+        no_progress: &mut NoProgressDetector,
+        unproductive_streak: &mut usize,
+    ) {
+        no_progress.reset();
+        *unproductive_streak = 0;
+        self.error_breaker.reset();
+        self.tool_failure_guard.reset();
     }
 
     /// The verify-before-done gate, consulted when a turn would finalize with no
@@ -2535,7 +2573,10 @@ impl SessionRuntime {
 
             // Admit queued soft interrupts at this safe boundary (Point D): after
             // the previous iteration's tool calls, before the next provider call.
-            self.admit_soft_interrupts("after_tools", events);
+            let admission = self.admit_soft_interrupts("after_tools", events);
+            if admission.user {
+                self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+            }
 
             let compacted = self.compacted_history(context_reserve, cancel).await;
             let tools = if tools_enabled {
@@ -2619,7 +2660,10 @@ impl SessionRuntime {
                         return self.stop(events, StopReason::Cancelled);
                     }
                     () = self.steer.urgent_notified() => {
-                        self.admit_soft_interrupts("during_stream", events);
+                        let admission = self.admit_soft_interrupts("during_stream", events);
+                        if admission.user {
+                            self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                        }
                         continue 'turn;
                     }
                     // A graceful wind-down requested while streaming: no tool is
@@ -2959,8 +3003,11 @@ impl SessionRuntime {
                 // A soft interrupt queued while this call-free turn was streaming
                 // (Point B): instead of ending, admit it and keep the turn going so
                 // the model sees the steer/notice before it finalizes.
-                if !self.steer.is_empty() {
-                    self.admit_soft_interrupts("turn_continued", events);
+                let admission = self.admit_soft_interrupts("turn_continued", events);
+                if admission.any {
+                    if admission.user {
+                        self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                    }
                     continue;
                 }
                 // Verify-before-done gate (opt-in): before accepting a call-free
@@ -3020,7 +3067,10 @@ impl SessionRuntime {
                             "skipped: an urgent interrupt cut the tool batch short",
                         ));
                     }
-                    self.admit_soft_interrupts("between_tools", events);
+                    let admission = self.admit_soft_interrupts("between_tools", events);
+                    if admission.user {
+                        self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                    }
                     continue 'turn;
                 }
                 // Progress-aware ceiling: a runaway or spinning tool loop stops
@@ -4003,6 +4053,152 @@ mod tests {
         }
         .into_message();
         assert_eq!(message_plain_text(&bg), "[background task] done");
+    }
+
+    fn test_runtime() -> (SessionRuntime, tempfile::TempDir) {
+        use localpilot_sandbox::{PermissionEngine, Profile};
+        use localpilot_store::Store;
+        use localpilot_tools::ToolRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = SessionRuntime::new(
+            Arc::new(FakeProvider::new()),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Bypass, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig::default(),
+            Vec::new(),
+        );
+        (runtime, dir)
+    }
+
+    #[test]
+    fn admit_soft_interrupts_computes_the_source_summary() {
+        let (mut rt, _dir) = test_runtime();
+        let (events, _rx) = broadcast::channel(16);
+        let steer = rt.steer_queue();
+
+        // Empty queue: nothing admitted.
+        assert_eq!(
+            rt.admit_soft_interrupts("p", &events),
+            SoftInterruptAdmission {
+                any: false,
+                user: false
+            }
+        );
+
+        // System-only: admitted, but not a user steer → no reset.
+        steer.push_interrupt(SoftInterrupt {
+            content: "notice".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: false,
+        });
+        assert_eq!(
+            rt.admit_soft_interrupts("p", &events),
+            SoftInterruptAdmission {
+                any: true,
+                user: false
+            }
+        );
+
+        // BackgroundTask-only: same shape.
+        steer.push_interrupt(SoftInterrupt {
+            content: "done".to_string(),
+            source: SoftInterruptSource::BackgroundTask,
+            urgent: false,
+        });
+        assert_eq!(
+            rt.admit_soft_interrupts("p", &events),
+            SoftInterruptAdmission {
+                any: true,
+                user: false
+            }
+        );
+
+        // User-only.
+        steer.push_interrupt(SoftInterrupt::user("steer"));
+        assert_eq!(
+            rt.admit_soft_interrupts("p", &events),
+            SoftInterruptAdmission {
+                any: true,
+                user: true
+            }
+        );
+
+        // Mixed batch (System + User): admitted, user=true → resets once.
+        steer.push_interrupt(SoftInterrupt {
+            content: "notice".to_string(),
+            source: SoftInterruptSource::System,
+            urgent: false,
+        });
+        steer.push_interrupt(SoftInterrupt::user("steer"));
+        assert_eq!(
+            rt.admit_soft_interrupts("p", &events),
+            SoftInterruptAdmission {
+                any: true,
+                user: true
+            }
+        );
+    }
+
+    #[test]
+    fn reset_progress_breakers_clears_progress_state_preserving_nudged() {
+        use localpilot_recovery::NoProgressSignal;
+        let (mut rt, _dir) = test_runtime();
+
+        // Trip the no-progress detector: active signal, one-shot nudge + grace
+        // minted, and the monotone since-reset view set.
+        let mut det = NoProgressDetector::new(12, 0.34, 3);
+        det.observe("read\u{1f}a", "same");
+        det.observe("read\u{1f}a", "same");
+        assert!(det.observe("read\u{1f}a", "same"), "the detector trips");
+        assert!(det.active_signal().is_active() && det.is_tripped() && det.has_nudged());
+
+        // Trip the failure breakers and set a non-zero unproductive streak.
+        let mut streak = 7usize;
+        let mut error_tripped = false;
+        for _ in 0..10 {
+            if rt.error_breaker.observe("t", "boom") {
+                error_tripped = true;
+                break;
+            }
+        }
+        assert!(
+            error_tripped,
+            "the error breaker trips within 10 identical errors"
+        );
+        rt.tool_failure_guard.record_failure("t");
+        rt.tool_failure_guard.record_failure("t");
+
+        rt.reset_progress_breakers(&mut det, &mut streak);
+
+        // Detector: dynamic signal, monotone view, and pending grace all cleared,
+        // observation history reset — but the per-turn nudge is preserved.
+        assert_eq!(det.active_signal(), NoProgressSignal::None);
+        assert!(
+            !det.is_tripped(),
+            "the monotone since-reset view is cleared"
+        );
+        assert!(!det.consume_grace(), "the pending grace is cancelled");
+        assert!(
+            det.has_nudged(),
+            "the per-turn nudge is preserved across the reset"
+        );
+        // Streak and both failure breakers restart.
+        assert_eq!(streak, 0, "the unproductive streak restarts");
+        assert!(
+            !rt.error_breaker.observe("t", "boom"),
+            "the error breaker restarts after the reset"
+        );
+        assert_eq!(
+            rt.tool_failure_guard.record_failure("t"),
+            1,
+            "the tool-failure guard restarts after the reset"
+        );
+        // (The helper's signature takes no cost state — `tool_calls_used`, the
+        // budget, and the timeout are structurally unreachable from it.)
     }
 
     #[test]

@@ -413,6 +413,157 @@ async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn
     assert!(text.contains("after steering"));
 }
 
+/// A provider that spins on identical `read_file` calls and, on a chosen call
+/// index, pushes one soft interrupt of a chosen source into the runtime's steer
+/// queue (as a deterministic side effect of `stream`, so no async race). Used to
+/// exercise the user-steering reset of the progress breakers mid-turn.
+struct SteerAfterNProvider {
+    declaration: ProviderDeclaration,
+    calls: AtomicUsize,
+    steer_at: usize,
+    source: localpilot_harness::SoftInterruptSource,
+    total: usize,
+    queue: Mutex<Option<localpilot_harness::SteerQueue>>,
+}
+
+impl SteerAfterNProvider {
+    fn new(steer_at: usize, source: localpilot_harness::SoftInterruptSource, total: usize) -> Self {
+        Self {
+            declaration: FakeProvider::new().declaration().clone(),
+            calls: AtomicUsize::new(0),
+            steer_at,
+            source,
+            total,
+            queue: Mutex::new(None),
+        }
+    }
+
+    fn set_queue(&self, queue: localpilot_harness::SteerQueue) {
+        *self.queue.lock().unwrap() = Some(queue);
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for SteerAfterNProvider {
+    fn declaration(&self) -> &ProviderDeclaration {
+        &self.declaration
+    }
+
+    async fn stream(&self, _request: ModelRequest) -> Result<ModelEventStream, ProviderError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == self.steer_at {
+            if let Some(queue) = self.queue.lock().unwrap().clone() {
+                queue.push_interrupt(localpilot_harness::SoftInterrupt {
+                    content: "STEER".to_string(),
+                    source: self.source,
+                    urgent: false,
+                });
+            }
+        }
+        if n < self.total {
+            Ok(Box::pin(futures::stream::iter([
+                Ok(ModelEvent::ToolCall {
+                    id: format!("c{n}"),
+                    name: "read_file".to_string(),
+                    input_json: json!({ "path": "f.txt" }),
+                    provider_metadata: None,
+                }),
+                Ok(ModelEvent::Done),
+            ])))
+        } else {
+            Ok(Box::pin(futures::stream::iter([
+                Ok(ModelEvent::TextDelta("done".to_string())),
+                Ok(ModelEvent::Done),
+            ])))
+        }
+    }
+}
+
+fn steer_spin_config() -> SessionConfig {
+    SessionConfig {
+        interactivity: Interactivity::NonInteractive,
+        trusted: true,
+        ..SessionConfig::default()
+    }
+}
+
+/// Count the strategy-change Warnings, the model-visible tool-result hints, and
+/// the executed tool calls (one `ToolFinished` each) in a turn's events.
+fn steer_counts(events: &[RuntimeEvent]) -> (usize, usize, usize) {
+    let mut warnings = 0;
+    let mut hints = 0;
+    let mut tool_calls = 0;
+    for event in events {
+        match event {
+            RuntimeEvent::Warning(text) if text.contains("not making forward progress") => {
+                warnings += 1;
+            }
+            RuntimeEvent::ToolFinished { output, .. } => {
+                tool_calls += 1;
+                if output.contains("These tool calls are not making forward progress") {
+                    hints += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    (warnings, hints, tool_calls)
+}
+
+#[tokio::test]
+async fn a_user_steer_mid_spin_resets_the_progress_breakers_for_a_fresh_round() {
+    use localpilot_harness::SoftInterruptSource;
+    // Spin on identical reads; a User steer is pushed during the third call (the
+    // call that trips the detector) and admitted at the next safe boundary, which
+    // resets the progress breakers. The same repetition then takes a fresh full
+    // round to re-trip: 3 calls trip, reset, 3 more re-trip, and the 7th is
+    // stopped — 6 executed calls, versus the un-steered 4. The preserved per-turn
+    // nudge means no second Warning/hint/grace.
+    let provider = Arc::new(SteerAfterNProvider::new(2, SoftInterruptSource::User, 20));
+    let mut h = build_from_provider(provider.clone(), steer_spin_config());
+    std::fs::write(h._dir.path().join("f.txt"), "x\n").unwrap();
+    provider.set_queue(h.runtime.steer_queue());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("spin", &h.events, &h.cancel).await;
+    let (warnings, hints, tool_calls) = steer_counts(&drain(&mut rx));
+
+    assert_eq!(reason, StopReason::NoProgress);
+    assert_eq!(
+        tool_calls, 6,
+        "the user steer reset the detector, buying a fresh round before the re-trip"
+    );
+    assert_eq!(
+        warnings, 1,
+        "the preserved nudge never emits a second Warning"
+    );
+    assert_eq!(hints, 1, "no second model-visible hint after the steer");
+}
+
+#[tokio::test]
+async fn a_system_steer_mid_spin_does_not_reset_the_progress_breakers() {
+    use localpilot_harness::SoftInterruptSource;
+    // The same script, but the mid-spin interrupt is a System source: it is
+    // admitted but resets nothing, so the turn stops after the normal 4 calls
+    // (3 trip + 1 grace), exactly like the un-steered spin.
+    let provider = Arc::new(SteerAfterNProvider::new(2, SoftInterruptSource::System, 20));
+    let mut h = build_from_provider(provider.clone(), steer_spin_config());
+    std::fs::write(h._dir.path().join("f.txt"), "x\n").unwrap();
+    provider.set_queue(h.runtime.steer_queue());
+    let mut rx = h.events.subscribe();
+
+    let reason = h.runtime.run_turn("spin", &h.events, &h.cancel).await;
+    let (warnings, hints, tool_calls) = steer_counts(&drain(&mut rx));
+
+    assert_eq!(reason, StopReason::NoProgress);
+    assert_eq!(
+        tool_calls, 4,
+        "a system steer does not reset the breakers; the spin stops at the normal boundary"
+    );
+    assert_eq!(warnings, 1);
+    assert_eq!(hints, 1);
+}
+
 #[tokio::test]
 async fn loop_reads_a_file_then_produces_a_final_answer() {
     let provider = FakeProvider::new()
