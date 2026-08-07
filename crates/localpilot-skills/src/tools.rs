@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use localpilot_core::{one_line, word_overlap, Locator, SUMMARY_CHARS};
+use localpilot_core::{one_line, Locator, SUMMARY_CHARS};
 use localpilot_sandbox::Effect;
 use localpilot_tools::{Tool, ToolContext, ToolError, ToolOutput};
 use schemars::JsonSchema;
@@ -81,24 +81,6 @@ pub fn discover_trusted_scoped(
 #[must_use]
 pub fn user_home() -> Option<PathBuf> {
     home_dir()
-}
-
-/// A simple relevance score for a locator: how many of the query's words the
-/// skill's description contains, plus a bonus for an explicit command trigger
-/// match. Mirrors the predicate [`SkillSet::relevant`] uses, so a skill that is
-/// returned always scores at least 1.
-fn score(skill: &Skill, query_words: &[&str], query_lower: &str) -> u32 {
-    let description = skill.manifest.description.to_ascii_lowercase();
-    let word_hits = word_overlap(&description, query_words);
-    let trigger_bonus = u32::from(
-        skill
-            .manifest
-            .triggers
-            .commands
-            .iter()
-            .any(|c| query_lower.contains(&c.to_ascii_lowercase())),
-    ) * 2;
-    word_hits + trigger_bonus
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -179,29 +161,32 @@ impl Tool for SkillSearch {
             Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
         };
 
-        let query_lower = input.query.to_ascii_lowercase();
-        let query_words: Vec<&str> = query_lower
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|w| w.len() > 2)
-            .collect();
-        let mut locators: Vec<Locator> = set
-            .relevant(&input.query)
+        // One ranked pass over the whole matching set (score desc, name asc):
+        // the count is taken before any truncation, so overflow is honest.
+        let ranked = set.ranked(&input.query);
+        let total = ranked.len();
+        let mut locators: Vec<Locator> = ranked
             .into_iter()
-            .map(|skill| {
+            .map(|(skill, score)| {
                 Locator::new(
                     skill.manifest.name.clone(),
                     one_line(&skill.manifest.description, SUMMARY_CHARS),
-                    score(skill, &query_words, &query_lower),
+                    score,
                 )
             })
             .collect();
-        // Highest score first; ties broken by name for a stable order.
-        locators.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
         locators.truncate(MAX_LOCATORS);
 
         if locators.is_empty() {
+            // Honest no-match: report how many discoverable packages exist (never
+            // user-only), so the model learns skills are present rather than
+            // concluding none exist. Lexical search may truthfully miss an
+            // unrelated or non-English query; no full-catalog fallback.
+            let available = set.discoverable_count();
+            let plural = if available == 1 { "" } else { "s" };
             return Ok(ToolOutput::ok(format!(
-                "no skills match \"{}\"",
+                "no installed package skills strongly match \"{}\" — {available} discoverable \
+                 package skill{plural} available; broaden the query or load one by exact name",
                 input.query
             )));
         }
@@ -210,6 +195,14 @@ impl Tool for SkillSearch {
         );
         for loc in &locators {
             let _ = writeln!(out, "- {} (score {}): {}", loc.name, loc.score, loc.summary);
+        }
+        // Never silently drop matches beyond the page cap.
+        if total > locators.len() {
+            let _ = writeln!(
+                out,
+                "(showing {} of {total} matches; refine the query)",
+                locators.len()
+            );
         }
         Ok(ToolOutput::ok(out))
     }
@@ -450,6 +443,99 @@ mod tests {
         assert!(
             !out.text.contains("Body of add-provider"),
             "body leaked into search: {}",
+            out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn no_match_reports_the_discoverable_count_never_absence_or_user_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill_md(
+            dir.path(),
+            "add-provider",
+            "guide adding a provider",
+            false,
+            "",
+        );
+        // A user-only skill must not be counted or named.
+        write_skill_md(dir.path(), "secret-step", "internal handoff", true, "");
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = search(None)
+            .invoke(
+                json!({ "query": "quantum teleportation recipe" }),
+                &ctx(&ws, true),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error());
+        // Honest no-match: reports the discoverable count (1 — the user-only skill
+        // is excluded), never "no skills exist".
+        assert!(
+            out.text
+                .contains("no installed package skills strongly match"),
+            "got: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("1 discoverable package skill available"),
+            "got: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("secret-step"),
+            "user-only skill leaked: {}",
+            out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn more_than_ten_matches_report_the_full_count_and_never_silently_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        // Twelve discoverable skills that all match the token "format".
+        for i in 0..12 {
+            write_skill_md(
+                dir.path(),
+                &format!("formatter-{i:02}"),
+                "format helper",
+                false,
+                "",
+            );
+        }
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = search(None)
+            .invoke(json!({ "query": "format" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(!out.is_error());
+        // The overflow is disclosed against the full matching set, not hidden.
+        assert!(
+            out.text.contains("showing 10 of 12 matches"),
+            "got: {}",
+            out.text
+        );
+        // Exactly ten locator lines are shown (the cap), the rest disclosed.
+        let shown = out.text.lines().filter(|l| l.starts_with("- ")).count();
+        assert_eq!(shown, 10);
+        // The page is the STABLE top: all matches tie on score, so the name
+        // tie-break yields formatter-00..=formatter-09; the last two are omitted.
+        // This proves rank-before-truncate, not merely the line count.
+        for i in 0..10 {
+            assert!(
+                out.text.contains(&format!("formatter-{i:02}")),
+                "expected formatter-{i:02} in page: {}",
+                out.text
+            );
+        }
+        assert!(
+            !out.text.contains("formatter-10"),
+            "formatter-10 must be past the page: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("formatter-11"),
+            "formatter-11 must be past the page: {}",
             out.text
         );
     }

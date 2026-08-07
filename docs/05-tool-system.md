@@ -629,8 +629,16 @@ is searched for and chosen (the skill model is ADR-0027).
   autonomous_discovery = true`, two read-only tools are registered —
   `skill_search` returns lean ranked locators (name + one-line summary + score)
   over the *discoverable* skills only, and `skill_load` returns one skill's body by
-  exact name. A user-only skill (`disable-model-invocation: true`) is never
-  returned by search; it is reachable only by an exact typed name.
+  exact name. Search matches a skill's name, description, and command triggers with
+  one shared, punctuation-insensitive signal — so a query like `threejs` finds a
+  `Three.js` skill — and the inclusion gate and the ranking derive from that same
+  signal (every returned skill scores at least 1). When nothing matches strongly
+  it reports how many discoverable skills exist rather than implying none do, and
+  when more skills match than fit the page it reports the full match count instead
+  of silently dropping the rest; it never invents a match. A user-only skill
+  (`disable-model-invocation: true`) is
+  never returned by search or counted in that total; it is reachable only by an
+  exact typed name.
 
 Both tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
 skills load only when the workspace is trusted. Loading a skill injects *content

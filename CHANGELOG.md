@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`skill_search` matching is more forgiving and honest.** It now matches a
+  skill's name, description, and command triggers with one shared,
+  punctuation-insensitive signal, so a query like `threejs` finds a `Three.js`
+  skill and a run-together name like `reactthreefiber` finds `react-three-fiber`.
+  The inclusion gate and the ranking use that one signal (every returned skill
+  scores at least 1). When nothing matches strongly, the result reports how many
+  discoverable skills exist instead of implying there are none, and a search with
+  more matches than the page cap says so rather than silently dropping the rest.
+  Unrelated queries still honestly return no match — search never invents one.
+  User-only skills remain excluded from search and from that count.
+
 - **`/compact` and the long-running ingest runs now work in full-screen chat.**
   `/compact` (and `/compact force`) summarize the conversation on the same live
   pump a turn uses — a single Ctrl+C cancels the compaction and returns to the

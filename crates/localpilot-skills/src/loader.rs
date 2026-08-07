@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use localpilot_core::word_overlap;
+
 use crate::error::SkillError;
 use crate::manifest::{Invocation, SkillManifest};
 
@@ -222,34 +224,138 @@ impl SkillSet {
         self.skills.iter().find(|s| s.manifest.name == name)
     }
 
+    /// Discoverable skills matching `query`, each paired with its relevance
+    /// score, ranked highest-first with a stable name tie-break. This is the one
+    /// ranked entry point: the inclusion gate ([`SkillSet::relevant`]) and the
+    /// `skill_search` ranking both derive from it, so a returned skill always has
+    /// a nonzero score and the gate and the ranking can never encode independent
+    /// match rules. Matching is via [`match_score`] over the skill name,
+    /// description, and command triggers — a query and each field are normalized
+    /// with one shared signal (Unicode-lowercased alphanumeric tokens plus a
+    /// compact all-alphanumeric form, so `three.js` and `threejs` match). Only
+    /// **discoverable** skills are candidates — user-only skills are reached
+    /// solely by [`SkillSet::by_name`] (a typed name), never by search — so a
+    /// model can never auto-surface a skill the author marked user-only.
+    #[must_use]
+    pub fn ranked(&self, query: &str) -> Vec<(&Skill, u32)> {
+        let query = normalize_query(query);
+        let mut hits: Vec<(&Skill, u32)> = self
+            .skills
+            .iter()
+            .filter(|skill| skill.manifest.invocation == Invocation::Discoverable)
+            .filter_map(|skill| {
+                let score = match_score(skill, &query);
+                (score > 0).then_some((skill, score))
+            })
+            .collect();
+        // Highest score first; ties broken by name for a stable order.
+        hits.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.manifest.name.cmp(&b.0.manifest.name))
+        });
+        hits
+    }
+
     /// Skills relevant to `query`, for on-demand discovery (the `skill_search`
-    /// tool): a description keyword match or an explicit command trigger.
-    /// Only **discoverable** skills are candidates — user-only skills are reached
-    /// solely by [`SkillSet::by_name`] (a typed name), never by search — so a model
-    /// can never auto-surface a skill the author marked user-only. Description-based
-    /// relevance is the default.
+    /// tool). The inclusion view of [`SkillSet::ranked`] — same match signal,
+    /// scores dropped. Only **discoverable** skills are candidates.
     #[must_use]
     pub fn relevant(&self, query: &str) -> Vec<&Skill> {
-        let query_lower = query.to_ascii_lowercase();
-        let query_words: Vec<&str> = query_lower
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|w| w.len() > 2)
-            .collect();
+        self.ranked(query)
+            .into_iter()
+            .map(|(skill, _)| skill)
+            .collect()
+    }
+
+    /// The number of **discoverable** skills in the set — never counting
+    /// user-only skills. The narrow count `skill_search` reports when a query has
+    /// no strong match, so the model learns that installed skills exist without a
+    /// user-only name or description ever being surfaced.
+    #[must_use]
+    pub fn discoverable_count(&self) -> usize {
         self.skills
             .iter()
             .filter(|skill| skill.manifest.invocation == Invocation::Discoverable)
-            .filter(|skill| {
-                let description = skill.manifest.description.to_ascii_lowercase();
-                let trigger_hit = skill
-                    .manifest
-                    .triggers
-                    .commands
-                    .iter()
-                    .any(|c| query_lower.contains(&c.to_ascii_lowercase()));
-                trigger_hit || query_words.iter().any(|w| description.contains(w))
-            })
-            .collect()
+            .count()
     }
+}
+
+/// The minimum length, in characters, of a query or field token considered for
+/// matching. Two-character runs are dropped to keep token matches signal-bearing;
+/// the compact whole-string form still catches short product names.
+const MIN_TOKEN_CHARS: usize = 3;
+
+/// A query normalized once for skill matching, so the inclusion gate and the
+/// ranking share one signal and cannot drift. `tokens` are the Unicode-lowercased
+/// alphanumeric runs of length ≥ [`MIN_TOKEN_CHARS`]; `compact` is the whole query
+/// reduced to lowercased alphanumerics, so a punctuation-separated product name
+/// (`three.js`) and its natural spelling (`threejs`) share a compact form.
+struct NormalizedQuery {
+    tokens: Vec<String>,
+    compact: String,
+}
+
+/// Normalize a raw query once into its shared match signal. See
+/// [`NormalizedQuery`].
+fn normalize_query(query: &str) -> NormalizedQuery {
+    NormalizedQuery {
+        tokens: tokens_of(query),
+        compact: compact_of(query),
+    }
+}
+
+/// The Unicode-lowercased alphanumeric tokens of `text`, each of length ≥
+/// [`MIN_TOKEN_CHARS`].
+fn tokens_of(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= MIN_TOKEN_CHARS)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// `text` reduced to lowercased alphanumerics only — punctuation, spaces, and
+/// separators dropped — so `three.js` becomes `threejs`.
+fn compact_of(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The one relevance signal shared by the inclusion gate and the ranking.
+/// Returns `0` when `skill` does not match `query`, and a positive score when it
+/// does — so every admitted match scores at least 1 and `relevant` (score > 0)
+/// and `ranked` can never diverge. Matches the skill name, its description, and
+/// its command triggers. The query's compact form is compared against the
+/// compact name and the compact description **separately** — never a
+/// name+description concatenation — so a field boundary cannot fabricate a match.
+/// `word_overlap` (the shared relevance core) is fed pre-normalized text, so the
+/// core stays untouched.
+fn match_score(skill: &Skill, query: &NormalizedQuery) -> u32 {
+    let token_refs: Vec<&str> = query.tokens.iter().map(String::as_str).collect();
+
+    let name_lower = skill.manifest.name.to_lowercase();
+    let desc_lower = skill.manifest.description.to_lowercase();
+    let name_word_hits = word_overlap(&name_lower, &token_refs);
+    let desc_word_hits = word_overlap(&desc_lower, &token_refs);
+
+    let name_compact = compact_of(&skill.manifest.name);
+    let desc_compact = compact_of(&skill.manifest.description);
+    let name_compact_hit = !query.compact.is_empty() && name_compact.contains(&query.compact);
+    let desc_compact_hit = !query.compact.is_empty() && desc_compact.contains(&query.compact);
+
+    let trigger_hit = skill.manifest.triggers.commands.iter().any(|c| {
+        let c_compact = compact_of(c);
+        !c_compact.is_empty() && query.compact.contains(&c_compact)
+    });
+
+    // A name match weighs more than a description match; every positive signal
+    // contributes at least 1, so any admitted match has a nonzero score.
+    name_word_hits * 2
+        + desc_word_hits
+        + u32::from(name_compact_hit) * 2
+        + u32::from(desc_compact_hit)
+        + u32::from(trigger_hit) * 2
 }
 
 /// The project-local skill directories LocalPilot reads: its own directory
@@ -558,6 +664,125 @@ body\n",
         assert_eq!(relevant[0].manifest.name, "provider-helper");
         // The user-only skill is still reachable by its exact name (a typed load).
         assert!(set.by_name("secret-handoff").is_some());
+        // The narrow discoverable count never includes the user-only skill.
+        assert_eq!(set.discoverable_count(), 1);
+    }
+
+    #[test]
+    fn compact_matching_finds_a_punctuated_product_name_by_its_natural_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "three-fiber", "Three.js scene helpers", "");
+        write_skill(dir.path(), "gardening", "water the plants", "");
+        let set = resolve_dir(dir.path());
+
+        // `threejs` (no dot) matches `Three.js` because both compact to `threejs`.
+        let hits = set.relevant("threejs");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].manifest.name, "three-fiber");
+        // The plain token spelling matches too, and the unrelated skill never does.
+        assert_eq!(set.relevant("three").len(), 1);
+    }
+
+    #[test]
+    fn compact_matching_finds_a_hyphenated_name_by_its_run_together_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "react-three-fiber", "renderer bindings", "");
+        let set = resolve_dir(dir.path());
+
+        // `reactthreefiber` matches the hyphenated name via its compact form.
+        let hits = set.relevant("reactthreefiber");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].manifest.name, "react-three-fiber");
+    }
+
+    #[test]
+    fn compact_name_and_description_are_matched_separately_never_concatenated() {
+        let dir = tempfile::tempdir().unwrap();
+        // `reactthreefiber` exists only ACROSS the name/description boundary
+        // (`react-three` + `fiber ...`); comparing the compact fields separately
+        // must not fabricate a match by concatenating them.
+        write_skill(dir.path(), "react-three", "fiber helpers", "");
+        let set = resolve_dir(dir.path());
+
+        assert!(set.relevant("reactthreefiber").is_empty());
+    }
+
+    #[test]
+    fn an_unrelated_query_has_no_strong_match_rather_than_a_fabricated_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "three-fiber", "Three.js scene helpers", "");
+        let set = resolve_dir(dir.path());
+
+        // A non-English/unrelated query truthfully matches nothing — lexical
+        // search does not invent a semantic hit.
+        assert!(set.relevant("welke skills heb je beschikbaar").is_empty());
+    }
+
+    #[test]
+    fn the_gate_and_the_ranking_share_one_signal_and_every_match_scores_nonzero() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "three-fiber", "Three.js scene helpers", "");
+        write_skill(dir.path(), "three-loader", "load three meshes", "");
+        write_skill(dir.path(), "gardening", "water the plants", "");
+        let set = resolve_dir(dir.path());
+
+        let ranked = set.ranked("three");
+        // Every admitted match has a nonzero score.
+        assert!(ranked.iter().all(|(_, score)| *score > 0));
+        // The inclusion gate is exactly the ranked set (same names, same order),
+        // so gate and ranking cannot encode independent rules.
+        let gate: Vec<&str> = set
+            .relevant("three")
+            .iter()
+            .map(|s| s.manifest.name.as_str())
+            .collect();
+        let ranked_names: Vec<&str> = ranked
+            .iter()
+            .map(|(s, _)| s.manifest.name.as_str())
+            .collect();
+        assert_eq!(gate, ranked_names);
+    }
+
+    #[test]
+    fn a_name_match_outranks_a_description_only_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "json", "unrelated helper text", "");
+        write_skill(dir.path(), "other", "json formatting helper", "");
+        let set = resolve_dir(dir.path());
+
+        let ranked = set.ranked("json");
+        assert_eq!(ranked.len(), 2);
+        // The skill whose NAME is the query outranks the description-only match.
+        assert_eq!(ranked[0].0.manifest.name, "json");
+        assert!(ranked[0].1 > ranked[1].1);
+    }
+
+    #[test]
+    fn a_command_trigger_matches_by_its_normalized_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        // A skill whose name and description are deliberately unrelated to the
+        // query — only its punctuated command trigger connects.
+        let sdir = dir.path().join("releaser");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(
+            sdir.join("skill.toml"),
+            "name = \"releaser\"\ndescription = \"unrelated helper text\"\nversion = \"0.1.0\"\n\
+             [triggers]\ncommands = [\"deploy-prod\"]\n",
+        )
+        .unwrap();
+        std::fs::write(sdir.join("SKILL.md"), "# releaser\n\nBody.\n").unwrap();
+        write_skill(dir.path(), "gardening", "water the plants", "");
+        let set = resolve_dir(dir.path());
+
+        // The natural run-together spelling reaches the skill through its trigger
+        // (compact `deployprod`), with a nonzero ranked score, though neither the
+        // name nor the description matches.
+        let ranked = set.ranked("deployprod");
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0.manifest.name, "releaser");
+        assert!(ranked[0].1 > 0);
+        // An unrelated query reaches neither skill (no trigger, no name/desc hit).
+        assert!(set.relevant("xyzzy quux").is_empty());
     }
 
     // --- LocalHub#39: user-global baseline and project overlay precedence. ---
