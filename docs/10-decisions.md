@@ -2,6 +2,69 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0145: Skills Are Usable From Chat — Canonical Live Trust, Package Discovery UX, And Lane Separation
+
+Status: Accepted. Clarifying amendment to ADR-0027 (the pull-based, opt-in skill
+model), ADR-0097/0098/0099 (global baseline overlay, sources, review-only
+discovery), ADR-0143 (workspace trust), and ADR-0144 (the shared slash surface).
+It changes no security boundary; it makes installed skills usable from an
+interactive chat session and makes the diagnostics truthful. Closes LocalHub#60.
+
+Decision:
+
+- **Canonical live-session trust.** `SessionRuntime.trusted` (`SessionConfig.trusted`,
+  via `set_trusted`) is the one live authority every `ToolContext` and resume path
+  reads. It is derived from the folder-trust store, not the permission profile: a
+  single launch snapshot `trust_required = prompt_required(profile, cwd)` is
+  computed once in `InteractiveSessionSetup::resolve`, used for `SessionConfig.trusted
+  = !trust_required` and for the host trust gate (no re-read, no TOCTOU), and copied
+  into every built runtime including both pair peers. When the user accepts the trust
+  dialog, full-screen (ContinueSession + Remember) and inline accept paths set runtime
+  trust true before any live/resumed work; a pair grants both peers all-or-error before
+  spawn. The full-screen `session_trusted` resume shadow and the inline `state.trusted`
+  trust-authority are removed, so resume reads the same value as a live turn. Memory-only
+  (ContinueSession) vs persisted-store (Remember) is preserved; the launch gate is
+  unweakened.
+
+- **Package discovery UX.** The installed SKILL.md package catalog (the user-global
+  baseline plus the trusted project overlay) is reachable by the model through three
+  read-only tools: `skill_list` pages the whole discoverable catalog (name + one-line
+  summary + scope, bounded/paginated, default 50 / max 100), `skill_search` ranks it by
+  one skill-local normalization signal shared by the inclusion gate and the ranking
+  (punctuation-insensitive: `threejs`↔`Three.js`; matches name + description + command
+  triggers; honest overflow/no-match counts, never a fabricated hit), and `skill_load`
+  reads one skill's body by exact name. The shared `word_overlap` relevance core and the
+  tool broker are untouched. `UserOnly` packages are never revealed by name,
+  description, or body to the model: `skill_list` may report only the aggregate
+  UserOnly count, `skill_search` excludes UserOnly packages entirely and does not
+  report that aggregate, and a UserOnly package is reachable solely by an exact
+  user-supplied name via `skill_load`.
+
+- **Lane separation.** The installed-package tools are lexically and in prose distinct
+  from the LocalMind advisory-skill lane (`active_skills`/`skill_drafts`); each tool's
+  description and system-prompt cue names its lane and states that one lane's results do
+  not establish the other's presence or absence.
+
+- **Disabled-not-empty cue.** When installed packages are readable but model discovery
+  is off, a single harness-owned system-prompt cue — count-derived and presence-only
+  (the count decides only whether the cue fires; no count, name, or description is
+  injected) — tells the model discovery is disabled, not that no skills exist — and points at
+  `/skills list` or `[skills] autonomous_discovery = true`; it forbids inferring package
+  absence from the LocalMind lane. It is seeded at initial prompt construction and
+  appended monotonically (exactly once) when an in-session trust grant first makes
+  packages readable. `doctor` and a static `/settings` row surface the on/off state
+  truthfully (doctor with trust-safe counts that distinguish unreadable from empty).
+
+- **Opt-in posture reaffirmed.** `autonomous_discovery` stays off by default and gates
+  registration of all three package tools (their schemas + cues are themselves a
+  model-reachable content path); the disabled-not-empty cue is count-derived
+  truthfulness, not content injection. ADR-0027's small-model-first, pull-based posture
+  and ADR-0099's autonomous-load gate hold.
+
+Rejected: merging the LocalMind active/draft lane into the package tools (a disabled
+draft is not an available package); flipping the `autonomous_discovery` default; a
+second trust authority or a second discovery/invocation filter.
+
 ## ADR-0144: One Shared Slash-Command Surface For Inline, Full-Screen, And Pair Hosts
 
 Status: accepted. A fifth increment adds the **synchronous command + bounded
@@ -264,7 +327,9 @@ observe an in-session switch and block it), the profile comes straight from the 
 permission-engine handle, and trust comes from a new single-host `session_trusted` bool
 initialized from the launch trust-prompt result and set true on either accept branch
 (session-only or remember, per ADR-0143) — session-only trust is honored for the live
-resume but never persists, so the launch gate is unweakened; no pair-host change. The
+resume but never persists, so the launch gate is unweakened; no pair-host change.
+**[Superseded by ADR-0145: the resume-only `session_trusted` shadow was removed; live
+trust is now the one `SessionRuntime.trusted` authority read by resume and every turn.]** The
 inner runtime runs through the existing resume builders with a cloned `TuiApprover` whose
 approvals land on the same `approval_rx` the pump already services (the only new plumbing:
 an `approval_tx` on the host context); its runtime events drain on the `Runtime` lane;

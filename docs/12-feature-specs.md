@@ -138,8 +138,10 @@ Skill sources and managed installs (ADR-0098):
   `skills repo add|refresh|list|delete` — search their cached catalogs offline
   with `skills available [query]`, and install/remove packages with
   `skills install` / `skills delete`. Every command is available as both
-  `localpilot skills …` (CLI) and `/skills …` (REPL), parsing to the same
-  operation. This is a curated source list, not a marketplace: LocalPilot does not
+  `localpilot skills …` (CLI) and `/skills …` in the interactive chat host —
+  including the default full-screen host, where `/skills` routes to the same
+  operation and returns a bounded report (ADR-0129/ADR-0144) — parsing to the
+  same operation. This is a curated source list, not a marketplace: LocalPilot does not
   discover, rank, or trust repositories on the user's behalf.
 - Without `-g` a mutation targets the current project; `-g` targets the user-global
   scope. Read-only commands without `-g` show the effective global+project view;

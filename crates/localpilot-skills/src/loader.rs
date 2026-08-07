@@ -240,9 +240,7 @@ impl SkillSet {
     pub fn ranked(&self, query: &str) -> Vec<(&Skill, u32)> {
         let query = normalize_query(query);
         let mut hits: Vec<(&Skill, u32)> = self
-            .skills
-            .iter()
-            .filter(|skill| skill.manifest.invocation == Invocation::Discoverable)
+            .discoverable()
             .filter_map(|skill| {
                 let score = match_score(skill, &query);
                 (score > 0).then_some((skill, score))
@@ -256,9 +254,10 @@ impl SkillSet {
         hits
     }
 
-    /// Skills relevant to `query`, for on-demand discovery (the `skill_search`
-    /// tool). The inclusion view of [`SkillSet::ranked`] — same match signal,
-    /// scores dropped. Only **discoverable** skills are candidates.
+    /// Skills relevant to `query` — the inclusion view of [`SkillSet::ranked`]
+    /// (same match signal, scores dropped). `skill_search` ranks via
+    /// [`SkillSet::ranked`]; this name-only view backs the non-model handoff
+    /// surface. Only **discoverable** skills are candidates.
     #[must_use]
     pub fn relevant(&self, query: &str) -> Vec<&Skill> {
         self.ranked(query)

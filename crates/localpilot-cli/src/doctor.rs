@@ -269,7 +269,7 @@ fn gather_skills(
 ) -> SkillsDoctor {
     let readable = match localpilot_skills::discover(cwd, home, trusted) {
         Ok(set) => Some(SkillsCounts {
-            discoverable: set.discoverable().count(),
+            discoverable: set.discoverable_count(),
             user_only: set.user_only_count(),
             skipped: set.skipped().len(),
         }),

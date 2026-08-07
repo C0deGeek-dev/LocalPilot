@@ -610,8 +610,11 @@ There is deliberately no command to reveal, export, or copy a stored value.
 | --- | --- | --- | --- |
 | `autonomous_discovery` | bool | `false` | Register the `skill_list`/`skill_search`/`skill_load` tools so the model may list, discover, and read the installed SKILL.md package catalog on its own (the user-global baseline plus this workspace's trusted project overlay), **and** allow the skill-discovery lane to load a relevant, model-discoverable *installed* skill into a `/research` run (ADR-0099). Off by default, so a small local model never auto-injects a skill; an available/discovered match or a user-only skill stays report-only regardless. The deterministic `localpilot skills list \| show \| research` surface works regardless. |
 
-Project skills are advisory prompt modules under `.localpilot/skills/` or
-`.agents/skills/`; see [05-tool-system.md](05-tool-system.md) §Project Skill
+Installed skill packages are advisory prompt modules under `.localpilot/skills/`
+or `.agents/skills/`. The effective catalog is the user-global baseline
+(`~/.localpilot/skills`, `~/.agents/skills`) — always present — overlaid by this
+workspace's trusted project directories; an untrusted workspace contributes no
+project overlay. See [05-tool-system.md](05-tool-system.md) §Project Skill
 Discovery.
 
 `localpilot doctor` reports a `skills:` block: whether `autonomous_discovery` is

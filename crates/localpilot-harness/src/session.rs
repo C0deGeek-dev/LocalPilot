@@ -2216,10 +2216,11 @@ impl SessionRuntime {
         self.history_generation = self.history_generation.wrapping_add(1);
     }
 
-    /// Whether this session treats the workspace as trusted — the value every
-    /// `ToolContext` reads for the workspace-trust gate, set once at construction
-    /// from the launch decision. Read-only here; the live trust transition is a
-    /// later increment.
+    /// Whether this session treats the workspace as trusted — the one live value
+    /// every `ToolContext` reads for the workspace-trust gate. Seeded at
+    /// construction from the launch decision and updated by
+    /// [`SessionRuntime::set_trusted`] when the workspace-trust dialog is accepted,
+    /// so it is the sole live trust authority (resume reads it too).
     #[must_use]
     pub fn trusted(&self) -> bool {
         self.config.trusted
