@@ -13337,6 +13337,34 @@ mod tests {
     }
 
     #[test]
+    fn localbox_pump_success_refreshes_header_notice_and_model_completion() {
+        let mut app = app();
+        apply_localbox_pump_result(
+            &mut app,
+            LocalBoxPumpResult::Adopted {
+                endpoint: "http://127.0.0.1:11435/v1".to_string(),
+                provider: "local".to_string(),
+                model: "bonsai.gguf".to_string(),
+                notices: vec!["switched to provider 'local' · model 'bonsai.gguf'".to_string()],
+                model_values: vec![CompletionCommand {
+                    name: "local".to_string(),
+                    description: "current · anthropic · bonsai.gguf".to_string(),
+                }],
+            },
+        );
+
+        assert_eq!(app.active_provider(), "local");
+        assert_eq!(app.active_model(), "bonsai.gguf");
+        assert!(timeline_has(&app, "wrote [providers.local]"));
+        assert!(timeline_has(&app, "switched to provider 'local'"));
+        let _ = app.handle_input(InputAction::Insert("/model".to_string()), 80);
+        assert_eq!(app.handle_input(InputAction::Submit, 80), AppCommand::None);
+        let screen = rendered_screen(&app);
+        assert!(screen.contains("local"));
+        assert!(screen.contains("current · anthropic · bonsai.gguf"));
+    }
+
+    #[test]
     fn route_fullscreen_slash_pumps_exactly_the_long_running_ingest_tier() {
         use localpilot_tui::{IngestAction, IngestTier};
         // Every IngestAction variant (the enum has no generated iterator — a NEW variant
