@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.8.1 - 2026-08-07
+
+Coordinated LocalX release.
+
 - **Self-update now survives a transient release-asset connection failure and
   its source fallback selects the right workspace package.** Manifest and
   archive downloads retry bounded transport/body failures while still failing
