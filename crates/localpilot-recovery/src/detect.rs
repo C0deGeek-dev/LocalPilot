@@ -423,6 +423,18 @@ impl NoProgressSignal {
     }
 }
 
+/// One entry in the detector's recent-calls window, carrying both digests the
+/// two signals need: `signature` for novelty distinctness and `pair`
+/// (`(signature, output)`) for repeat accounting. A single deque of these is the
+/// sole source of truth for both signals, so the repeat count stays bounded to
+/// the window (each entry is one `repeats` increment; its eviction is one
+/// decrement).
+#[derive(Debug, Clone, Copy)]
+struct RecentEntry {
+    signature: u64,
+    pair: u64,
+}
+
 /// Detects *successful* tool calls that make no forward progress — the case the
 /// failure breakers ([`ToolLoopDetector`], [`RepeatedErrorBreaker`]) cannot see
 /// because every call returns success. Two deterministic signals:
@@ -443,10 +455,16 @@ pub struct NoProgressDetector {
     window: usize,
     distinct_floor: f64,
     repeat_threshold: usize,
-    /// Repeat count per `(signature, output)` digest seen this turn.
+    /// Repeat count per `(signature, output)` digest within the current
+    /// successful-call window. Kept in lock-step with `recent`: each entry there
+    /// contributes one to its pair's count, and its eviction decrements it (the
+    /// entry is removed at zero), so this map is bounded by the window and
+    /// "three times" means three within the window — not across the whole turn.
     repeats: HashMap<u64, usize>,
-    /// Recent successful-call signature digests, newest at the back.
-    recent: VecDeque<u64>,
+    /// The recent successful calls, newest at the back, each carrying both the
+    /// signature digest (novelty) and the `(signature, output)` pair digest
+    /// (repeat accounting). The single windowed source of truth for both signals.
+    recent: VecDeque<RecentEntry>,
     /// The no-progress signal from the most recent observation, recomputed each
     /// call so a genuinely novel call clears it. This DYNAMIC view drives the
     /// default rail's always-on guard (with the one grace dispatch); the explicit
@@ -509,15 +527,33 @@ impl NoProgressDetector {
     /// re-trip never re-fires or re-mints.
     pub fn observe(&mut self, signature: &str, output: &str) -> bool {
         let pair = digest_pair(signature, output);
-        let count = self.repeats.entry(pair).or_insert(0);
-        *count += 1;
-        let stuck_count = *count;
+
+        // Add the current pair, push its combined window entry, then evict until
+        // the window fits — decrementing (and removing at zero) every evicted
+        // pair's count. This ordering is contractual: an earlier occurrence
+        // evicted by THIS observation is decremented BEFORE we read the count, so
+        // it cannot help the current observation reach the threshold.
+        *self.repeats.entry(pair).or_insert(0) += 1;
+        self.recent.push_back(RecentEntry {
+            signature: digest(signature),
+            pair,
+        });
+        while self.recent.len() > self.window {
+            if let Some(evicted) = self.recent.pop_front() {
+                if let Some(count) = self.repeats.get_mut(&evicted.pair) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.repeats.remove(&evicted.pair);
+                    }
+                }
+            }
+        }
+
+        // Only now read the current pair's windowed count from the post-eviction
+        // map (the pair is still present — this observation just pushed it).
+        let stuck_count = self.repeats.get(&pair).copied().unwrap_or(0);
         let stuck_repeat = stuck_count >= self.repeat_threshold;
 
-        self.recent.push_back(digest(signature));
-        while self.recent.len() > self.window {
-            self.recent.pop_front();
-        }
         let window_full = self.recent.len() >= self.window;
         let novelty_decayed = window_full && self.distinct_ratio() < self.distinct_floor;
 
@@ -551,9 +587,14 @@ impl NoProgressDetector {
         crossing
     }
 
-    /// Distinct signatures over the current window.
+    /// Distinct signatures over the current window (projected from the combined
+    /// recent entries — novelty cares only about the signature, not the output).
     fn distinct_count(&self) -> usize {
-        self.recent.iter().collect::<HashSet<_>>().len()
+        self.recent
+            .iter()
+            .map(|entry| entry.signature)
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Share of distinct signatures over the current window (`1.0` when empty).
@@ -1119,6 +1160,107 @@ mod tests {
             "re-trip after reset does not re-nudge"
         );
         assert!(!d.consume_grace(), "no fresh grace after reset + re-trip");
+    }
+
+    // Subject 04: repeat accounting is bounded to the window. All of these use a
+    // zero distinct floor so the novelty signal can never fire — isolating the
+    // stuck-repeat signal so one cannot mask the other.
+
+    #[test]
+    fn stuck_repeat_trips_inside_the_window_with_exact_count() {
+        let mut d = NoProgressDetector::new(12, 0.0, 3);
+        assert!(!d.observe("A", "o"));
+        assert!(!d.observe("A", "o"));
+        assert!(d.observe("A", "o"), "the third in-window repeat trips");
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::StuckRepeat { count: 3 }
+        );
+    }
+
+    #[test]
+    fn an_occurrence_evicted_by_the_current_call_does_not_reach_the_threshold() {
+        // Window 3, threshold 3, pattern A A B A: the fourth call pushes the
+        // second A and evicts the FIRST A in the same observation, so the current
+        // A's windowed count is 2 (window [A, B, A]), not 3 — it must not trip.
+        let mut d = NoProgressDetector::new(3, 0.0, 3);
+        d.observe("A", "o");
+        d.observe("A", "o");
+        d.observe("B", "o");
+        assert!(
+            !d.observe("A", "o"),
+            "the earlier A evicted by this call must not help reach the threshold"
+        );
+        assert_eq!(d.active_signal(), NoProgressSignal::None);
+    }
+
+    #[test]
+    fn aging_out_all_occurrences_removes_the_map_entry() {
+        // Window 2: after A ages out entirely, its `repeats` entry is gone.
+        let mut d = NoProgressDetector::new(2, 0.0, 100);
+        d.observe("A", "o");
+        d.observe("B", "o");
+        d.observe("C", "o"); // pushes C, evicts A → A removed
+        assert!(
+            !d.repeats.contains_key(&digest_pair("A", "o")),
+            "an aged-out pair leaves no map entry"
+        );
+        assert_eq!(d.recent.len(), 2, "the deque stays at the window size");
+        assert_eq!(d.repeats.len(), 2, "the map holds only the in-window pairs");
+    }
+
+    #[test]
+    fn many_unique_pairs_keep_the_window_and_repeat_map_bounded() {
+        let mut d = NoProgressDetector::new(12, 0.0, 100);
+        for i in 0..200 {
+            d.observe(&format!("sig{i}"), &format!("out{i}"));
+        }
+        assert_eq!(d.recent.len(), 12, "the deque never exceeds the window");
+        assert!(
+            d.repeats.len() <= 12,
+            "the repeat map cardinality is bounded by the window, got {}",
+            d.repeats.len()
+        );
+    }
+
+    #[test]
+    fn a_repeat_signal_re_accumulates_after_aging_out_while_the_monotone_view_stays_latched() {
+        let mut d = NoProgressDetector::new(3, 0.0, 3);
+        // Trip on three identical calls.
+        d.observe("A", "o");
+        d.observe("A", "o");
+        assert!(d.observe("A", "o"));
+        assert!(d.is_tripped());
+
+        // Age the repeat fully out of the window with three distinct calls.
+        d.observe("B", "o");
+        d.observe("C", "o");
+        d.observe("D", "o");
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::None,
+            "the dynamic signal clears once the repeat ages out"
+        );
+        assert!(
+            d.is_tripped(),
+            "the monotone explicit-budget view stays latched until reset"
+        );
+
+        // Re-observing the same pair re-accumulates the correct windowed count.
+        d.observe("A", "o");
+        d.observe("A", "o");
+        assert!(
+            !d.observe("A", "o"),
+            "no second nudge; the grace/nudge are spent"
+        );
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::StuckRepeat { count: 3 },
+            "the windowed count re-accumulates to the threshold"
+        );
+
+        d.reset();
+        assert!(!d.is_tripped(), "reset clears the monotone view");
     }
 
     #[test]
