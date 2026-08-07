@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **New `skill_list` tool: page the whole installed skill catalog.** When
+  `[skills] autonomous_discovery = true`, the model can list every discoverable
+  skill package (name, one-line summary, and origin scope) in name order,
+  paginated (default 50, max 100 per page, with a `next offset` when more remain)
+  — so it can pick from the full catalog instead of guessing search terms. It is
+  package-only and read-only: user-only skills contribute only an omitted count
+  (never a name or body), an untrusted workspace shows only the user-global
+  baseline, and `skill_search`'s "no strong match" and overflow results now point
+  at `skill_list`. For LocalMind-derived skills the model still uses
+  `active_skills`/`skill_drafts`.
+
 - **`skill_search` matching is more forgiving and honest.** It now matches a
   skill's name, description, and command triggers with one shared,
   punctuation-insensitive signal, so a query like `threejs` finds a `Three.js`

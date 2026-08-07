@@ -39,5 +39,6 @@ pub use source::{normalize_url, source_id, SkillSource, SourceRegistry};
 pub use suggest::{SkillDraft, SuggestionEngine};
 pub use templates::{standard_template_dirs, PromptTemplate, TemplateSet};
 pub use tools::{
-    discover, discover_trusted, discover_trusted_scoped, user_home, SkillLoad, SkillSearch,
+    discover, discover_trusted, discover_trusted_scoped, user_home, SkillList, SkillLoad,
+    SkillSearch,
 };

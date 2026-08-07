@@ -267,15 +267,33 @@ impl SkillSet {
             .collect()
     }
 
-    /// The number of **discoverable** skills in the set — never counting
-    /// user-only skills. The narrow count `skill_search` reports when a query has
-    /// no strong match, so the model learns that installed skills exist without a
-    /// user-only name or description ever being surfaced.
-    #[must_use]
-    pub fn discoverable_count(&self) -> usize {
+    /// The **discoverable** skills in the set, in the set's stable name order —
+    /// never user-only skills. The single definition of the discoverable filter:
+    /// `skill_list` pages over this, and [`SkillSet::discoverable_count`] counts
+    /// it, so invocation filtering has one home.
+    pub fn discoverable(&self) -> impl Iterator<Item = &Skill> {
         self.skills
             .iter()
             .filter(|skill| skill.manifest.invocation == Invocation::Discoverable)
+    }
+
+    /// The number of **discoverable** skills in the set — never counting
+    /// user-only skills. The narrow count `skill_search`/`skill_list` report so
+    /// the model learns installed skills exist without a user-only name or
+    /// description ever being surfaced. Delegates to [`SkillSet::discoverable`].
+    #[must_use]
+    pub fn discoverable_count(&self) -> usize {
+        self.discoverable().count()
+    }
+
+    /// The number of **user-only** skills in the set (`disable-model-invocation:
+    /// true`). Reported only as a count so a model can be told that some packages
+    /// are installed-but-hidden without their names or descriptions leaking.
+    #[must_use]
+    pub fn user_only_count(&self) -> usize {
+        self.skills
+            .iter()
+            .filter(|skill| skill.manifest.invocation == Invocation::UserOnly)
             .count()
     }
 }

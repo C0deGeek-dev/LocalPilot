@@ -626,10 +626,13 @@ is searched for and chosen (the skill model is ADR-0027).
   `discoverable`); `localpilot skills show <name>` prints one skill's body by exact
   name, with no model in the loop.
 - **Model-callable** (opt-in, off by default): when `[skills]
-  autonomous_discovery = true`, two read-only tools are registered —
-  `skill_search` returns lean ranked locators (name + one-line summary + score)
-  over the *discoverable* skills only, and `skill_load` returns one skill's body by
-  exact name. Search matches a skill's name, description, and command triggers with
+  autonomous_discovery = true`, three read-only tools are registered —
+  `skill_list` pages the whole discoverable catalog (name + one-line summary +
+  scope, name order, default 50/max 100 per page, with a `next offset` when more
+  remain), `skill_search` returns lean ranked locators (name + one-line summary +
+  score) over the *discoverable* skills only, and `skill_load` returns one skill's
+  body by exact name. `skill_list` and `skill_search` are package-only — for the
+  LocalMind advisory-skill lane the model uses `active_skills`/`skill_drafts`. Search matches a skill's name, description, and command triggers with
   one shared, punctuation-insensitive signal — so a query like `threejs` finds a
   `Three.js` skill — and the inclusion gate and the ranking derive from that same
   signal (every returned skill scores at least 1). When nothing matches strongly

@@ -92,12 +92,13 @@ impl McpTools {
         // The agent can read active (human-enabled) skills as advisory guidance,
         // read-only. Reading a skill never runs, installs, or changes it.
         registry.register(Box::new(localpilot_localmind::ActiveSkills));
-        // Pull-based project-skill discovery (ADR-0027): the agent can search for
-        // and load project-local skills on demand instead of carrying them in
-        // context. Registered only when autonomous discovery is enabled, so a
-        // small local model never reaches for a skill on its own by default; both
-        // tools are read-only and trust-gated regardless.
+        // Pull-based project-skill discovery (ADR-0027): the agent can list,
+        // search for, and load project-local skills on demand instead of carrying
+        // them in context. Registered only when autonomous discovery is enabled,
+        // so a small local model never reaches for a skill on its own by default;
+        // all three tools are read-only and trust-gated regardless.
         if self.skills_autonomous {
+            registry.register(Box::new(localpilot_skills::SkillList::new()));
             registry.register(Box::new(localpilot_skills::SkillSearch::new()));
             registry.register(Box::new(localpilot_skills::SkillLoad::new()));
         }
@@ -237,16 +238,18 @@ mod tests {
         // Off by default: the model cannot reach project skills on its own.
         let off = McpTools::default().registry();
         let off_names = off.names();
+        assert!(!off_names.contains(&"skill_list"), "got: {off_names:?}");
         assert!(!off_names.contains(&"skill_search"), "got: {off_names:?}");
         assert!(!off_names.contains(&"skill_load"), "got: {off_names:?}");
 
-        // Opted in: both read-only discovery tools are registered.
+        // Opted in: all three read-only discovery tools are registered.
         let on = McpTools {
             entries: Vec::new(),
             skills_autonomous: true,
         }
         .registry();
         let on_names = on.names();
+        assert!(on_names.contains(&"skill_list"), "got: {on_names:?}");
         assert!(on_names.contains(&"skill_search"), "got: {on_names:?}");
         assert!(on_names.contains(&"skill_load"), "got: {on_names:?}");
     }

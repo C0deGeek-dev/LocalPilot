@@ -29,6 +29,20 @@ use crate::loader::{discovery_roots, global_only_roots, home_dir, Skill, SkillSe
 const MAX_LOCATORS: usize = 10;
 /// Upper bound on a single loaded skill body, so pulling guidance stays lean.
 const BODY_CHARS: usize = 12_000;
+/// Default `skill_list` page size when the caller gives no `limit`.
+const DEFAULT_LIST_LIMIT: usize = 50;
+/// Hard ceiling on a `skill_list` page, so one call never returns an unbounded
+/// catalog. A larger requested `limit` is capped to this; it never yields more.
+const MAX_LIST_LIMIT: usize = 100;
+
+/// The plural suffix for a count (`""` for 1, `"s"` otherwise).
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
 
 /// Resolve the effective skill set for `root`, resolving the per-user home
 /// directory from the environment. The per-user global baseline
@@ -186,7 +200,7 @@ impl Tool for SkillSearch {
             let plural = if available == 1 { "" } else { "s" };
             return Ok(ToolOutput::ok(format!(
                 "no installed package skills strongly match \"{}\" — {available} discoverable \
-                 package skill{plural} available; broaden the query or load one by exact name",
+                 package skill{plural} available; call skill_list or broaden the query",
                 input.query
             )));
         }
@@ -200,7 +214,7 @@ impl Tool for SkillSearch {
         if total > locators.len() {
             let _ = writeln!(
                 out,
-                "(showing {} of {total} matches; refine the query)",
+                "(showing {} of {total} matches; refine or call skill_list)",
                 locators.len()
             );
         }
@@ -332,6 +346,146 @@ fn render_skill(skill: &Skill) -> String {
     out
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SkillListInput {
+    /// 0-based index of the first skill to return (default 0).
+    #[serde(default)]
+    offset: usize,
+    /// Maximum skills to return in this page (default 50; values above 100 are
+    /// capped to 100; 0 is invalid).
+    #[serde(default = "default_list_limit")]
+    limit: usize,
+}
+
+fn default_list_limit() -> usize {
+    DEFAULT_LIST_LIMIT
+}
+
+/// `skill_list`: page the installed SKILL.md package catalog — **discoverable**
+/// skills only (name, one-line summary, origin scope), in stable name order.
+/// Package skills only; LocalMind active/draft skills have their own tools. The
+/// effective merged catalog (user-global baseline + trusted project overlay) is
+/// used, so an untrusted workspace shows only the global baseline. Read-only;
+/// loads no bodies and never reveals a user-only package's name, description, or
+/// body.
+pub struct SkillList {
+    /// The per-user home directory for the global skill baseline, resolved once
+    /// at construction. `None` omits the global layer (e.g. no resolvable home).
+    home: Option<PathBuf>,
+}
+
+impl SkillList {
+    /// Construct the tool, resolving the per-user home directory from the
+    /// environment for the global skill baseline.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { home: home_dir() }
+    }
+}
+
+impl Default for SkillList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for SkillList {
+    fn name(&self) -> &str {
+        "skill_list"
+    }
+
+    fn description(&self) -> &str {
+        "List the installed SKILL.md package catalog — discoverable skills only \
+         (name, one-line summary, and origin scope), in name order and paginated. \
+         Package skills only; for LocalMind active/draft skills use `active_skills` \
+         or `skill_drafts`. Read-only: listing runs, installs, and enables nothing, \
+         and never reveals a user-only package's name, description, or body."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::to_value(schemars::schema_for!(SkillListInput)).unwrap_or(Value::Null)
+    }
+
+    fn effects(&self, _input: &Value, _ctx: &ToolContext<'_>) -> Result<Vec<Effect>, ToolError> {
+        Ok(vec![Effect::ReadPath {
+            inside_workspace: true,
+            secret_like: false,
+        }])
+    }
+
+    async fn invoke(&self, input: Value, ctx: &ToolContext<'_>) -> Result<ToolOutput, ToolError> {
+        let input: SkillListInput =
+            serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        // A zero page is a clean invalid input, never an empty looping page.
+        if input.limit == 0 {
+            return Err(ToolError::InvalidInput(
+                "`limit` must be at least 1 (max 100)".to_string(),
+            ));
+        }
+        let limit = input.limit.min(MAX_LIST_LIMIT);
+        // The user-global baseline is always available; the project overlay is
+        // included only when the workspace is trusted (LocalHub#39) — an untrusted
+        // workspace never has its project manifests read here.
+        let set = match discover(ctx.workspace.root(), self.home.as_deref(), ctx.trusted) {
+            Ok(set) => set,
+            Err(_) => return Ok(ToolOutput::ok("skills are unreadable")),
+        };
+        // Discoverable rows only, in the set's stable name order; user-only
+        // packages contribute a count and nothing else.
+        let skills: Vec<&Skill> = set.discoverable().collect();
+        let total = skills.len();
+        let user_only = set.user_only_count();
+
+        if total == 0 {
+            let mut out =
+                String::from("No discoverable skill packages installed (0 discoverable).");
+            if user_only > 0 {
+                let _ = write!(
+                    out,
+                    " {user_only} user-only package{} installed but hidden from model discovery.",
+                    plural(user_only)
+                );
+            }
+            return Ok(ToolOutput::ok(out));
+        }
+        // An offset at or past the end is distinct from an empty catalog.
+        if input.offset >= total {
+            return Ok(ToolOutput::ok(format!(
+                "offset {} is past the end — {total} discoverable package skill{} total; use offset 0",
+                input.offset,
+                plural(total)
+            )));
+        }
+
+        let end = (input.offset + limit).min(total);
+        let mut out = format!(
+            "Installed skill packages — {total} discoverable, showing {}-{end} of {total} (name order):\n",
+            input.offset + 1
+        );
+        for skill in &skills[input.offset..end] {
+            let _ = writeln!(
+                out,
+                "- {} — {} [{}]",
+                skill.manifest.name,
+                one_line(&skill.manifest.description, SUMMARY_CHARS),
+                skill.scope.label()
+            );
+        }
+        if end < total {
+            let _ = writeln!(out, "next offset: {end}");
+        }
+        if user_only > 0 {
+            let _ = writeln!(
+                out,
+                "({user_only} user-only package{} installed but hidden from model discovery)",
+                plural(user_only)
+            );
+        }
+        Ok(ToolOutput::ok(out))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -380,6 +534,13 @@ mod tests {
     /// A `skill_load` tool with an injected (or absent) global-baseline home.
     fn load(home: Option<&Path>) -> SkillLoad {
         SkillLoad {
+            home: home.map(Path::to_path_buf),
+        }
+    }
+
+    /// A `skill_list` tool with an injected (or absent) global-baseline home.
+    fn list(home: Option<&Path>) -> SkillList {
+        SkillList {
             home: home.map(Path::to_path_buf),
         }
     }
@@ -482,6 +643,8 @@ mod tests {
             "got: {}",
             out.text
         );
+        // Points the model at the list tool now that it exists.
+        assert!(out.text.contains("skill_list"), "got: {}", out.text);
         assert!(
             !out.text.contains("secret-step"),
             "user-only skill leaked: {}",
@@ -537,6 +700,328 @@ mod tests {
             !out.text.contains("formatter-11"),
             "formatter-11 must be past the page: {}",
             out.text
+        );
+        // The overflow disclosure names the list tool.
+        assert!(out.text.contains("skill_list"), "got: {}", out.text);
+    }
+
+    // --- skill_list (LocalHub#60) ---
+
+    /// Write `n` discoverable skills named `pkg-00`..`pkg-(n-1)` with a matching
+    /// one-line description, under the project overlay.
+    fn write_n_skills(root: &Path, n: usize) {
+        for i in 0..n {
+            write_skill_md(
+                root,
+                &format!("pkg-{i:02}"),
+                &format!("helper number {i}"),
+                false,
+                "",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_list_default_page_lists_the_whole_small_catalog_in_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        write_n_skills(dir.path(), 15);
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = list(None).invoke(json!({}), &ctx(&ws, true)).await.unwrap();
+        assert!(!out.is_error());
+        assert!(
+            out.text.contains("15 discoverable, showing 1-15 of 15"),
+            "got: {}",
+            out.text
+        );
+        // All 15 present, one row each, with the scope label.
+        let rows: Vec<&str> = out.text.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(rows.len(), 15);
+        assert!(rows[0].contains("pkg-00"), "got: {}", rows[0]);
+        assert!(
+            rows[0].contains("[project (.localpilot)]"),
+            "got: {}",
+            rows[0]
+        );
+        // Name order is stable.
+        assert!(rows[14].contains("pkg-14"), "got: {}", rows[14]);
+        // Fits one page: no next offset.
+        assert!(!out.text.contains("next offset"), "got: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn skill_list_pages_with_next_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_n_skills(dir.path(), 15);
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = list(None)
+            .invoke(json!({ "offset": 0, "limit": 10 }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(out.text.contains("showing 1-10 of 15"), "got: {}", out.text);
+        assert!(out.text.contains("next offset: 10"), "got: {}", out.text);
+        let rows = out.text.lines().filter(|l| l.starts_with("- ")).count();
+        assert_eq!(rows, 10);
+
+        // The next page returns the remainder and no further offset.
+        let out2 = list(None)
+            .invoke(json!({ "offset": 10, "limit": 10 }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(
+            out2.text.contains("showing 11-15 of 15"),
+            "got: {}",
+            out2.text
+        );
+        assert!(!out2.text.contains("next offset"), "got: {}", out2.text);
+        assert_eq!(out2.text.lines().filter(|l| l.starts_with("- ")).count(), 5);
+    }
+
+    #[tokio::test]
+    async fn skill_list_caps_the_limit_at_one_hundred_and_rejects_a_zero_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        write_n_skills(dir.path(), 120);
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        // A limit above the hard maximum never returns more than 100 rows.
+        let out = list(None)
+            .invoke(json!({ "limit": 1000 }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(
+            out.text.contains("showing 1-100 of 120"),
+            "got: {}",
+            out.text
+        );
+        assert!(out.text.contains("next offset: 100"), "got: {}", out.text);
+        assert_eq!(
+            out.text.lines().filter(|l| l.starts_with("- ")).count(),
+            100
+        );
+
+        // A zero limit is a clean invalid input, not an empty looping page.
+        let err = list(None)
+            .invoke(json!({ "limit": 0 }), &ctx(&ws, true))
+            .await;
+        assert!(
+            matches!(err, Err(ToolError::InvalidInput(_))),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_list_distinguishes_empty_catalog_from_out_of_range_offset() {
+        // Empty catalog.
+        let empty = tempfile::tempdir().unwrap();
+        let ws_empty = Workspace::new(empty.path()).unwrap();
+        let out = list(None)
+            .invoke(json!({}), &ctx(&ws_empty, true))
+            .await
+            .unwrap();
+        assert!(
+            out.text
+                .contains("No discoverable skill packages installed (0 discoverable)"),
+            "got: {}",
+            out.text
+        );
+
+        // Non-empty catalog, offset past the end (including offset == total).
+        let dir = tempfile::tempdir().unwrap();
+        write_n_skills(dir.path(), 3);
+        let ws = Workspace::new(dir.path()).unwrap();
+        let out = list(None)
+            .invoke(json!({ "offset": 3 }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(
+            out.text
+                .contains("offset 3 is past the end — 3 discoverable package skills total"),
+            "got: {}",
+            out.text
+        );
+        // Distinct from the empty message.
+        assert!(!out.text.contains("0 discoverable"), "got: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn skill_list_shows_only_discoverable_and_reports_user_only_as_a_count() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill_md(
+            dir.path(),
+            "visible-pkg",
+            "a discoverable helper",
+            false,
+            "",
+        );
+        // A user-only skill with a sentinel name and description that must not leak.
+        write_skill_md(
+            dir.path(),
+            "hidden-sentinel",
+            "SENTINEL-DESC-should-never-appear",
+            true,
+            "",
+        );
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = list(None).invoke(json!({}), &ctx(&ws, true)).await.unwrap();
+        assert!(out.text.contains("1 discoverable"), "got: {}", out.text);
+        assert!(out.text.contains("visible-pkg"), "got: {}", out.text);
+        // The user-only count is reported, but never its name or description.
+        assert!(
+            out.text
+                .contains("1 user-only package installed but hidden"),
+            "got: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("hidden-sentinel"),
+            "name leaked: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("SENTINEL-DESC"),
+            "description leaked: {}",
+            out.text
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_list_untrusted_shows_the_global_baseline_only_and_counts_only_its_user_only() {
+        // Global baseline (injected home): one discoverable + one user-only.
+        let home = tempfile::tempdir().unwrap();
+        write_skill_md(home.path(), "global-visible", "a global helper", false, "");
+        write_skill_md(home.path(), "global-hidden", "GLOBAL-SENTINEL", true, "");
+        // Project overlay: its own discoverable + user-only, which must be neither
+        // shown nor counted while untrusted.
+        let project = tempfile::tempdir().unwrap();
+        write_skill_md(
+            project.path(),
+            "project-visible",
+            "a project helper",
+            false,
+            "",
+        );
+        write_skill_md(
+            project.path(),
+            "project-hidden",
+            "PROJECT-SENTINEL",
+            true,
+            "",
+        );
+        let ws = Workspace::new(project.path()).unwrap();
+
+        let out = list(Some(home.path()))
+            .invoke(json!({}), &ctx(&ws, false))
+            .await
+            .unwrap();
+        // The effective untrusted catalog is exactly the global baseline.
+        assert!(out.text.contains("1 discoverable"), "got: {}", out.text);
+        assert!(out.text.contains("global-visible"), "got: {}", out.text);
+        // The omitted user-only count is exactly the GLOBAL one.
+        assert!(
+            out.text
+                .contains("1 user-only package installed but hidden"),
+            "got: {}",
+            out.text
+        );
+        // No project contribution — row, name, description, or count.
+        assert!(!out.text.contains("project-visible"), "got: {}", out.text);
+        assert!(!out.text.contains("project-hidden"), "got: {}", out.text);
+        assert!(!out.text.contains("PROJECT-SENTINEL"), "got: {}", out.text);
+        // The global user-only description also never leaks.
+        assert!(!out.text.contains("GLOBAL-SENTINEL"), "got: {}", out.text);
+    }
+
+    #[tokio::test]
+    async fn skill_load_returns_a_user_only_package_body_by_exact_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // A user-only package: excluded from list/search, reachable only by name.
+        write_skill_md(dir.path(), "secret-runbook", "SECRET-DESC", true, "");
+        write_skill_md(
+            dir.path(),
+            "visible-helper",
+            "a discoverable helper",
+            false,
+            "",
+        );
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        // Exact user-supplied name loads its body through the tool.
+        let loaded = load(None)
+            .invoke(json!({ "name": "secret-runbook" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(!loaded.is_error());
+        assert!(
+            loaded.text.contains("Body of secret-runbook"),
+            "got: {}",
+            loaded.text
+        );
+
+        // Neither list nor search ever surfaces that user-only name or description.
+        let listed = list(None).invoke(json!({}), &ctx(&ws, true)).await.unwrap();
+        assert!(
+            !listed.text.contains("secret-runbook"),
+            "got: {}",
+            listed.text
+        );
+        assert!(!listed.text.contains("SECRET-DESC"), "got: {}", listed.text);
+        let searched = search(None)
+            .invoke(json!({ "query": "secret runbook" }), &ctx(&ws, true))
+            .await
+            .unwrap();
+        assert!(
+            !searched.text.contains("secret-runbook"),
+            "got: {}",
+            searched.text
+        );
+        assert!(
+            !searched.text.contains("SECRET-DESC"),
+            "got: {}",
+            searched.text
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_list_bounds_each_row_summary_to_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        // A long description with internal whitespace runs (a single frontmatter
+        // line; the fixture writer does not support a raw multiline value). The
+        // row must collapse the whitespace and bound the summary.
+        let long = format!("verbose package{}", "  detail".repeat(40));
+        write_skill_md(dir.path(), "verbose-pkg", &long, false, "");
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        let out = list(None).invoke(json!({}), &ctx(&ws, true)).await.unwrap();
+        // Exactly one locator row for the package.
+        let rows: Vec<&str> = out.text.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(rows.len(), 1);
+        // The summary is bounded (ellipsis) and does not carry the full tail.
+        assert!(rows[0].contains('…'), "got: {}", rows[0]);
+        assert!(
+            !rows[0].contains("detail  detail"),
+            "uncollapsed/unbounded description leaked into the row: {}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn skill_list_declares_one_in_workspace_read_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let effects = list(None).effects(&json!({}), &ctx(&ws, true)).unwrap();
+        assert_eq!(effects.len(), 1);
+        assert!(
+            matches!(
+                effects[0],
+                Effect::ReadPath {
+                    inside_workspace: true,
+                    secret_like: false
+                }
+            ),
+            "got: {:?}",
+            effects[0]
         );
     }
 
