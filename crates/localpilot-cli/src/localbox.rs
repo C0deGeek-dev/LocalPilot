@@ -249,7 +249,7 @@ pub(crate) async fn run_adopt(
             (LocalBoxState::InstalledNotRunning, Some(model)) => {
                 // Starting a server loads a model and binds a port — a real side
                 // effect, gated like any other.
-                let request = PermissionRequest {
+                let permission = PermissionRequest {
                     tool: "localbox serve".to_string(),
                     effect: Effect::RunCommand(CommandClass::ExternalWrite),
                     interactivity,
@@ -257,7 +257,7 @@ pub(crate) async fn run_adopt(
                     detail: format!("localbox serve {model}"),
                 };
                 if !consent(
-                    &request,
+                    &permission,
                     &format!("start LocalBox serving {model} (loads a model, can take minutes)?"),
                 )? {
                     anyhow::bail!("declined — LocalBox not started");
@@ -421,14 +421,50 @@ pub(crate) async fn run_terminal_adopt(
     consent: TerminalConsent<'_>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<TerminalAdoptOutcome> {
+    let request = TerminalAdoptRequest {
+        cwd,
+        serve,
+        profile,
+        trusted,
+        consent,
+        cancel,
+    };
+    run_terminal_adopt_with(request, detect, |model, operation_cancel| async move {
+        start_localbox_serve(&model, ServeStdio::Null, Some(&operation_cancel)).await
+    })
+    .await
+}
+
+#[cfg(feature = "tui")]
+struct TerminalAdoptRequest<'a> {
+    cwd: &'a Path,
+    serve: Option<&'a str>,
+    profile: Profile,
+    trusted: bool,
+    consent: TerminalConsent<'a>,
+    cancel: &'a CancellationToken,
+}
+
+#[cfg(feature = "tui")]
+async fn run_terminal_adopt_with<D, DetectFuture, S, ServeFuture>(
+    request: TerminalAdoptRequest<'_>,
+    mut detect_state: D,
+    mut start_serve: S,
+) -> anyhow::Result<TerminalAdoptOutcome>
+where
+    D: FnMut() -> DetectFuture,
+    DetectFuture: std::future::Future<Output = LocalBoxState>,
+    S: FnMut(String, CancellationToken) -> ServeFuture,
+    ServeFuture: std::future::Future<Output = anyhow::Result<ServeWait>>,
+{
     use localpilot_sandbox::{
         CommandClass, Effect, Interactivity, PermissionEngine, PermissionRequest,
     };
 
-    let engine = PermissionEngine::new(profile, Vec::new());
-    let mut state = detect().await;
+    let engine = PermissionEngine::new(request.profile, Vec::new());
+    let mut state = detect_state().await;
     if !matches!(state, LocalBoxState::Running { .. }) {
-        match (&state, serve) {
+        match (&state, request.serve) {
             (LocalBoxState::NotInstalled, _) => {
                 anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
             }
@@ -436,23 +472,23 @@ pub(crate) async fn run_terminal_adopt(
                 "no running LocalBox server found — use `/localbox adopt --serve <model>` or run `localbox serve <model>` first"
             ),
             (LocalBoxState::InstalledNotRunning, Some(model)) => {
-                let request = PermissionRequest {
+                let permission = PermissionRequest {
                     tool: "localbox serve".to_string(),
                     effect: Effect::RunCommand(CommandClass::ExternalWrite),
                     interactivity: Interactivity::Interactive,
-                    trusted,
+                    trusted: request.trusted,
                     detail: format!("localbox serve {model}"),
                 };
-                if !terminal_effect_allowed(&engine, &request, &consent).await {
+                if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
                     return Ok(TerminalAdoptOutcome::Declined("LocalBox launch"));
                 }
                 if matches!(
-                    start_localbox_serve(model, ServeStdio::Null, Some(cancel)).await?,
+                    start_serve(model.to_string(), request.cancel.clone()).await?,
                     ServeWait::Cancelled
                 ) {
                     return Ok(TerminalAdoptOutcome::Cancelled);
                 }
-                state = detect().await;
+                state = detect_state().await;
             }
             (LocalBoxState::Running { .. }, _) => {}
         }
@@ -464,8 +500,8 @@ pub(crate) async fn run_terminal_adopt(
             "LocalBox did not come up at {DEFAULT_PROXY_BASE_URL} after starting — check `localbox status`"
         ),
     };
-    let path = localpilot_config::project_config_path(cwd);
-    let request = PermissionRequest {
+    let path = localpilot_config::project_config_path(request.cwd);
+    let permission = PermissionRequest {
         tool: "localbox adopt".to_string(),
         effect: Effect::WritePath {
             inside_workspace: true,
@@ -473,16 +509,16 @@ pub(crate) async fn run_terminal_adopt(
             secret_like: false,
         },
         interactivity: Interactivity::Interactive,
-        trusted,
+        trusted: request.trusted,
         detail: path.display().to_string(),
     };
-    if !terminal_effect_allowed(&engine, &request, &consent).await {
+    if !terminal_effect_allowed(&engine, &permission, &request.consent).await {
         return Ok(TerminalAdoptOutcome::Declined("LocalBox adoption"));
     }
     write_local_provider(&path, &endpoint, model.as_deref())?;
 
     let config = localpilot_config::load(
-        &localpilot_config::ConfigPaths::standard(cwd),
+        &localpilot_config::ConfigPaths::standard(request.cwd),
         &localpilot_config::CliOverrides::default(),
     )?;
     let registry = Arc::new(ProviderRegistry::from_config(&config)?);
@@ -769,6 +805,205 @@ command = \"npx\"
         assert!(
             terminal_effect_allowed(&engine, &request, &TerminalConsent::ExplicitCommand).await
         );
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn terminal_adopt_of_a_running_server_writes_and_builds_the_live_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let outcome = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: dir.path(),
+                serve: None,
+                profile: Profile::Unrestricted,
+                trusted: true,
+                consent: TerminalConsent::ExplicitCommand,
+                cancel: &cancel,
+            },
+            || {
+                std::future::ready(LocalBoxState::Running {
+                    endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                    model: Some("bonsai.gguf".to_string()),
+                })
+            },
+            |_model, _cancel| std::future::ready(Err(anyhow::anyhow!("unexpected launch"))),
+        )
+        .await
+        .unwrap();
+
+        let TerminalAdoptOutcome::Adopted(adopted) = outcome else {
+            panic!("expected an adopted provider");
+        };
+        assert_eq!(adopted.endpoint, DEFAULT_PROXY_BASE_URL);
+        assert!(adopted.registry.get("local").is_some());
+        assert_eq!(
+            adopted
+                .config
+                .providers
+                .get("local")
+                .and_then(|provider| provider.model.as_deref()),
+            Some("bonsai.gguf")
+        );
+        assert!(localpilot_config::project_config_path(dir.path()).is_file());
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn terminal_serve_uses_the_literal_model_then_adopts_when_ready() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        let states = RefCell::new(VecDeque::from([
+            LocalBoxState::InstalledNotRunning,
+            LocalBoxState::Running {
+                endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                model: Some("Bonsai 27B.gguf".to_string()),
+            },
+        ]));
+        let started = RefCell::new(Vec::new());
+        let outcome = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: dir.path(),
+                serve: Some("Bonsai 27B.gguf"),
+                profile: Profile::Unrestricted,
+                trusted: true,
+                consent: TerminalConsent::ExplicitCommand,
+                cancel: &cancel,
+            },
+            || {
+                std::future::ready(
+                    states
+                        .borrow_mut()
+                        .pop_front()
+                        .unwrap_or(LocalBoxState::InstalledNotRunning),
+                )
+            },
+            |model, _cancel| {
+                started.borrow_mut().push(model);
+                std::future::ready(Ok(ServeWait::Complete))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, TerminalAdoptOutcome::Adopted(_)));
+        assert_eq!(started.into_inner(), vec!["Bonsai 27B.gguf"]);
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn terminal_serve_cancel_and_failure_write_nothing() {
+        for failure in [None, Some("launcher failed")] {
+            let dir = tempfile::tempdir().unwrap();
+            let cancel = CancellationToken::new();
+            let outcome = run_terminal_adopt_with(
+                TerminalAdoptRequest {
+                    cwd: dir.path(),
+                    serve: Some("model.gguf"),
+                    profile: Profile::Unrestricted,
+                    trusted: true,
+                    consent: TerminalConsent::ExplicitCommand,
+                    cancel: &cancel,
+                },
+                || std::future::ready(LocalBoxState::InstalledNotRunning),
+                |_model, _cancel| {
+                    std::future::ready(match failure {
+                        None => Ok(ServeWait::Cancelled),
+                        Some(message) => Err(anyhow::anyhow!(message)),
+                    })
+                },
+            )
+            .await;
+            match failure {
+                None => assert!(matches!(outcome, Ok(TerminalAdoptOutcome::Cancelled))),
+                Some(message) => {
+                    assert!(outcome.is_err_and(|error| error.to_string().contains(message)))
+                }
+            }
+            assert!(!localpilot_config::project_config_path(dir.path()).exists());
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn terminal_decline_absence_and_bad_config_never_overwrite() {
+        use localpilot_sandbox::ScriptedApprover;
+
+        let cancel = CancellationToken::new();
+        let declined_dir = tempfile::tempdir().unwrap();
+        let declined_path = localpilot_config::project_config_path(declined_dir.path());
+        std::fs::write(&declined_path, "marker = true\n").unwrap();
+        let approver = ScriptedApprover::new(vec![false]);
+        let declined = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: declined_dir.path(),
+                serve: None,
+                profile: Profile::Default,
+                trusted: false,
+                consent: TerminalConsent::Prompt(&approver),
+                cancel: &cancel,
+            },
+            || {
+                std::future::ready(LocalBoxState::Running {
+                    endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                    model: None,
+                })
+            },
+            |_model, _cancel| std::future::ready(Ok(ServeWait::Complete)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            declined,
+            TerminalAdoptOutcome::Declined("LocalBox adoption")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(declined_path).unwrap(),
+            "marker = true\n"
+        );
+
+        let absent_dir = tempfile::tempdir().unwrap();
+        let absent = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: absent_dir.path(),
+                serve: Some("model.gguf"),
+                profile: Profile::Unrestricted,
+                trusted: true,
+                consent: TerminalConsent::ExplicitCommand,
+                cancel: &cancel,
+            },
+            || std::future::ready(LocalBoxState::NotInstalled),
+            |_model, _cancel| std::future::ready(Ok(ServeWait::Complete)),
+        )
+        .await;
+        assert!(absent.is_err_and(|error| error.to_string().contains("not installed")));
+
+        let malformed_dir = tempfile::tempdir().unwrap();
+        let path = localpilot_config::project_config_path(malformed_dir.path());
+        std::fs::write(&path, "not [ valid").unwrap();
+        let malformed = run_terminal_adopt_with(
+            TerminalAdoptRequest {
+                cwd: malformed_dir.path(),
+                serve: None,
+                profile: Profile::Unrestricted,
+                trusted: true,
+                consent: TerminalConsent::ExplicitCommand,
+                cancel: &cancel,
+            },
+            || {
+                std::future::ready(LocalBoxState::Running {
+                    endpoint: DEFAULT_PROXY_BASE_URL.to_string(),
+                    model: None,
+                })
+            },
+            |_model, _cancel| std::future::ready(Ok(ServeWait::Complete)),
+        )
+        .await;
+        assert!(malformed.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "not [ valid");
     }
 
     #[tokio::test]
