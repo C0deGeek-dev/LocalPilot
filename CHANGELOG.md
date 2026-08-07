@@ -6,6 +6,14 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Self-update now survives a transient release-asset connection failure and
+  its source fallback selects the right workspace package.** Manifest and
+  archive downloads retry bounded transport/body failures while still failing
+  immediately on definitive HTTP errors. If binary installation remains
+  unavailable, `cargo install --git` explicitly selects `localpilot`, avoiding
+  Cargo's ambiguous-workspace error from the `localpilot-fuzz` and `xtask`
+  binaries.
+
 ## v2.8.0 - 2026-08-07
 
 Coordinated LocalX release.

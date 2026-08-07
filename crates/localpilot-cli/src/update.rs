@@ -275,22 +275,12 @@ fn path_notice(out: &mut dyn Write) -> anyhow::Result<()> {
 /// Reinstall from source at `tag` via `cargo install --git`, matching the running
 /// binary's feature set, and the MSVC toolchain on Windows when the TUI is built.
 fn reinstall(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
-    let mut features: Vec<&str> = Vec::new();
-    if cfg!(feature = "tui") {
-        features.push("tui");
-    }
-
     let mut command = std::process::Command::new("cargo");
     // The interactive TUI is unstable on the windows-gnu toolchain.
     if cfg!(all(windows, feature = "tui")) {
         command.arg("+stable-x86_64-pc-windows-msvc");
     }
-    command.args([
-        "install", "--git", REPO_URL, "--tag", tag, "--locked", "--force",
-    ]);
-    if !features.is_empty() {
-        command.arg("--features").arg(features.join(","));
-    }
+    command.args(reinstall_args(tag));
 
     writeln!(out, "reinstalling from source at {tag} ...")?;
     let status = command
@@ -302,6 +292,26 @@ fn reinstall(tag: &str, out: &mut dyn Write) -> anyhow::Result<()> {
     } else {
         Err(anyhow::anyhow!("cargo install failed"))
     }
+}
+
+/// Build the source-reinstall arguments separately from process execution so
+/// the workspace package selection cannot regress unnoticed.
+fn reinstall_args(tag: &str) -> Vec<String> {
+    let mut args = vec![
+        "install".to_string(),
+        "--git".to_string(),
+        REPO_URL.to_string(),
+        "localpilot".to_string(),
+        "--tag".to_string(),
+        tag.to_string(),
+        "--locked".to_string(),
+        "--force".to_string(),
+    ];
+    if cfg!(feature = "tui") {
+        args.push("--features".to_string());
+        args.push("tui".to_string());
+    }
+    args
 }
 
 fn confirm(prompt: &str) -> anyhow::Result<bool> {
@@ -451,7 +461,10 @@ pub async fn install_tool(
     let manifest_bytes = match localpilot_dist::download(&format!("{base}/manifest.json")).await {
         Ok(bytes) => bytes,
         Err(error) => {
-            writeln!(out, "no manifest for {tag} ({error}); use --from-source")?;
+            writeln!(
+                out,
+                "could not fetch the {tag} manifest ({error}); use --from-source"
+            )?;
             return Ok(false);
         }
     };
@@ -661,7 +674,26 @@ pub fn rollback(out: &mut dyn Write) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Version;
+    use super::{reinstall_args, Version, REPO_URL};
+
+    #[test]
+    fn source_reinstall_selects_the_localpilot_package() {
+        let args = reinstall_args("v9.8.7");
+
+        assert_eq!(
+            &args[..8],
+            [
+                "install",
+                "--git",
+                REPO_URL,
+                "localpilot",
+                "--tag",
+                "v9.8.7",
+                "--locked",
+                "--force",
+            ]
+        );
+    }
 
     #[test]
     fn alpha_ordering_and_describe_suffix() {

@@ -28,6 +28,9 @@ use crate::version::Version;
 
 /// How long to wait for the whole download before giving up.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Retry transient request/body failures without retrying definitive HTTP
+/// statuses such as a missing release asset.
+const DOWNLOAD_ATTEMPTS: usize = 3;
 /// Refuse an archive larger than this. A release archive is ~13 MB; anything
 /// approaching this is a redirect to something that is not our artefact.
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -75,28 +78,54 @@ pub async fn download(url: &str) -> Result<Vec<u8>, DistError> {
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
         .map_err(DistError::io)?;
-    let response = client.get(url).send().await.map_err(DistError::io)?;
-    if !response.status().is_success() {
-        return Err(DistError::Io(format!(
-            "download {url} returned {}",
-            response.status()
-        )));
-    }
-    if let Some(len) = response.content_length() {
-        if len > MAX_ARCHIVE_BYTES {
+    let mut last_transport_error = None;
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        let response = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = DistError::io(error);
+                if attempt == DOWNLOAD_ATTEMPTS {
+                    return Err(error);
+                }
+                last_transport_error = Some(error);
+                continue;
+            }
+        };
+        if !response.status().is_success() {
             return Err(DistError::Io(format!(
-                "refusing a {len}-byte download; the archive should be a few tens of MB"
+                "download {url} returned {}",
+                response.status()
             )));
         }
+        if let Some(len) = response.content_length() {
+            if len > MAX_ARCHIVE_BYTES {
+                return Err(DistError::Io(format!(
+                    "refusing a {len}-byte download; the archive should be a few tens of MB"
+                )));
+            }
+        }
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let error = DistError::io(error);
+                if attempt == DOWNLOAD_ATTEMPTS {
+                    return Err(error);
+                }
+                last_transport_error = Some(error);
+                continue;
+            }
+        };
+        if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
+            return Err(DistError::Io(format!(
+                "refusing a {}-byte download",
+                bytes.len()
+            )));
+        }
+        return Ok(bytes.to_vec());
     }
-    let bytes = response.bytes().await.map_err(DistError::io)?;
-    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err(DistError::Io(format!(
-            "refusing a {}-byte download",
-            bytes.len()
-        )));
-    }
-    Ok(bytes.to_vec())
+    Err(last_transport_error.unwrap_or_else(|| {
+        DistError::Io(format!("download {url} failed without a transport error"))
+    }))
 }
 
 /// Extract a `.tar.gz` archive into `into`.
@@ -237,6 +266,36 @@ pub async fn install_release(
         let _ = std::fs::remove_dir_all(&staged);
     }
     result
+}
+
+#[cfg(test)]
+mod download_tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn download_retries_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = second.read(&mut request);
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+
+        let bytes = super::download(&format!("http://{address}/manifest.json"))
+            .await
+            .unwrap();
+
+        assert_eq!(bytes, b"ok");
+        server.join().unwrap();
+    }
 }
 
 #[cfg(test)]
