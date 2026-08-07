@@ -507,7 +507,10 @@ struct SemanticDigest {
 #[derive(Default)]
 struct DigestBuckets {
     sections: BTreeMap<SummarySectionKind, Vec<String>>,
-    user_intents: BTreeSet<String>,
+    /// The most recent non-synthetic user intent, overwritten in chronological
+    /// order so the digest's Goal is the last real user turn — not the
+    /// lexicographically-greatest one, and never a runtime-synthesized notice.
+    latest_user_intent: Option<String>,
     command_counts: BTreeMap<String, usize>,
     file_paths: BTreeSet<String>,
     /// Per-path file operations (read/modified/created/deleted) derived from the
@@ -529,7 +532,7 @@ fn semantic_digest(dropped: &[Vec<Message>]) -> SemanticDigest {
         ));
         for message in exchange {
             if let Some(text) = first_text(message) {
-                classify_text(message.role, text, &mut buckets);
+                classify_text(message.role, message.is_synthetic(), text, &mut buckets);
             }
             for block in &message.content {
                 match block {
@@ -567,7 +570,7 @@ fn semantic_digest(dropped: &[Vec<Message>]) -> SemanticDigest {
         }
     }
 
-    if let Some(latest_goal) = buckets.user_intents.iter().next_back().cloned() {
+    if let Some(latest_goal) = buckets.latest_user_intent.take() {
         buckets
             .sections
             .entry(SummarySectionKind::Goal)
@@ -653,14 +656,18 @@ fn semantic_digest(dropped: &[Vec<Message>]) -> SemanticDigest {
     }
 }
 
-fn classify_text(role: Role, text: &str, buckets: &mut DigestBuckets) {
+fn classify_text(role: Role, is_synthetic: bool, text: &str, buckets: &mut DigestBuckets) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if role == Role::User {
-        buckets.user_intents.insert(truncate(trimmed, 120));
+    // A runtime-synthesized message (e.g. the no-progress stop notice) shapes the
+    // conversation and is legitimate role-agnostic evidence below, but it is never
+    // a user *intent* — skip the goal/Constraints/NextSteps heuristics for it so a
+    // synthetic notice can never be elected as the session goal.
+    if role == Role::User && !is_synthetic {
+        buckets.latest_user_intent = Some(truncate(trimmed, 120));
         if contains_any(
             &lower,
             &["prefer", "always", "never", "constraint", "require"],
@@ -868,6 +875,93 @@ mod tests {
                 ))],
             ),
         ]
+    }
+
+    fn synthetic(text: &str) -> Message {
+        Message::text(Role::User, text).into_synthetic("no-progress")
+    }
+
+    fn section_items(digest: &SemanticDigest, kind: SummarySectionKind) -> Vec<String> {
+        digest
+            .sections
+            .iter()
+            .find(|section| section.kind == kind)
+            .map(|section| section.items.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn goal_election_ignores_synthetic_stop_notice() {
+        // A real prompt followed by the guard's own synthetic stop notice: the
+        // notice must never be elected as the goal, and never appear as an intent.
+        let dropped = vec![vec![
+            user("Fix the auth bug"),
+            synthetic("no forward progress; changing strategy"),
+        ]];
+        let digest = semantic_digest(&dropped);
+        assert_eq!(
+            section_items(&digest, SummarySectionKind::Goal),
+            vec!["Fix the auth bug".to_string()]
+        );
+    }
+
+    #[test]
+    fn goal_election_is_chronological_not_lexical() {
+        // Lower-case "zzz…" sorts lexically after capitalised "Add…", so the old
+        // BTreeSet::next_back() would elect the wrong one; chronology must win.
+        let dropped = vec![vec![
+            user("zzz refactor the parser"),
+            user("Add a health endpoint"),
+        ]];
+        let digest = semantic_digest(&dropped);
+        assert_eq!(
+            section_items(&digest, SummarySectionKind::Goal),
+            vec!["Add a health endpoint".to_string()]
+        );
+    }
+
+    #[test]
+    fn goal_election_takes_last_occurrence_on_repeat() {
+        // Intents A, B, A: the last real turn (A) wins. An insertion-ordered set
+        // would keep A in its first slot and wrongly elect B.
+        let dropped = vec![vec![
+            user("Investigate the flaky test"),
+            user("Draft the release notes"),
+            user("Investigate the flaky test"),
+        ]];
+        let digest = semantic_digest(&dropped);
+        assert_eq!(
+            section_items(&digest, SummarySectionKind::Goal),
+            vec!["Investigate the flaky test".to_string()]
+        );
+    }
+
+    #[test]
+    fn synthetic_user_skips_intent_but_keeps_evidence() {
+        // One synthetic user payload carrying a constraint token ("never"), a
+        // next-step token ("next") AND a decision token ("decided"/"use "):
+        // the intent/Constraints/NextSteps heuristics are skipped for it, but
+        // the role-agnostic evidence classification still runs.
+        let dropped = vec![vec![synthetic(
+            "never revert; we decided to use Postgres; next migrate",
+        )]];
+        let digest = semantic_digest(&dropped);
+        assert!(
+            section_items(&digest, SummarySectionKind::Goal).is_empty(),
+            "synthetic message must not be elected as the goal"
+        );
+        assert!(
+            section_items(&digest, SummarySectionKind::Constraints).is_empty(),
+            "synthetic message must not populate Constraints"
+        );
+        assert!(
+            section_items(&digest, SummarySectionKind::NextSteps).is_empty(),
+            "synthetic message must not populate NextSteps"
+        );
+        assert!(
+            !section_items(&digest, SummarySectionKind::Decisions).is_empty(),
+            "role-agnostic evidence (Decisions) must still classify synthetic text"
+        );
     }
 
     #[test]
