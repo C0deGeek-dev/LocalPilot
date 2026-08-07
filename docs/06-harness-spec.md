@@ -710,18 +710,57 @@ either key replaces that default with an explicit, progress-aware budget
 Setting either key enables the budget; a single configured bound serves as both
 the soft start and the hard ceiling.
 
-"No forward progress" is judged deterministically: the same `(tool, arguments)`
-call returning the same output repeatedly, or a turn cycling a tiny set of calls.
-On the first such signal the runtime appends a one-shot strategy-change hint to
-the tool result (mirroring the repeated-error hint), nudging the model to act on
-what it has or change approach before any stop.
+"No forward progress" is judged deterministically over a sliding window of the
+last 12 *successful* calls: the same `(tool, arguments)` call returning the same
+output at least three times **within that window** (stuck repeat), or the
+window's share of distinct call signatures falling below a fixed floor (novelty
+decay). Both are windowed — a repeat that has aged out of the window no longer
+counts — so "three times" means three within the window, not across the whole
+turn.
+
+On the first such signal the runtime emits one strategy-change Warning and
+appends a one-shot, model-visible hint to the tool result (mirroring the
+repeated-error hint), then allows exactly one more *grace* dispatch — the call
+whose observation may show the model has changed approach. Every successful
+observation (including that grace call) recomputes the signal; the turn continues
+only if the recomputed signal is inactive — the current pair is below the repeat
+threshold *and* novelty decay is inactive (the window is not full, or its
+diversity is at or above the floor). A genuinely new call clears a stuck repeat
+when it does not simultaneously leave novelty decay active, and a borderline
+novelty window can clear as diversity rises; one novel signature does not by
+itself clear a deeply-decayed full window. If the recomputed
+signal is still active after the grace call, the turn stops. The one-shot hint
+and the single grace are minted once per turn — a recovery or re-trip never mints
+a second.
+(Only the *default* rail grants this grace and reads the recoverable, recomputed
+signal; an explicit operator budget keeps a monotone "tripped since the turn
+began" view, so its cost-aware stop is unchanged.)
+
+A user *soft interrupt* admitted at a safe boundary resets the progress breakers
+— the no-progress detector's history, its signals, and any pending grace, plus
+the failure breakers — because the user has changed the turn's trajectory, so
+the same repetition takes a fresh full round to re-trip. It does **not** reset
+the accumulated tool-call count, the cost budget, the wall-clock deadline, or the
+already-spent one-shot nudge; a System- or background-task interrupt resets
+nothing.
 
 The two stops are distinct, recorded exit reasons: a cost-ceiling stop
-(`BudgetExceeded`) and a no-progress stop (`NoProgress`). Both leave a
-model-visible synthetic message and honour the tool-pairing invariant above, like
-every other exit path. With `tool_call_budget_max == tool_call_budget` the bound
-is a flat fixed ceiling; raise the maximum above the soft start to let a
-productive turn extend.
+(`BudgetExceeded`) and a no-progress stop (`NoProgress`). Both preserve the
+tool-pairing invariant above and leave their own model-visible synthetic
+`Role::User` message. Only the `NoProgress` stop additionally names which signal
+fired: one pure builder returns two values — a *notice* (the stop `Warning` and
+the synthetic `Role::User` message share these exact bytes) and a frozen *detail*
+(`signal=stuck_repeat tool="…" count=…`, `signal=novelty_decay window=…
+distinct=…`, or `signal=consecutive_failures count=…`) that is embedded inside
+that notice and also persisted verbatim in `TurnEnded.detail` on the additive
+`detail` field, with no new event field and no format-version bump. The coarse
+`NoProgress` tag itself is unchanged. Compaction
+treats that synthetic rails message as *evidence* of what happened, never as a
+user goal: the compacted session Goal is the chronologically-latest real user
+turn, and a synthetic user message contributes no Goal/Constraints/NextSteps
+intent (its role-agnostic evidence still applies). With `tool_call_budget_max ==
+tool_call_budget` the bound is a flat fixed ceiling; raise the maximum above the
+soft start to let a productive turn extend.
 
 ### Always-On Degenerate-Loop Guard
 
@@ -731,7 +770,9 @@ disabled, the turn still stops with `NoProgress` if either the no-progress
 detector trips (a repeated or cyclic *successful* call set) or a run of
 consecutive *non-successful* calls — the denied/failing spin the detector never
 sees, since it is fed only by successful calls — exceeds a fixed conservative
-limit. Both failure kinds count here (a missing binary routed through the shell
+limit. The one grace dispatch described above applies only to the detector's
+no-progress signal; the consecutive-failure backstop stops immediately, with no
+grace. Both failure kinds count here (a missing binary routed through the shell
 comes back as a *reported* exit 127 and must not spin unchecked), but only a
 tool that could not run at all (`Unusable`, ADR-0116) counts against the
 per-tool stuck signal; a completed run whose wrapped work failed clears it,

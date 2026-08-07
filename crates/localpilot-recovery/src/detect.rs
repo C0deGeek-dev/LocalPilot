@@ -638,6 +638,10 @@ impl NoProgressDetector {
     }
 
     /// Whether the one-shot nudge has already been emitted this turn (monotone).
+    /// Introspection accessor — the nudge/grace lifecycle is driven by
+    /// [`Self::observe`] (mint) and [`Self::consume_grace`]/[`Self::reset`]
+    /// (spend/preserve); this getter exists so the detector's own tests can assert
+    /// the spent nudge is preserved across a steering `reset`.
     #[must_use]
     pub fn has_nudged(&self) -> bool {
         self.nudged

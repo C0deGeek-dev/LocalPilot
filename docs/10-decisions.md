@@ -2,6 +2,83 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0146: No-Progress Guard — Recoverable Signal, Windowed Repeats, User-Only Steering Reset, Diagnosable Stop, And Synthetic-Not-Intent Compaction
+
+Status: Accepted. Amends ADR-0052 (the always-on degenerate-loop guard's
+constants) and ADR-0055 (the built-in default rail that fills only the maximum
+and marks the budget not-operator-explicit). The always-on guard's own stop
+notice was degrading the context the model needs; this makes the guard
+recoverable and diagnosable without weakening halting.
+
+Decision:
+
+- **Thresholds stay constants, not configuration (ADR-0052 upheld).** The window
+  (12 successful calls), the repeat threshold (3), the distinct floor, and the
+  new one-shot grace (`NO_PROGRESS_GRACE_CALLS = 1`) are fixed constants
+  co-located with the detector in `recovery/detect.rs`; the consecutive-failure
+  backstop's `UNPRODUCTIVE_CALL_LIMIT` stays in `harness/session.rs`. No new
+  config surface.
+
+- **The detector exposes two views, not an irreversible latch.** A *dynamic*
+  typed signal (`StuckRepeat{count}` / `NoveltyDecay{distinct, window}` / none) is
+  recomputed on **every** successful observation. The default rail reads it and,
+  after the one-shot nudge, grants exactly one grace dispatch; that grace call's
+  observation recomputes the signal, and the turn continues only if the
+  recomputed signal is inactive — the current pair is below the repeat threshold
+  *and* novelty decay is inactive (the window is not full, or its diversity is at
+  or above the floor). A genuinely new call clears a stuck repeat when it does not
+  simultaneously leave novelty decay active, and a borderline novelty window can
+  clear as diversity rises; one novel signature does not by itself clear a
+  deeply-decayed full window. If the recomputed signal is still
+  active, the turn stops. A separate *monotone since-reset* view preserves the old
+  latch behaviour exactly for the explicit cost controller (a turn that trips
+  below its soft start still stops at the soft start), so operator-budget
+  behaviour is unchanged. The one-shot nudge and the single grace are minted once
+  per turn.
+
+- **User-only steering reset.** A user soft interrupt admitted at a safe boundary
+  resets the progress breakers (the detector's history, both signal views, and
+  any pending grace, plus the unproductive-call streak and the error/tool-failure
+  breakers) through one shared reset path at all four admission boundaries — the
+  user changed the trajectory. It never resets the accumulated tool-call count,
+  the cost budget, the wall-clock deadline, or the already-spent per-turn nudge;
+  a System- or background-task interrupt resets nothing.
+
+- **Repeats are window-bounded.** Repeat accounting is decremented on eviction
+  from the single 12-success window (and its map entry removed at zero), so
+  "three times" means three within the window — not across the whole turn — and
+  the repeat map stays bounded by the window.
+
+- **Diagnosable stop, unchanged coarse contract.** Every no-progress stop keeps
+  the coarse `stop == "NoProgress"` tag byte-for-byte (so the self-review friction
+  finding and the scorecard are unaffected) and additionally records a precise,
+  frozen-grammar `TurnEnded.detail` — `signal=stuck_repeat tool="…" count=…`,
+  `signal=novelty_decay window=… distinct=…`, or `signal=consecutive_failures
+  count=…` — on the existing additive `detail` field. No new event field, no
+  `StopReason` payload, and no `SESSION_EVENT_FORMAT_VERSION` bump. One pure
+  builder returns two values: the **notice** (the stop `Warning` and the synthetic
+  `Role::User` message use these same bytes) and the frozen **detail** (embedded
+  inside the notice and persisted verbatim in `TurnEnded.detail`). Stuck-repeat
+  provenance names the tool captured at the observation that produced the signal,
+  never a later failing grace tool.
+
+- **Synthetic messages are evidence, never intent (compaction).** The guard's
+  stop notice is a synthetic `Role::User` message; compaction no longer elects it
+  as the session goal. The compacted Goal is the chronologically-latest real user
+  intent (an overwritten `Option<String>`, not a lexically-ordered set), and a
+  synthetic user message contributes no Goal/Constraints/NextSteps intent while
+  its role-agnostic evidence classification still applies.
+
+Provenance: all code, tests, identifiers, and the `signal=…` grammar are original
+to this repository (clean-room). Rollback and compatibility: the change is
+self-contained to the harness/recovery/store/selfreview crates; the additive
+`detail` is back-compatible (old logs default it to `None`, old builds ignore it),
+`stop` and the format version are unchanged, and reverting the grace + the
+two-view detector restores the prior halting behaviour. Pinned by the
+`localpilot-recovery` detector tests, the `localpilot-harness` budget/rails and
+`no_progress_detail` suites, the `localpilot-store` round-trip, and the
+`localpilot-selfreview` friction-compat test.
+
 ## ADR-0145: Skills Are Usable From Chat — Canonical Live Trust, Package Discovery UX, And Lane Separation
 
 Status: Accepted. Clarifying amendment to ADR-0027 (the pull-based, opt-in skill

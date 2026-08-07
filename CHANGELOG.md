@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **The no-progress guard no longer kills a turn that recovers, and its stop
+  names the signal that fired.** A turn that trips the degenerate-loop detector
+  now gets its one strategy-change hint plus exactly one grace call, whose
+  observation recomputes progress — the turn continues only when that
+  recomputation makes the signal inactive, and otherwise stops. Repeat detection
+  counts only within a sliding window of recent successful calls (so calls far
+  apart no longer add up to a false loop); a user
+  steering message resets the progress breakers (not the cost/tool-call budget or
+  deadline), while system/background notices do not; and every `NoProgress` stop
+  now records which signal fired (stuck repeat / novelty decay / consecutive
+  failures) alongside the unchanged coarse reason. Compaction no longer mistakes
+  the guard's own stop notice for the session goal — it keeps the latest real
+  request as the goal. (Explicit operator budgets are unchanged.)
+
 - **`localpilot doctor` and `/settings` now surface skill-discovery state.**
   Doctor reports a `skills:` block — whether `[skills] autonomous_discovery` is
   on or off, how many discoverable packages are readable and how many user-only
