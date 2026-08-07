@@ -16,9 +16,19 @@
 //! existing [`localpilot_llm::discover_models`] — not a parse of that prose,
 //! which would couple LocalPilot to a cross-repo wording that can drift.
 
+#[cfg(feature = "tui")]
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
+#[cfg(feature = "tui")]
+use std::sync::Arc;
 
 use localpilot_llm::discover_models;
+#[cfg(feature = "tui")]
+use localpilot_llm::ProviderRegistry;
+#[cfg(feature = "tui")]
+use localpilot_sandbox::{Approver, Profile};
+use tokio_util::sync::CancellationToken;
 
 /// LocalBox's documented default no-think proxy endpoint. LocalBox launch and
 /// `status` default to proxy `:11435` and backend `:8080` (`--proxy-port` /
@@ -252,7 +262,7 @@ pub(crate) async fn run_adopt(
                 )? {
                     anyhow::bail!("declined — LocalBox not started");
                 }
-                start_localbox_serve(model)?;
+                let _ = start_localbox_serve(model, ServeStdio::Inherit, None).await?;
                 state = detect().await;
             }
             (LocalBoxState::Running { .. }, _) => {}
@@ -296,22 +306,207 @@ pub(crate) async fn run_adopt(
     Ok(())
 }
 
-/// Start a LocalBox server headless with `localbox serve <model>`, inheriting its
-/// output so the user sees the model-load progress. `localbox serve` blocks until
-/// the model is ready (it runs its own reply check) and then returns, leaving the
-/// server running as its own detached process — LocalPilot does not own or reap
-/// it (nothing to kill), and `localbox stop` is LocalBox's own teardown.
-fn start_localbox_serve(model: &str) -> anyhow::Result<()> {
-    println!("starting LocalBox serving {model} (loading a model can take a few minutes)…");
-    let status = std::process::Command::new("localbox")
-        .arg("serve")
-        .arg(model)
-        .status()
+/// Child stdio policy for `localbox serve`: the standalone CLI keeps the visible
+/// progress stream, while terminal hosts isolate all streams from their raw-mode
+/// alternate screen.
+#[derive(Clone, Copy)]
+enum ServeStdio {
+    Inherit,
+    #[cfg(feature = "tui")]
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeWait {
+    Complete,
+    Cancelled,
+}
+
+/// Run LocalBox's blocking launcher without blocking Tokio. When `cancel` fires,
+/// LocalPilot drops only its wait handle; Tokio documents that the child keeps
+/// running by default, which preserves ADR-0130's ownership boundary. LocalBox
+/// remains the sole owner of the detached model server and its teardown.
+async fn start_localbox_serve(
+    model: &str,
+    stdio: ServeStdio,
+    cancel: Option<&CancellationToken>,
+) -> anyhow::Result<ServeWait> {
+    let program = localbox_on_path()
+        .ok_or_else(|| anyhow::anyhow!("LocalBox is not installed (no `localbox` on PATH)"))?;
+    let mut command = tokio::process::Command::new(program);
+    command.arg("serve").arg(model).kill_on_drop(false);
+    match stdio {
+        ServeStdio::Inherit => {
+            println!("starting LocalBox serving {model} (loading a model can take a few minutes)…");
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+        }
+        #[cfg(feature = "tui")]
+        ServeStdio::Null => {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+        }
+    }
+    let mut child = command
+        .spawn()
         .map_err(|error| anyhow::anyhow!("could not run `localbox serve {model}`: {error}"))?;
+    let status = wait_or_cancel(child.wait(), cancel).await;
+    let Some(status) = status else {
+        // Deliberate detach: dropping Tokio's `Child` with kill_on_drop(false)
+        // leaves `localbox serve` running. It may still finish launching the
+        // LocalBox-owned server after the TUI returns to idle.
+        return Ok(ServeWait::Cancelled);
+    };
+    let status = status?;
     if !status.success() {
         anyhow::bail!("`localbox serve {model}` exited with {status}");
     }
-    Ok(())
+    Ok(ServeWait::Complete)
+}
+
+async fn wait_or_cancel<F, T>(wait: F, cancel: Option<&CancellationToken>) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    match cancel {
+        Some(cancel) => {
+            tokio::select! {
+                value = wait => Some(value),
+                _ = cancel.cancelled() => None,
+            }
+        }
+        None => Some(wait.await),
+    }
+}
+
+/// How a terminal host resolves an `Ask` decision. The legacy inline host keeps
+/// its standard approval dialog; the full-screen host preserves ADR-0130's
+/// explicit-command consent while still honoring hard `Deny` decisions.
+#[cfg(feature = "tui")]
+pub(crate) enum TerminalConsent<'a> {
+    Prompt(&'a dyn Approver),
+    ExplicitCommand,
+}
+
+/// A successful terminal adoption, including the freshly rebuilt provider
+/// registry needed to activate `local` in the current idle session.
+#[cfg(feature = "tui")]
+pub(crate) struct AdoptedLocalBox {
+    pub(crate) endpoint: String,
+    pub(crate) config: localpilot_config::Config,
+    pub(crate) registry: Arc<ProviderRegistry>,
+}
+
+/// Observable outcome of the in-terminal workflow.
+#[cfg(feature = "tui")]
+pub(crate) enum TerminalAdoptOutcome {
+    Adopted(Box<AdoptedLocalBox>),
+    Declined(&'static str),
+    Cancelled,
+}
+
+/// Detect, optionally launch, permission-gate, adopt, reload, and rebuild the
+/// provider registry for a terminal host. The caller owns UI projection and the
+/// final idle runtime switch; config is durable before this returns `Adopted`.
+#[cfg(feature = "tui")]
+pub(crate) async fn run_terminal_adopt(
+    cwd: &Path,
+    serve: Option<&str>,
+    profile: Profile,
+    trusted: bool,
+    consent: TerminalConsent<'_>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<TerminalAdoptOutcome> {
+    use localpilot_sandbox::{
+        CommandClass, Effect, Interactivity, PermissionEngine, PermissionRequest,
+    };
+
+    let engine = PermissionEngine::new(profile, Vec::new());
+    let mut state = detect().await;
+    if !matches!(state, LocalBoxState::Running { .. }) {
+        match (&state, serve) {
+            (LocalBoxState::NotInstalled, _) => {
+                anyhow::bail!("LocalBox is not installed (no `localbox` on PATH)")
+            }
+            (LocalBoxState::InstalledNotRunning, None) => anyhow::bail!(
+                "no running LocalBox server found — use `/localbox adopt --serve <model>` or run `localbox serve <model>` first"
+            ),
+            (LocalBoxState::InstalledNotRunning, Some(model)) => {
+                let request = PermissionRequest {
+                    tool: "localbox serve".to_string(),
+                    effect: Effect::RunCommand(CommandClass::ExternalWrite),
+                    interactivity: Interactivity::Interactive,
+                    trusted,
+                    detail: format!("localbox serve {model}"),
+                };
+                if !terminal_effect_allowed(&engine, &request, &consent).await {
+                    return Ok(TerminalAdoptOutcome::Declined("LocalBox launch"));
+                }
+                if matches!(
+                    start_localbox_serve(model, ServeStdio::Null, Some(cancel)).await?,
+                    ServeWait::Cancelled
+                ) {
+                    return Ok(TerminalAdoptOutcome::Cancelled);
+                }
+                state = detect().await;
+            }
+            (LocalBoxState::Running { .. }, _) => {}
+        }
+    }
+
+    let (endpoint, model) = match state {
+        LocalBoxState::Running { endpoint, model } => (endpoint, model),
+        LocalBoxState::InstalledNotRunning | LocalBoxState::NotInstalled => anyhow::bail!(
+            "LocalBox did not come up at {DEFAULT_PROXY_BASE_URL} after starting — check `localbox status`"
+        ),
+    };
+    let path = localpilot_config::project_config_path(cwd);
+    let request = PermissionRequest {
+        tool: "localbox adopt".to_string(),
+        effect: Effect::WritePath {
+            inside_workspace: true,
+            overwrite: path.exists(),
+            secret_like: false,
+        },
+        interactivity: Interactivity::Interactive,
+        trusted,
+        detail: path.display().to_string(),
+    };
+    if !terminal_effect_allowed(&engine, &request, &consent).await {
+        return Ok(TerminalAdoptOutcome::Declined("LocalBox adoption"));
+    }
+    write_local_provider(&path, &endpoint, model.as_deref())?;
+
+    let config = localpilot_config::load(
+        &localpilot_config::ConfigPaths::standard(cwd),
+        &localpilot_config::CliOverrides::default(),
+    )?;
+    let registry = Arc::new(ProviderRegistry::from_config(&config)?);
+    Ok(TerminalAdoptOutcome::Adopted(Box::new(AdoptedLocalBox {
+        endpoint,
+        config,
+        registry,
+    })))
+}
+
+#[cfg(feature = "tui")]
+async fn terminal_effect_allowed(
+    engine: &localpilot_sandbox::PermissionEngine,
+    request: &localpilot_sandbox::PermissionRequest,
+    consent: &TerminalConsent<'_>,
+) -> bool {
+    match engine.decide(request) {
+        localpilot_sandbox::Decision::Allow => true,
+        localpilot_sandbox::Decision::Ask => match consent {
+            TerminalConsent::Prompt(approver) => approver.approve(request).await,
+            TerminalConsent::ExplicitCommand => true,
+        },
+        localpilot_sandbox::Decision::Deny => false,
+    }
 }
 
 /// Merge a `[providers.local]` block for `endpoint`/`model` into the config file
@@ -531,6 +726,48 @@ command = \"npx\"
                 endpoint,
                 model: Some("qwen-coder".to_string()),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_child_wait_returns_without_waiting_for_the_child_future() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_or_cancel(std::future::pending::<()>(), Some(&cancel)),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_none());
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn terminal_consent_prompts_on_ask_while_explicit_command_is_consent() {
+        use localpilot_sandbox::{
+            CommandClass, Effect, Interactivity, PermissionEngine, PermissionRequest, Profile,
+            ScriptedApprover,
+        };
+
+        let engine = PermissionEngine::new(Profile::Default, Vec::new());
+        let request = PermissionRequest {
+            tool: "localbox serve".to_string(),
+            effect: Effect::RunCommand(CommandClass::ExternalWrite),
+            interactivity: Interactivity::Interactive,
+            trusted: true,
+            detail: "localbox serve model.gguf".to_string(),
+        };
+        let denied = ScriptedApprover::new(vec![false]);
+        assert!(
+            !terminal_effect_allowed(&engine, &request, &TerminalConsent::Prompt(&denied)).await
+        );
+        let approved = ScriptedApprover::new(vec![true]);
+        assert!(
+            terminal_effect_allowed(&engine, &request, &TerminalConsent::Prompt(&approved)).await
+        );
+        assert!(
+            terminal_effect_allowed(&engine, &request, &TerminalConsent::ExplicitCommand).await
         );
     }
 

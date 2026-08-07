@@ -1713,6 +1713,24 @@ impl SessionRuntime {
         self.registry = Some(registry);
     }
 
+    /// Replace the provider registry used by subsequent provider switches.
+    /// Interactive hosts use this after a user-approved config update so a new
+    /// provider can become available without restarting the session. The active
+    /// provider, model, and provider-neutral transcript are left untouched until
+    /// the host explicitly calls [`set_active_provider`](Self::set_active_provider).
+    ///
+    /// # Errors
+    /// [`SwitchError::TurnInFlight`] when a turn is in progress; registry
+    /// replacement is restricted to the same idle boundary as provider/model
+    /// switching.
+    pub fn replace_registry(&mut self, registry: Arc<ProviderRegistry>) -> Result<(), SwitchError> {
+        if self.turn_in_flight {
+            return Err(SwitchError::TurnInFlight);
+        }
+        self.registry = Some(registry);
+        Ok(())
+    }
+
     /// The id of the active provider, read from its own declaration.
     #[must_use]
     pub fn active_provider_id(&self) -> &str {
@@ -4804,6 +4822,29 @@ mod tests {
     }
 
     #[test]
+    fn replacing_the_idle_registry_exposes_a_new_provider_without_touching_history() {
+        let (mut runtime, _dir) = switchable_runtime();
+        let history_before = runtime.messages.clone();
+        let mut providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::new();
+        providers.insert("a".to_string(), fake_with_id("a"));
+        providers.insert("local".to_string(), fake_with_id("local"));
+        let mut defaults = HashMap::new();
+        defaults.insert("local".to_string(), "bonsai.gguf".to_string());
+        let registry = Arc::new(ProviderRegistry::from_providers(
+            providers, defaults, "local",
+        ));
+
+        runtime.replace_registry(registry).unwrap();
+        assert_eq!(runtime.active_provider_id(), "a");
+        assert_eq!(runtime.messages, history_before);
+
+        let outcome = runtime.set_active_provider("local").unwrap();
+        assert_eq!(outcome.provider_id, "local");
+        assert_eq!(outcome.model, "bonsai.gguf");
+        assert_eq!(runtime.messages, history_before);
+    }
+
+    #[test]
     fn provider_only_switch_without_a_default_model_keeps_the_current_one() {
         let (mut runtime, _dir) = switchable_runtime();
         // `a` carries no configured default model, so a switch back to it keeps the
@@ -4841,6 +4882,15 @@ mod tests {
         );
         assert_eq!(
             runtime.set_active_model("x"),
+            Err(SwitchError::TurnInFlight)
+        );
+        let empty = Arc::new(ProviderRegistry::from_providers(
+            HashMap::new(),
+            HashMap::new(),
+            "none",
+        ));
+        assert_eq!(
+            runtime.replace_registry(empty),
             Err(SwitchError::TurnInFlight)
         );
         // Between turns the same switch succeeds.

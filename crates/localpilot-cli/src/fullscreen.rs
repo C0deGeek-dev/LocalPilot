@@ -91,7 +91,10 @@ pub(crate) struct HostContext<'a> {
     pub(crate) cwd: &'a Path,
     pub(crate) history: &'a localpilot_store::PromptHistory,
     pub(crate) ingest: &'a localpilot_config::IngestConfig,
-    pub(crate) config: &'a localpilot_config::Config,
+    /// Session-local config snapshot. LocalBox adoption replaces it after the
+    /// durable config write so later `/model`, completion, and image-capability
+    /// paths observe the newly added provider without restarting the host.
+    pub(crate) config: &'a mut localpilot_config::Config,
     pub(crate) trust_required: bool,
 }
 
@@ -693,6 +696,10 @@ enum PumpedIngest {
 /// A slash command that runs on the operation pump rather than synchronously.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum PumpedSlash {
+    /// Adopt a running server, or launch `serve` first when supplied.
+    LocalBoxAdopt {
+        serve: Option<String>,
+    },
     Compact {
         force: bool,
     },
@@ -727,6 +734,9 @@ enum SerialOperation {
 /// action, so there is no reparse or clone.
 fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
     match action {
+        SlashAction::LocalBoxAdopt { serve } => {
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve })
+        }
         SlashAction::Compact { force } => SlashRoute::Pumped(PumpedSlash::Compact { force }),
         SlashAction::Ingest(localpilot_tui::IngestAction::Run) => {
             SlashRoute::Pumped(PumpedSlash::Ingest(PumpedIngest::Run))
@@ -897,7 +907,7 @@ pub(crate) async fn run(
     app.set_command_catalog(fullscreen_command_catalog());
     app.set_command_values(
         "model",
-        fullscreen_model_values(context.config, context.runtime.active_provider_id()),
+        fullscreen_model_values(&*context.config, context.runtime.active_provider_id()),
     );
     apply_host_preferences(&mut app);
     for item in startup_items {
@@ -2945,59 +2955,11 @@ async fn execute_fullscreen_slash_action(
                 "invalid /{command}: {reason}"
             )));
         }
-        SlashAction::LocalBoxAdopt => {
-            match crate::localbox::detect().await {
-                crate::localbox::LocalBoxState::Running { endpoint, model } => {
-                    // The user explicitly typed `/localbox adopt`, so the command
-                    // itself is the consent for this workspace config write; the
-                    // permission engine can still hard-deny it under a Deny policy.
-                    let engine = localpilot_sandbox::PermissionEngine::new(
-                        crate::models_cmd::profile(config),
-                        Vec::new(),
-                    );
-                    let path = localpilot_config::project_config_path(cwd);
-                    let request = localpilot_sandbox::PermissionRequest {
-                        tool: "localbox adopt".to_string(),
-                        effect: localpilot_sandbox::Effect::WritePath {
-                            inside_workspace: true,
-                            overwrite: path.exists(),
-                            secret_like: false,
-                        },
-                        interactivity: localpilot_sandbox::Interactivity::Interactive,
-                        trusted: true,
-                        detail: path.display().to_string(),
-                    };
-                    if matches!(engine.decide(&request), localpilot_sandbox::Decision::Deny) {
-                        app.apply_runtime(RuntimeUpdate::Notice(
-                            "adopt denied by the permission policy".to_string(),
-                        ));
-                    } else {
-                        match crate::localbox::write_local_provider(
-                            &path,
-                            &endpoint,
-                            model.as_deref(),
-                        ) {
-                            Ok(()) => app.apply_runtime(RuntimeUpdate::Notice(format!(
-                                "adopted LocalBox at {endpoint} — wrote [providers.local]; it applies on the next launch"
-                            ))),
-                            Err(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
-                                "adopt failed: {error}"
-                            ))),
-                        }
-                    }
-                }
-                crate::localbox::LocalBoxState::InstalledNotRunning => {
-                    app.apply_runtime(RuntimeUpdate::Notice(
-                        "no running LocalBox server — run `localbox serve <model>` (or `localpilot localbox adopt --serve <model>`) first".to_string(),
-                    ));
-                }
-                crate::localbox::LocalBoxState::NotInstalled => {
-                    app.apply_runtime(RuntimeUpdate::Notice(
-                        "LocalBox is not installed (no `localbox` on PATH)".to_string(),
-                    ));
-                }
-            }
-        }
+        // Routed to the operation pump before synchronous dispatch. Keeping an
+        // explicit defensive arm makes a future routing regression visible.
+        SlashAction::LocalBoxAdopt { .. } => app.apply_runtime(RuntimeUpdate::Warning(
+            "/localbox could not enter the operation pump".to_string(),
+        )),
         action @ (SlashAction::Help
         | SlashAction::Theme(_)
         | SlashAction::Settings(_)
@@ -3891,7 +3853,10 @@ async fn run_event_loop(
                                     },
                                     SerialOperation::PumpedSlash(command),
                                     &mut queue,
-                                    ResumeAuthority { approval_tx },
+                                    PumpedAuthority {
+                                        config,
+                                        approval_tx,
+                                    },
                                 )
                                 .await?
                                 {
@@ -3930,7 +3895,10 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
-                            ResumeAuthority { approval_tx },
+                            PumpedAuthority {
+                                config,
+                                approval_tx,
+                            },
                         )
                         .await?
                         {
@@ -3956,7 +3924,10 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
-                            ResumeAuthority { approval_tx },
+                            PumpedAuthority {
+                                config,
+                                approval_tx,
+                            },
                         )
                         .await?
                         {
@@ -4012,7 +3983,7 @@ async fn drive_operation_chain(
     mut ctx: SlashContext<'_>,
     first: SerialOperation,
     queue: &mut VecDeque<QueuedOperation>,
-    resume: ResumeAuthority<'_>,
+    mut authority: PumpedAuthority<'_>,
 ) -> Result<bool> {
     let mut current = Some(first);
     while let Some(operation) = current {
@@ -4022,8 +3993,16 @@ async fn drive_operation_chain(
             // transition (compact immediately, ingest after preflight, resume after
             // entering Harness mode).
             SerialOperation::PumpedSlash(command) => {
-                if drive_slash_command(terminal, app, runtime, &mut ctx, command, queue, resume)
-                    .await?
+                if drive_slash_command(
+                    terminal,
+                    app,
+                    runtime,
+                    &mut ctx,
+                    command,
+                    queue,
+                    &mut authority,
+                )
+                .await?
                 {
                     discard_queued_operations(queue);
                     return Ok(true);
@@ -4094,9 +4073,12 @@ async fn drive_slash_command(
     ctx: &mut SlashContext<'_>,
     command: PumpedSlash,
     queue: &mut VecDeque<QueuedOperation>,
-    resume: ResumeAuthority<'_>,
+    authority: &mut PumpedAuthority<'_>,
 ) -> Result<bool> {
     match command {
+        PumpedSlash::LocalBoxAdopt { serve } => {
+            drive_localbox(terminal, app, runtime, authority.config, ctx, serve, queue).await
+        }
         PumpedSlash::Compact { force } => {
             drive_compact(terminal, app, runtime, ctx, force, queue).await
         }
@@ -4113,15 +4095,167 @@ async fn drive_slash_command(
                 runtime,
                 ctx,
                 queue,
-                resume,
+                ResumeAuthority {
+                    approval_tx: authority.approval_tx,
+                },
                 ResumeKind::Harness,
             )
             .await
         }
         PumpedSlash::WaitResume => {
-            drive_harness_resume(terminal, app, runtime, ctx, queue, resume, ResumeKind::Wait).await
+            drive_harness_resume(
+                terminal,
+                app,
+                runtime,
+                ctx,
+                queue,
+                ResumeAuthority {
+                    approval_tx: authority.approval_tx,
+                },
+                ResumeKind::Wait,
+            )
+            .await
         }
     }
+}
+
+enum LocalBoxPumpResult {
+    Adopted {
+        endpoint: String,
+        provider: String,
+        model: String,
+        notices: Vec<String>,
+        model_values: Vec<CompletionCommand>,
+    },
+    Declined(&'static str),
+    Cancelled,
+    Failed(String),
+}
+
+/// Run `/localbox` on the responsive command pump. Child stdio is isolated by
+/// the shared workflow, Ctrl+C cancels only LocalPilot's wait, and a successful
+/// durable adoption atomically refreshes the session-local config/registry before
+/// switching the next turn to `local`.
+async fn drive_localbox(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut AppModel,
+    runtime: &mut SessionRuntime,
+    config: &mut localpilot_config::Config,
+    ctx: &mut SlashContext<'_>,
+    serve: Option<String>,
+    queue: &mut VecDeque<QueuedOperation>,
+) -> Result<bool> {
+    let cancel = CancellationToken::new();
+    let operation_cancel = cancel.clone();
+    let profile = crate::models_cmd::profile(config);
+    let trusted = runtime.trusted();
+    let cwd = ctx.cwd.to_path_buf();
+    let image_capability = ImageCapabilitySnapshot {
+        provider_id: runtime.active_provider_id().to_string(),
+        vision_capable: runtime.active_accepts_images(),
+    };
+    app.begin_work();
+    let mut io = TerminalIo {
+        poll: |timeout: Duration| event::poll(timeout),
+        read: || event::read(),
+        draw: |app: &AppModel| draw_synchronized(terminal, app),
+    };
+    let operation = async move {
+        match crate::localbox::run_terminal_adopt(
+            &cwd,
+            serve.as_deref(),
+            profile,
+            trusted,
+            crate::localbox::TerminalConsent::ExplicitCommand,
+            &operation_cancel,
+        )
+        .await
+        {
+            Ok(crate::localbox::TerminalAdoptOutcome::Adopted(adopted)) => {
+                let adopted = *adopted;
+                let crate::localbox::AdoptedLocalBox {
+                    endpoint,
+                    config: fresh_config,
+                    registry,
+                } = adopted;
+                if let Err(error) = runtime.replace_registry(registry) {
+                    return LocalBoxPumpResult::Failed(format!(
+                        "config was written, but the live provider registry could not refresh: {error}; restart LocalPilot to use it"
+                    ));
+                }
+                *config = fresh_config;
+                let report = switch_model_target(runtime, config, "local", None).await;
+                let model_values = fullscreen_model_values(config, runtime.active_provider_id());
+                LocalBoxPumpResult::Adopted {
+                    endpoint,
+                    provider: report.provider,
+                    model: report.model,
+                    notices: report.notices,
+                    model_values,
+                }
+            }
+            Ok(crate::localbox::TerminalAdoptOutcome::Declined(action)) => {
+                LocalBoxPumpResult::Declined(action)
+            }
+            Ok(crate::localbox::TerminalAdoptOutcome::Cancelled) => LocalBoxPumpResult::Cancelled,
+            Err(error) => LocalBoxPumpResult::Failed(error.to_string()),
+        }
+    };
+    drive_fullscreen_operation(
+        app,
+        SlashContext {
+            approval_rx: &mut *ctx.approval_rx,
+            question_rx: &mut *ctx.question_rx,
+            cwd: ctx.cwd,
+            history: ctx.history,
+            mouse_state: &mut *ctx.mouse_state,
+            paste_burst: &mut *ctx.paste_burst,
+            workspace_index: &mut *ctx.workspace_index,
+        },
+        &mut io,
+        &cancel,
+        &image_capability,
+        queue,
+        OperationKind::Command,
+        EventLane::Bare,
+        QuestionMode::Inert,
+        ProgressLane::None,
+        operation,
+        apply_localbox_pump_result,
+    )
+    .await
+}
+
+fn apply_localbox_pump_result(app: &mut AppModel, result: LocalBoxPumpResult) {
+    match result {
+        LocalBoxPumpResult::Adopted {
+            endpoint,
+            provider,
+            model,
+            notices,
+            model_values,
+        } => {
+            app.set_active_provider_model(provider, model);
+            app.set_command_values("model", model_values);
+            app.apply_runtime(RuntimeUpdate::Notice(format!(
+                "adopted LocalBox at {endpoint} — wrote [providers.local]"
+            )));
+            for notice in notices {
+                app.apply_runtime(RuntimeUpdate::Notice(notice));
+            }
+        }
+        LocalBoxPumpResult::Declined(action) => app.apply_runtime(RuntimeUpdate::Notice(format!(
+            "{action} declined — no further changes made"
+        ))),
+        LocalBoxPumpResult::Cancelled => app.apply_runtime(RuntimeUpdate::Notice(
+            "stopped waiting for LocalBox; startup may continue in the background — run `/localbox adopt` when it is ready"
+                .to_string(),
+        )),
+        LocalBoxPumpResult::Failed(error) => app.apply_runtime(RuntimeUpdate::Warning(format!(
+            "LocalBox launch/adopt failed: {error}"
+        ))),
+    }
+    app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
 }
 
 /// `/compact` and `/compact force` on the pump. No approvals, no inner runtime; the
@@ -4471,6 +4605,14 @@ async fn drive_research(
 /// carried here.
 #[derive(Clone, Copy)]
 struct ResumeAuthority<'a> {
+    approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
+}
+
+/// Ambient state used only by pumped slash commands: the mutable session-local
+/// config for LocalBox adoption and the approval sender for resume commands.
+/// Bundling it keeps the serial-chain dispatcher narrow as pumped commands grow.
+struct PumpedAuthority<'a> {
+    config: &'a mut localpilot_config::Config,
     approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
 }
 
@@ -9743,7 +9885,7 @@ mod tests {
             ),
             (
                 "localbox",
-                "Adopt a running LocalBox server into your config (/localbox adopt)",
+                "Launch or adopt LocalBox (/localbox adopt [--serve <model>])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -13074,8 +13216,19 @@ mod tests {
     }
 
     #[test]
-    fn route_fullscreen_slash_pumps_compact_and_long_ingest_only() {
+    fn route_fullscreen_slash_pumps_localbox_and_existing_long_operations() {
         use localpilot_tui::IngestAction;
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::LocalBoxAdopt { serve: None }),
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: None })
+        ));
+        assert!(matches!(
+            route_fullscreen_slash(SlashAction::LocalBoxAdopt {
+                serve: Some("model.gguf".to_string()),
+            }),
+            SlashRoute::Pumped(PumpedSlash::LocalBoxAdopt { serve: Some(model) })
+                if model == "model.gguf"
+        ));
         assert!(matches!(
             route_fullscreen_slash(SlashAction::Compact { force: false }),
             SlashRoute::Pumped(PumpedSlash::Compact { force: false })
@@ -13163,6 +13316,24 @@ mod tests {
             pumped_ingest_mode(PumpedIngest::Resume),
             (localpilot_localmind::RunMode::Refresh, true)
         ));
+    }
+
+    #[test]
+    fn localbox_pump_projects_cancellation_and_failure_as_terminal_outcomes() {
+        let mut cancelled = app();
+        apply_localbox_pump_result(&mut cancelled, LocalBoxPumpResult::Cancelled);
+        assert!(timeline_has(
+            &cancelled,
+            "startup may continue in the background"
+        ));
+
+        let mut failed = app();
+        apply_localbox_pump_result(
+            &mut failed,
+            LocalBoxPumpResult::Failed("launcher failed".to_string()),
+        );
+        assert!(timeline_has(&failed, "LocalBox launch/adopt failed"));
+        assert!(timeline_has(&failed, "launcher failed"));
     }
 
     #[test]

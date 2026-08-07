@@ -97,9 +97,13 @@ pub enum SlashAction {
         provider: Option<String>,
         model: Option<String>,
     },
-    /// Adopt a running LocalBox server into `.localpilot.toml` from inside the
-    /// session (`/localbox` or `/localbox adopt`).
-    LocalBoxAdopt,
+    /// Adopt a LocalBox server into `.localpilot.toml` from inside the session.
+    /// `serve` starts that model first when no server is already running
+    /// (`/localbox adopt --serve <model>`); bare `/localbox` and
+    /// `/localbox adopt` retain their running-server behavior.
+    LocalBoxAdopt {
+        serve: Option<String>,
+    },
     Ingest(IngestAction),
     Knowledge(String),
     /// Research a topic. `Some(topic)` runs a one-shot research pass; `None`
@@ -515,7 +519,7 @@ slash_commands! {
             "localbox",
             Optional,
             Fall,
-            "Adopt a running LocalBox server into your config (/localbox adopt)"
+            "Launch or adopt LocalBox (/localbox adopt [--serve <model>])"
         ),
         New => both("new", NoArg, Fall, "Start a fresh session"),
         Fork => both("fork", NoArg, Fall, "Branch the conversation into a new session"),
@@ -664,7 +668,7 @@ impl SlashAction {
             SlashAction::ToggleThinking => C::Think,
             SlashAction::SetEffort(_) => C::Effort,
             SlashAction::Model { .. } => C::Model,
-            SlashAction::LocalBoxAdopt => C::Localbox,
+            SlashAction::LocalBoxAdopt { .. } => C::Localbox,
             SlashAction::NewSession => C::New,
             SlashAction::Fork => C::Fork,
             SlashAction::CloneSession => C::Clone,
@@ -795,14 +799,23 @@ fn dispatch(spelling: &Spelling, host: Host, name: &str, args: &str, command: &s
             }
         }
         C::Localbox => {
-            if args.is_empty() || args == "adopt" {
-                SlashAction::LocalBoxAdopt
+            let parsed = if args.is_empty() || args == "adopt" {
+                Some(None)
             } else {
-                SlashAction::Invalid {
+                args.strip_prefix("adopt")
+                    .map(str::trim_start)
+                    .and_then(|rest| rest.strip_prefix("--serve"))
+                    .filter(|model| model.chars().next().is_some_and(char::is_whitespace))
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(|model| Some(model.to_string()))
+            };
+            match parsed {
+                Some(serve) => SlashAction::LocalBoxAdopt { serve },
+                None => SlashAction::Invalid {
                     command: name.to_string(),
-                    reason: "usage: /localbox adopt — add a running LocalBox server to your config"
-                        .to_string(),
-                }
+                    reason: "usage: /localbox adopt [--serve <model>]".to_string(),
+                },
             }
         }
         C::New => no_arg(spelling, name, args, command, SlashAction::NewSession),
@@ -1167,7 +1180,7 @@ mod tests {
             ),
             (
                 "localbox",
-                "Adopt a running LocalBox server into your config (/localbox adopt)",
+                "Launch or adopt LocalBox (/localbox adopt [--serve <model>])",
             ),
             ("new", "Start a fresh session"),
             ("fork", "Branch the conversation into a new session"),
@@ -1632,5 +1645,33 @@ mod tests {
         );
         assert_eq!(parse_slash("/wait-resume"), Some(SlashAction::WaitResume));
         assert_eq!(parse_slash("/wait_resume"), Some(SlashAction::WaitResume));
+    }
+
+    #[test]
+    fn localbox_accepts_adopt_and_a_literal_serve_model_only() {
+        assert_eq!(
+            parse_slash("/localbox"),
+            Some(SlashAction::LocalBoxAdopt { serve: None })
+        );
+        assert_eq!(
+            parse_slash("/localbox adopt"),
+            Some(SlashAction::LocalBoxAdopt { serve: None })
+        );
+        assert_eq!(
+            parse_slash("/localbox adopt --serve Bonsai 27B.gguf"),
+            Some(SlashAction::LocalBoxAdopt {
+                serve: Some("Bonsai 27B.gguf".to_string()),
+            })
+        );
+        for malformed in [
+            "/localbox --serve model",
+            "/localbox adopt --serve",
+            "/localbox adopt --server model",
+        ] {
+            assert!(matches!(
+                parse_slash(malformed),
+                Some(SlashAction::Invalid { .. })
+            ));
+        }
     }
 }

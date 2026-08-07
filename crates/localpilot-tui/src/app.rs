@@ -301,7 +301,7 @@ fn apply_slash(state: &mut AppState, action: SlashAction) {
         SlashAction::Model { .. } => state.apply(UiEvent::Notice(
             "/model is handled by the interactive host".to_string(),
         )),
-        SlashAction::LocalBoxAdopt => state.apply(UiEvent::Notice(
+        SlashAction::LocalBoxAdopt { .. } => state.apply(UiEvent::Notice(
             "/localbox is handled by the interactive host".to_string(),
         )),
         SlashAction::Exit { .. } => state.should_quit = true,
@@ -714,13 +714,32 @@ mod tests {
 
     #[test]
     fn localbox_slash_command_parses() {
-        assert_eq!(parse_slash("/localbox"), Some(SlashAction::LocalBoxAdopt));
+        assert_eq!(
+            parse_slash("/localbox"),
+            Some(SlashAction::LocalBoxAdopt { serve: None })
+        );
         assert_eq!(
             parse_slash("/localbox adopt"),
-            Some(SlashAction::LocalBoxAdopt)
+            Some(SlashAction::LocalBoxAdopt { serve: None })
+        );
+        assert_eq!(
+            parse_slash("/localbox adopt --serve bonsai.gguf"),
+            Some(SlashAction::LocalBoxAdopt {
+                serve: Some("bonsai.gguf".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_slash("/localbox adopt --serve Bonsai 27B.gguf"),
+            Some(SlashAction::LocalBoxAdopt {
+                serve: Some("Bonsai 27B.gguf".to_string()),
+            })
         );
         assert!(matches!(
             parse_slash("/localbox wat"),
+            Some(SlashAction::Invalid { .. })
+        ));
+        assert!(matches!(
+            parse_slash("/localbox adopt --serve"),
             Some(SlashAction::Invalid { .. })
         ));
     }
