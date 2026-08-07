@@ -95,5 +95,13 @@ expression: render_json(&fixture())
     "models-json"
   ],
   "workspace_trust": "unknown",
-  "workspace_trust_store": "/home/user/.config/localpilot/trusted-folders.txt"
+  "workspace_trust_store": "/home/user/.config/localpilot/trusted-folders.txt",
+  "skills": {
+    "autonomous_discovery": false,
+    "readable": {
+      "discoverable": 2,
+      "user_only": 1,
+      "skipped": 0
+    }
+  }
 }

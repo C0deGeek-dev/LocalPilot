@@ -35,3 +35,9 @@ capabilities: doctor-json, models-json
 
 workspace trust: could not be evaluated
   evaluation failed; run `localpilot trust status` for the error
+
+skills:
+  autonomous discovery: off (set `[skills] autonomous_discovery = true`)
+  discoverable packages: 2
+  user-only packages (hidden): 1
+  project overlay hidden (workspace trust could not be evaluated)

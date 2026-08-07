@@ -608,11 +608,25 @@ There is deliberately no command to reveal, export, or copy a stored value.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `autonomous_discovery` | bool | `false` | Register the `skill_search`/`skill_load` tools so the model may discover and read project skills on its own, **and** allow the skill-discovery lane to load a relevant, model-discoverable *installed* skill into a `/research` run (ADR-0099). Off by default, so a small local model never auto-injects a skill; an available/discovered match or a user-only skill stays report-only regardless. The deterministic `localpilot skills list \| show \| research` surface works regardless. |
+| `autonomous_discovery` | bool | `false` | Register the `skill_list`/`skill_search`/`skill_load` tools so the model may list, discover, and read the installed SKILL.md package catalog on its own (the user-global baseline plus this workspace's trusted project overlay), **and** allow the skill-discovery lane to load a relevant, model-discoverable *installed* skill into a `/research` run (ADR-0099). Off by default, so a small local model never auto-injects a skill; an available/discovered match or a user-only skill stays report-only regardless. The deterministic `localpilot skills list \| show \| research` surface works regardless. |
 
 Project skills are advisory prompt modules under `.localpilot/skills/` or
 `.agents/skills/`; see [05-tool-system.md](05-tool-system.md) §Project Skill
 Discovery.
+
+`localpilot doctor` reports a `skills:` block: whether `autonomous_discovery` is
+on or off, the readable discoverable-package count and the hidden user-only
+count. When the project overlay is not included it says which case applies —
+`project overlay hidden (workspace untrusted)` for a confidently untrusted
+workspace, or `project overlay hidden (workspace trust could not be evaluated)`
+when trust is unknown (never a confident "untrusted"). In both cases only the
+user-global baseline is counted and no project manifest is read. A catalog that
+cannot be scanned at all is reported as `unreadable`, distinct from a real empty
+`0`; and when some package entries are malformed the block adds `package entries
+skipped as unreadable: N` (a count only) so a `0` is never mistaken for a clean
+empty catalog. The full-screen `/settings` view shows a static `Installed
+package discovery: on/off` row (config-only; it performs no catalog scan) with,
+when off, guidance to `/skills list` or the `autonomous_discovery` switch.
 
 ### `[tools]`
 

@@ -6,6 +6,20 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **`localpilot doctor` and `/settings` now surface skill-discovery state.**
+  Doctor reports a `skills:` block — whether `[skills] autonomous_discovery` is
+  on or off, how many discoverable packages are readable and how many user-only
+  packages are hidden. When the project overlay is not included it distinguishes a
+  confidently untrusted workspace (`workspace untrusted`) from one whose trust
+  could not be evaluated (`workspace trust could not be evaluated`) — matching the
+  report's own trust line — and in both cases counts only the user-global baseline
+  without reading any project manifest. A catalog that cannot be scanned is
+  reported as `unreadable` (distinct from a real empty `0`), and malformed entries
+  are surfaced as a count (`package entries skipped as unreadable: N`) so an empty
+  `0` is never mistaken for a clean catalog. The full-screen `/settings` view adds
+  a static `Installed package discovery: on/off` row that, when off, points at
+  `/skills list` and the config switch — with no catalog scan on render.
+
 - **Accepting the workspace-trust dialog now trusts the live session
   immediately.** Live session trust is derived from the trusted-folders store
   (not the permission profile) and updated in place when you accept — so the

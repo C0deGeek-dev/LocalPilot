@@ -2260,6 +2260,28 @@ fn fullscreen_settings(app: &AppModel, config: &localpilot_config::Config) -> Ve
             edit: None,
             is_default: true,
         },
+        // A config-only row: whether the model-callable skill-discovery tools are
+        // registered. It performs NO catalog/home/workspace scan and infers no
+        // emptiness — its only input is `[skills] autonomous_discovery`.
+        SettingEntry {
+            section: "Session".to_string(),
+            name: "Installed package discovery".to_string(),
+            value: if config.skills.autonomous_discovery {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
+            description: if config.skills.autonomous_discovery {
+                "Model-callable skill discovery is on (`skill_list`/`skill_search`/`skill_load`)."
+                    .to_string()
+            } else {
+                "Off — list installed skills with `/skills list`, or set `[skills] \
+                 autonomous_discovery = true` to let the model discover them."
+                    .to_string()
+            },
+            edit: None,
+            is_default: true,
+        },
     ]
 }
 
@@ -8934,6 +8956,62 @@ mod tests {
                 .filter_map(|setting| setting.edit)
                 .collect::<Vec<_>>(),
             [SettingEdit::CopyOnSelect, SettingEdit::Theme]
+        );
+    }
+
+    #[test]
+    fn the_installed_package_discovery_row_projects_config_only_on_and_off() {
+        let mut app = app();
+        app.capture_setting_defaults();
+
+        // Off (the default): the row reads "off" and names both enable paths.
+        let off = fullscreen_settings(&app, &localpilot_config::Config::default());
+        let off_row = off
+            .iter()
+            .find(|s| s.name == "Installed package discovery")
+            .expect("the discovery row is present");
+        assert_eq!(off_row.value, "off");
+        assert!(
+            off_row.description.contains("/skills list"),
+            "names /skills list"
+        );
+        assert!(
+            off_row.description.contains("autonomous_discovery = true"),
+            "names the config switch"
+        );
+        assert!(
+            off_row.edit.is_none(),
+            "the row is static — it edits nothing"
+        );
+
+        // On: the row reads "on".
+        let mut on_config = localpilot_config::Config::default();
+        on_config.skills.autonomous_discovery = true;
+        let on = fullscreen_settings(&app, &on_config);
+        let on_row = on
+            .iter()
+            .find(|s| s.name == "Installed package discovery")
+            .expect("the discovery row is present");
+        assert_eq!(on_row.value, "on");
+
+        // Config-only projection: with the same app and only the flag flipped, the
+        // discovery row is the ONLY row that changes, and the row set is stable
+        // (same names in the same order).
+        assert_eq!(
+            off.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            on.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            "row ordering/stability is preserved"
+        );
+        let changed: Vec<&str> = off
+            .iter()
+            .zip(on.iter())
+            .filter(|(a, b)| a.value != b.value)
+            .map(|(a, _)| a.name.as_str())
+            .collect();
+        assert_eq!(
+            changed,
+            ["Installed package discovery"],
+            "only the flag row's value changes with the config"
         );
     }
 

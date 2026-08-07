@@ -18,7 +18,7 @@ mod trust;
 
 use doctor::{
     AgentsStatus, ConfigPath, DoctorReport, McpServerState, McpServerStatus, ProviderStatus,
-    ToolStatus, TrustState,
+    SkillsCounts, SkillsDoctor, ToolStatus, TrustState,
 };
 use localpilot_config::CredentialSource;
 
@@ -221,6 +221,14 @@ fn report() -> DoctorReport {
         workspace_trust_store: Some(
             "/home/user/.config/localpilot/trusted-folders.txt".to_string(),
         ),
+        skills: SkillsDoctor {
+            autonomous_discovery: false,
+            readable: Some(SkillsCounts {
+                discoverable: 3,
+                user_only: 0,
+                skipped: 0,
+            }),
+        },
         hygiene: None,
     }
 }

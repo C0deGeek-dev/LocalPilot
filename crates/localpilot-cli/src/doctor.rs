@@ -52,6 +52,13 @@ pub struct DoctorReport {
     /// base resolves. `None` when no config base is available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_trust_store: Option<String>,
+    /// Installed-skill-package discovery state: the `autonomous_discovery` flag
+    /// and the readable catalog counts (or unreadable). Whether the project
+    /// overlay is included, and the overlay-hidden wording, derive from
+    /// [`DoctorReport::workspace_trust`] (the single trust authority) — so
+    /// `skills.readable` is the trust-gated snapshot (effective global+project
+    /// when trusted, global baseline only otherwise).
+    pub skills: SkillsDoctor,
     /// Context-hygiene report — the authored-context layers (instruction files +
     /// skills) with their token weights and any advisory findings. Populated only
     /// by `doctor --hygiene`; absent (and omitted from JSON) otherwise, so the
@@ -214,6 +221,83 @@ pub struct AgentsStatus {
     pub errors: Vec<String>,
 }
 
+/// Readable counts of the installed skill-package catalog. `0` is a real,
+/// confident empty catalog — distinct from an unreadable one (see
+/// [`SkillsDoctor::readable`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SkillsCounts {
+    /// Discoverable (model-reachable) packages in the readable effective set.
+    pub discoverable: usize,
+    /// User-only (`disable-model-invocation: true`) packages — hidden from model
+    /// discovery, reported only as a count.
+    pub user_only: usize,
+    /// Package entries the scan skipped as malformed/unreadable (a count only —
+    /// never a name, description, or path). A nonzero value means a confident
+    /// `discoverable`/`user_only` of `0` is NOT necessarily an empty catalog.
+    pub skipped: usize,
+}
+
+/// Installed-skill-package state for `doctor`. All counting happens at report
+/// construction; rendering reads these stored values only. Whether the project
+/// overlay was included is derived at render from [`DoctorReport::workspace_trust`]
+/// (the one trust authority) — not stored here, so it can never disagree with the
+/// report's own trust block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct SkillsDoctor {
+    /// The `[skills] autonomous_discovery` flag — whether the model-callable
+    /// discovery tools are registered. A config-only value.
+    pub autonomous_discovery: bool,
+    /// The readable catalog counts, or `None` when the catalog could not be
+    /// scanned at all (unreadable/unknown — never a confident zero). Under an
+    /// untrusted or unknown-trust workspace this reflects the user-global baseline
+    /// only (the project overlay is not read).
+    pub readable: Option<SkillsCounts>,
+}
+
+/// Count the installed skill-package catalog for `doctor`, trust-safely, against
+/// an explicit global `home` (the injectable seam behind [`skills_doctor`]).
+///
+/// When `trusted` the effective global+project catalog is counted; when not, the
+/// user-global baseline ONLY (the trust gate omits the project overlay — no
+/// project manifest is read or inferred). A discovery failure yields `readable:
+/// None` (unreadable/unknown), never a confident `0`.
+fn gather_skills(
+    config: &localpilot_config::Config,
+    cwd: &Path,
+    home: Option<&Path>,
+    trusted: bool,
+) -> SkillsDoctor {
+    let readable = match localpilot_skills::discover(cwd, home, trusted) {
+        Ok(set) => Some(SkillsCounts {
+            discoverable: set.discoverable().count(),
+            user_only: set.user_only_count(),
+            skipped: set.skipped().len(),
+        }),
+        Err(_) => None,
+    };
+    SkillsDoctor {
+        autonomous_discovery: config.skills.autonomous_discovery,
+        readable,
+    }
+}
+
+/// The installed-skill-package state for the cwd project, resolving the real
+/// per-user home once and deriving trust from the doctor's own trust evaluation
+/// (only a `Trusted` workspace reads the project overlay). Best-effort and
+/// read-only, like the rest of `doctor`.
+fn skills_doctor(trust: TrustState) -> SkillsDoctor {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = localpilot_config::load(&ConfigPaths::standard(&cwd), &CliOverrides::default())
+        .unwrap_or_default();
+    let trusted = matches!(trust, TrustState::Trusted);
+    gather_skills(
+        &config,
+        &cwd,
+        localpilot_skills::user_home().as_deref(),
+        trusted,
+    )
+}
+
 /// Resolve the definitions visible from the cwd. Best-effort and read-only.
 fn agents() -> AgentsStatus {
     let Ok(cwd) = std::env::current_dir() else {
@@ -276,6 +360,7 @@ pub fn report() -> DoctorReport {
         research_docs: research_docs(),
         agents: agents(),
         capabilities: capabilities(),
+        skills: skills_doctor(workspace_trust),
         workspace_trust,
         workspace_trust_store,
         hygiene: None,
@@ -594,6 +679,55 @@ pub fn render(report: &DoctorReport) -> String {
             );
         }
     }
+
+    // Installed skill packages — a read of stored values only; no scan here.
+    let _ = writeln!(s);
+    let _ = writeln!(s, "skills:");
+    if report.skills.autonomous_discovery {
+        let _ = writeln!(s, "  autonomous discovery: on");
+    } else {
+        let _ = writeln!(
+            s,
+            "  autonomous discovery: off (set `[skills] autonomous_discovery = true`)"
+        );
+    }
+    match &report.skills.readable {
+        Some(counts) => {
+            let _ = writeln!(s, "  discoverable packages: {}", counts.discoverable);
+            let _ = writeln!(s, "  user-only packages (hidden): {}", counts.user_only);
+            // A nonzero skipped count means a `0` above is not a clean empty
+            // catalog — some entries were malformed/unreadable (count only).
+            if counts.skipped > 0 {
+                let _ = writeln!(
+                    s,
+                    "  package entries skipped as unreadable: {}",
+                    counts.skipped
+                );
+            }
+        }
+        None => {
+            let _ = writeln!(
+                s,
+                "  installed packages: unreadable (could not scan the skill catalog)"
+            );
+        }
+    }
+    // Overlay inclusion is derived from the report's one trust authority, so the
+    // skills block never contradicts the trust block. The wording keeps an
+    // unevaluable workspace distinct from a confidently untrusted one.
+    match report.workspace_trust {
+        TrustState::Trusted => {}
+        TrustState::Untrusted => {
+            let _ = writeln!(s, "  project overlay hidden (workspace untrusted)");
+        }
+        TrustState::Unknown => {
+            let _ = writeln!(
+                s,
+                "  project overlay hidden (workspace trust could not be evaluated)"
+            );
+        }
+    }
+    let _ = writeln!(s);
 
     if let Some(context) = &report.hygiene {
         render_hygiene(&mut s, context);
@@ -1043,6 +1177,14 @@ mod tests {
             workspace_trust_store: Some(
                 "/home/user/.config/localpilot/trusted-folders.txt".to_string(),
             ),
+            skills: SkillsDoctor {
+                autonomous_discovery: false,
+                readable: Some(SkillsCounts {
+                    discoverable: 2,
+                    user_only: 1,
+                    skipped: 0,
+                }),
+            },
             hygiene: None,
         }
     }
@@ -1080,6 +1222,280 @@ mod tests {
         assert_eq!(
             workspace_trust_in(cwd.path(), &unreadable).0,
             TrustState::Unknown
+        );
+    }
+
+    /// Write a `SKILL.md` package under `skills_dir/<name>/`. `user_only` marks it
+    /// `disable-model-invocation: true`.
+    fn write_pkg(skills_dir: &Path, name: &str, user_only: bool) {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let flag = if user_only {
+            "disable-model-invocation: true\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: helper {name}\n{flag}---\n\nbody\n"),
+        )
+        .expect("write skill");
+    }
+
+    /// Write a malformed `SKILL.md` (an invalid manifest name) under
+    /// `skills_dir/<dir_name>/` — the loader skips it and records it in `skipped`.
+    fn write_bad_pkg(skills_dir: &Path, dir_name: &str) {
+        let dir = skills_dir.join(dir_name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: Not Valid\ndescription: x\n---\nbody\n",
+        )
+        .expect("write bad skill");
+    }
+
+    fn global_skills(home: &Path) -> PathBuf {
+        home.join(".localpilot").join("skills")
+    }
+    fn project_skills(cwd: &Path) -> PathBuf {
+        cwd.join(".localpilot").join("skills")
+    }
+
+    #[test]
+    fn gather_skills_untrusted_counts_the_global_baseline_only() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        write_pkg(&global_skills(home.path()), "glob-disc", false);
+        write_pkg(&global_skills(home.path()), "glob-hidden", true);
+        // A project Discoverable + UserOnly that must contribute NOTHING untrusted.
+        write_pkg(&project_skills(cwd.path()), "proj-disc", false);
+        write_pkg(&project_skills(cwd.path()), "proj-hidden", true);
+
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), false);
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts {
+                discoverable: 1,
+                user_only: 1,
+                skipped: 0
+            }),
+            "only the global baseline is counted; no project read"
+        );
+    }
+
+    #[test]
+    fn gather_skills_trusted_counts_the_effective_global_plus_project() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        write_pkg(&global_skills(home.path()), "glob-disc", false);
+        write_pkg(&global_skills(home.path()), "glob-hidden", true);
+        write_pkg(&project_skills(cwd.path()), "proj-disc", false);
+        write_pkg(&project_skills(cwd.path()), "proj-hidden", true);
+
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), true);
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts {
+                discoverable: 2,
+                user_only: 2,
+                skipped: 0
+            }),
+            "the effective global+project catalog is counted"
+        );
+    }
+
+    #[test]
+    fn gather_skills_trusted_respects_a_project_shadowing_a_global_name() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        // Same manifest name in both scopes resolves to ONE effective skill.
+        write_pkg(&global_skills(home.path()), "shared", false);
+        write_pkg(&project_skills(cwd.path()), "shared", false);
+
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), true);
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts {
+                discoverable: 1,
+                user_only: 0,
+                skipped: 0
+            }),
+            "a shadowed name is one effective skill, not two"
+        );
+    }
+
+    #[test]
+    fn gather_skills_counts_skipped_entries_alongside_valid_ones() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        write_pkg(&global_skills(home.path()), "glob-disc", false);
+        write_bad_pkg(&global_skills(home.path()), "glob-broken");
+
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), false);
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts {
+                discoverable: 1,
+                user_only: 0,
+                skipped: 1
+            }),
+            "valid counts plus a skipped diagnostic"
+        );
+    }
+
+    #[test]
+    fn gather_skills_all_malformed_is_not_a_clean_empty_catalog() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        write_bad_pkg(&global_skills(home.path()), "glob-broken");
+
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), false);
+        // Zero real packages, but a nonzero skipped count — NOT a clean empty.
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts {
+                discoverable: 0,
+                user_only: 0,
+                skipped: 1
+            })
+        );
+    }
+
+    #[test]
+    fn gather_skills_genuinely_empty_has_no_skipped() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        // No skill directories at all under either scope.
+        let config = localpilot_config::Config::default();
+        let s = gather_skills(&config, cwd.path(), Some(home.path()), true);
+        assert_eq!(
+            s.readable,
+            Some(SkillsCounts::default()),
+            "a real empty 0/0/0"
+        );
+    }
+
+    #[test]
+    fn gather_skills_autonomous_toggle_changes_only_the_flag() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let home = tempfile::tempdir().expect("home");
+        write_pkg(&global_skills(home.path()), "glob-disc", false);
+
+        let mut config = localpilot_config::Config::default();
+        let off = gather_skills(&config, cwd.path(), Some(home.path()), false);
+        config.skills.autonomous_discovery = true;
+        let on = gather_skills(&config, cwd.path(), Some(home.path()), false);
+        assert_eq!(
+            off.readable, on.readable,
+            "the flag never changes the counts"
+        );
+        assert!(!off.autonomous_discovery);
+        assert!(on.autonomous_discovery);
+    }
+
+    #[test]
+    fn render_distinguishes_an_unreadable_catalog_from_an_empty_one() {
+        let mut unreadable = fixture();
+        unreadable.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: None,
+        };
+        let out = render(&unreadable);
+        assert!(
+            out.contains("installed packages: unreadable"),
+            "unreadable must be explicit: {out}"
+        );
+        assert!(
+            !out.contains("discoverable packages:"),
+            "an unreadable catalog must not print a count"
+        );
+
+        // A genuinely empty catalog: a real 0/0 with no skipped entries.
+        let mut empty = fixture();
+        empty.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: Some(SkillsCounts::default()),
+        };
+        let out = render(&empty);
+        assert!(
+            out.contains("discoverable packages: 0"),
+            "an empty catalog is a real 0: {out}"
+        );
+        assert!(
+            !out.contains("unreadable"),
+            "an empty catalog is not unreadable"
+        );
+        assert!(
+            !out.contains("skipped as unreadable"),
+            "a clean empty catalog has no skipped line"
+        );
+
+        // An all-malformed catalog: 0/0 counts but a nonzero skipped line, so it
+        // is NOT presented as a clean empty catalog.
+        let mut malformed = fixture();
+        malformed.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: Some(SkillsCounts {
+                discoverable: 0,
+                user_only: 0,
+                skipped: 1,
+            }),
+        };
+        assert!(
+            render(&malformed).contains("package entries skipped as unreadable: 1"),
+            "a skipped entry must be surfaced"
+        );
+    }
+
+    #[test]
+    fn render_overlay_wording_is_three_state_and_matches_the_trust_block() {
+        let counts = Some(SkillsCounts {
+            discoverable: 1,
+            user_only: 0,
+            skipped: 0,
+        });
+
+        let mut untrusted = fixture();
+        untrusted.workspace_trust = TrustState::Untrusted;
+        untrusted.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: counts,
+        };
+        assert!(
+            render(&untrusted).contains("project overlay hidden (workspace untrusted)"),
+            "untrusted names it plainly"
+        );
+
+        let mut unknown = fixture();
+        unknown.workspace_trust = TrustState::Unknown;
+        unknown.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: counts,
+        };
+        let out = render(&unknown);
+        assert!(
+            out.contains("project overlay hidden (workspace trust could not be evaluated)"),
+            "unknown is never a confident 'untrusted': {out}"
+        );
+        assert!(
+            !out.contains("(workspace untrusted)"),
+            "unknown must not claim untrusted"
+        );
+
+        let mut trusted = fixture();
+        trusted.workspace_trust = TrustState::Trusted;
+        trusted.skills = SkillsDoctor {
+            autonomous_discovery: false,
+            readable: counts,
+        };
+        assert!(
+            !render(&trusted).contains("project overlay hidden"),
+            "a trusted workspace includes the overlay — no hidden line"
         );
     }
 
