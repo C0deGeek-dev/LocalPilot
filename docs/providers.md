@@ -68,11 +68,23 @@ block.
   key env) into `.localpilot.toml` and sets it as the default provider. The
   merge **upserts only `[providers.local]`** — any other providers,
   `[mcp.servers.*]` tables, and comments already in the file are preserved.
-- **Inside a running chat session**, `/localbox adopt` does the same, with an
-  in-session approval prompt; the adopted provider applies on the next launch.
+- **Inside a running chat session**, use `/localbox adopt` to adopt a server
+  that is already running, or `/localbox adopt --serve <model>` to start one
+  when necessary. LocalPilot launches the model through LocalBox, adopts the
+  resulting provider, rebuilds the provider registry, and switches the current
+  idle conversation to the local model immediately; the transcript is kept.
+  If a server is already running, `--serve` adopts that server instead of
+  starting another one. Starting LocalBox and writing workspace config remain
+  permission-gated effects.
 
-After adopting, `localpilot` uses the local model, and `/model` switches to it
-like any other provider.
+  Pressing `Ctrl-C` while LocalPilot waits for startup cancels only LocalPilot's
+  wait. LocalBox owns the server process, so startup may continue in the
+  background; once it is ready, run `/localbox adopt` to finish adoption.
+  Stop the server with LocalBox itself.
+
+After CLI adoption, the next `localpilot` session uses the local model. After
+in-session adoption, the current chat uses it immediately, and `/model` can
+switch between it and other configured providers as usual.
 
 ## The official OpenAI API
 

@@ -728,10 +728,9 @@ enum SerialOperation {
     PumpedSlash(PumpedSlash),
 }
 
-/// Route a parsed full-screen slash action: `/compact[ force]` and the three
-/// long-running ingest actions pump; everything else — including the eleven fast
-/// ingest subcommands and every other command — runs synchronously. Consumes the
-/// action, so there is no reparse or clone.
+/// Route a parsed full-screen slash action: `/localbox`, `/compact[ force]`, and
+/// the long-running ingest/research/resume actions pump; everything else runs
+/// synchronously. Consumes the action, so there is no reparse or clone.
 fn route_fullscreen_slash(action: SlashAction) -> SlashRoute {
     match action {
         SlashAction::LocalBoxAdopt { serve } => {
@@ -2828,8 +2827,9 @@ async fn execute_fullscreen_slash(
 }
 
 /// Execute an already-parsed synchronous full-screen slash action. Pumped actions
-/// (`/compact`, long-running `/ingest`) are intercepted by `route_fullscreen_slash`
-/// at the idle dispatch site before reaching here.
+/// (`/localbox`, `/compact`, long-running `/ingest`, research, and resume) are
+/// intercepted by `route_fullscreen_slash` at the idle dispatch site before
+/// reaching here.
 async fn execute_fullscreen_slash_action(
     app: &mut AppModel,
     runtime: &mut SessionRuntime,

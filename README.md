@@ -166,6 +166,8 @@ unchanged. Run `localpilot --help` for the complete command tree.
   quits.
 - `/` opens slash-command completion; `@` mentions a workspace file.
 - `/model` changes provider or model without losing the conversation.
+- `/localbox adopt --serve <model>` can start LocalBox, adopt its provider, and
+  switch the current idle conversation to the local model.
 - `/name` names the session so it can be resumed by name.
 - `/default`, `/relaxed`, `/bypass`, and `/unrestricted` switch the permission
   profile mid-turn, taking effect from the running turn's next tool call.

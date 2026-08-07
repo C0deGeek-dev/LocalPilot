@@ -209,6 +209,16 @@ and a generated dispatch matrix (derived from the shared spec table, not a hand-
 allow-list) proves every visible full-screen row parses host-aware without `Unknown` and
 reaches a typed pumped/synchronous route; no new ADR.
 
+An eleventh increment moves the already-visible `/localbox` action from the
+synchronous tier onto the same full-screen operation pump, without changing the
+**34/38/8** catalogs. `/localbox adopt --serve <model>` may wait while LocalBox
+starts, so it gets responsive draw/input handling and `Ctrl-C`; unlike in-process
+compact, ingest, research, and resume work, cancellation drops only LocalPilot's
+wait and never stops the unowned server. Success refreshes the idle runtime's
+provider registry and the host's model projections, then switches the existing
+provider-neutral conversation to `local`. This is an amendment to ADR-0130, not
+a new slash-command identity or ADR.
+
 The slash-command surface was defined three times: the inline composer parsed
 and completed one list (`localpilot-tui`), the full-screen picker hand-curated a
 second (a `SUPPORTED` allow-list filtered against the inline table plus
@@ -433,6 +443,16 @@ so the deferred arm, its "not available in full-screen chat yet" notice, and the
 host-aware without `Unknown` and reaches a typed pumped/synchronous route, and the picker,
 autocomplete, and `/help` agree because they project the one shared catalog. Inline and pair
 byte-unchanged (pair stays 8); no new ADR.
+
+The eleventh increment keeps the operation boundary but adds a distinct
+detach-and-report cancellation shape for `/localbox`: the worker owns only the
+launch/readiness/adoption workflow, not the server it asks LocalBox to start, so
+dropping the wait cannot imply teardown. A successful result returns the updated
+session-local config and fresh provider registry to the host; replacement is
+allowed only while the session runtime is idle, transcript history is untouched,
+and the existing provider/model switch seam performs activation. Failure or
+cancellation becomes one bounded terminal notice, with no synthetic conversation
+turn. The shared spelling and all three catalog counts are unchanged; no new ADR.
 
 ## ADR-0143: Workspace Trust Is Reachable, Inspectable, And Consistently Consumed
 
@@ -899,12 +919,22 @@ default no-think proxy endpoint (`GET :11435/v1/models`, which the proxy forward
 to the backend). The **endpoint probe is the authoritative "serving" signal** —
 `localbox status` prints prose for humans, not a machine contract, so LocalPilot
 does not parse it. The action is exposed by a **dedicated surface** — the CLI
-`localpilot localbox adopt [--serve <model>]` and the in-session `/localbox adopt`
+`localpilot localbox adopt [--serve <model>]` and the in-session
+`/localbox adopt [--serve <model>]`
 — never by overloading `/model`; a failed `/model` switch only *points* at
 `/localbox` when LocalBox is present. `--serve` starts a stopped server via
 `localbox serve <model>`, which blocks until the model is ready and then returns,
 leaving the server as its own detached process: LocalPilot never owns or reaps a
 LocalBox server (`localbox stop` is LocalBox's teardown).
+
+In terminal chat, adoption is a pumped idle operation. A successful config write
+rebuilds the immutable provider registry from the updated session-local config,
+replaces the idle runtime registry, and switches the current conversation to the
+new local provider/model without rewriting its provider-neutral transcript. The
+full-screen header, model completion, and image-capability projection update from
+that same live result. Cancelling LocalPilot's readiness wait drops only the wait:
+the unowned LocalBox launch may continue in the background, no stop command is
+issued, and a later bare `/localbox adopt` finishes adoption once it is ready.
 
 Writing config **upserts only `[providers.local]`** (and points `[provider] default`
 at it), preserving every other provider, `[mcp.servers.*]` table, and comment —
@@ -915,8 +945,9 @@ deliberately unlike LocalBox's own emitter, which owns and wholesale-replaces th
 release train, so that contract is stable-by-governance and any breaking change
 warrants its own plan. Every side effect (starting a server, writing config) passes
 the permission engine; in the full-screen chat host an explicit user-typed
-`/localbox adopt` is itself the consent for the workspace config write, and the
-engine still hard-denies under a `Deny` policy. No new runtime dependencies
+`/localbox adopt [--serve <model>]` is itself the consent for its requested start
+and workspace config write, and the engine still hard-denies under a `Deny`
+policy. No new runtime dependencies
 (`toml_edit` was already in the tree via `toml`).
 
 ## ADR-0129: Full-Screen Chat Is The Interactive Default

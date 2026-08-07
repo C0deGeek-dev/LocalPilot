@@ -1,13 +1,12 @@
-//! Read-only detection of a local LocalBox install and a running LocalBox model
-//! server.
+//! Detection, permission-gated launch, and provider adoption for a local
+//! LocalBox model server.
 //!
-//! Answers two questions so `localpilot models` (and, later, the interactive
-//! model flow) can point a user at a local model without hand-editing config:
-//! is a `localbox` binary on `PATH`, and is a LocalBox server already serving —
-//! at which endpoint? It never spawns a server, offers to start one, or writes
-//! config; that authority lives in later, permission-gated steps. When LocalBox
-//! is absent, detection returns [`LocalBoxState::NotInstalled`] after only a
-//! cheap `PATH` scan, so every existing flow is left byte-for-byte unchanged.
+//! Detection answers whether a `localbox` binary is on `PATH` and whether a
+//! server is already serving. The CLI and terminal-chat workflows can then
+//! launch a requested model, wait for readiness, and upsert the local provider
+//! after their host-specific permission gates. When LocalBox is absent,
+//! detection returns [`LocalBoxState::NotInstalled`] after only a cheap `PATH`
+//! scan, so unrelated provider flows are unchanged.
 //!
 //! LocalBox exposes no machine-readable status — `localbox status` prints a
 //! prose health line on its default ports, carrying no endpoint that could be
@@ -547,7 +546,7 @@ async fn terminal_effect_allowed(
 
 /// Merge a `[providers.local]` block for `endpoint`/`model` into the config file
 /// at `path` (creating it if absent), preserving other content. The **surface-
-/// agnostic write half of adopt**: the CLI (`run_adopt`) and the in-TUI `/model`
+/// agnostic write half of adopt**: the CLI (`run_adopt`) and the in-TUI `/localbox`
 /// adopt both reach here only after consent — CLI confirm or an in-session
 /// permission approval — so gating is the caller's responsibility, never this
 /// function's. Reached only on approval, so a denied grant writes nothing.

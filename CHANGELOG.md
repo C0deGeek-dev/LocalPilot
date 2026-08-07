@@ -205,12 +205,16 @@ is SemVer-stable; the configuration schema stability policy is in
   usable model is configured, startup, the `/model` command, and
   `localpilot models` now point at a detected LocalBox server (or an
   installed-but-stopped LocalBox) instead of only erroring; when no LocalBox is
-  present the messages are unchanged. The new `localpilot localbox adopt` (and the
-  in-session `/localbox adopt`) write a `[providers.local]` block for a running
+  present the messages are unchanged. The new `localpilot localbox adopt` and
+  in-session `/localbox adopt` write a `[providers.local]` block for a running
   LocalBox — a permission-gated config write that upserts only the local
   provider, preserving your other providers, MCP tables, and comments.
   `localbox adopt --serve <model>` also starts a server first (gated) if none is
-  running. See [docs/providers.md](docs/providers.md).
+  running. In a chat, `/localbox adopt --serve <model>` performs that launch and
+  adoption from the terminal UI, rebuilds the provider registry, and switches
+  the current idle conversation to the local model without losing its
+  transcript. Cancelling the wait does not stop the LocalBox-owned server, whose
+  startup may continue in the background. See [docs/providers.md](docs/providers.md).
 
 ## v2.7.0 - 2026-08-02
 
