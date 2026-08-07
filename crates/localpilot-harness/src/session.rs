@@ -3037,17 +3037,30 @@ impl SessionRuntime {
                 // below, so without this guard a stuck turn would burn the whole
                 // ceiling. Only an *explicit* operator budget hands the no-progress
                 // stop to the controller. See ADR-0052.
-                if !self.config.tool_budget_explicit
-                    && (no_progress.is_tripped() || unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT)
-                {
-                    let notice = "no forward progress this turn (repeated or failing \
-                                  calls); stopping instead of spinning"
-                        .to_string();
-                    let _ = events.send(RuntimeEvent::Warning(notice.clone()));
-                    self.append(
-                        Message::text(Role::User, notice).into_synthetic("no tool-call progress"),
-                    );
-                    return self.stop(events, StopReason::NoProgress);
+                if !self.config.tool_budget_explicit {
+                    // The consecutive-failure backstop stops immediately (no
+                    // grace). The detector's no-progress signal instead honours
+                    // exactly one grace dispatch after its one-shot nudge — the
+                    // call whose observation may clear the signal — then stops if
+                    // the turn is still stuck. The stop-notice copy is unchanged.
+                    let stop_no_progress = if unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT {
+                        true
+                    } else if no_progress.active_signal().is_active() {
+                        !no_progress.consume_grace()
+                    } else {
+                        false
+                    };
+                    if stop_no_progress {
+                        let notice = "no forward progress this turn (repeated or failing \
+                                      calls); stopping instead of spinning"
+                            .to_string();
+                        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+                        self.append(
+                            Message::text(Role::User, notice)
+                                .into_synthetic("no tool-call progress"),
+                        );
+                        return self.stop(events, StopReason::NoProgress);
+                    }
                 }
                 match budget.decide(tool_calls_used, no_progress.is_tripped()) {
                     BudgetDecision::Continue => {}

@@ -374,6 +374,10 @@ pub const NO_PROGRESS_DISTINCT_FLOOR: f64 = 0.34;
 /// Default number of times an identical `(signature, output)` successful call
 /// may recur before it counts as no forward progress.
 pub const NO_PROGRESS_REPEAT_THRESHOLD: usize = 3;
+/// Grace dispatches the default rail allows after the one-shot no-progress nudge:
+/// the call whose observation may clear the signal before the guard stops the
+/// turn. Exactly one — a small constant, not config (thresholds stay constants).
+pub const NO_PROGRESS_GRACE_CALLS: usize = 1;
 
 /// Stable 64-bit digest of one string, for compact within-turn keys.
 fn digest(s: &str) -> u64 {
@@ -393,6 +397,30 @@ fn digest_pair(signature: &str, output: &str) -> u64 {
     '\u{1f}'.hash(&mut hasher);
     output.hash(&mut hasher);
     hasher.finish()
+}
+
+/// The detector's current no-progress signal, recomputed on every successful
+/// observation so a genuinely novel call can clear it — replacing the old
+/// irreversible latch. `StuckRepeat` and `NoveltyDecay` carry the numbers that
+/// distinguish which signal fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoProgressSignal {
+    /// No no-progress signal is active for the most recent observation.
+    None,
+    /// The same `(signature, output)` has succeeded `count` times (at or past the
+    /// repeat threshold).
+    StuckRepeat { count: usize },
+    /// Over the current window the share of distinct signatures fell below the
+    /// floor: `distinct` distinct signatures across a window of `window` calls.
+    NoveltyDecay { distinct: usize, window: usize },
+}
+
+impl NoProgressSignal {
+    /// Whether any no-progress signal is currently active.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// Detects *successful* tool calls that make no forward progress — the case the
@@ -419,9 +447,29 @@ pub struct NoProgressDetector {
     repeats: HashMap<u64, usize>,
     /// Recent successful-call signature digests, newest at the back.
     recent: VecDeque<u64>,
-    /// Latches once either signal first crosses, so the budget controller can
-    /// read a stable "stuck" state for the rest of the turn.
-    tripped: bool,
+    /// The no-progress signal from the most recent observation, recomputed each
+    /// call so a genuinely novel call clears it. This DYNAMIC view drives the
+    /// default rail's always-on guard (with the one grace dispatch); the explicit
+    /// budget controller instead reads the monotone [`Self::tripped_since_reset`]
+    /// view via [`Self::is_tripped`].
+    active: NoProgressSignal,
+    /// Monotone-since-reset compatibility view for the explicit budget controller
+    /// ([`Self::is_tripped`]): set once any signal fires and NOT cleared by a
+    /// novel-call recompute, so the cost controller sees exactly the old latch
+    /// behaviour (a turn that trips below `soft_start` still stops at `soft_start`
+    /// even if the dynamic signal has since cleared). Cleared by [`Self::reset`]
+    /// (future user steering), unlike the per-turn `nudged`.
+    tripped_since_reset: bool,
+    /// Set once when the one-shot strategy-change nudge is emitted, monotone for
+    /// the whole turn: a recovery or re-trip never emits a second nudge and never
+    /// mints a second grace. Preserved across [`Self::reset`] — only a freshly
+    /// constructed detector (a new turn) clears it.
+    nudged: bool,
+    /// Grace dispatches remaining, minted to [`NO_PROGRESS_GRACE_CALLS`] with the
+    /// nudge on the default rail: the call(s) after the nudge may still dispatch so
+    /// an observation can clear the signal. Consumed by the guard; never re-minted
+    /// within the turn.
+    grace_remaining: usize,
 }
 
 impl Default for NoProgressDetector {
@@ -445,30 +493,67 @@ impl NoProgressDetector {
             repeat_threshold: repeat_threshold.max(1),
             repeats: HashMap::new(),
             recent: VecDeque::new(),
-            tripped: false,
+            active: NoProgressSignal::None,
+            tripped_since_reset: false,
+            nudged: false,
+            grace_remaining: 0,
         }
     }
 
-    /// Observe one *successful* tool call. Returns `true` only on the call that
-    /// first crosses a no-progress signal — the moment to surface a strategy-
-    /// change hint (fire-once, like [`RepeatedErrorBreaker`]). Read the latched
-    /// state with [`Self::is_tripped`].
+    /// Observe one *successful* tool call. Recomputes the typed active signal
+    /// (read it with [`Self::active_signal`]) from this observation, so a
+    /// genuinely novel call clears it. Returns `true` only on the call that
+    /// first crosses a no-progress signal this turn — the moment to surface the
+    /// one-shot strategy-change hint — and on that crossing mints exactly one
+    /// grace dispatch. The nudge/grace are monotone for the turn: a recovery or
+    /// re-trip never re-fires or re-mints.
     pub fn observe(&mut self, signature: &str, output: &str) -> bool {
         let pair = digest_pair(signature, output);
         let count = self.repeats.entry(pair).or_insert(0);
         *count += 1;
-        let stuck_repeat = *count >= self.repeat_threshold;
+        let stuck_count = *count;
+        let stuck_repeat = stuck_count >= self.repeat_threshold;
 
         self.recent.push_back(digest(signature));
         while self.recent.len() > self.window {
             self.recent.pop_front();
         }
-        let novelty_decayed =
-            self.recent.len() >= self.window && self.distinct_ratio() < self.distinct_floor;
+        let window_full = self.recent.len() >= self.window;
+        let novelty_decayed = window_full && self.distinct_ratio() < self.distinct_floor;
 
-        let crossing = (stuck_repeat || novelty_decayed) && !self.tripped;
-        self.tripped = self.tripped || stuck_repeat || novelty_decayed;
+        // Recompute the active signal from THIS observation — not a latch — so a
+        // novel pair clears it. Stuck-repeat takes precedence when both fire.
+        self.active = if stuck_repeat {
+            NoProgressSignal::StuckRepeat { count: stuck_count }
+        } else if novelty_decayed {
+            NoProgressSignal::NoveltyDecay {
+                distinct: self.distinct_count(),
+                window: self.recent.len(),
+            }
+        } else {
+            NoProgressSignal::None
+        };
+
+        // Maintain the monotone since-reset view the explicit budget controller
+        // reads: once any signal fires it stays set until reset, so the cost
+        // controller keeps the old latch behaviour even after the dynamic signal
+        // clears.
+        self.tripped_since_reset |= self.active.is_active();
+
+        // Fire the one-shot nudge on the first crossing this turn and mint the
+        // grace with it. `nudged` is monotone and the grace is minted once, so a
+        // recovery or re-trip never re-fires or re-mints.
+        let crossing = self.active.is_active() && !self.nudged;
+        if crossing {
+            self.nudged = true;
+            self.grace_remaining = NO_PROGRESS_GRACE_CALLS;
+        }
         crossing
+    }
+
+    /// Distinct signatures over the current window.
+    fn distinct_count(&self) -> usize {
+        self.recent.iter().collect::<HashSet<_>>().len()
     }
 
     /// Share of distinct signatures over the current window (`1.0` when empty).
@@ -476,21 +561,59 @@ impl NoProgressDetector {
         if self.recent.is_empty() {
             return 1.0;
         }
-        let distinct = self.recent.iter().collect::<HashSet<_>>().len();
-        distinct as f64 / self.recent.len() as f64
+        self.distinct_count() as f64 / self.recent.len() as f64
     }
 
-    /// Whether a no-progress signal has fired this turn (latched).
+    /// The current typed no-progress signal, recomputed on each observation.
+    #[must_use]
+    pub fn active_signal(&self) -> NoProgressSignal {
+        self.active
+    }
+
+    /// Compatibility accessor for the explicit budget controller: the MONOTONE
+    /// since-reset view — `true` once any no-progress signal has fired this turn,
+    /// and NOT cleared by a novel-call recompute. This preserves the old latch
+    /// behaviour exactly (a turn that trips below `soft_start` still stops at
+    /// `soft_start`). The default rail's always-on guard instead reads the dynamic
+    /// [`Self::active_signal`], which can clear on a novel call. Cleared by
+    /// [`Self::reset`].
     #[must_use]
     pub fn is_tripped(&self) -> bool {
-        self.tripped
+        self.tripped_since_reset
     }
 
-    /// Reset at a turn boundary, mirroring the other per-turn breakers.
+    /// Consume the one pending grace dispatch, if any, returning whether a grace
+    /// was available (and is now spent). The default-rail guard calls this when a
+    /// signal is active: `true` lets exactly one more call dispatch so its
+    /// observation can clear the signal; `false` means the grace is spent and the
+    /// turn must stop.
+    pub fn consume_grace(&mut self) -> bool {
+        if self.grace_remaining > 0 {
+            self.grace_remaining -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the one-shot nudge has already been emitted this turn (monotone).
+    #[must_use]
+    pub fn has_nudged(&self) -> bool {
+        self.nudged
+    }
+
+    /// Clear the observation history and active signal, and cancel any pending
+    /// grace — e.g. when the user steers the turn — while PRESERVING the spent
+    /// per-turn `nudged` state, so a steer never re-mints a nudge or a grace. A
+    /// freshly constructed detector (a new turn) is the only full reset of the
+    /// nudge/grace lifecycle.
     pub fn reset(&mut self) {
         self.repeats.clear();
         self.recent.clear();
-        self.tripped = false;
+        self.active = NoProgressSignal::None;
+        self.tripped_since_reset = false;
+        self.grace_remaining = 0;
+        // `nudged` is intentionally NOT cleared (monotone for the turn).
     }
 }
 
@@ -801,7 +924,10 @@ mod tests {
         assert!(detector.is_tripped());
         // Fires once on the crossing, not on every later repeat.
         assert!(!detector.observe(sig, out), "no re-fire while still stuck");
-        assert!(detector.is_tripped(), "latched after the crossing");
+        assert!(
+            detector.is_tripped(),
+            "still active while stuck (no novel call has cleared it)"
+        );
     }
 
     #[test]
@@ -861,11 +987,138 @@ mod tests {
         assert!(!detector.observe(sig, "x"));
         assert!(detector.observe(sig, "x"), "trips on the repeat");
         detector.reset();
-        assert!(!detector.is_tripped(), "reset clears the latch");
+        assert!(
+            !detector.is_tripped(),
+            "reset clears the active signal and observation history"
+        );
         assert!(
             !detector.observe(sig, "x"),
             "streak restarts after a turn boundary"
         );
+    }
+
+    #[test]
+    fn active_signal_reports_typed_stuck_repeat() {
+        let mut d = NoProgressDetector::new(12, 0.34, 3);
+        let sig = "read_file\u{1f}{\"path\":\"a\"}";
+        d.observe(sig, "same");
+        d.observe(sig, "same");
+        d.observe(sig, "same");
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::StuckRepeat { count: 3 }
+        );
+    }
+
+    #[test]
+    fn active_signal_reports_typed_novelty_decay() {
+        // repeat_threshold high so only novelty can fire; two signatures over a
+        // full window of 12 → 2 distinct across 12 calls.
+        let mut d = NoProgressDetector::new(12, 0.34, 100);
+        for i in 0..12 {
+            let sig = if i % 2 == 0 { "a\u{1f}{}" } else { "b\u{1f}{}" };
+            d.observe(sig, &format!("out {i}"));
+        }
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::NoveltyDecay {
+                distinct: 2,
+                window: 12
+            }
+        );
+    }
+
+    #[test]
+    fn novel_success_clears_the_dynamic_signal_but_not_the_monotone_view() {
+        let mut d = NoProgressDetector::new(12, 0.34, 3);
+        let sig = "read_file\u{1f}{\"path\":\"a\"}";
+        d.observe(sig, "same");
+        d.observe(sig, "same");
+        assert!(d.observe(sig, "same"), "crosses on the 3rd repeat");
+        assert!(d.active_signal().is_active());
+        assert!(d.is_tripped(), "the since-reset view sets on the crossing");
+        // A genuinely novel pair recomputes the DYNAMIC signal to None (the
+        // default rail can recover), but the MONOTONE since-reset view that the
+        // explicit budget controller reads stays set until a reset.
+        let novel = "write_file\u{1f}{\"path\":\"b\"}";
+        assert!(
+            !d.observe(novel, "brand new"),
+            "novel call does not re-nudge"
+        );
+        assert_eq!(
+            d.active_signal(),
+            NoProgressSignal::None,
+            "the dynamic signal cleared on the novel call"
+        );
+        assert!(
+            d.is_tripped(),
+            "but the monotone budget-controller view remains set"
+        );
+        // A reset (future user steering) clears the monotone view too.
+        d.reset();
+        assert!(!d.is_tripped(), "reset clears the since-reset view");
+    }
+
+    #[test]
+    fn nudge_and_grace_fire_exactly_once_per_turn() {
+        let mut d = NoProgressDetector::new(12, 0.34, 3);
+        let sig = "read_file\u{1f}{\"path\":\"a\"}";
+        d.observe(sig, "same");
+        d.observe(sig, "same");
+        assert!(d.observe(sig, "same"), "one-shot nudge on the crossing");
+        assert!(d.has_nudged());
+        // Grace mints exactly once and is consumed once.
+        assert!(d.consume_grace(), "one grace dispatch was minted");
+        assert!(!d.consume_grace(), "no second grace");
+        // Staying stuck never re-fires the nudge or re-mints grace.
+        assert!(!d.observe(sig, "same"), "no second nudge while stuck");
+        assert!(!d.consume_grace(), "still no new grace after a re-trip");
+        assert!(d.has_nudged(), "nudged stays monotone");
+    }
+
+    #[test]
+    fn recovered_then_retripped_mints_no_second_grace() {
+        let mut d = NoProgressDetector::new(12, 0.34, 3);
+        let a = "read_file\u{1f}{\"path\":\"a\"}";
+        d.observe(a, "same");
+        d.observe(a, "same");
+        assert!(d.observe(a, "same"), "trips + nudges + mints grace");
+        assert!(d.consume_grace(), "grace spent on the recovery dispatch");
+        // Recover on a novel pair.
+        assert!(!d.observe("b\u{1f}{}", "new"));
+        assert_eq!(d.active_signal(), NoProgressSignal::None);
+        // Re-trip later: the signal returns but there is no new nudge / grace.
+        d.observe(a, "same");
+        assert!(!d.observe(a, "same"), "re-trip does not re-nudge");
+        assert!(d.active_signal().is_active(), "signal is active again");
+        assert!(
+            !d.consume_grace(),
+            "no second grace after recovery + re-trip"
+        );
+    }
+
+    #[test]
+    fn reset_preserves_nudged_and_cancels_pending_grace() {
+        let mut d = NoProgressDetector::new(12, 0.34, 2);
+        let sig = "read_file\u{1f}{\"path\":\"a\"}";
+        d.observe(sig, "x");
+        assert!(d.observe(sig, "x"), "trips + mints grace");
+        assert!(d.has_nudged());
+        assert!(d.is_tripped(), "the since-reset view is set before reset");
+        d.reset();
+        // History + active signal + the monotone view + pending grace are cleared…
+        assert_eq!(d.active_signal(), NoProgressSignal::None);
+        assert!(!d.is_tripped(), "reset clears the since-reset view");
+        assert!(!d.consume_grace(), "reset cancelled the pending grace");
+        // …but the spent nudge is preserved, so a re-trip after the steer does
+        // not mint a fresh nudge or grace.
+        assert!(d.has_nudged(), "reset preserves the spent nudge");
+        d.observe(sig, "x");
+        assert!(
+            !d.observe(sig, "x"),
+            "re-trip after reset does not re-nudge"
+        );
+        assert!(!d.consume_grace(), "no fresh grace after reset + re-trip");
     }
 
     #[test]
