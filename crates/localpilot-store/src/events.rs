@@ -98,11 +98,14 @@ pub enum SessionEventKind {
     },
     TurnEnded {
         stop: String,
-        /// The underlying failure detail when `stop` names an error condition
-        /// (e.g. the provider's rejection message for `ProviderError`) — `None`
-        /// for a normal stop (`Done`, `Cancelled`, ...) or when no further detail
-        /// was available. Additive: absent on any log line written before this
-        /// field existed, which deserializes as `None`.
+        /// An additive, human-readable qualifier of the coarse `stop` tag: the
+        /// provider's rejection message for `ProviderError`, or the no-progress
+        /// signal (`signal=stuck_repeat tool=… count=…` / `signal=novelty_decay …`
+        /// / `signal=consecutive_failures …`) for `NoProgress`. `None` for a
+        /// normal stop (`Done`, `Cancelled`, ...) or when no further detail was
+        /// available. The `stop` tag itself is unchanged by the detail. Additive:
+        /// absent on any log line written before this field existed, which
+        /// deserializes as `None`.
         #[serde(default)]
         detail: Option<String>,
     },
@@ -688,6 +691,31 @@ mod tests {
             SessionEventKind::TurnEnded {
                 stop: "ProviderError".to_string(),
                 detail: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_no_progress_turn_ended_detail_round_trips() {
+        // The NoProgress signal detail rides the existing additive `detail`
+        // field — no new field and no format-version bump — and the coarse
+        // `stop` tag stays exactly "NoProgress".
+        let detail = "signal=stuck_repeat tool=\"read_file\" count=3".to_string();
+        let original = event(
+            SessionEventKind::TurnEnded {
+                stop: "NoProgress".to_string(),
+                detail: Some(detail.clone()),
+            },
+            None,
+        );
+        let line = serde_json::to_string(&original).unwrap();
+        let loaded = SessionEvent::from_line(&line).unwrap();
+        assert_eq!(loaded.v, SESSION_EVENT_FORMAT_VERSION);
+        assert_eq!(
+            loaded.kind,
+            SessionEventKind::TurnEnded {
+                stop: "NoProgress".to_string(),
+                detail: Some(detail),
             }
         );
     }

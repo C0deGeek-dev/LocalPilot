@@ -21,8 +21,8 @@ use localpilot_llm::{
     ProviderRegistry, QuotaInfo, ToolSpec,
 };
 use localpilot_recovery::{
-    detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, RecoveryAction,
-    RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
+    detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, NoProgressSignal,
+    RecoveryAction, RecoveryEngine, RepeatedErrorBreaker, StreamMonitor,
 };
 use localpilot_sandbox::{
     Approver, Interactivity, PermissionEngine, PermissionEngineHandle, Profile,
@@ -787,6 +787,56 @@ fn no_progress_hint() -> String {
      what you already have and answer, or change approach (read a different \
      input, try a different tool, or state what is blocking you)."
         .to_string()
+}
+
+/// Which no-progress signal stopped the turn — the precise reason behind the
+/// coarse `NoProgress` stop tag. `StuckRepeat` carries the tool captured at the
+/// successful observation that produced the signal (provenance).
+#[derive(Debug, Clone)]
+enum NoProgressDiagnostic {
+    StuckRepeat { tool: String, count: usize },
+    NoveltyDecay { window: usize, distinct: usize },
+    ConsecutiveFailures { count: usize },
+}
+
+/// Map the detector's typed signal (plus the tool that produced it) to a
+/// diagnostic, so both the dynamic (default-rail) and monotone (explicit-budget)
+/// diagnostic views are built the same way. `None` for a cleared signal.
+fn no_progress_diagnostic(signal: NoProgressSignal, tool: &str) -> Option<NoProgressDiagnostic> {
+    match signal {
+        NoProgressSignal::None => None,
+        NoProgressSignal::StuckRepeat { count } => Some(NoProgressDiagnostic::StuckRepeat {
+            tool: tool.to_string(),
+            count,
+        }),
+        NoProgressSignal::NoveltyDecay { distinct, window } => {
+            Some(NoProgressDiagnostic::NoveltyDecay { window, distinct })
+        }
+    }
+}
+
+/// Build the `(notice, detail)` pair for a no-progress stop from its diagnostic.
+/// The `detail` grammar is a persisted contract (field order and spacing are
+/// fixed; the stuck tool value is JSON-string encoded; no trailing punctuation),
+/// and the notice embeds it byte-for-byte. One builder feeds the stop Warning,
+/// the appended synthetic User message, and the persisted `TurnEnded.detail`.
+fn no_progress_notice(diagnostic: &NoProgressDiagnostic) -> (String, String) {
+    let detail = match diagnostic {
+        NoProgressDiagnostic::StuckRepeat { tool, count } => {
+            // Infallible JSON-string encoding of the tool name, so every stuck
+            // detail is guaranteed to use the frozen `tool="…"` form.
+            let tool = serde_json::Value::String(tool.clone()).to_string();
+            format!("signal=stuck_repeat tool={tool} count={count}")
+        }
+        NoProgressDiagnostic::NoveltyDecay { window, distinct } => {
+            format!("signal=novelty_decay window={window} distinct={distinct}")
+        }
+        NoProgressDiagnostic::ConsecutiveFailures { count } => {
+            format!("signal=consecutive_failures count={count}")
+        }
+    };
+    let notice = format!("no forward progress this turn ({detail}); stopping instead of spinning");
+    (notice, detail)
 }
 
 /// What a session resume recovered from the durable event log.
@@ -1986,9 +2036,13 @@ impl SessionRuntime {
         &mut self,
         no_progress: &mut NoProgressDetector,
         unproductive_streak: &mut usize,
+        dynamic_diagnostic: &mut Option<NoProgressDiagnostic>,
+        monotone_diagnostic: &mut Option<NoProgressDiagnostic>,
     ) {
         no_progress.reset();
         *unproductive_streak = 0;
+        *dynamic_diagnostic = None;
+        *monotone_diagnostic = None;
         self.error_breaker.reset();
         self.tool_failure_guard.reset();
     }
@@ -2549,6 +2603,14 @@ impl SessionRuntime {
             self.config.tool_call_budget_max,
         );
         let mut no_progress = NoProgressDetector::default();
+        // Two no-progress diagnostic views mirroring the detector's two signals
+        // (D009): the DYNAMIC one is rebuilt from the current signal + the tool
+        // that produced it after every successful observation (the default-rail
+        // stop reads it); the MONOTONE one records only the first signal since the
+        // last reset (the explicit-budget stop reads it, so its diagnostic
+        // survives a later dynamic-clear). A user steer clears both (§reset).
+        let mut no_progress_dynamic: Option<NoProgressDiagnostic> = None;
+        let mut no_progress_monotone: Option<NoProgressDiagnostic> = None;
         // Always-on degenerate-loop guard: consecutive failing calls with no
         // successful call between them. Resets on any successful call. Unlike the
         // opt-in budget, this bounds a spin even when the budget is off.
@@ -2575,7 +2637,12 @@ impl SessionRuntime {
             // the previous iteration's tool calls, before the next provider call.
             let admission = self.admit_soft_interrupts("after_tools", events);
             if admission.user {
-                self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                self.reset_progress_breakers(
+                    &mut no_progress,
+                    &mut unproductive_streak,
+                    &mut no_progress_dynamic,
+                    &mut no_progress_monotone,
+                );
             }
 
             let compacted = self.compacted_history(context_reserve, cancel).await;
@@ -2662,7 +2729,12 @@ impl SessionRuntime {
                     () = self.steer.urgent_notified() => {
                         let admission = self.admit_soft_interrupts("during_stream", events);
                         if admission.user {
-                            self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                            self.reset_progress_breakers(
+                                &mut no_progress,
+                                &mut unproductive_streak,
+                                &mut no_progress_dynamic,
+                                &mut no_progress_monotone,
+                            );
                         }
                         continue 'turn;
                     }
@@ -3006,7 +3078,12 @@ impl SessionRuntime {
                 let admission = self.admit_soft_interrupts("turn_continued", events);
                 if admission.any {
                     if admission.user {
-                        self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                        self.reset_progress_breakers(
+                            &mut no_progress,
+                            &mut unproductive_streak,
+                            &mut no_progress_dynamic,
+                            &mut no_progress_monotone,
+                        );
                     }
                     continue;
                 }
@@ -3069,7 +3146,12 @@ impl SessionRuntime {
                     }
                     let admission = self.admit_soft_interrupts("between_tools", events);
                     if admission.user {
-                        self.reset_progress_breakers(&mut no_progress, &mut unproductive_streak);
+                        self.reset_progress_breakers(
+                            &mut no_progress,
+                            &mut unproductive_streak,
+                            &mut no_progress_dynamic,
+                            &mut no_progress_monotone,
+                        );
                     }
                     continue 'turn;
                 }
@@ -3093,23 +3175,38 @@ impl SessionRuntime {
                     // exactly one grace dispatch after its one-shot nudge — the
                     // call whose observation may clear the signal — then stops if
                     // the turn is still stuck. The stop-notice copy is unchanged.
-                    let stop_no_progress = if unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT {
-                        true
-                    } else if no_progress.active_signal().is_active() {
-                        !no_progress.consume_grace()
-                    } else {
-                        false
-                    };
-                    if stop_no_progress {
-                        let notice = "no forward progress this turn (repeated or failing \
-                                      calls); stopping instead of spinning"
-                            .to_string();
-                        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
-                        self.append(
-                            Message::text(Role::User, notice)
-                                .into_synthetic("no tool-call progress"),
+                    if unproductive_streak >= UNPRODUCTIVE_CALL_LIMIT {
+                        return self.stop_no_progress(
+                            events,
+                            &NoProgressDiagnostic::ConsecutiveFailures {
+                                count: unproductive_streak,
+                            },
                         );
-                        return self.stop(events, StopReason::NoProgress);
+                    }
+                    // Grace spent while a signal is active → the turn MUST stop.
+                    // The stuck-repeat provenance tool comes from the dynamic
+                    // diagnostic captured at the trip observation (rebuilt with the
+                    // signal at the same observe); an invariant violation fails
+                    // loudly rather than persisting a false or incomplete record.
+                    if no_progress.active_signal().is_active() && !no_progress.consume_grace() {
+                        return match no_progress.active_signal() {
+                            NoProgressSignal::StuckRepeat { .. } => match &no_progress_dynamic {
+                                Some(diagnostic @ NoProgressDiagnostic::StuckRepeat { .. }) => {
+                                    self.stop_no_progress(events, diagnostic)
+                                }
+                                _ => unreachable!(
+                                    "an active stuck-repeat signal implies a paired dynamic stuck-repeat diagnostic"
+                                ),
+                            },
+                            NoProgressSignal::NoveltyDecay { distinct, window } => self
+                                .stop_no_progress(
+                                    events,
+                                    &NoProgressDiagnostic::NoveltyDecay { window, distinct },
+                                ),
+                            NoProgressSignal::None => unreachable!(
+                                "the always-on guard only reaches this match when the signal is active"
+                            ),
+                        };
                     }
                 }
                 match budget.decide(tool_calls_used, no_progress.is_tripped()) {
@@ -3130,16 +3227,19 @@ impl SessionRuntime {
                         return self.stop(events, StopReason::BudgetExceeded);
                     }
                     BudgetDecision::StopNoProgress => {
-                        let notice = format!(
-                            "no forward progress across {tool_calls_used} tool calls this turn; \
-                             stopping instead of spinning"
-                        );
-                        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
-                        self.append(
-                            Message::text(Role::User, notice)
-                                .into_synthetic("no tool-call progress"),
-                        );
-                        return self.stop(events, StopReason::NoProgress);
+                        // Explicit-budget stop: use the MONOTONE diagnostic (the
+                        // first signal since reset), so a dynamic-clear by novel
+                        // successes below the soft start cannot erase the cause. A
+                        // `StopNoProgress` decision implies the monotone latch and
+                        // its diagnostic were set together in the same observation,
+                        // so this is `Some` — a violated invariant fails loudly
+                        // rather than persisting a detail-less `NoProgress` record.
+                        return match &no_progress_monotone {
+                            Some(diagnostic) => self.stop_no_progress(events, diagnostic),
+                            None => unreachable!(
+                                "a StopNoProgress budget decision implies the monotone no-progress diagnostic was set"
+                            ),
+                        };
                     }
                 }
                 tool_calls_used += 1;
@@ -3639,6 +3739,16 @@ impl SessionRuntime {
                             ));
                             result.output.push_str(&no_progress_hint());
                         }
+                        // Rebuild the dynamic diagnostic from the recomputed signal
+                        // + the tool that produced it (provenance), and seed the
+                        // monotone diagnostic on the first active signal since the
+                        // last reset — so a later dynamic-clear cannot erase the
+                        // explicit controller's original cause.
+                        no_progress_dynamic =
+                            no_progress_diagnostic(no_progress.active_signal(), name);
+                        if no_progress_monotone.is_none() {
+                            no_progress_monotone = no_progress_dynamic.clone();
+                        }
                     }
                 }
                 let _ = events.send(RuntimeEvent::ToolFinished {
@@ -3696,10 +3806,28 @@ impl SessionRuntime {
         self.stop_with_detail(events, reason, None)
     }
 
-    /// Stop the turn, persisting `detail` (when present) alongside the coarse
-    /// `StopReason` tag in the durable session log — e.g. the provider's
-    /// rejection message for `ProviderError`, so the log carries the actual
-    /// failure reason instead of just the tag. `stop` is the detail-less case.
+    /// Stop the turn on a no-progress signal, routing the default-rail and
+    /// explicit-budget stops through one place: the single builder produces the
+    /// notice + the precise detail, the notice is sent as the stop Warning AND
+    /// appended as the synthetic User message (byte-for-byte identical), and the
+    /// detail rides `TurnEnded.detail` beside the byte-for-byte `NoProgress` tag.
+    fn stop_no_progress(
+        &mut self,
+        events: &broadcast::Sender<RuntimeEvent>,
+        diagnostic: &NoProgressDiagnostic,
+    ) -> StopReason {
+        let (notice, detail) = no_progress_notice(diagnostic);
+        let _ = events.send(RuntimeEvent::Warning(notice.clone()));
+        self.append(Message::text(Role::User, notice).into_synthetic("no tool-call progress"));
+        self.stop_with_detail(events, StopReason::NoProgress, Some(detail))
+    }
+
+    /// Stop the turn, persisting `detail` (when present) as an additive,
+    /// human-readable qualifier of the coarse `StopReason` tag in the durable
+    /// session log — the provider's rejection message for `ProviderError`, or the
+    /// no-progress signal (`signal=…`) for `NoProgress` — so the log carries the
+    /// actual reason, not just the tag. The `StopReason` tag itself is unchanged.
+    /// `stop` is the detail-less case.
     fn stop_with_detail(
         &mut self,
         events: &broadcast::Sender<RuntimeEvent>,
@@ -4144,6 +4272,117 @@ mod tests {
     }
 
     #[test]
+    fn no_progress_notice_freezes_the_detail_grammar() {
+        // The detail grammar is a persisted contract: field order and spacing are
+        // fixed, the stuck tool value is JSON-string encoded, and there is no
+        // trailing punctuation. The notice embeds the detail byte-for-byte.
+        let (notice, detail) = no_progress_notice(&NoProgressDiagnostic::StuckRepeat {
+            tool: "read_file".to_string(),
+            count: 3,
+        });
+        assert_eq!(detail, r#"signal=stuck_repeat tool="read_file" count=3"#);
+        assert_eq!(
+            notice,
+            r#"no forward progress this turn (signal=stuck_repeat tool="read_file" count=3); stopping instead of spinning"#
+        );
+
+        let (_, detail) = no_progress_notice(&NoProgressDiagnostic::NoveltyDecay {
+            window: 12,
+            distinct: 1,
+        });
+        assert_eq!(detail, "signal=novelty_decay window=12 distinct=1");
+
+        let (notice, detail) =
+            no_progress_notice(&NoProgressDiagnostic::ConsecutiveFailures { count: 12 });
+        assert_eq!(detail, "signal=consecutive_failures count=12");
+        assert!(
+            !detail.ends_with('.'),
+            "the detail carries no trailing punctuation"
+        );
+        assert!(
+            notice.contains(&detail),
+            "the notice embeds the detail byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn diagnostic_views_track_the_detector_signal() {
+        use localpilot_recovery::NoProgressSignal;
+
+        // The mapper: an active signal produces a diagnostic (stuck carries the
+        // tool), `None` produces none.
+        assert!(matches!(
+            no_progress_diagnostic(NoProgressSignal::StuckRepeat { count: 3 }, "read_file"),
+            Some(NoProgressDiagnostic::StuckRepeat { count: 3, .. })
+        ));
+        assert!(matches!(
+            no_progress_diagnostic(
+                NoProgressSignal::NoveltyDecay {
+                    distinct: 1,
+                    window: 12
+                },
+                "read_file"
+            ),
+            Some(NoProgressDiagnostic::NoveltyDecay {
+                window: 12,
+                distinct: 1
+            })
+        ));
+        assert!(no_progress_diagnostic(NoProgressSignal::None, "read_file").is_none());
+
+        // The turn-loop tracking rule (inlined here as it appears in `run_turn`):
+        // rebuild the dynamic view every observation; seed the monotone view on the
+        // FIRST active signal only; `None` clears ONLY the dynamic view.
+        let mut monotone: Option<NoProgressDiagnostic> = None;
+
+        // First active stuck signal → both views set (monotone seeded from None).
+        let mut dynamic =
+            no_progress_diagnostic(NoProgressSignal::StuckRepeat { count: 3 }, "read_file");
+        if monotone.is_none() {
+            monotone = dynamic.clone();
+        }
+        assert!(matches!(
+            dynamic,
+            Some(NoProgressDiagnostic::StuckRepeat { count: 3, .. })
+        ));
+        assert!(matches!(
+            monotone,
+            Some(NoProgressDiagnostic::StuckRepeat { count: 3, .. })
+        ));
+
+        // A novel success clears the dynamic view; the monotone cause persists.
+        dynamic = no_progress_diagnostic(NoProgressSignal::None, "write_file");
+        if monotone.is_none() {
+            monotone = dynamic.clone();
+        }
+        assert!(dynamic.is_none(), "None clears only the dynamic view");
+        assert!(
+            matches!(monotone, Some(NoProgressDiagnostic::StuckRepeat { .. })),
+            "the monotone first-since-reset cause persists"
+        );
+
+        // A later novelty signal updates only the dynamic view.
+        dynamic = no_progress_diagnostic(
+            NoProgressSignal::NoveltyDecay {
+                distinct: 1,
+                window: 12,
+            },
+            "tick",
+        );
+        if monotone.is_none() {
+            monotone = dynamic.clone();
+        }
+        assert!(matches!(
+            dynamic,
+            Some(NoProgressDiagnostic::NoveltyDecay { .. })
+        ));
+        assert!(
+            matches!(monotone, Some(NoProgressDiagnostic::StuckRepeat { .. })),
+            "the monotone view is not overwritten by a later signal"
+        );
+    }
+
+    #[test]
     fn reset_progress_breakers_clears_progress_state_preserving_nudged() {
         use localpilot_recovery::NoProgressSignal;
         let (mut rt, _dir) = test_runtime();
@@ -4172,8 +4411,21 @@ mod tests {
         rt.tool_failure_guard.record_failure("t");
         rt.tool_failure_guard.record_failure("t");
 
-        rt.reset_progress_breakers(&mut det, &mut streak);
+        // Both diagnostic views are populated before the reset.
+        let mut dynamic_diag = Some(NoProgressDiagnostic::StuckRepeat {
+            tool: "read_file".to_string(),
+            count: 3,
+        });
+        let mut monotone_diag = dynamic_diag.clone();
 
+        rt.reset_progress_breakers(&mut det, &mut streak, &mut dynamic_diag, &mut monotone_diag);
+
+        // Both diagnostic views are cleared.
+        assert!(dynamic_diag.is_none(), "the dynamic diagnostic is cleared");
+        assert!(
+            monotone_diag.is_none(),
+            "the monotone diagnostic is cleared"
+        );
         // Detector: dynamic signal, monotone view, and pending grace all cleared,
         // observation history reset — but the per-turn nudge is preserved.
         assert_eq!(det.active_signal(), NoProgressSignal::None);

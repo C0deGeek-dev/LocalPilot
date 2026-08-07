@@ -199,7 +199,10 @@ mod tests {
 
     #[test]
     fn a_friction_exit_is_high_severity() {
-        for reason in ["BudgetExceeded", "no_progress"] {
+        // "NoProgress" is the EXACT spelling the harness persists (`{StopReason:?}`);
+        // the finding must stay high severity for it even after the stop grew a
+        // `signal=…` detail (the detail rides a separate field, not `exit_reason`).
+        for reason in ["BudgetExceeded", "no_progress", "NoProgress"] {
             let signals = ProcessFriction {
                 tool_calls: 3,
                 reproduce_before_fix: true,
