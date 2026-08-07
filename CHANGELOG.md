@@ -6,6 +6,10 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+## v2.8.0 - 2026-08-07
+
+Coordinated LocalX release.
+
 - **The no-progress guard no longer kills a turn that recovers, and its stop
   names the signal that fired.** A turn that trips the degenerate-loop detector
   now gets its one strategy-change hint plus exactly one grace call, whose
