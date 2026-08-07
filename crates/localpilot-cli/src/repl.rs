@@ -615,6 +615,14 @@ async fn event_loop(
                         }
                         if state.trusted {
                             crate::trust::remember(host.cwd);
+                            // Grant live trust to the runtime so this session's
+                            // tools see the project overlay, and refresh the
+                            // package-discovery cue now that it is readable.
+                            crate::interactive_session::grant_live_trust(
+                                runtime,
+                                host.config,
+                                host.cwd,
+                            );
                         }
                     } else if is_clipboard_image_key(key) {
                         attach_clipboard_image(state, runtime, &host).await;
@@ -929,18 +937,18 @@ async fn run_slash(
         SlashAction::HarnessResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("running harness resume".to_string()));
-            run_harness_command(terminal, state, prompts, host, false).await?;
+            run_harness_command(terminal, state, prompts, host, false, runtime.trusted()).await?;
         }
         SlashAction::WaitResume => {
             state.mode = Mode::Harness;
             state.apply(UiEvent::Notice("checking paused harness run".to_string()));
-            run_harness_command(terminal, state, prompts, host, true).await?;
+            run_harness_command(terminal, state, prompts, host, true, runtime.trusted()).await?;
         }
         SlashAction::Model { provider, model } => {
             run_model_command(state, runtime, host.cwd, provider, model).await;
         }
         SlashAction::LocalBoxAdopt => {
-            run_localbox_adopt(terminal, state, prompts, host).await?;
+            run_localbox_adopt(terminal, state, prompts, host, runtime.trusted()).await?;
         }
         // The walk-and-chunk actions can run for many seconds; drive them through
         // a spinner/progress loader so the UI never just freezes. The rest are
@@ -1862,12 +1870,15 @@ async fn run_harness_command(
     prompts: &mut UserChannels,
     host: &CommandHost<'_>,
     wait_resume: bool,
+    runtime_trusted: bool,
 ) -> anyhow::Result<()> {
     let (events, mut rx) = broadcast::channel::<RuntimeEvent>(1024);
     let cancel = CancellationToken::new();
     let started = std::time::Instant::now();
     let profile = sandbox_profile(state.profile);
-    let trusted = state.trusted;
+    // The live runtime is the trust authority for a resume, so it matches the
+    // live turn; `state.trusted` remains the UI-flow flag only.
+    let trusted = runtime_trusted;
     let tx = host.approval_tx.clone();
     let operation_events = events.clone();
     let operation_cancel = cancel.clone();
@@ -1937,6 +1948,7 @@ async fn run_localbox_adopt(
     state: &mut AppState,
     prompts: &mut UserChannels,
     host: &CommandHost<'_>,
+    runtime_trusted: bool,
 ) -> anyhow::Result<()> {
     let (endpoint, model) = match crate::localbox::detect().await {
         crate::localbox::LocalBoxState::Running { endpoint, model } => (endpoint, model),
@@ -1957,7 +1969,9 @@ async fn run_localbox_adopt(
     let path = localpilot_config::project_config_path(host.cwd);
     let overwrite = path.exists();
     let profile = sandbox_profile(state.profile);
-    let trusted = state.trusted;
+    // The live runtime is the workspace-trust authority for the adopt write's
+    // permission decision; `state.trusted` stays the UI-flow flag only.
+    let trusted = runtime_trusted;
     let tx = host.approval_tx.clone();
     let (_events, mut rx) = broadcast::channel::<RuntimeEvent>(16);
     let cancel = CancellationToken::new();

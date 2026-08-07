@@ -59,7 +59,14 @@ subdirectories — each is trusted on its own.
 
 - The first time you `localpilot chat` in an untrusted folder, the dialog offers
   three choices: trust for this session only (nothing is written), trust and
-  remember the workspace (the folder is added to the store), or exit.
+  remember the workspace (the folder is added to the store), or exit. Either
+  accept grants trust to the live session immediately — the session's tools then
+  see the trusted project overlay (e.g. project skills) without a relaunch. The
+  session-only choice grants trust in memory only; nothing is persisted, so a
+  later process in that folder still prompts. The live session-trust value is
+  derived once at launch from the trusted-folders store (not from the permission
+  profile) and updated in place on accept, so a resume and every tool call read
+  the same authority.
 - `localpilot trust add [PATH]` records a folder (default: the current
   directory); `localpilot trust remove [PATH]` revokes it; `localpilot trust
   list` shows every trusted folder; `localpilot trust status [PATH]` reports

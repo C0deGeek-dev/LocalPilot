@@ -2225,6 +2225,16 @@ impl SessionRuntime {
         self.config.trusted
     }
 
+    /// Update the live workspace-trust decision — the sole authority every
+    /// `ToolContext` reads. Called when the user accepts the trust dialog, so the
+    /// same session's tools see the now-trusted project overlay. Mutates in-memory
+    /// state only; persisting trust across sessions stays the caller's separate,
+    /// explicit step (`trust::remember`). A permission-profile switch never routes
+    /// through here — profile and trust are independent.
+    pub fn set_trusted(&mut self, trusted: bool) {
+        self.config.trusted = trusted;
+    }
+
     /// Record — monotonically — that installed skill packages are present while
     /// model discovery is disabled, appending the truthful "disabled, not empty"
     /// cue to the live system prompt exactly once.
@@ -4227,6 +4237,27 @@ mod tests {
             1,
             "a no-op note_...() must not double-append"
         );
+    }
+
+    #[test]
+    fn set_trusted_is_the_live_authority_and_a_profile_swap_never_touches_it() {
+        let (mut runtime, _d) = runtime_with_package_hint(false);
+        // Default construction here builds an untrusted session.
+        runtime.config.trusted = false;
+        assert!(!runtime.trusted());
+
+        // A permission-profile change must NOT alter trust — they are independent.
+        runtime.set_permission_profile(Profile::Unrestricted, Vec::new());
+        assert!(
+            !runtime.trusted(),
+            "a profile swap must not grant workspace trust"
+        );
+
+        // Only set_trusted moves the live authority.
+        runtime.set_trusted(true);
+        assert!(runtime.trusted());
+        // And every ToolContext reads it: config.trusted is the backing value.
+        assert!(runtime.config.trusted);
     }
 
     /// A single-provider runtime over `provider`, for capability checks.

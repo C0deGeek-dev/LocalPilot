@@ -6,6 +6,17 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Accepting the workspace-trust dialog now trusts the live session
+  immediately.** Live session trust is derived from the trusted-folders store
+  (not the permission profile) and updated in place when you accept — so the
+  session's tools see the trusted project overlay (e.g. project skills) at once,
+  and a resume reads the same value as a live turn, with no relaunch. Trusting
+  "for this session only" stays in-memory (nothing persisted); "trust and
+  remember" still writes the store. If installed skill packages become readable
+  by the grant while discovery is off, the "disabled, not empty" cue is added
+  once. In a paired session the grant applies to both peers or fails cleanly,
+  never leaving one peer trusted and the other not.
+
 - **Skill tools now clearly separate the two "skills" lanes, and say when
   discovery is merely off.** The installed-package tools
   (`skill_list`/`skill_search`/`skill_load`) and LocalMind's

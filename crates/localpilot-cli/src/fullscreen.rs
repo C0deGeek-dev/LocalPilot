@@ -1020,7 +1020,22 @@ pub(crate) async fn run_pair(
             &mut workspace_index,
         );
         match trust {
-            Ok(PairTrustOutcome::Accepted) => {}
+            Ok(PairTrustOutcome::Accepted) => {
+                // Grant live trust to BOTH peers before the driver spawns. The
+                // host computes the now-readable package-discovery hint once
+                // (trusted-side) and passes it in, so pair-run carries no
+                // config/skill dependency; grant_trust is all-or-error.
+                let hint = crate::interactive_session::initial_package_discovery_hint(
+                    context.config,
+                    context.cwd,
+                    true,
+                );
+                if let Err(error) = prepared.grant_trust(hint).await {
+                    restore_pair_terminal(terminal, &mut modes);
+                    prepared.into_host().close().await;
+                    return Err(error);
+                }
+            }
             Ok(PairTrustOutcome::Exit) => {
                 restore_pair_terminal(terminal, &mut modes);
                 prepared.into_host().close().await;
@@ -3727,17 +3742,14 @@ async fn run_event_loop(
         history,
         ingest,
         config,
-        trust_required,
+        // The launch gate uses this in the startup screen; inside the loop the live
+        // authority is `runtime.trusted()` (built from the same launch snapshot),
+        // updated on accept — so no separate loop-local trust shadow is kept.
+        trust_required: _,
     } = context;
     let mut queue = VecDeque::new();
     let mut mouse_state = MouseState::default();
     let mut paste_burst = PasteBurst::default();
-    // The authoritative in-session workspace-trust grant for this single full-screen
-    // host: trusted at launch unless a prompt was required, then set true on either
-    // accept branch (session-only or remember). Snapshotted into a resume's
-    // `ResumeRun.trusted`; it never persists, so the launch gate (driven by the store)
-    // is unweakened — a session-only grant still prompts a subsequent process.
-    let mut session_trusted = !trust_required;
     while !app.exit_requested {
         workspace_index.refresh(app);
         let hit_map = draw_synchronized(terminal, app)?;
@@ -3767,14 +3779,15 @@ async fn run_event_loop(
                 TrustEventOutcome::Pending => {}
                 TrustEventOutcome::Copy(text) => copy_to_clipboard(app, text),
                 TrustEventOutcome::ContinueSession => {
-                    // Session-only: trusted for this live session (a resume honors it),
-                    // but nothing is persisted, so a later process still prompts.
-                    grant_session_trust(&mut session_trusted);
+                    // Session-only: the live runtime becomes trusted so this
+                    // session's tools see the project overlay, but nothing is
+                    // persisted (memory-only), so a later process still prompts.
+                    crate::interactive_session::grant_live_trust(runtime, config, cwd);
                     accept_workspace_trust(app, cwd, false, crate::trust::remember);
                     crate::repl::start_session_knowledge_index(cwd, ingest);
                 }
                 TrustEventOutcome::Remember => {
-                    grant_session_trust(&mut session_trusted);
+                    crate::interactive_session::grant_live_trust(runtime, config, cwd);
                     accept_workspace_trust(app, cwd, true, crate::trust::remember);
                     crate::repl::start_session_knowledge_index(cwd, ingest);
                 }
@@ -3856,10 +3869,7 @@ async fn run_event_loop(
                                     },
                                     SerialOperation::PumpedSlash(command),
                                     &mut queue,
-                                    ResumeAuthority {
-                                        approval_tx,
-                                        session_trusted,
-                                    },
+                                    ResumeAuthority { approval_tx },
                                 )
                                 .await?
                                 {
@@ -3898,10 +3908,7 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
-                            ResumeAuthority {
-                                approval_tx,
-                                session_trusted,
-                            },
+                            ResumeAuthority { approval_tx },
                         )
                         .await?
                         {
@@ -3927,10 +3934,7 @@ async fn run_event_loop(
                             },
                             SerialOperation::Queued(operation),
                             &mut queue,
-                            ResumeAuthority {
-                                approval_tx,
-                                session_trusted,
-                            },
+                            ResumeAuthority { approval_tx },
                         )
                         .await?
                         {
@@ -4440,12 +4444,12 @@ async fn drive_research(
 
 /// The resume-only ambient authority the pumped `/harness-resume` / `/wait-resume`
 /// commands need beyond the shared `SlashContext`: the approval sender their inner
-/// runtime's approver clones, and the live single-host trust snapshot. Bundled into
-/// one value so the dispatcher signature does not grow.
+/// runtime's approver clones. Bundled into one value so the dispatcher signature
+/// does not grow. Live trust is read straight off the runtime at dispatch, not
+/// carried here.
 #[derive(Clone, Copy)]
 struct ResumeAuthority<'a> {
     approval_tx: &'a mpsc::UnboundedSender<ApprovalCall>,
-    session_trusted: bool,
 }
 
 /// Which resume the pump runs — a typed kind (not a bare `wait` bool) so the two
@@ -4477,16 +4481,17 @@ struct ResumeDispatch {
     trusted: bool,
 }
 
-/// Read the LIVE model/provider/profile off the runtime plus the live single-host
-/// trust — the authority the resume builders use, not launch-time values. Passing the
-/// live provider is what makes wait-resume's provider-identity check observe an
-/// in-session switch.
-fn resume_dispatch_snapshot(runtime: &SessionRuntime, session_trusted: bool) -> ResumeDispatch {
+/// Read the LIVE model/provider/profile/trust off the runtime — the authority the
+/// resume builders use, not launch-time values, so a resume matches the live turn.
+/// Passing the live provider is what makes wait-resume's provider-identity check
+/// observe an in-session switch; reading `runtime.trusted()` makes a mid-session
+/// trust grant reach the resume without a separate shadow.
+fn resume_dispatch_snapshot(runtime: &SessionRuntime) -> ResumeDispatch {
     ResumeDispatch {
         model: runtime.active_model().to_string(),
         provider_id: runtime.active_provider_id().to_string(),
         profile: runtime.permission_engine_handle().profile(),
-        trusted: session_trusted,
+        trusted: runtime.trusted(),
     }
 }
 
@@ -4496,14 +4501,6 @@ fn resume_dispatch_snapshot(runtime: &SessionRuntime, session_trusted: bool) -> 
 fn begin_harness_resume(app: &mut AppModel) {
     app.set_shared_mode(localpilot_tui::Mode::Harness);
     app.begin_work();
-}
-
-/// Grant workspace trust for this live full-screen session — the single-host retained
-/// state a resume snapshots into `ResumeRun.trusted`. Set by BOTH trust-accept branches
-/// (session-only and remember); never persisted itself, so the launch gate stays
-/// store-driven and a later process still prompts.
-fn grant_session_trust(session_trusted: &mut bool) {
-    *session_trusted = true;
 }
 
 /// The approver factory the resume's `ResumeRun` uses: each step mints a fresh
@@ -4553,7 +4550,7 @@ async fn drive_harness_resume(
     kind: ResumeKind,
 ) -> Result<bool> {
     // Dispatch-time LIVE snapshot (never launch-time), built through the shared seam.
-    let snapshot = resume_dispatch_snapshot(runtime, resume.session_trusted);
+    let snapshot = resume_dispatch_snapshot(runtime);
     let image_capability = ImageCapabilitySnapshot {
         provider_id: snapshot.provider_id.clone(),
         vision_capable: runtime.active_accepts_images(),
@@ -12569,14 +12566,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut bundle = dual_provider_session(dir.path()).await;
 
-        // Before the switch: the seam reads the launch target, default profile, given trust.
-        let before = resume_dispatch_snapshot(&bundle.runtime, false);
+        // Before the switch: the seam reads the launch target, default profile, live trust.
+        bundle.runtime.set_trusted(false);
+        let before = resume_dispatch_snapshot(&bundle.runtime);
         assert_eq!(before.provider_id, "first");
         assert_eq!(before.model, "model-a");
         assert_eq!(before.profile, localpilot_sandbox::Profile::Default);
         assert!(!before.trusted);
 
-        // A REAL in-session provider switch (the `/model` runtime action) + profile switch.
+        // A REAL in-session provider switch (the `/model` runtime action) + profile switch
+        // + a live trust grant (what a trust-accept branch does).
         bundle
             .runtime
             .set_active_provider("second")
@@ -12584,9 +12583,11 @@ mod tests {
         bundle
             .runtime
             .set_permission_profile(localpilot_sandbox::Profile::Bypass, Vec::new());
+        bundle.runtime.set_trusted(true);
 
-        // After: the seam returns the switched provider/model/profile + the live trust.
-        let after = resume_dispatch_snapshot(&bundle.runtime, true);
+        // After: the seam returns the switched provider/model/profile + the live trust,
+        // read straight off the runtime (no separate shadow).
+        let after = resume_dispatch_snapshot(&bundle.runtime);
         assert_eq!(
             after.provider_id, "second",
             "the seam reads the switched provider live"
@@ -12733,31 +12734,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_trust_grant_feeds_the_resume_dispatch_snapshot() {
-        // The single-host `session_trusted` starts from `!trust_required`; the shared
-        // `grant_session_trust` helper — called by BOTH the ContinueSession and Remember
-        // accept branches (fullscreen.rs:3777/3782) — flips it live; and
-        // `resume_dispatch_snapshot` consumes it into `ResumeRun.trusted`. The
-        // session-only (no store) vs remember (store) persistence distinction is locked
-        // separately by `session_trust_does_not_write_but_remember_uses_an_isolated_store`;
-        // this locks the live-grant → dispatch-snapshot wiring the resume trust depends on.
+    async fn a_live_trust_grant_reaches_the_resume_dispatch_snapshot() {
+        // Both accept branches (ContinueSession and Remember) call
+        // `runtime.set_trusted(true)`; `resume_dispatch_snapshot` reads
+        // `runtime.trusted()` live, so a resume matches the live turn. The
+        // session-only (no store) vs remember (store) persistence distinction is
+        // locked separately by
+        // `session_trust_does_not_write_but_remember_uses_an_isolated_store`; this
+        // locks the live-grant → dispatch-snapshot wiring the resume trust needs.
         let dir = tempfile::tempdir().unwrap();
-        let bundle = dual_provider_session(dir.path()).await;
+        let mut bundle = dual_provider_session(dir.path()).await;
 
-        // An untrusted, prompt-required launch initializes `session_trusted = !trust_required = false`.
-        let mut session_trusted = false;
+        // An untrusted, prompt-required launch builds an untrusted runtime.
+        bundle.runtime.set_trusted(false);
         assert!(
-            !resume_dispatch_snapshot(&bundle.runtime, session_trusted).trusted,
+            !resume_dispatch_snapshot(&bundle.runtime).trusted,
             "before any accept, the resume snapshot is untrusted"
         );
 
-        // Both accept outcomes call the shared grant helper, which flips the live bool.
-        grant_session_trust(&mut session_trusted);
-        assert!(session_trusted, "the grant helper sets live session trust");
+        // A trust-accept branch grants live trust; the resume snapshot reads it.
+        bundle.runtime.set_trusted(true);
         assert!(
-            resume_dispatch_snapshot(&bundle.runtime, session_trusted).trusted,
-            "the resume snapshot consumes the live session trust (ResumeRun.trusted)"
+            resume_dispatch_snapshot(&bundle.runtime).trusted,
+            "the resume snapshot reads the live runtime trust (ResumeRun.trusted)"
         );
+        bundle.runtime.close();
     }
 
     #[tokio::test]

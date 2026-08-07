@@ -489,6 +489,14 @@ impl PreparedPairRun {
         })
     }
 
+    /// Grant live workspace trust to both peers on trust acceptance, before the
+    /// driver spawns (all-or-error). Delegates to
+    /// [`InteractivePairHost::grant_trust`]; `hint` is the host's pre-computed
+    /// package-discovery hint, so this path carries no config/skill dependency.
+    pub(crate) async fn grant_trust(&self, hint: bool) -> anyhow::Result<()> {
+        self.host.grant_trust(hint).await
+    }
+
     /// Recover the intact host when terminal setup or another pre-spawn step
     /// fails. No driver task or model turn has started yet.
     pub(crate) fn into_host(self) -> InteractivePairHost {

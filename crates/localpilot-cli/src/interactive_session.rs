@@ -232,6 +232,39 @@ impl InteractivePairHost {
         &self.owner.task
     }
 
+    /// Grant live workspace trust to BOTH pair peers on trust acceptance, before
+    /// the driver spawns. All-or-error: resolve both registry handles FIRST and
+    /// fail (mutating neither) if either is missing, then set each runtime trusted
+    /// and — when `hint` — append the package-discovery cue once. `hint` is
+    /// computed once by the host (trusted-side), so pair-run stays free of config
+    /// and skill-discovery dependencies. Mirrors `close_registered`'s
+    /// resolve-then-lock-then-mutate discipline over the shared registry.
+    pub(crate) async fn grant_trust(&self, hint: bool) -> anyhow::Result<()> {
+        let sessions = self.owner.sessions;
+        // Resolve both handles before mutating either — a missing peer is an
+        // internal error, never a silently half-trusted pair.
+        let handle_a = self
+            .owner
+            .registry
+            .get(sessions[0])
+            .await
+            .ok_or_else(|| anyhow::anyhow!("pair peer A session is not registered"))?;
+        let handle_b = self
+            .owner
+            .registry
+            .get(sessions[1])
+            .await
+            .ok_or_else(|| anyhow::anyhow!("pair peer B session is not registered"))?;
+        for handle in [handle_a, handle_b] {
+            let mut runtime = handle.lock().await;
+            runtime.set_trusted(true);
+            if hint {
+                runtime.note_package_discovery_disabled_but_present();
+            }
+        }
+        Ok(())
+    }
+
     /// Build, register, adopt, and subscribe to two interactive sessions.
     pub(crate) async fn prepare(
         setup: &InteractiveSessionSetup,
@@ -672,7 +705,7 @@ fn interactive_config(
 /// blocks launch (treated as no hint). Trust-safe — the project overlay is read
 /// only when the workspace is `trusted`; an untrusted workspace counts the
 /// user-global baseline alone and never reads project manifests.
-fn initial_package_discovery_hint(config: &Config, cwd: &Path, trusted: bool) -> bool {
+pub(crate) fn initial_package_discovery_hint(config: &Config, cwd: &Path, trusted: bool) -> bool {
     // Resolve the real per-user global home once; the injectable seam below does
     // the counting, so tests can pin the global baseline instead of the machine's.
     initial_package_discovery_hint_with(
@@ -683,11 +716,48 @@ fn initial_package_discovery_hint(config: &Config, cwd: &Path, trusted: bool) ->
     )
 }
 
+/// Grant live workspace trust to an interactive runtime on trust acceptance, and
+/// refresh the package-discovery cue now that the project overlay is readable.
+///
+/// The full-screen and inline accept branches share this helper. Pair does NOT
+/// route through it — it uses the separate all-or-error
+/// [`InteractivePairHost::grant_trust`] with a host-precomputed hint (same
+/// `set_trusted → config.trusted` policy, different call site because both peer
+/// handles must be resolved before either is mutated). Trust is set in-memory
+/// only (`runtime.set_trusted(true)`); persisting it across sessions stays the
+/// caller's separate `trust::remember` step, so the launch gate is unweakened.
+pub(crate) fn grant_live_trust(runtime: &mut SessionRuntime, config: &Config, cwd: &Path) {
+    // Resolve the real per-user global home once; the injectable seam does the work.
+    grant_live_trust_with(
+        runtime,
+        config,
+        cwd,
+        localpilot_skills::user_home().as_deref(),
+    );
+}
+
+/// [`grant_live_trust`] with an explicit global-baseline `home` — the injectable
+/// seam, so cue tests pin the global catalog instead of the machine's. Sets the
+/// runtime trusted, then appends the "disabled, not empty" cue at most once (the
+/// runtime helper is monotonic), only when discovery is off and a discoverable
+/// package is now readable; no package content is injected.
+pub(crate) fn grant_live_trust_with(
+    runtime: &mut SessionRuntime,
+    config: &Config,
+    cwd: &Path,
+    home: Option<&Path>,
+) {
+    runtime.set_trusted(true);
+    if initial_package_discovery_hint_with(config, cwd, home, true) {
+        runtime.note_package_discovery_disabled_but_present();
+    }
+}
+
 /// [`initial_package_discovery_hint`] with an explicit global-baseline `home`
 /// (the injectable seam). The project overlay is read only when `trusted`; the
 /// global baseline is read from `home` (or omitted when `None`). Best-effort — a
 /// discovery error yields no hint and never blocks launch.
-fn initial_package_discovery_hint_with(
+pub(crate) fn initial_package_discovery_hint_with(
     config: &Config,
     cwd: &Path,
     home: Option<&Path>,
@@ -777,10 +847,12 @@ mod tests {
     use localpilot_config::{CompactionMode, ProviderConfig, RepairMode, RuleSeverity};
     use localpilot_harness::StopReason;
     use localpilot_llm::{FakeProvider, ModelProvider, ProviderRegistry};
-    use localpilot_sandbox::{CommandClass, Decision};
+    use localpilot_sandbox::{CommandClass, Decision, Workspace};
     use localpilot_server::swarm::{SpawnError, SwarmError};
     use localpilot_server::SwarmLimits;
+    use localpilot_skills::SkillList;
     use localpilot_store::SessionEventKind;
+    use localpilot_tools::{Tool, ToolContext};
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
@@ -1123,6 +1195,318 @@ mod tests {
                 "both peers derive trust from the one snapshot"
             );
         }
+    }
+
+    /// The package-discovery-disabled cue marker, shared by the grant-path tests.
+    const CUE_MARKER: &str = "discovery is off, not that there are no skills";
+
+    /// A minimal UNTRUSTED runtime with only builtin tools and NO seeded cue —
+    /// built directly (not via `setup.build`) so the initial cue state is
+    /// deterministic and does not depend on the machine's real global catalog.
+    fn untrusted_runtime(dir: &Path) -> SessionRuntime {
+        let (approval_tx, _rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        SessionRuntime::new(
+            provider("first", None) as Arc<dyn ModelProvider>,
+            crate::mcp::McpTools::default().registry(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(TuiApprover::new(approval_tx)),
+            Store::open(dir),
+            Workspace::new(dir).expect("workspace"),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                model: "m".to_string(),
+                interactivity: Interactivity::NonInteractive,
+                trusted: false,
+                package_discovery_disabled_but_present: false,
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        )
+    }
+
+    /// A read-only `ToolContext` keyed on a given trust value — the shape
+    /// `session.rs` builds from `runtime.config.trusted` for every tool call.
+    fn skill_lookup_ctx(ws: &Workspace, trusted: bool) -> ToolContext<'_> {
+        ToolContext {
+            workspace: ws,
+            interactivity: Interactivity::NonInteractive,
+            trusted,
+            retention: None,
+            processes: None,
+            agents: None,
+            prompter: None,
+            peers: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_trust_grant_makes_the_project_overlay_visible_to_a_real_tool_lookup() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        // A discoverable project-overlay skill package.
+        write_project_skill(dir.path(), "proj-only-pkg", "a project helper", false);
+        let (setup, _a, _b) = setup_with_two_providers(dir.path());
+        // Untrusted launch (Profile::Default, fresh temp dir) ⇒ runtime built untrusted.
+        let mut bundle = setup.build("first", "model-a").await.expect("build");
+        assert!(!bundle.runtime.trusted(), "untrusted launch");
+
+        let ws = Workspace::new(dir.path()).expect("workspace");
+        // Before the grant: a REAL skill_list lookup keyed on runtime.trusted()
+        // does NOT see the project overlay.
+        let before = SkillList::new()
+            .invoke(json!({}), &skill_lookup_ctx(&ws, bundle.runtime.trusted()))
+            .await
+            .expect("list before");
+        assert!(
+            !before.text.contains("proj-only-pkg"),
+            "the project overlay is hidden before the grant: {}",
+            before.text
+        );
+
+        // The accept path grants live trust.
+        grant_live_trust(&mut bundle.runtime, setup.config(), dir.path());
+        assert!(bundle.runtime.trusted(), "granted");
+
+        // After: the same lookup, keyed on the now-true runtime trust, sees it.
+        let after = SkillList::new()
+            .invoke(json!({}), &skill_lookup_ctx(&ws, bundle.runtime.trusted()))
+            .await
+            .expect("list after");
+        assert!(
+            after.text.contains("proj-only-pkg"),
+            "the project overlay is visible after the grant: {}",
+            after.text
+        );
+        bundle.runtime.close();
+    }
+
+    #[test]
+    fn a_trust_grant_appends_the_disabled_cue_false_true_true_through_the_seam() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        // A project-only Discoverable package; discovery off (default config).
+        write_project_skill(dir.path(), "proj-pkg", "a project helper", false);
+        let mut runtime = untrusted_runtime(dir.path());
+
+        // Untrusted construction seeds NO cue (deterministic — no global-home read).
+        assert_eq!(
+            runtime.system_prompt_text().matches(CUE_MARKER).count(),
+            0,
+            "no cue before the grant"
+        );
+        // Grant with NO injected global home: the now-trusted project overlay
+        // yields the hint, so the cue is appended exactly once (false→true).
+        grant_live_trust_with(&mut runtime, &Config::default(), dir.path(), None);
+        assert_eq!(
+            runtime.system_prompt_text().matches(CUE_MARKER).count(),
+            1,
+            "the grant appends the cue exactly once"
+        );
+        // A repeat grant is idempotent — the monotonic helper never double-appends.
+        grant_live_trust_with(&mut runtime, &Config::default(), dir.path(), None);
+        assert_eq!(
+            runtime.system_prompt_text().matches(CUE_MARKER).count(),
+            1,
+            "true→true is a no-op"
+        );
+        runtime.close();
+    }
+
+    #[test]
+    fn a_grant_flips_trust_but_adds_no_cue_for_a_user_only_only_project() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        // Only a UserOnly package — never discoverable, so no cue is warranted.
+        write_project_skill(dir.path(), "hidden-only", "hidden", true);
+        let mut runtime = untrusted_runtime(dir.path());
+
+        grant_live_trust_with(&mut runtime, &Config::default(), dir.path(), None);
+        assert!(runtime.trusted(), "trust still flips");
+        assert_eq!(
+            runtime.system_prompt_text().matches(CUE_MARKER).count(),
+            0,
+            "a user-only package is not discoverable, so no cue"
+        );
+        runtime.close();
+    }
+
+    #[test]
+    fn a_grant_flips_trust_but_adds_no_cue_when_autonomous_discovery_is_on() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        write_project_skill(dir.path(), "proj-pkg", "a project helper", false);
+        let mut runtime = untrusted_runtime(dir.path());
+        let mut config = Config::default();
+        config.skills.autonomous_discovery = true;
+
+        grant_live_trust_with(&mut runtime, &config, dir.path(), None);
+        assert!(runtime.trusted(), "trust still flips");
+        assert_eq!(
+            runtime.system_prompt_text().matches(CUE_MARKER).count(),
+            0,
+            "discovery on means the tools are registered — no disabled cue"
+        );
+        runtime.close();
+    }
+
+    #[tokio::test]
+    async fn pair_grant_trust_flips_both_peers() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let (setup, _a, _b) = setup_with_two_providers(dir.path());
+        let pair = InteractivePairHost::prepare(
+            &setup,
+            "review the change",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .expect("hosted pair");
+
+        let sa = pair.owner.sessions[0];
+        let sb = pair.owner.sessions[1];
+        // Before: both peers untrusted (Profile::Default launch).
+        assert!(!peer_trusted(&pair, sa).await);
+        assert!(!peer_trusted(&pair, sb).await);
+
+        pair.grant_trust(false).await.expect("grant both peers");
+        assert!(peer_trusted(&pair, sa).await, "peer A trusted after grant");
+        assert!(peer_trusted(&pair, sb).await, "peer B trusted after grant");
+
+        pair.close().await;
+    }
+
+    #[tokio::test]
+    async fn pair_grant_trust_is_all_or_error_when_a_peer_is_missing() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let (setup, _a, _b) = setup_with_two_providers(dir.path());
+        let pair = InteractivePairHost::prepare(
+            &setup,
+            "review the change",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .expect("hosted pair");
+        let sa = pair.owner.sessions[0];
+        let sb = pair.owner.sessions[1];
+
+        // Peer B goes missing: grant must fail and mutate NEITHER peer (both
+        // handles are resolved before either is touched).
+        pair.owner.registry.remove(sb).await;
+        assert!(
+            pair.grant_trust(false).await.is_err(),
+            "a missing peer is an error"
+        );
+        assert!(
+            !peer_trusted(&pair, sa).await,
+            "peer A must not be mutated when peer B is missing"
+        );
+
+        pair.close().await;
+    }
+
+    /// Read a hosted peer's live runtime trust through the shared registry.
+    async fn peer_trusted(pair: &InteractivePairHost, session: SessionId) -> bool {
+        pair.owner
+            .registry
+            .get(session)
+            .await
+            .expect("registered peer")
+            .lock()
+            .await
+            .trusted()
+    }
+
+    /// Count the disabled-cue marker in a hosted peer's live system prompt.
+    async fn peer_cue_count(pair: &InteractivePairHost, session: SessionId) -> usize {
+        pair.owner
+            .registry
+            .get(session)
+            .await
+            .expect("registered peer")
+            .lock()
+            .await
+            .system_prompt_text()
+            .matches(CUE_MARKER)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn pair_grant_makes_each_peer_overlay_visible_and_cues_once() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        // A project-only Discoverable package; discovery off (default config).
+        write_project_skill(dir.path(), "pair-proj-pkg", "a project helper", false);
+        let (setup, _a, _b) = setup_with_two_providers(dir.path());
+        let pair = InteractivePairHost::prepare(
+            &setup,
+            "review the change",
+            InteractivePeerSelection {
+                provider_id: "first",
+                model: "model-a",
+            },
+            InteractivePeerSelection {
+                provider_id: "second",
+                model: "model-b",
+            },
+        )
+        .await
+        .expect("hosted pair");
+        let sessions = [pair.owner.sessions[0], pair.owner.sessions[1]];
+        let ws = Workspace::new(dir.path()).expect("workspace");
+
+        // BEFORE the grant: each peer is untrusted, so a REAL skill_list lookup
+        // keyed on that peer's live trust hides the project overlay.
+        for session in sessions {
+            let trusted = peer_trusted(&pair, session).await;
+            assert!(!trusted, "peer untrusted before grant");
+            let out = SkillList::new()
+                .invoke(json!({}), &skill_lookup_ctx(&ws, trusted))
+                .await
+                .expect("list before");
+            assert!(
+                !out.text.contains("pair-proj-pkg"),
+                "the project overlay is hidden before the grant: {}",
+                out.text
+            );
+        }
+
+        // Grant BOTH peers through the pair's own all-or-error path, true-hint branch.
+        pair.grant_trust(true).await.expect("grant both peers");
+
+        // AFTER: each peer's real lookup shows the overlay, and each carries the cue once.
+        for session in sessions {
+            let trusted = peer_trusted(&pair, session).await;
+            assert!(trusted, "peer trusted after grant");
+            let out = SkillList::new()
+                .invoke(json!({}), &skill_lookup_ctx(&ws, trusted))
+                .await
+                .expect("list after");
+            assert!(
+                out.text.contains("pair-proj-pkg"),
+                "the project overlay is visible after the grant: {}",
+                out.text
+            );
+            assert_eq!(peer_cue_count(&pair, session).await, 1, "cue once per peer");
+        }
+
+        // A repeated grant is idempotent per peer.
+        pair.grant_trust(true).await.expect("grant again");
+        for session in sessions {
+            assert_eq!(
+                peer_cue_count(&pair, session).await,
+                1,
+                "a repeat grant must not double-append per peer"
+            );
+        }
+        pair.close().await;
     }
 
     #[tokio::test]
