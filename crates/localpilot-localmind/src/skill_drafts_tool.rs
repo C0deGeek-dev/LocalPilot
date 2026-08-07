@@ -38,10 +38,13 @@ impl Tool for SkillDrafts {
 
     fn description(&self) -> &str {
         "List LocalMind's generated skill drafts for this project, or show one draft's body by id. \
-         Drafts are candidate reusable workflows distilled from accepted project memory; they are \
-         always disabled and never auto-installed. Read-only: surfacing a draft does not enable it \
-         — enabling stays a human step (`localpilot learning skills`). Use it to notice a relevant \
-         existing workflow and propose it to the user, not to apply one yourself."
+         Drafts are LocalMind-derived candidate reusable workflows distilled from accepted project \
+         memory; they are always disabled and never auto-installed. This is a different lane from \
+         installed SKILL.md skill packages (`skill_search`/`skill_list`): its results do not \
+         establish which packages are installed — package presence or absence cannot be inferred \
+         from them. Read-only: surfacing a draft does not enable it — enabling stays a human step \
+         (`localpilot learning skills`). Use it to notice a relevant existing workflow and propose \
+         it to the user, never to apply or enable one yourself."
     }
 
     fn schema(&self) -> Value {
@@ -287,6 +290,23 @@ mod tests {
                 inside_workspace: true,
                 secret_like: false
             }]
+        );
+    }
+
+    #[test]
+    fn the_description_distinguishes_itself_from_installed_packages_and_stays_human_only() {
+        let desc = SkillDrafts.description();
+        assert!(
+            desc.contains("different lane from") && desc.contains("SKILL.md"),
+            "must distinguish itself from installed SKILL.md packages: {desc}"
+        );
+        assert!(
+            desc.contains("cannot be inferred") || desc.contains("do not establish"),
+            "must say its results do not establish package presence/absence: {desc}"
+        );
+        assert!(
+            desc.contains("always disabled") && desc.contains("never to apply or enable"),
+            "must keep drafts disabled/human-only: {desc}"
         );
     }
 }

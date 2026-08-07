@@ -642,8 +642,23 @@ is searched for and chosen (the skill model is ADR-0027).
   (`disable-model-invocation: true`) is
   never returned by search or counted in that total; it is reachable only by an
   exact typed name.
+- **Disabled, not empty.** When installed skill packages are available in the
+  session's readable catalog (the user-global baseline, plus the project overlay
+  when trusted) but `autonomous_discovery` is off, those tools are not registered
+  — so the system prompt instead carries a short, truthful cue that package
+  discovery is *disabled, not that no skills exist*, points the user at `/skills
+  list` in chat (or `localpilot skills list` outside chat) and the `[skills]
+  autonomous_discovery = true` switch, and tells the model not to infer package
+  presence or absence from the LocalMind lane. The cue carries no package names,
+  descriptions, or counts. It is computed once at launch, trust-safely (the
+  project overlay is inspected only when the workspace is trusted).
+- **Two distinct lanes.** The package tools above (`skill_list`/`skill_search`/
+  `skill_load`) are the installed SKILL.md catalog. LocalMind's
+  `active_skills`/`skill_drafts` are a *separate* lane of memory-derived advisory
+  workflows; the tool descriptions and prompt cues say so, and the presence or
+  absence of one lane's results never establishes anything about the other.
 
-Both tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
+All three tools are read-only (`Effect::ReadPath`) and trust-gated: project-local
 skills load only when the workspace is trusted. Loading a skill injects *content
 the agent reads* — it runs, installs, and enables nothing. A skill's declared
 `required_tools`/`permissions` are surfaced when it is loaded for transparency,

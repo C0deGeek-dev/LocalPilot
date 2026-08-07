@@ -6,6 +6,18 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Skill tools now clearly separate the two "skills" lanes, and say when
+  discovery is merely off.** The installed-package tools
+  (`skill_list`/`skill_search`/`skill_load`) and LocalMind's
+  `active_skills`/`skill_drafts` now describe themselves as distinct lanes and
+  cross-reference each other, so an empty result from one no longer implies the
+  other is empty. When skill packages are available in the session's readable
+  catalog but model discovery is off (`[skills] autonomous_discovery = false`),
+  the agent is told that discovery is *disabled, not that no skills exist*, and
+  pointed at `/skills list` in chat (or `localpilot skills list` outside chat) and
+  the config switch — without ever injecting package names, descriptions, or
+  counts. Interactive sessions compute that state once at launch, trust-safely.
+
 - **New `skill_list` tool: page the whole installed skill catalog.** When
   `[skills] autonomous_discovery = true`, the model can list every discoverable
   skill package (name, one-line summary, and origin scope) in name order,

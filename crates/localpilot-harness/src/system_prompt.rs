@@ -13,7 +13,11 @@ use localpilot_tools::ToolRegistry;
 /// pull-discovery broker's marker trigger is on; it is gated together with the
 /// `tool_search` tool being registered.
 #[must_use]
-pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String {
+pub fn agent_system_prompt(
+    tools: &ToolRegistry,
+    marker_enabled: bool,
+    package_discovery_disabled_but_present: bool,
+) -> String {
     let mut names = tools.names();
     names.sort_unstable();
     compose_with(
@@ -21,6 +25,7 @@ pub fn agent_system_prompt(tools: &ToolRegistry, marker_enabled: bool) -> String
         marker_enabled,
         PromptParts::all(),
         has_doc_tool(tools),
+        package_discovery_disabled_but_present,
     )
 }
 
@@ -49,7 +54,8 @@ pub fn composed_system_prompt(
 ) -> String {
     let mut names = tools.names();
     names.sort_unstable();
-    compose_with(&names, marker_enabled, parts, has_doc_tool(tools))
+    // A subagent never carries the interactive host's package-discovery hint.
+    compose_with(&names, marker_enabled, parts, has_doc_tool(tools), false)
 }
 
 /// The cue, appended only when a knowledge-base search tool is registered, that
@@ -76,14 +82,29 @@ const REMEMBER_CUE: &str = concat!(
 
 /// The cue, appended only when the `skill_drafts` tool is registered, that tells
 /// the model candidate skill drafts may exist and that surfacing one never
-/// activates it.
+/// activates it. This is the LocalMind-derived disabled-candidate lane — separate
+/// from the installed SKILL.md package lane (`skill_list`/`skill_search`).
 const SKILL_DRAFTS_CUE: &str = concat!(
     "\n\n",
-    "This project may have generated skill drafts — candidate reusable workflows ",
-    "distilled from accepted memory. When a task resembles a recurring workflow, call ",
-    "`skill_drafts` to list or inspect them. They are always disabled; you can surface a ",
-    "relevant one and propose it to the user, but enabling a skill stays a human step — ",
-    "never assume a draft is active.",
+    "LocalMind may have generated skill drafts — candidate reusable workflows distilled ",
+    "from accepted project memory. These are a different lane from installed SKILL.md skill ",
+    "packages (`skill_list`/`skill_search`); a draft says nothing about which packages are ",
+    "installed. When a task resembles a recurring workflow, call `skill_drafts` to list or ",
+    "inspect them. They are always disabled; surface a relevant one and propose it to the user, ",
+    "but never apply or enable a draft yourself and never assume a draft is active — enabling ",
+    "stays a human step.",
+);
+
+/// The cue, appended only when the `active_skills` tool is registered, that tells
+/// the model human-enabled LocalMind-derived advisory workflows may exist —
+/// distinct from installed SKILL.md packages.
+const ACTIVE_SKILLS_CUE: &str = concat!(
+    "\n\n",
+    "LocalMind may have active skills — human-enabled advisory workflows distilled from ",
+    "accepted project memory. Call `active_skills` to list or read them and apply their guidance ",
+    "yourself; reading enables and runs nothing. These are a different lane from installed ",
+    "SKILL.md skill packages (`skill_list`/`skill_search`), and their presence or absence says ",
+    "nothing about which packages are installed.",
 );
 
 /// The cue, appended only when the `skill_search` tool is registered (autonomous
@@ -92,12 +113,38 @@ const SKILL_DRAFTS_CUE: &str = concat!(
 /// than carried in context.
 const SKILL_SEARCH_CUE: &str = concat!(
     "\n\n",
-    "Your user-global directory or this project may define skills — advisory prompt modules for ",
-    "recurring tasks. They are not loaded into context; when a task looks like one, call ",
-    "`skill_search` to find relevant skills (you get back names and one-line summaries), then ",
-    "`skill_load` to read one and apply its guidance yourself. Loading a skill runs nothing; any ",
-    "action it suggests still goes through the normal permission gate.",
+    "Installed SKILL.md skill packages — from your user-global directory and this workspace's ",
+    "trusted overlay — are advisory prompt modules for recurring tasks, reachable on demand rather ",
+    "than loaded into context. Call `skill_list` to page the whole installed catalog, or ",
+    "`skill_search` to find relevant ones (both return names and one-line summaries), then ",
+    "`skill_load` to read one by exact name and apply its guidance yourself. This is the installed ",
+    "package lane — separate from LocalMind's `active_skills`/`skill_drafts`. Loading a skill runs ",
+    "nothing; any action it suggests still goes through the normal permission gate.",
 );
+
+/// The cue, emitted only when installed skill packages exist on disk but
+/// model-facing discovery is disabled (`skill_search` unregistered). It contains
+/// no package names, descriptions, or counts — only the truthful fact that
+/// discovery is off, not that no skills exist, plus how to enable it. One
+/// definition, used by both initial prompt composition and the live append in
+/// [`crate::SessionRuntime::note_package_discovery_disabled_but_present`].
+const PACKAGE_DISCOVERY_DISABLED_BUT_PRESENT_CUE: &str = concat!(
+    "\n\n",
+    "Installed SKILL.md skill packages are available in this session's readable catalog, but ",
+    "model-facing skill discovery is disabled, so the `skill_list`/`skill_search`/`skill_load` ",
+    "tools are not registered this session. This means package discovery is off, not that there ",
+    "are no skills — do not conclude that no skills are installed, and do not infer package ",
+    "presence or absence from LocalMind's `active_skills`/`skill_drafts` (a different lane). The ",
+    "user can list installed packages in chat with `/skills list` (or `localpilot skills list` ",
+    "outside chat), or enable model discovery by setting `[skills] autonomous_discovery = true`.",
+);
+
+/// The single definition of the package-discovery-disabled cue, exposed so the
+/// runtime's live append path uses the same text as initial composition.
+#[must_use]
+pub(crate) fn package_discovery_disabled_but_present_cue() -> &'static str {
+    PACKAGE_DISCOVERY_DISABLED_BUT_PRESENT_CUE
+}
 
 /// The cue, appended only when the `tool_search` tool is registered (the
 /// pull-discovery broker is enabled), that tells the model the advertised tool set
@@ -187,14 +234,14 @@ fn build_prompt(names: &[&str]) -> String {
 /// Render the prompt, optionally adding the `NEED:` marker convention.
 #[cfg(test)]
 fn build_prompt_with(names: &[&str], marker_enabled: bool) -> String {
-    compose_with(names, marker_enabled, PromptParts::all(), false)
+    compose_with(names, marker_enabled, PromptParts::all(), false, false)
 }
 
 /// [`compose_with`] with no documentation tool advertised — the common case in
 /// the section tests, which pass bare tool names.
 #[cfg(test)]
 fn compose(names: &[&str], marker_enabled: bool, parts: PromptParts) -> String {
-    compose_with(names, marker_enabled, parts, false)
+    compose_with(names, marker_enabled, parts, false, false)
 }
 
 /// The agent-mode opening. Always present when `include_base` is on; it is the
@@ -267,6 +314,7 @@ fn compose_with(
     marker_enabled: bool,
     parts: PromptParts,
     doc_tool_advertised: bool,
+    package_discovery_disabled_but_present: bool,
 ) -> String {
     let ask_user_enabled = parts.include_ask_user;
     let mut sections: Vec<String> = Vec::new();
@@ -284,6 +332,7 @@ fn compose_with(
         marker_enabled,
         doc_tool_advertised,
         ask_user_enabled,
+        package_discovery_disabled_but_present,
     ));
     if parts.include_look_before_launch {
         sections.push(LOOK_BEFORE_LAUNCH_SECTION.to_string());
@@ -305,6 +354,7 @@ fn tools_section(
     marker_enabled: bool,
     doc_tool_advertised: bool,
     ask_user_enabled: bool,
+    package_discovery_disabled_but_present: bool,
 ) -> String {
     let knowledge_cue = if names.contains(&"knowledge_search") {
         KNOWLEDGE_SEARCH_CUE
@@ -321,11 +371,25 @@ fn tools_section(
     } else {
         ""
     };
+    let active_skills_cue = if names.contains(&"active_skills") {
+        ACTIVE_SKILLS_CUE
+    } else {
+        ""
+    };
     let skill_search_cue = if names.contains(&"skill_search") {
         SKILL_SEARCH_CUE
     } else {
         ""
     };
+    // The installed-package lane is present but discovery is off: emit the
+    // truthful "disabled, not empty" cue, but only when the package tools are
+    // genuinely absent (so it never contradicts a live `skill_search`).
+    let package_discovery_disabled_cue =
+        if package_discovery_disabled_but_present && !names.contains(&"skill_search") {
+            PACKAGE_DISCOVERY_DISABLED_BUT_PRESENT_CUE
+        } else {
+            ""
+        };
     let tool_search_cue = if names.contains(&"tool_search") {
         TOOL_SEARCH_CUE
     } else {
@@ -356,7 +420,7 @@ fn tools_section(
         ""
     };
     format!(
-        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{skill_search_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}",
+        "Use tools when local information or side effects are needed. Available tools: {tools}.{knowledge_cue}{remember_cue}{skill_drafts_cue}{active_skills_cue}{skill_search_cue}{package_discovery_disabled_cue}{tool_search_cue}{tool_marker_cue}{ask_user_cue}{documentation_cue}",
         tools = names.join(", ")
     )
 }
@@ -413,8 +477,12 @@ mod cue_tests {
             "the cue must be present when skill_drafts is registered"
         );
         assert!(
-            with.contains("enabling a skill stays a human step"),
+            with.contains("enabling stays a human step"),
             "the cue must keep activation a human step"
+        );
+        assert!(
+            with.contains("different lane from installed SKILL.md"),
+            "the draft cue must distinguish itself from installed packages"
         );
         let without = build_prompt(&["read_file", "write_file"]);
         assert!(
@@ -427,8 +495,16 @@ mod cue_tests {
     fn the_skill_search_cue_appears_only_when_the_tool_is_registered() {
         let with = build_prompt(&["skill_search", "skill_load", "read_file"]);
         assert!(
-            with.contains("call `skill_search`"),
+            with.contains("`skill_search` to find relevant ones"),
             "the cue must be present when skill_search is registered"
+        );
+        assert!(
+            with.contains("SKILL.md skill packages"),
+            "the cue must name the installed package lane"
+        );
+        assert!(
+            with.contains("`skill_list`") && with.contains("`skill_load`"),
+            "the cue must name the list and load tools"
         );
         assert!(
             with.contains("goes through the normal permission gate"),
@@ -438,7 +514,7 @@ mod cue_tests {
         // registered and the model is not nudged to reach for skills on its own.
         let without = build_prompt(&["read_file", "write_file"]);
         assert!(
-            !without.contains("call `skill_search`"),
+            !without.contains("`skill_search` to find relevant ones"),
             "the cue must be absent when skill_search is not registered"
         );
     }
@@ -488,6 +564,75 @@ mod cue_tests {
             "the marker cue needs tool_search to be actionable"
         );
     }
+
+    #[test]
+    fn the_active_skills_cue_appears_only_when_that_tool_is_registered() {
+        let with = build_prompt(&["active_skills", "read_file"]);
+        // Case-stable distinctive phrase unique to the active-skills cue (so an
+        // accidental cue cannot slip past a lowercased check).
+        assert!(
+            with.contains("human-enabled advisory workflows"),
+            "the active-skills cue must be present when the tool is registered"
+        );
+        assert!(
+            with.contains("different lane from") && with.contains("SKILL.md"),
+            "the active-skills cue must distinguish itself from installed packages"
+        );
+        let without = build_prompt(&["read_file", "write_file"]);
+        assert!(
+            !without.contains("human-enabled advisory workflows"),
+            "the cue must be absent when active_skills is not registered"
+        );
+    }
+
+    #[test]
+    fn the_disabled_but_present_cue_appears_only_when_hinted_and_search_absent() {
+        // Hint true + skill_search absent ⇒ the truthful "disabled, not empty" cue.
+        let hinted = compose_with(&["read_file"], false, PromptParts::all(), false, true);
+        assert!(
+            hinted.contains("discovery is off, not that there are no skills"),
+            "the disabled-but-present cue must appear when hinted and package tools are absent: {hinted}"
+        );
+        assert!(
+            hinted.contains("autonomous_discovery = true"),
+            "the cue must point at the enable switch"
+        );
+        // Hint false ⇒ no cue.
+        let unhinted = compose_with(&["read_file"], false, PromptParts::all(), false, false);
+        assert!(
+            !unhinted.contains("discovery is off, not that there are no skills"),
+            "no cue without the hint"
+        );
+        // Hint true but skill_search present ⇒ suppressed (would contradict a live tool).
+        let with_tool = compose_with(&["skill_search"], false, PromptParts::all(), false, true);
+        assert!(
+            !with_tool.contains("discovery is off, not that there are no skills"),
+            "the disabled cue must never appear alongside a registered skill_search"
+        );
+        // Hint false AND skill_search present ⇒ no cue (the fourth truth-table cell).
+        let no_hint_with_tool =
+            compose_with(&["skill_search"], false, PromptParts::all(), false, false);
+        assert!(
+            !no_hint_with_tool.contains("discovery is off, not that there are no skills"),
+            "no disabled cue without the hint, even with skill_search present"
+        );
+    }
+
+    #[test]
+    fn the_disabled_but_present_cue_carries_no_package_names_or_counts() {
+        let cue = package_discovery_disabled_but_present_cue();
+        // No count leaks — the cue never states how many packages exist.
+        assert!(
+            !cue.chars().any(|c| c.is_ascii_digit()),
+            "the disabled cue must carry no count: {cue}"
+        );
+        // It is the truthful "disabled, not empty" statement, not "no skills".
+        assert!(cue.contains("not that there are no skills"), "cue: {cue}");
+        assert!(
+            cue.contains("do not infer package presence or absence"),
+            "cue must forbid inferring presence/absence from LocalMind results: {cue}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -497,7 +642,7 @@ mod tests {
     #[test]
     fn prompt_names_every_builtin_tool() {
         let tools = ToolRegistry::with_builtins();
-        let prompt = agent_system_prompt(&tools, false);
+        let prompt = agent_system_prompt(&tools, false, false);
         for name in tools.names() {
             assert!(prompt.contains(name), "prompt omitted {name}");
         }
@@ -713,7 +858,7 @@ mod composition_tests {
 
     #[test]
     fn an_advertised_documentation_tool_gets_direct_use_guidance() {
-        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false, false);
         assert!(
             prompt.contains("current or version-specific behaviour"),
             "the version-sensitive documentation policy must be present"
@@ -747,7 +892,7 @@ mod composition_tests {
     #[test]
     fn the_documentation_policy_is_vendor_neutral() {
         let brokered = build_prompt(&["read_file", "tool_search"]);
-        let direct = agent_system_prompt(&registry_with_doc_tool(), false);
+        let direct = agent_system_prompt(&registry_with_doc_tool(), false, false);
         for prompt in [&brokered, &direct] {
             let lower = prompt.to_ascii_lowercase();
             for vendor in ["context7", "prisma", "npm", "pypi", "github"] {
@@ -772,7 +917,7 @@ mod composition_tests {
 
     #[test]
     fn the_policy_stays_bounded_to_version_sensitive_work() {
-        let prompt = agent_system_prompt(&registry_with_doc_tool(), false);
+        let prompt = agent_system_prompt(&registry_with_doc_tool(), false, false);
         assert!(
             prompt.contains("Stable local implementation questions need no documentation lookup"),
             "the policy must state its own threshold"

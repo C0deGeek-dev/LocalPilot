@@ -41,10 +41,13 @@ impl Tool for ActiveSkills {
 
     fn description(&self) -> &str {
         "List LocalMind's active (human-enabled) skills for this project, or show one skill's body \
-         by id. Active skills are reviewable advisory prompt modules distilled from accepted \
-         project memory, carrying provenance to their source. Read-only guidance: reading a skill \
-         does not run, install, enable, or disable anything — apply its guidance yourself and let \
-         the user manage the skill lifecycle with `localpilot learning skills`."
+         by id. Active skills are LocalMind-derived advisory workflows distilled from accepted \
+         project memory, carrying provenance to their source. This is a different lane from \
+         installed SKILL.md skill packages (`skill_search`/`skill_list`): its results do not \
+         establish which packages are installed — package presence or absence cannot be inferred \
+         from them. Read-only guidance: reading a skill does not run, install, enable, or disable \
+         anything — apply its guidance yourself and let the user manage the skill lifecycle with \
+         `localpilot learning skills`."
     }
 
     fn schema(&self) -> Value {
@@ -252,6 +255,24 @@ mod tests {
                 inside_workspace: true,
                 secret_like: false
             }]
+        );
+    }
+
+    #[test]
+    fn the_description_distinguishes_itself_from_installed_packages() {
+        let desc = ActiveSkills.description();
+        assert!(
+            desc.contains("different lane from") && desc.contains("SKILL.md"),
+            "must distinguish itself from installed SKILL.md packages: {desc}"
+        );
+        assert!(
+            desc.contains("skill_search") || desc.contains("skill_list"),
+            "must cross-reference the package tools: {desc}"
+        );
+        assert!(
+            desc.contains("do not establish which packages are installed")
+                || desc.contains("cannot be inferred"),
+            "must say its results do not establish package presence/absence: {desc}"
         );
     }
 }

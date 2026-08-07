@@ -215,6 +215,13 @@ pub struct SessionConfig {
     pub model: String,
     pub interactivity: Interactivity,
     pub trusted: bool,
+    /// When set, the session was launched with installed skill packages present
+    /// on disk but model-facing skill discovery disabled (`[skills]
+    /// autonomous_discovery = false`). The initial system prompt then carries a
+    /// truthful "disabled, not empty" cue so the model does not conclude no
+    /// skills exist. Off by default (and for non-interactive sessions); the
+    /// interactive host computes it once, trust-safely, at launch.
+    pub package_discovery_disabled_but_present: bool,
     pub context_token_limit: usize,
     /// Requested reasoning effort for provider turns; mapped (or no-op
     /// clamped) per provider. Switchable mid-session.
@@ -317,6 +324,7 @@ impl Default for SessionConfig {
             model: "default".to_string(),
             interactivity: Interactivity::Interactive,
             trusted: true,
+            package_discovery_disabled_but_present: false,
             context_token_limit: 24_000,
             reasoning_effort: None,
             max_stream_retries: 3,
@@ -951,7 +959,11 @@ impl SessionRuntime {
         let mut messages = Vec::with_capacity(seed.len() + 1);
         messages.push(Message::text(
             Role::System,
-            crate::system_prompt::agent_system_prompt(&tools, config.tool_marker_enabled),
+            crate::system_prompt::agent_system_prompt(
+                &tools,
+                config.tool_marker_enabled,
+                config.package_discovery_disabled_but_present,
+            ),
         ));
         messages.extend(seed);
 
@@ -2202,6 +2214,35 @@ impl SessionRuntime {
             _ => self.messages.insert(0, message),
         }
         self.history_generation = self.history_generation.wrapping_add(1);
+    }
+
+    /// Whether this session treats the workspace as trusted — the value every
+    /// `ToolContext` reads for the workspace-trust gate, set once at construction
+    /// from the launch decision. Read-only here; the live trust transition is a
+    /// later increment.
+    #[must_use]
+    pub fn trusted(&self) -> bool {
+        self.config.trusted
+    }
+
+    /// Record — monotonically — that installed skill packages are present while
+    /// model discovery is disabled, appending the truthful "disabled, not empty"
+    /// cue to the live system prompt exactly once.
+    ///
+    /// `false → true` sets the config marker and appends
+    /// [`crate::system_prompt::package_discovery_disabled_but_present_cue`] once;
+    /// `true → true` is a no-op (the cue is already in the prompt). The initial
+    /// prompt built by [`SessionRuntime::new`] already carries the cue when the
+    /// config marker is set at construction, so this is only for a marker that
+    /// becomes true partway through a session's life.
+    pub fn note_package_discovery_disabled_but_present(&mut self) {
+        if self.config.package_discovery_disabled_but_present {
+            return;
+        }
+        self.config.package_discovery_disabled_but_present = true;
+        self.append_system_prompt(
+            crate::system_prompt::package_discovery_disabled_but_present_cue(),
+        );
     }
 
     /// The text of the most recent assistant message, if any.
@@ -4091,6 +4132,100 @@ mod tests {
             !allowed.output.contains("permission denied"),
             "{}",
             allowed.output
+        );
+    }
+
+    /// A minimal runtime whose `SessionConfig` carries the package-discovery
+    /// hint, with only builtin tools (no `skill_search`), so the
+    /// disabled-but-present cue is eligible for the initial prompt.
+    fn runtime_with_package_hint(hint: bool) -> (SessionRuntime, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = SessionRuntime::new(
+            fake_with_id("a"),
+            ToolRegistry::with_builtins(),
+            PermissionEngine::new(Profile::Default, Vec::new()),
+            Box::new(ScriptedApprover::always()),
+            Store::open(dir.path()),
+            Workspace::new(dir.path()).unwrap(),
+            RecoveryEngine::new(RecoveryBudget::default()),
+            SessionConfig {
+                model: "m".to_string(),
+                interactivity: Interactivity::NonInteractive,
+                package_discovery_disabled_but_present: hint,
+                ..SessionConfig::default()
+            },
+            Vec::new(),
+        );
+        (runtime, dir)
+    }
+
+    /// A distinctive fragment of the package-discovery-disabled cue.
+    const DISABLED_CUE_MARKER: &str = "discovery is off, not that there are no skills";
+
+    #[test]
+    fn the_initial_prompt_carries_the_disabled_cue_only_when_hinted() {
+        let (with, _d1) = runtime_with_package_hint(true);
+        assert!(
+            with.system_prompt_text().contains(DISABLED_CUE_MARKER),
+            "hinted construction must carry the cue: {}",
+            with.system_prompt_text()
+        );
+        let (without, _d2) = runtime_with_package_hint(false);
+        assert!(
+            !without.system_prompt_text().contains(DISABLED_CUE_MARKER),
+            "unhinted construction must not carry the cue"
+        );
+    }
+
+    /// Count occurrences of the disabled-cue marker in a runtime's system prompt.
+    fn disabled_cue_count(runtime: &SessionRuntime) -> usize {
+        runtime
+            .system_prompt_text()
+            .matches(DISABLED_CUE_MARKER)
+            .count()
+    }
+
+    #[test]
+    fn note_package_discovery_flips_the_marker_and_appends_the_cue_exactly_once() {
+        let (mut runtime, _d) = runtime_with_package_hint(false);
+        assert!(
+            !runtime.config.package_discovery_disabled_but_present,
+            "marker starts false"
+        );
+        assert_eq!(disabled_cue_count(&runtime), 0, "starts without the cue");
+
+        runtime.note_package_discovery_disabled_but_present();
+        assert!(
+            runtime.config.package_discovery_disabled_but_present,
+            "false→true flips the config marker"
+        );
+        assert_eq!(
+            disabled_cue_count(&runtime),
+            1,
+            "false→true appends exactly once"
+        );
+
+        // Idempotent: a second call keeps the marker true and appends no duplicate.
+        runtime.note_package_discovery_disabled_but_present();
+        assert!(runtime.config.package_discovery_disabled_but_present);
+        assert_eq!(disabled_cue_count(&runtime), 1, "true→true is a no-op");
+    }
+
+    #[test]
+    fn note_package_discovery_on_an_initially_true_runtime_never_double_appends() {
+        // Built with the marker already set: the initial prompt carries the cue
+        // exactly once, and a later note_...() must not append a second copy.
+        let (mut runtime, _d) = runtime_with_package_hint(true);
+        assert_eq!(
+            disabled_cue_count(&runtime),
+            1,
+            "initial construction carries the cue exactly once"
+        );
+        runtime.note_package_discovery_disabled_but_present();
+        assert_eq!(
+            disabled_cue_count(&runtime),
+            1,
+            "a no-op note_...() must not double-append"
         );
     }
 

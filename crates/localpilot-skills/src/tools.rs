@@ -1,9 +1,10 @@
 //! Model-callable, read-only tools that make project-local skills a live,
 //! pull-based surface (ADR-0027).
 //!
-//! Discovery is pull-based, not pushed: `skill_search` returns lean ranked
-//! locators over the *discoverable* skills, and `skill_load` returns one skill's
-//! body by exact name. Both are read-only (`Effect::ReadPath`) — loading a skill
+//! Discovery is pull-based, not pushed: `skill_list` pages the *discoverable*
+//! catalog, `skill_search` returns lean ranked locators over it, and `skill_load`
+//! returns one skill's body by exact name. All three are read-only
+//! (`Effect::ReadPath`) — loading a skill
 //! injects *content the agent reads*, never an action. A skill's declared
 //! permissions/required tools are surfaced when it is loaded, but loading grants
 //! nothing: any real effect the guidance leads to still goes through the
@@ -137,11 +138,14 @@ impl Tool for SkillSearch {
     }
 
     fn description(&self) -> &str {
-        "Search this project's skills for ones relevant to the current task, returning a short \
-         ranked list of locators (skill name, one-line summary, score) — no skill bodies. Skills \
-         are advisory prompt modules; this is the pull-based way to discover them on demand instead \
-         of carrying every skill in context. Then call `skill_load` with a name to read one skill's \
-         guidance. Read-only: searching never runs, installs, or enables anything."
+        "Search the installed SKILL.md package catalog (the user-global baseline plus this \
+         workspace's trusted project overlay) for skills relevant to the current task, returning a \
+         short ranked list of locators (skill name, one-line summary, score) — no skill bodies. \
+         Skills are advisory prompt modules; this is the pull-based way to discover them on demand \
+         instead of carrying every skill in context. Call `skill_list` to page the whole catalog, \
+         or `skill_load` with an exact name to read one skill's guidance. Package skills only — \
+         unrelated to LocalMind's active/draft skills (`active_skills`/`skill_drafts`). Read-only: \
+         searching never runs, installs, or enables anything, and never surfaces a user-only skill."
     }
 
     fn schema(&self) -> Value {
@@ -262,11 +266,14 @@ impl Tool for SkillLoad {
     }
 
     fn description(&self) -> &str {
-        "Read one project skill's body by its exact name (from `skill_search`, or a name the user \
-         asked for). The body is advisory guidance to apply in your own reasoning — loading it runs, \
-         installs, and enables nothing. Any required tools or permissions the skill names are shown \
-         for transparency; they are not granted, so any real action still goes through the normal \
-         permission gate."
+        "Read one installed SKILL.md package's body by its exact name (from `skill_list` / \
+         `skill_search`, or a name the user asked for) — the effective catalog is the user-global \
+         baseline plus this workspace's trusted project overlay, and an exact name also reaches a \
+         user-only package. The body is advisory guidance to apply in your own reasoning — loading \
+         it runs, installs, and enables nothing. Any required tools or permissions the skill names \
+         are shown for transparency; they are not granted, so any real action still goes through the \
+         normal permission gate. Package skills only — unrelated to LocalMind's active/draft skills \
+         (`active_skills`/`skill_drafts`)."
     }
 
     fn schema(&self) -> Value {
@@ -396,7 +403,8 @@ impl Tool for SkillList {
     }
 
     fn description(&self) -> &str {
-        "List the installed SKILL.md package catalog — discoverable skills only \
+        "List the installed SKILL.md package catalog (the user-global baseline plus \
+         this workspace's trusted project overlay) — discoverable skills only \
          (name, one-line summary, and origin scope), in name order and paginated. \
          Package skills only; for LocalMind active/draft skills use `active_skills` \
          or `skill_drafts`. Read-only: listing runs, installs, and enables nothing, \
@@ -1022,6 +1030,43 @@ mod tests {
             ),
             "got: {:?}",
             effects[0]
+        );
+    }
+
+    #[test]
+    fn the_three_package_tool_descriptions_name_the_catalog_and_cross_reference_localmind() {
+        let list_tool = list(None);
+        let search_tool = search(None);
+        let load_tool = load(None);
+        for (name, desc) in [
+            ("skill_list", list_tool.description()),
+            ("skill_search", search_tool.description()),
+            ("skill_load", load_tool.description()),
+        ] {
+            assert!(
+                desc.contains("SKILL.md"),
+                "{name} must name the installed SKILL.md package catalog: {desc}"
+            );
+            // The effective-catalog origin/trust fact (global baseline + trusted overlay).
+            assert!(
+                desc.contains("user-global baseline"),
+                "{name} must name the user-global baseline: {desc}"
+            );
+            assert!(
+                desc.contains("trusted project overlay"),
+                "{name} must name the trusted project overlay: {desc}"
+            );
+            // Both LocalMind cross-references.
+            assert!(
+                desc.contains("active_skills") && desc.contains("skill_drafts"),
+                "{name} must cross-reference both LocalMind tools: {desc}"
+            );
+        }
+        // skill_load still documents the exact user-supplied-name path.
+        assert!(
+            load_tool.description().contains("exact name"),
+            "skill_load must name the exact-name path: {}",
+            load_tool.description()
         );
     }
 

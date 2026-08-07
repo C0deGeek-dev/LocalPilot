@@ -107,6 +107,16 @@ pub(crate) struct InteractiveSessionSetup {
     /// Kept alive so one set of MCP transports backs each fresh tool registry.
     mcp: crate::mcp::McpTools,
     agents: Option<Arc<AgentSet>>,
+    /// The one canonical launch trust decision (`prompt_required(profile, cwd)`),
+    /// computed once in [`InteractiveSessionSetup::resolve`]. Every built runtime
+    /// (both pair peers) derives `SessionConfig.trusted = !trust_required` from
+    /// it, and the selected host reads the same value for its trust gate — so the
+    /// runtime and the gate can never diverge or re-read the store (no TOCTOU).
+    trust_required: bool,
+    /// The initial, trust-safe package-discovery hint, computed once at launch:
+    /// installed skill packages exist but model discovery is off. Copied into
+    /// every built runtime's `SessionConfig` — no per-build/per-peer scan.
+    package_discovery_hint: bool,
 }
 
 /// A fresh interactive runtime and the host-facing halves of its user channels.
@@ -397,6 +407,10 @@ impl InteractiveSessionSetup {
         let providers = Arc::new(ProviderRegistry::from_config(&config)?);
         let mcp = crate::mcp::McpTools::load(&config).await;
         let agents = crate::agents_cmd::session_agents(&cwd);
+        // One canonical launch trust decision, shared by every built runtime and
+        // the host gate; and one trust-safe initial package-discovery hint.
+        let trust_required = crate::trust::prompt_required(profile, &cwd);
+        let package_discovery_hint = initial_package_discovery_hint(&config, &cwd, !trust_required);
         Ok(Self {
             config,
             cwd,
@@ -404,7 +418,15 @@ impl InteractiveSessionSetup {
             providers,
             mcp,
             agents,
+            trust_required,
+            package_discovery_hint,
         })
+    }
+
+    /// The one canonical launch trust decision (`prompt_required(profile, cwd)`),
+    /// so the host gate reads the same value the runtimes were built with.
+    pub(crate) fn trust_required(&self) -> bool {
+        self.trust_required
     }
 
     /// Build a fresh fully interactive session on an explicit provider/model.
@@ -438,7 +460,13 @@ impl InteractiveSessionSetup {
             Store::open(&self.cwd),
             crate::session_cmd::workspace_with_read_roots(&self.cwd, &self.config)?,
             RecoveryEngine::new(RecoveryBudget::default()),
-            interactive_config(&self.config, self.profile, model, context_window),
+            interactive_config(
+                &self.config,
+                model,
+                context_window,
+                !self.trust_required,
+                self.package_discovery_hint,
+            ),
             Vec::new(),
         );
         runtime.set_broker(broker);
@@ -541,6 +569,8 @@ impl InteractiveSessionSetup {
         profile: Profile,
         providers: ProviderRegistry,
     ) -> Self {
+        let trust_required = crate::trust::prompt_required(profile, &cwd);
+        let package_discovery_hint = initial_package_discovery_hint(&config, &cwd, !trust_required);
         Self {
             config,
             cwd,
@@ -548,6 +578,8 @@ impl InteractiveSessionSetup {
             providers: Arc::new(providers),
             mcp: crate::mcp::McpTools::default(),
             agents: None,
+            trust_required,
+            package_discovery_hint,
         }
     }
 }
@@ -594,17 +626,24 @@ fn finish_pair_build(
 }
 
 /// The exact interactive `SessionConfig` formerly constructed inline by chat.
+///
+/// `trusted` and `package_discovery_disabled_but_present` are the launch snapshot
+/// computed once in [`InteractiveSessionSetup::resolve`] and passed in verbatim,
+/// so every built runtime (both pair peers) shares one decision — no per-build
+/// re-derivation of trust or re-scan of the skill catalog.
 fn interactive_config(
     config: &Config,
-    profile: Profile,
     model: &str,
     context_window: Option<u64>,
+    trusted: bool,
+    package_discovery_disabled_but_present: bool,
 ) -> SessionConfig {
     let rails = config.harness.resolved_rails(true);
     SessionConfig {
         model: model.to_string(),
         interactivity: Interactivity::Interactive,
-        trusted: matches!(profile, Profile::Bypass | Profile::Unrestricted),
+        trusted,
+        package_discovery_disabled_but_present,
         context_token_limit: localpilot_harness::effective_context_limit(
             context_window,
             config.harness.context_token_limit,
@@ -625,6 +664,43 @@ fn interactive_config(
         verify_command: config.harness.verify_command.clone(),
         ..SessionConfig::default()
     }
+}
+
+/// The initial, trust-safe package-discovery hint: `true` only when model-facing
+/// skill discovery is off (`[skills] autonomous_discovery = false`) yet installed
+/// discoverable skill packages are present. Best-effort — a discovery error never
+/// blocks launch (treated as no hint). Trust-safe — the project overlay is read
+/// only when the workspace is `trusted`; an untrusted workspace counts the
+/// user-global baseline alone and never reads project manifests.
+fn initial_package_discovery_hint(config: &Config, cwd: &Path, trusted: bool) -> bool {
+    // Resolve the real per-user global home once; the injectable seam below does
+    // the counting, so tests can pin the global baseline instead of the machine's.
+    initial_package_discovery_hint_with(
+        config,
+        cwd,
+        localpilot_skills::user_home().as_deref(),
+        trusted,
+    )
+}
+
+/// [`initial_package_discovery_hint`] with an explicit global-baseline `home`
+/// (the injectable seam). The project overlay is read only when `trusted`; the
+/// global baseline is read from `home` (or omitted when `None`). Best-effort — a
+/// discovery error yields no hint and never blocks launch.
+fn initial_package_discovery_hint_with(
+    config: &Config,
+    cwd: &Path,
+    home: Option<&Path>,
+    trusted: bool,
+) -> bool {
+    if config.skills.autonomous_discovery {
+        // Discovery is on: the package tools are registered, so the model has a
+        // real way in and needs no "disabled, not empty" cue.
+        return false;
+    }
+    localpilot_skills::discover(cwd, home, trusted)
+        .map(|set| set.discoverable_count() > 0)
+        .unwrap_or(false)
 }
 
 /// Resolve the active provider's image-input capability: explicit config wins,
@@ -719,6 +795,35 @@ mod tests {
         Arc::new(FakeProvider::new().with_declaration(declaration))
     }
 
+    /// Write a `SKILL.md` skill under `skills_dir/<name>/`. `user_only` marks it
+    /// `disable-model-invocation: true` (excluded from discovery counts).
+    fn write_skill_md_at(skills_dir: &Path, name: &str, description: &str, user_only: bool) {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let flag = if user_only {
+            "disable-model-invocation: true\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: {description}\n{flag}---\n\nBody of {name}.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Write a project-overlay skill under `<cwd>/.localpilot/skills/<name>/`.
+    fn write_project_skill(cwd: &Path, name: &str, description: &str, user_only: bool) {
+        write_skill_md_at(
+            &cwd.join(".localpilot").join("skills"),
+            name,
+            description,
+            user_only,
+        );
+    }
+
     fn setup_with_two_providers(
         root: &Path,
     ) -> (
@@ -804,10 +909,13 @@ mod tests {
         config.tools.repair = RepairMode::Warn;
         config.tools.elide_seen_reads = true;
 
-        let built = interactive_config(&config, Profile::Unrestricted, "chosen", Some(20_000));
+        // The trust decision and the package-discovery hint are the launch
+        // snapshot passed in verbatim — no longer re-derived from the profile here.
+        let built = interactive_config(&config, "chosen", Some(20_000), true, false);
         assert_eq!(built.model, "chosen");
         assert_eq!(built.interactivity, Interactivity::Interactive);
         assert!(built.trusted);
+        assert!(!built.package_discovery_disabled_but_present);
         assert_eq!(
             built.context_token_limit,
             localpilot_harness::effective_context_limit(Some(20_000), 99_999)
@@ -835,8 +943,186 @@ mod tests {
         assert!(built.verify_before_done);
         assert_eq!(built.verify_command.as_deref(), Some("cargo test"));
 
-        let untrusted = interactive_config(&config, Profile::Default, "chosen", None);
+        // A passed-in untrusted snapshot + a set hint flow straight through.
+        let untrusted = interactive_config(&config, "chosen", None, false, true);
         assert!(!untrusted.trusted);
+        assert!(untrusted.package_discovery_disabled_but_present);
+    }
+
+    #[test]
+    fn initial_package_discovery_hint_is_false_when_autonomous_discovery_is_on() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let mut config = Config::default();
+        config.skills.autonomous_discovery = true;
+        // Discovery on ⇒ the package tools are registered ⇒ no "disabled" cue,
+        // regardless of what is on disk (no scan even happens).
+        assert!(!initial_package_discovery_hint(
+            &config,
+            dir.path(),
+            /* trusted */ true
+        ));
+    }
+
+    /// A one-provider registry for a `for_test` setup.
+    fn one_provider_registry() -> ProviderRegistry {
+        let first: Arc<dyn ModelProvider> = provider("first", None);
+        let providers: HashMap<String, Arc<dyn ModelProvider>> =
+            HashMap::from([("first".to_string(), first)]);
+        ProviderRegistry::from_providers(providers, HashMap::new(), "first")
+    }
+
+    #[test]
+    fn the_setup_snapshots_one_trust_decision_read_by_the_host_gate() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+
+        // A fresh temp dir is never in the trust store, so under a prompting
+        // profile the one launch snapshot says trust is required — the same value
+        // the host gate reads and the runtime is built untrusted from.
+        let prompting = InteractiveSessionSetup::for_test(
+            dir.path().to_path_buf(),
+            Config::default(),
+            Profile::Default,
+            one_provider_registry(),
+        );
+        assert!(prompting.trust_required());
+
+        // An explicit bypass profile needs no prompt: one decision, false.
+        let bypass = InteractiveSessionSetup::for_test(
+            dir.path().to_path_buf(),
+            Config::default(),
+            Profile::Bypass,
+            one_provider_registry(),
+        );
+        assert!(!bypass.trust_required());
+    }
+
+    #[test]
+    fn initial_package_discovery_hint_only_counts_discoverable_packages() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        let home = tempfile::tempdir().expect("global home");
+        let global = home.path().join(".localpilot").join("skills");
+
+        // Flag off, untrusted, project-only, NO injected home ⇒ the project overlay
+        // is not read and the global baseline is absent ⇒ no hint.
+        write_project_skill(dir.path(), "proj-pkg", "a project helper", false);
+        let mut config = Config::default();
+        config.skills.autonomous_discovery = false;
+        assert!(!initial_package_discovery_hint_with(
+            &config,
+            dir.path(),
+            None,
+            /* trusted */ false
+        ));
+
+        // Untrusted, but an injected global with a Discoverable package ⇒ hint.
+        write_skill_md_at(&global, "glob-pkg", "a global helper", false);
+        assert!(initial_package_discovery_hint_with(
+            &config,
+            dir.path(),
+            Some(home.path()),
+            /* trusted */ false
+        ));
+
+        // Trusted, project Discoverable, no injected home ⇒ hint from the project.
+        assert!(initial_package_discovery_hint_with(
+            &config,
+            dir.path(),
+            None,
+            /* trusted */ true
+        ));
+
+        // A UserOnly-only baseline must NOT set the hint.
+        let user_only_home = tempfile::tempdir().expect("user-only home");
+        write_skill_md_at(
+            &user_only_home.path().join(".localpilot").join("skills"),
+            "hidden-pkg",
+            "hidden",
+            true,
+        );
+        assert!(!initial_package_discovery_hint_with(
+            &config,
+            dir.path(),
+            Some(user_only_home.path()),
+            /* trusted */ false
+        ));
+
+        // Flag ON ⇒ never hinted (the tools are registered instead).
+        config.skills.autonomous_discovery = true;
+        assert!(!initial_package_discovery_hint_with(
+            &config,
+            dir.path(),
+            Some(home.path()),
+            /* trusted */ true
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_launch_hint_is_snapshotted_once_and_reused_by_both_pair_peers() {
+        let dir = tempfile::tempdir().expect("temporary workspace");
+        // A discoverable project package, discovery off, and a trusting profile so
+        // the launch hint is true when the setup is built.
+        write_project_skill(dir.path(), "pair-pkg", "a project helper", false);
+        let first = provider("first", Some(32_000));
+        let second = provider("second", Some(16_000));
+        let providers: HashMap<String, Arc<dyn ModelProvider>> = HashMap::from([
+            ("first".to_string(), first as Arc<dyn ModelProvider>),
+            ("second".to_string(), second as Arc<dyn ModelProvider>),
+        ]);
+        let models = HashMap::from([
+            ("first".to_string(), "model-a".to_string()),
+            ("second".to_string(), "model-b".to_string()),
+        ]);
+        let mut config = Config::default();
+        config.skills.autonomous_discovery = false;
+        let setup = InteractiveSessionSetup::for_test(
+            dir.path().to_path_buf(),
+            config,
+            Profile::Bypass,
+            ProviderRegistry::from_providers(providers, models, "first"),
+        );
+        // The hint was captured once at construction; bypass needs no prompt.
+        assert!(
+            setup.package_discovery_hint,
+            "the launch hint was snapshotted"
+        );
+        assert!(!setup.trust_required());
+
+        // Remove the package AFTER the snapshot: a per-peer rescan would now miss
+        // it, so if both peers still carry the cue the hint must be the snapshot.
+        std::fs::remove_dir_all(dir.path().join(".localpilot")).unwrap();
+
+        let bundle = setup
+            .build_pair(
+                "pair task",
+                InteractivePeerSelection {
+                    provider_id: "first",
+                    model: "model-a",
+                },
+                InteractivePeerSelection {
+                    provider_id: "second",
+                    model: "model-b",
+                },
+            )
+            .await
+            .expect("build pair");
+
+        const MARKER: &str = "discovery is off, not that there are no skills";
+        for peer in [&bundle.a, &bundle.b] {
+            assert_eq!(
+                peer.session
+                    .runtime
+                    .system_prompt_text()
+                    .matches(MARKER)
+                    .count(),
+                1,
+                "both peers must carry the one snapshotted disabled cue exactly once"
+            );
+            assert_eq!(
+                peer.session.runtime.trusted(),
+                !setup.trust_required(),
+                "both peers derive trust from the one snapshot"
+            );
+        }
     }
 
     #[tokio::test]

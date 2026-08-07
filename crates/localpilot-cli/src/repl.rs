@@ -369,7 +369,9 @@ pub async fn run_chat(
     if chat_ui == ChatUi::Fullscreen {
         timer.mark("READY — entering full-screen TUI");
         let git = workspace_git_status(&cwd);
-        let trust_required = crate::trust::prompt_required(profile, &cwd);
+        // The one launch trust decision computed in `resolve`; the runtimes were
+        // built from the same snapshot, so gate and runtime cannot diverge.
+        let trust_required = setup.trust_required();
         let result = crate::fullscreen::run(
             localpilot_terminal_ui::Header {
                 version: header.version.clone(),
@@ -412,8 +414,8 @@ pub async fn run_chat(
     let mut state = AppState::new(header, Mode::Agent, ui_profile(profile));
     // Ask once per folder before doing anything in it; trust is remembered across
     // sessions. Already-trusted folders (and bypass/unrestricted, which are
-    // explicit) skip it.
-    if crate::trust::prompt_required(profile, &cwd) {
+    // explicit) skip it. The same launch snapshot the runtime was built from.
+    if setup.trust_required() {
         state.trust = Some(TrustPrompt {
             path: cwd.display().to_string(),
         });

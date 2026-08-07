@@ -490,6 +490,12 @@ contract:
    Each tool's only effect is a read inside the workspace
    (`Effect::ReadPath`). Reading a skill returns Markdown guidance with
    provenance; it never installs, enables, disables, or runs anything.
+   These two tools are a **separate lane** from the installed SKILL.md skill
+   *packages* surfaced by LocalPilot's `skill_list`/`skill_search`/`skill_load`
+   (see [`docs/05-tool-system.md`](05-tool-system.md)). Their descriptions and the
+   agent's prompt cues say so explicitly: an empty `active_skills`/`skill_drafts`
+   result establishes nothing about which packages are installed, and vice versa —
+   package presence or absence must never be inferred from this lane.
 3. **No silent execution, no auto-install.** There is no path by which a skill
    is executed or activated automatically. Enabling, disabling, and retiring are
    deliberate human, review-gated steps. A skill body is *content the agent
