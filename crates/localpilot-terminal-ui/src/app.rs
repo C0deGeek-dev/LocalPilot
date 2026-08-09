@@ -3206,7 +3206,7 @@ impl AppModel {
                 }
                 InputAction::Backspace => {
                     if question.other_cursor > 0 {
-                        let start = previous_char_boundary(
+                        let start = previous_grapheme_boundary(
                             &question.other,
                             question.other_cursor.saturating_sub(1),
                         );
@@ -3216,25 +3216,35 @@ impl AppModel {
                 }
                 InputAction::Delete => {
                     if question.other_cursor < question.other.len() {
-                        let end = next_char_boundary(
-                            &question.other,
-                            question.other_cursor.saturating_add(1),
-                        );
+                        let end = question.other[question.other_cursor..]
+                            .graphemes(true)
+                            .next()
+                            .map_or(question.other.len(), |grapheme| {
+                                question.other_cursor.saturating_add(grapheme.len())
+                            });
                         question.other.drain(question.other_cursor..end);
                     }
                 }
                 InputAction::MoveLeft => {
-                    question.other_cursor = previous_char_boundary(
+                    question.other_cursor = previous_grapheme_boundary(
                         &question.other,
                         question.other_cursor.saturating_sub(1),
                     );
                 }
                 InputAction::MoveRight | InputAction::ForwardCharOrSearch => {
-                    question.other_cursor = next_char_boundary(
-                        &question.other,
-                        question.other_cursor.saturating_add(1),
-                    );
+                    question.other_cursor = question.other[question.other_cursor..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(question.other.len(), |grapheme| {
+                            question.other_cursor.saturating_add(grapheme.len())
+                        });
                 }
+                InputAction::MoveVisualStart
+                | InputAction::MoveLineStart
+                | InputAction::MoveTextStart => question.other_cursor = 0,
+                InputAction::MoveVisualEnd
+                | InputAction::MoveLineEnd
+                | InputAction::MoveTextEnd => question.other_cursor = question.other.len(),
                 InputAction::Submit => {
                     let answer = question.other.trim();
                     if !answer.is_empty() {
@@ -7463,6 +7473,30 @@ mod tests {
         let debug = format!("{:?}", app.dialog);
         assert!(!debug.contains("Pick a color"));
         assert!(!debug.contains("Cya"));
+    }
+
+    #[test]
+    fn question_other_keeps_the_complete_long_answer_and_moves_to_both_ends() {
+        let mut app = model();
+        app.request_question(None, "Explain", Vec::<QuestionOption>::new(), false, 1, 1);
+        assert_eq!(
+            app.handle_question_input(InputAction::Submit),
+            QuestionAction::None
+        );
+        let pasted = format!("START {} END", "context ".repeat(120));
+        let _ = app.handle_question_input(InputAction::Paste(pasted.clone()));
+        let question = app.question().expect("question");
+        assert_eq!(question.other, pasted);
+        assert_eq!(question.other_cursor, pasted.len());
+
+        let _ = app.handle_question_input(InputAction::MoveTextStart);
+        assert_eq!(app.question().expect("question").other_cursor, 0);
+        let _ = app.handle_question_input(InputAction::MoveTextEnd);
+        assert_eq!(app.question().expect("question").other_cursor, pasted.len());
+        assert_eq!(
+            app.handle_question_input(InputAction::Submit),
+            QuestionAction::Submit(QuestionResponse::Other(pasted))
+        );
     }
 
     #[test]

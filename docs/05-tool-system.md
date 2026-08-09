@@ -184,6 +184,10 @@ Rules:
   answering its own asks
 - a **dismissed** question is not a failure: the transcript hands the decision
   back to the model with an instruction to say which way it went
+- the full-screen **free-text Other editor** wraps and grows until the dialog
+  reaches the available terminal height, then scrolls around the caret with a
+  visible proportional scrollbar. Home/End reviews either end before Enter
+  confirms; resize reflows the same stored answer rather than clipping it
 - malformed calls (no questions, too many, one option, too many options, a blank
   question, duplicate labels within a question) are rejected before a human is
   made to look at them

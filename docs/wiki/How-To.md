@@ -90,6 +90,12 @@ is elapsed operation time, not an estimated completion percentage. Typing and
 Enter are serviced independently from the animation refresh, including when a
 local LocalBox server is consuming the same machine.
 
+When LocalPilot asks a multiple-choice question, select **Other** and press Enter
+to type a custom answer. Long answers wrap and expand the dialog; after the
+available height is filled, a scrollbar shows the visible position and the view
+follows the caret. Use Home/End to review the beginning or end, Enter to confirm,
+or Esc to return to the choices.
+
 ## Name a conversation and resume it by name
 
 Every session has a UUID, but a name is easier to remember. Name the current

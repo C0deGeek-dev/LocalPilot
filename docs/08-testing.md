@@ -62,7 +62,10 @@ not need a real console:
   `ask_user` lifecycle: bounded typed schema, pending/
   resolved row identity, numbered modal, automatic Other editor, keyboard/mouse
   focus, Escape/closed-host cancellation, screen-reader projection and buffered
-  reply cleanup. Workspace-trust coverage separately pins full-width numbered
+  reply cleanup. Backend-neutral question tests also pin long-answer growth,
+  caret-following overflow at both ends, a visible scrollbar, grapheme-safe
+  editing, exact stored-answer submission, and narrow resize/screen-reader
+  reflow. Workspace-trust coverage separately pins full-width numbered
   rendering, keyboard/mouse focus, session-only versus persistent outcomes,
   deny-safe Escape, screen-reader current-selection text, selection-copy
   precedence, and double-Ctrl+C exit without touching the real trust store.

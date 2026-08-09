@@ -198,6 +198,9 @@ chat model. It owns:
 - width-indexed visible-row virtualization, pinned prompts, compact activity,
   and held/new-output state
 - grapheme/display-width editor geometry and input routing
+- bounded question-editor geometry: free-text answers reuse the shared wrap and
+  caret projection, grow within the modal, then expose a proportional vertical
+  scrollbar without changing the answer source of truth
 - lifecycle/focus state, including cancel/exit intent
 - one responsive frame layout/hit map and one semantic theme resolver across
   default, dim, high-contrast, colorblind, and no-color rendering

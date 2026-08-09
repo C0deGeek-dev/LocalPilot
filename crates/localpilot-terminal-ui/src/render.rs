@@ -2932,14 +2932,14 @@ fn render_question_dialog(
     // width truncation. Single chat keeps its copy byte-identical.
     let footer = if app.dialog_peer().is_some() {
         if question.editing_other {
-            "Ctrl+C abort · Esc choices · enter to confirm".to_string()
+            "Ctrl+C abort · Esc choices · Enter · H/E".to_string()
         } else if question.multi_select {
             "Ctrl+C abort · Esc dismiss · ↑/↓ select · space toggle · enter confirm".to_string()
         } else {
             "Ctrl+C abort · Esc dismiss · ↑/↓ select · enter confirm".to_string()
         }
     } else if question.editing_other {
-        "enter to confirm · esc to return to choices".to_string()
+        "Enter · Esc choices · Home/End".to_string()
     } else if question.multi_select {
         "↑/↓ to select · space to toggle · enter to confirm · esc to cancel".to_string()
     } else {
@@ -2952,11 +2952,35 @@ fn render_question_dialog(
     } else {
         1
     };
+    let other_prefix = format!(
+        "{} {}. ",
+        if question.selected == question.options.len() {
+            "❯"
+        } else {
+            " "
+        },
+        question.options.len() + 1
+    );
+    let other_prefix_width =
+        u16::try_from(UnicodeWidthStr::width(other_prefix.as_str())).unwrap_or(u16::MAX);
+    // Keep one cell for a proportional scrollbar. Reserving it even before the
+    // answer overflows prevents the text from re-wrapping when the bar appears.
+    let other_editor_width = projected_content_width
+        .saturating_sub(other_prefix_width)
+        .saturating_sub(1)
+        .max(1);
+    let other_rows = if question.editing_other {
+        crate::text::wrap_ranges(question.other, other_editor_width)
+    } else {
+        Vec::new()
+    };
+    let extra_other_rows = u16::try_from(other_rows.len().saturating_sub(1)).unwrap_or(u16::MAX);
     let fixed_rows = if screen_reader { 3 } else { 6 };
     let requested_height = u16::try_from(question.options.len())
         .unwrap_or(u16::MAX)
         .saturating_add(fixed_rows)
-        .saturating_add(footer_rows);
+        .saturating_add(footer_rows)
+        .saturating_add(extra_other_rows);
     let height = frame_area.height.saturating_sub(2).min(requested_height);
     let minimum_height = if screen_reader { 6 } else { 9 };
     if width < 20 || height < minimum_height {
@@ -3025,10 +3049,71 @@ fn render_question_dialog(
         }
         let selected = question.selected == index;
         let marker = if selected { "❯" } else { " " };
+        if index == question.options.len() && question.editing_other {
+            let viewport_rows = usize::from(footer_y.saturating_sub(y))
+                .min(other_rows.len())
+                .max(1);
+            let viewport_height = u16::try_from(viewport_rows).unwrap_or(u16::MAX);
+            let (cursor_row, cursor_column) = crate::editor::text_row_and_column(
+                question.other,
+                question.other_cursor,
+                other_editor_width,
+            );
+            let scroll = cursor_row
+                .saturating_add(1)
+                .saturating_sub(viewport_rows)
+                .min(other_rows.len().saturating_sub(viewport_rows));
+            let prefix_width = other_prefix_width.min(content_width.saturating_sub(1));
+            let answer_area = Rect::new(
+                left.saturating_add(prefix_width),
+                y,
+                other_editor_width.min(content_width.saturating_sub(prefix_width)),
+                viewport_height,
+            );
+            let answer_lines = if question.other.is_empty() {
+                vec![Line::styled("Type your answer", theme.ui(UiRole::Muted))]
+            } else {
+                other_rows
+                    .iter()
+                    .map(|row| Line::raw(question.other[row.start_byte..row.end_byte].to_string()))
+                    .collect::<Vec<_>>()
+            };
+            frame.render_widget(
+                Paragraph::new(truncate_end(&other_prefix, prefix_width))
+                    .style(theme.ui(UiRole::Focus)),
+                Rect::new(left, y, prefix_width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(answer_lines)
+                    .style(theme.ui(UiRole::Focus))
+                    .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+                answer_area,
+            );
+            let scrollbar = ScrollbarGeometry::calculate(
+                Rect::new(answer_area.right(), y, 1, viewport_height),
+                scroll,
+                other_rows.len(),
+                viewport_rows,
+            );
+            draw_scrollbar(frame, scrollbar, app);
+            let hit = Rect::new(left, y, content_width, viewport_height);
+            hits.push(QuestionHit { index, area: hit });
+            frame.set_cursor_position((
+                answer_area
+                    .x
+                    .saturating_add(cursor_column)
+                    .min(answer_area.right().saturating_sub(1)),
+                answer_area
+                    .y
+                    .saturating_add(
+                        u16::try_from(cursor_row.saturating_sub(scroll)).unwrap_or(u16::MAX),
+                    )
+                    .min(answer_area.bottom().saturating_sub(1)),
+            ));
+            continue;
+        }
         let label = if let Some(option) = question.options.get(index) {
             option.label.as_str()
-        } else if question.editing_other {
-            question.other
         } else {
             "Other (type your answer)"
         };
@@ -3046,19 +3131,10 @@ fn render_question_dialog(
             .get(index)
             .and_then(|option| option.description.as_deref())
             .map_or(String::new(), |description| format!(" — {description}"));
-        let shown = if index == question.options.len() && question.editing_other {
-            let value = if label.is_empty() {
-                "Type your answer"
-            } else {
-                label
-            };
-            format!("{marker} {}. {value}", index + 1)
-        } else {
-            format!(
-                "{marker} {}. {selection_mark}{label}{description}",
-                index + 1
-            )
-        };
+        let shown = format!(
+            "{marker} {}. {selection_mark}{label}{description}",
+            index + 1
+        );
         let role = if selected {
             UiRole::Focus
         } else {
@@ -3070,20 +3146,6 @@ fn render_question_dialog(
             hit,
         );
         hits.push(QuestionHit { index, area: hit });
-
-        if selected && question.editing_other {
-            let prefix = format!("{marker} {}. ", index + 1);
-            let prefix_width =
-                u16::try_from(UnicodeWidthStr::width(prefix.as_str())).unwrap_or(content_width);
-            let before = &question.other[..question.other_cursor.min(question.other.len())];
-            let answer_width = u16::try_from(UnicodeWidthStr::width(before)).unwrap_or(u16::MAX);
-            frame.set_cursor_position((
-                left.saturating_add(prefix_width)
-                    .saturating_add(answer_width)
-                    .min(hit.right().saturating_sub(1)),
-                y,
-            ));
-        }
     }
     let footer = if screen_reader {
         footer.clone()
@@ -4911,6 +4973,63 @@ mod tests {
         assert!(resolved.contains("User selected: Red"));
         assert!(!resolved.contains("● Asked user"));
         assert!(!resolved.contains("└ User selected"));
+    }
+
+    #[test]
+    fn long_question_answer_grows_scrolls_to_the_caret_and_survives_resize() {
+        let mut app = model();
+        app.request_question(
+            Some("Context".to_string()),
+            "Explain the constraints",
+            Vec::<crate::QuestionOption>::new(),
+            false,
+            1,
+            1,
+        );
+        let _ = app.handle_question_input(crate::InputAction::Submit);
+        let answer = format!("START-OF-ANSWER {} END-OF-ANSWER", "detail ".repeat(150));
+        let _ = app.handle_question_input(crate::InputAction::Paste(answer.clone()));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut hits = None;
+        terminal
+            .draw(|frame| hits = Some(render(frame, &app)))
+            .expect("draw long answer at end");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("END-OF-ANSWER"));
+        assert!(!rendered.contains("START-OF-ANSWER"));
+        assert!(rendered.contains('█'), "overflow needs a visible scrollbar");
+        let hits = hits.expect("hit map");
+        assert_eq!(hits.question_rows.len(), 1);
+        assert!(hits.question_rows[0].area.height > 1);
+
+        let _ = app.handle_question_input(crate::InputAction::MoveTextStart);
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw long answer at start");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("START-OF-ANSWER"));
+        assert!(!rendered.contains("END-OF-ANSWER"));
+
+        let _ = app.handle_question_input(crate::InputAction::MoveTextEnd);
+        let mut narrow = Terminal::new(TestBackend::new(40, 20)).expect("narrow terminal");
+        narrow
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw resized long answer");
+        assert!(narrow.backend().to_string().contains("END-OF-ANSWER"));
+
+        app.capabilities.screen_reader = true;
+        let mut accessible = Terminal::new(TestBackend::new(40, 20)).expect("accessible terminal");
+        accessible
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw accessible long answer");
+        assert!(accessible.backend().to_string().contains("END-OF-ANSWER"));
     }
 
     #[test]

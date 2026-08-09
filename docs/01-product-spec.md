@@ -365,6 +365,10 @@ and monotonic elapsed time. Input servicing is independent from the slower frame
 refresh, so LocalBox inference on the same host does not add a redraw-sized delay
 to typing or require a second Enter; manual compaction is labelled `Compacting`
 and does not claim synthetic phases or completion percentages (ADR-0148).
+When `ask_user` needs an answer outside its suggested choices, the full-screen
+Other editor wraps and grows to the available height, then scrolls with a visible
+position indicator while keeping the caret on-screen. Home/End makes both ends
+reviewable before Enter confirms, including after a terminal resize.
 
 ### Harness CLI
 

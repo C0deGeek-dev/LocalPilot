@@ -6,6 +6,11 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Long `ask_user` answers remain reviewable before confirmation.** The
+  full-screen Other editor wraps and grows with the answer, then keeps the
+  caret visible in a bounded vertical viewport with a proportional scrollbar.
+  Home/End exposes either end after overflow or resize, Unicode editing stays
+  grapheme-safe, and confirmation still returns the complete stored answer.
 - **Full-screen input stays responsive while LocalBox is busy, and long work is
   visibly alive.** Active operations now wake from one dedicated terminal-event
   reader independently of a 20 Hz render cadence, and ordinary-key paste
