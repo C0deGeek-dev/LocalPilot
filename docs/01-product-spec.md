@@ -312,10 +312,15 @@ Interactive slash commands are REPL-scoped. Mode and permission switches
 (`/agent`, `/harness`, `/default`, `/relaxed`, `/bypass`, `/unrestricted`), the
 reasoning panel (`/think`), reasoning effort (`/effort <level>`), and session
 controls (`/new`, `/fork`, `/clone`, `/tree`, `/sessions`, `/session <id>`) act
-on the live session. Permission switches also apply **while a turn is
-running** — they only reconfigure LocalPilot's own permission engine, which is
-consulted fresh per tool call, so the new profile governs the very next tool
-call without waiting for the model (ADR-0071). The rest:
+on the live session. During an inline or full-screen model turn, the shared
+host-aware live set is profile switches, `/bg`, `/effort`, and `/think`; the
+full-screen host additionally keeps `/help`, `/theme`, `/search`, and exit
+available (ADR-0147). Profile switches govern the next tool call because the
+permission engine is consulted fresh per call (ADR-0071); `/effort` governs the
+next provider request through a shared effort handle, including a later request
+inside the same turn; and `/bg` operates on the session's shared process
+registry. Other commands remain idle-only and are refused with the live choices
+rather than entering provider input. The rest:
 
 - `/clear` clears the visible conversation and runtime message history while
   preserving the session id, workspace, trust decision, provider/model, mode,
@@ -346,6 +351,14 @@ call without waiting for the model (ADR-0071). The rest:
   `[research.web].enabled = false`).
 - `/bg` lists this session's background processes (`/bg stop <id>` / `/bg stop
   all`).
+
+In full-screen chat, Ctrl+C first copies an active selection. With no selection,
+a nonempty composer is stashed and cleared without cancelling the turn; the next
+press on an empty busy composer cancels, and the following consecutive press
+exits. When idle, clearing a typed draft is followed by the ordinary empty-
+composer arm-then-exit sequence. Any other input resets the exit ladder. New
+assistant/reasoning timeline segments also discard provider framing CR/LF before
+their first prose row while preserving all later streamed whitespace (ADR-0147).
 
 ### Harness CLI
 

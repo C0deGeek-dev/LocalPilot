@@ -22,4 +22,4 @@ pub use provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-pub use request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
+pub use request::{constraint_for, ModelRequest, ReasoningEffort, ReasoningEffortHandle, ToolSpec};

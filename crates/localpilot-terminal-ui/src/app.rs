@@ -1747,14 +1747,18 @@ impl AppModel {
                 projection.stream_bytes = projection.stream_bytes.saturating_add(text.len());
                 if !Self::append_active_to(projection, projection.active_assistant, &text) {
                     projection.active_assistant =
-                        Self::push_runtime_item_to(projection, ItemKind::Assistant, text);
+                        Self::opening_segment_text(text).and_then(|text| {
+                            Self::push_runtime_item_to(projection, ItemKind::Assistant, text)
+                        });
                 }
             }
             RuntimeUpdate::Reasoning(text) => {
                 projection.stream_bytes = projection.stream_bytes.saturating_add(text.len());
                 if !Self::append_active_to(projection, projection.active_reasoning, &text) {
                     projection.active_reasoning =
-                        Self::push_runtime_item_to(projection, ItemKind::Reasoning, text);
+                        Self::opening_segment_text(text).and_then(|text| {
+                            Self::push_runtime_item_to(projection, ItemKind::Reasoning, text)
+                        });
                 }
             }
             RuntimeUpdate::ToolStarted { id, name, detail } => {
@@ -1961,6 +1965,20 @@ impl AppModel {
         }
         if projection.timeline_search.is_some() {
             Self::refresh_timeline_search_on(projection);
+        }
+    }
+
+    /// Normalize only a brand-new streamed assistant/reasoning segment. Provider
+    /// framing newlines have no semantic content before the first prose row;
+    /// once an item exists, subsequent deltas are appended byte-for-byte.
+    fn opening_segment_text(text: String) -> Option<String> {
+        let without_framing = text.trim_start_matches(['\r', '\n']);
+        if without_framing.trim().is_empty() {
+            None
+        } else if without_framing.len() == text.len() {
+            Some(text)
+        } else {
+            Some(without_framing.to_string())
         }
     }
 
@@ -4144,14 +4162,25 @@ impl AppModel {
             return AppCommand::Exit;
         }
 
-        self.exit_armed = true;
         if let Some(text) = self.trust_selected_text() {
+            self.exit_armed = true;
             return AppCommand::Copy(text);
         }
         if let Some(text) = self.projections.active().timeline.selected_text() {
+            self.exit_armed = true;
             return AppCommand::Copy(text);
         }
 
+        // Preserve a typed prompt (including paste/image attachments) in the
+        // existing atomic stash before Ctrl+C escalates to cancelling work or
+        // exiting the process. Clearing a draft is not an exit-arm press.
+        if !self.editor.text().is_empty() {
+            self.stash_or_pop();
+            self.exit_armed = false;
+            return AppCommand::None;
+        }
+
+        self.exit_armed = true;
         match self.projections.active().work {
             WorkState::Idle => AppCommand::None,
             WorkState::Busy {
@@ -5078,20 +5107,73 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_arms_then_exits_when_idle_even_with_a_draft() {
+    fn ctrl_c_stashes_an_idle_draft_without_arming_exit() {
         let mut app = model();
         app.editor.insert("unfinished draft");
         assert_eq!(
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::None
         );
-        assert!(app.exit_armed);
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+        assert!(!app.exit_armed);
         assert!(!app.exit_requested);
+
+        let _ = app.handle_input(InputAction::StashOrPop, 80);
+        assert_eq!(app.editor.text(), "unfinished draft");
+        assert!(!app.has_stashed_draft());
+    }
+
+    #[test]
+    fn ctrl_c_idle_draft_clear_then_arm_then_exit() {
+        let mut app = model();
+        app.editor.insert("unfinished draft");
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(!app.exit_armed);
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(app.exit_armed);
         assert_eq!(
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::Exit
         );
         assert!(app.exit_requested);
+    }
+
+    #[test]
+    fn ctrl_c_busy_draft_clear_then_cancel_then_exit() {
+        let mut app = model();
+        app.begin_work();
+        app.editor.insert("next prompt");
+
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::None
+        );
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+        assert!(!app.exit_armed);
+        assert_eq!(
+            app.active_work(),
+            WorkState::Busy {
+                cancellation_requested: false
+            }
+        );
+
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::CancelWork
+        );
+        assert!(app.exit_armed);
+        assert_eq!(
+            app.handle_input(InputAction::CancelOrExit, 80),
+            AppCommand::Exit
+        );
     }
 
     #[test]
@@ -5117,6 +5199,7 @@ mod tests {
     #[test]
     fn ctrl_c_copies_a_selection_then_a_second_press_exits() {
         let mut app = model();
+        app.editor.insert("draft stays while copying");
         let id = app
             .active_timeline_mut()
             .push(ItemKind::Assistant, "copy this")
@@ -5136,6 +5219,7 @@ mod tests {
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::Copy("copy".to_string())
         );
+        assert_eq!(app.editor.text(), "draft stays while copying");
         assert_eq!(
             app.handle_input(InputAction::CancelOrExit, 80),
             AppCommand::Exit
@@ -5185,6 +5269,52 @@ mod tests {
         assert_eq!(app.active_timeline().items()[0].id, id);
         assert_eq!(app.active_timeline().items()[0].text, "hello world");
         assert_eq!(app.active_stream_bytes(), "hello world".len());
+    }
+
+    #[test]
+    fn new_stream_segments_strip_only_leading_framing_newlines() {
+        let mut app = model();
+        app.begin_work();
+        let assistant = "\r\n\nanswer";
+        let reasoning = "\n\rthinking";
+
+        app.apply_runtime(RuntimeUpdate::Text(assistant.to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning(reasoning.to_string()));
+
+        let items = app.active_timeline().items();
+        assert_eq!(items[0].text, "answer");
+        assert_eq!(items[1].text, "thinking");
+        assert_eq!(app.active_stream_bytes(), assistant.len() + reasoning.len());
+    }
+
+    #[test]
+    fn whitespace_only_segment_openers_are_dropped_but_bytes_are_counted() {
+        let mut app = model();
+        app.begin_work();
+
+        app.apply_runtime(RuntimeUpdate::Text("\r\n\n".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("\n  \t".to_string()));
+
+        assert!(app.active_timeline().items().is_empty());
+        assert_eq!(app.active_stream_bytes(), 7);
+
+        app.apply_runtime(RuntimeUpdate::Text("answer".to_string()));
+        assert_eq!(app.active_timeline().items()[0].text, "answer");
+    }
+
+    #[test]
+    fn mid_segment_leading_newlines_are_preserved() {
+        let mut app = model();
+        app.begin_work();
+
+        app.apply_runtime(RuntimeUpdate::Text("first".to_string()));
+        app.apply_runtime(RuntimeUpdate::Text("\nsecond\n".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("thinking".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("\nmore".to_string()));
+
+        let items = app.active_timeline().items();
+        assert_eq!(items[0].text, "first\nsecond\n");
+        assert_eq!(items[1].text, "thinking\nmore");
     }
 
     #[test]
@@ -6925,8 +7055,8 @@ mod tests {
         assert!(app.active_projection().active_assistant.is_none());
         assert!(app.active_projection().active_reasoning.is_none());
 
-        app.apply_runtime(RuntimeUpdate::Text("assistant B".to_string()));
-        app.apply_runtime(RuntimeUpdate::Reasoning("reasoning B".to_string()));
+        app.apply_runtime(RuntimeUpdate::Text("\nassistant B".to_string()));
+        app.apply_runtime(RuntimeUpdate::Reasoning("\r\nreasoning B".to_string()));
         // Post-tool deltas open new segments, never the pre-tool ones.
         assert!(app.active_projection().active_assistant.is_some());
         assert_ne!(app.active_projection().active_assistant, Some(assistant_a));

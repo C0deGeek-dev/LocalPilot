@@ -29,7 +29,7 @@ use localpilot_store::Store;
 use localpilot_tools::{BackgroundProcesses, UserAnswer, UserQuestion};
 use localpilot_tui::{
     banner_text, blocking_prompt_height, handle_input, history_block_text, parse_slash, render,
-    AppInput, AppState, BackgroundCommand, BackgroundProcess, Header, ImageAttachment,
+    AppInput, AppState, BackgroundCommand, BackgroundProcess, Header, Host, ImageAttachment,
     IngestAction, Key, Mode, PlanItem, Profile as UiProfile, QuestionPrompt, SlashAction,
     TrustPrompt, UiEvent,
 };
@@ -920,6 +920,7 @@ async fn run_slash(
                 None,
                 None,
                 None,
+                None,
                 operation,
             )
             .await;
@@ -1325,22 +1326,19 @@ async fn unknown_model_warning(
 
 /// List or stop the session's background processes, posting the result as
 /// notices. Stopping is synchronous, so it runs directly off the input loop.
-/// Whether `action` is safe to run while a turn is in flight. These touch only
-/// UI state or the interior-mutable background registry, never the borrowed
-/// runtime, so they can execute from the mid-turn key handler.
+/// Whether `action` is safe to run while an inline turn is in flight.
 fn is_live_slash(action: &SlashAction) -> bool {
-    matches!(
-        action,
-        SlashAction::ToggleThinking | SlashAction::Background(_) | SlashAction::SetProfile(_)
-    )
+    action.runs_live(Host::Inline)
 }
 
 /// Run an allowlisted slash command mid-turn. Only the variants accepted by
-/// [`is_live_slash`] are handled here; anything else is a no-op.
+/// [`is_live_slash`] are handled here; a policy/dispatcher mismatch is visible
+/// instead of silently consuming the command.
 fn run_live_slash(
     state: &mut AppState,
     background: Option<&Arc<BackgroundProcesses>>,
     permissions: Option<&PermissionEngineHandle>,
+    reasoning_effort: Option<&localpilot_llm::ReasoningEffortHandle>,
     action: SlashAction,
 ) {
     match action {
@@ -1370,7 +1368,27 @@ fn run_live_slash(
                 "profile changes are unavailable during this operation".to_string(),
             )),
         },
-        _ => {}
+        SlashAction::SetEffort(level) => match localpilot_llm::ReasoningEffort::parse(&level) {
+            Some(effort) => match reasoning_effort {
+                Some(handle) => {
+                    handle.set(Some(effort));
+                    state.footer.effort = Some(effort.as_str().to_string());
+                    state.apply(UiEvent::Notice(format!(
+                        "reasoning effort set to {} (in force from the next provider request)",
+                        effort.as_str()
+                    )));
+                }
+                None => state.apply(UiEvent::Notice(
+                    "reasoning-effort changes are unavailable during this operation".to_string(),
+                )),
+            },
+            None => state.apply(UiEvent::Notice(format!(
+                "invalid effort {level:?}; use minimal, low, medium, or high"
+            ))),
+        },
+        _ => state.apply(UiEvent::Notice(
+            "live slash command could not be dispatched".to_string(),
+        )),
     }
 }
 
@@ -1852,6 +1870,7 @@ async fn run_research_prompt(
         None,
         None,
         None,
+        None,
         operation,
     )
     .await;
@@ -1925,7 +1944,7 @@ async fn run_harness_command(
     // captured above, so a mid-run profile swap has nothing to apply to —
     // profile slash commands keep the idle-only notice here.
     let summary = drive_runtime_operation(
-        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, operation,
+        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, None, operation,
     )
     .await;
     state.busy = false;
@@ -1973,7 +1992,7 @@ async fn run_localbox_adopt(
     };
 
     let outcome = drive_runtime_operation(
-        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, operation,
+        terminal, state, prompts, &mut rx, &cancel, started, None, None, None, None, operation,
     )
     .await;
     state.busy = false;
@@ -2023,6 +2042,9 @@ async fn run_turn(
     // Same pattern for the permission engine, so `/unrestricted` (and the other
     // profile commands) apply while the model is still generating.
     let permissions = runtime.permission_engine_handle();
+    // `/effort` uses the same shared-handle pattern and applies from the next
+    // provider request made by this turn.
+    let reasoning_effort = runtime.reasoning_effort_handle();
     let turn = async {
         let _ = runtime
             .run_turn_with_attachments(prompt, attachments, &events, &cancel)
@@ -2039,6 +2061,7 @@ async fn run_turn(
         Some(&steer),
         Some(&background),
         Some(&permissions),
+        Some(&reasoning_effort),
         turn,
     )
     .await
@@ -2055,6 +2078,7 @@ async fn drive_runtime_operation<F, T>(
     steer: Option<&localpilot_harness::SteerQueue>,
     background: Option<&Arc<BackgroundProcesses>>,
     permissions: Option<&PermissionEngineHandle>,
+    reasoning_effort: Option<&localpilot_llm::ReasoningEffortHandle>,
     operation: F,
 ) -> anyhow::Result<T>
 where
@@ -2093,6 +2117,7 @@ where
                         steer,
                         background,
                         permissions,
+                        reasoning_effort,
                         &mut paste_burst,
                         buffered_after,
                     );
@@ -2239,6 +2264,7 @@ fn resolve_event(
     steer: Option<&localpilot_harness::SteerQueue>,
     background: Option<&Arc<BackgroundProcesses>>,
     permissions: Option<&PermissionEngineHandle>,
+    reasoning_effort: Option<&localpilot_llm::ReasoningEffortHandle>,
     paste_burst: &mut PasteBurst,
     buffered_after: bool,
 ) -> Option<PendingAsk> {
@@ -2292,7 +2318,13 @@ fn resolve_event(
                                 // Clear the input line, then run the allowlisted
                                 // command against UI state / the shared handle.
                                 let _ = state.take_input_for_submit();
-                                run_live_slash(state, background, permissions, action);
+                                run_live_slash(
+                                    state,
+                                    background,
+                                    permissions,
+                                    reasoning_effort,
+                                    action,
+                                );
                             }
                             _ => state.apply(UiEvent::Notice(
                                 "slash commands run when the current turn is idle".to_string(),
@@ -3477,7 +3509,7 @@ mod tests {
         let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
         let handle =
             PermissionEngineHandle::new(PermissionEngine::new(Profile::Default, Vec::new()));
-        run_live_slash(&mut state, None, Some(&handle), action);
+        run_live_slash(&mut state, None, Some(&handle), None, action);
         assert_eq!(handle.profile(), Profile::Unrestricted);
         assert_eq!(state.profile, UiProfile::Unrestricted);
 
@@ -3487,6 +3519,7 @@ mod tests {
         let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
         run_live_slash(
             &mut state,
+            None,
             None,
             None,
             SlashAction::SetProfile(UiProfile::Bypass),
@@ -3637,10 +3670,7 @@ mod tests {
     }
 
     #[test]
-    fn live_slash_allowlist_admits_only_bg_and_think() {
-        // The mid-turn key handler runs only commands that touch UI state or the
-        // shared background registry — never the borrowed runtime. Everything else
-        // must stay queued behind the "run when idle" notice.
+    fn inline_live_slash_contract_admits_shared_controls() {
         for input in [
             "/bg",
             "/bg list",
@@ -3648,6 +3678,8 @@ mod tests {
             "/bg stop all",
             "/think",
             "/thinking",
+            "/relaxed",
+            "/effort high",
         ] {
             let action = parse_slash(input).expect("parses to an action");
             assert!(
@@ -3662,6 +3694,27 @@ mod tests {
                 "{input} must wait for the turn to finish"
             );
         }
+    }
+
+    #[test]
+    fn effort_slash_applies_mid_turn_through_the_shared_handle() {
+        let mut state = AppState::new(test_header(), Mode::Agent, UiProfile::Default);
+        let handle =
+            localpilot_llm::ReasoningEffortHandle::new(Some(localpilot_llm::ReasoningEffort::Low));
+
+        run_live_slash(
+            &mut state,
+            None,
+            None,
+            Some(&handle),
+            SlashAction::SetEffort("high".to_string()),
+        );
+
+        assert_eq!(
+            handle.snapshot(),
+            Some(localpilot_llm::ReasoningEffort::High)
+        );
+        assert_eq!(state.footer.effort.as_deref(), Some("high"));
     }
 
     fn ui_state() -> AppState {

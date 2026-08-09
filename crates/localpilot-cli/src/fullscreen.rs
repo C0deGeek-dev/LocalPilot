@@ -8,7 +8,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc as std_mpsc, OnceLock};
+use std::sync::{mpsc as std_mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -27,6 +27,7 @@ use localpilot_core::ContentBlock;
 use localpilot_harness::{
     ModelHealth, RuntimeEvent, SessionRuntime, SoftInterrupt, SteerQueue, StopReason,
 };
+use localpilot_sandbox::{PermissionEngine, PermissionEngineHandle};
 use localpilot_store::SessionIndexEntry;
 use localpilot_terminal_ui::{
     render, sanitize_text, AppCommand, AppModel, ColorSupport, CompletionCommand, ContentPoint,
@@ -38,8 +39,8 @@ use localpilot_terminal_ui::{
     TimelinePaneHits, UsageTotals, UserShellCommand, UserShellOutput, VisualRowPart,
 };
 use localpilot_terminal_ui::{QuestionAction, TrustAction};
-use localpilot_tools::{ToolOutputPresentation, UserAnswer, UserQuestion};
-use localpilot_tui::{parse_slash_for, SlashAction};
+use localpilot_tools::{BackgroundProcesses, ToolOutputPresentation, UserAnswer, UserQuestion};
+use localpilot_tui::{parse_slash_for, Host, SlashAction};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -4791,6 +4792,7 @@ async fn drive_harness_resume(
         EventLane::Runtime {
             events: &mut events_rx,
             steering: None,
+            live: None,
         },
         QuestionMode::Inert,
         ProgressLane::None,
@@ -4821,7 +4823,16 @@ enum EventLane<'a> {
     Runtime {
         events: &'a mut broadcast::Receiver<RuntimeEvent>,
         steering: Option<&'a SteerQueue>,
+        live: Option<&'a LiveControls>,
     },
+}
+
+/// Interior-mutable controls that remain available while `SessionRuntime` is
+/// borrowed by an active turn.
+struct LiveControls {
+    permissions: PermissionEngineHandle,
+    background: Arc<BackgroundProcesses>,
+    reasoning_effort: localpilot_llm::ReasoningEffortHandle,
 }
 
 /// Whether the ambient `question_rx` is serviced this operation. The lane is the
@@ -4998,11 +5009,18 @@ where
     // completion drain stay uniform; its sender is held open, so it simply never
     // yields and drains empty.
     let (_bare_sender, mut bare_rx) = broadcast::channel::<RuntimeEvent>(1);
-    let (lane_events, steer): (&mut broadcast::Receiver<RuntimeEvent>, Option<&SteerQueue>) =
-        match lane {
-            EventLane::Bare => (&mut bare_rx, None),
-            EventLane::Runtime { events, steering } => (events, steering),
-        };
+    let (lane_events, steer, live): (
+        &mut broadcast::Receiver<RuntimeEvent>,
+        Option<&SteerQueue>,
+        Option<&LiveControls>,
+    ) = match lane {
+        EventLane::Bare => (&mut bare_rx, None, None),
+        EventLane::Runtime {
+            events,
+            steering,
+            live,
+        } => (events, steering, live),
+    };
     let servicing = matches!(questions, QuestionMode::Serviced);
     tokio::pin!(operation);
     let mut pending: Option<oneshot::Sender<bool>> = None;
@@ -5083,6 +5101,7 @@ where
                                     history,
                                     cwd,
                                     image_capability,
+                                    live,
                                     steer.map(|steer| (steer, &mut pending_steer_items)),
                                 ),
                             }
@@ -5258,6 +5277,11 @@ async fn drive_turn(
         vision_capable: runtime.active_accepts_images(),
     };
     let steer = runtime.steer_queue();
+    let live = LiveControls {
+        permissions: runtime.permission_engine_handle(),
+        background: runtime.background_handle(),
+        reasoning_effort: runtime.reasoning_effort_handle(),
+    };
     let operation = runtime.run_turn_with_attachments(prompt, attachments, &events, &cancel);
     let mut io = TerminalIo {
         poll: |timeout: Duration| event::poll(timeout),
@@ -5283,6 +5307,7 @@ async fn drive_turn(
         EventLane::Runtime {
             events: &mut rx,
             steering: Some(&steer),
+            live: Some(&live),
         },
         QuestionMode::Serviced,
         ProgressLane::None,
@@ -5304,30 +5329,24 @@ fn handle_turn_event_impl(
     history: &localpilot_store::PromptHistory,
     cwd: &Path,
     image_capability: &ImageCapabilitySnapshot,
+    live: Option<&LiveControls>,
     mut steering: Option<(&SteerQueue, &mut VecDeque<ItemId>)>,
 ) -> bool {
     match event {
         Event::Key(key) if is_key_action(key) => {
-            if is_enqueue_key(key) {
-                if let AppCommand::Submit(submitted) =
-                    app.handle_input(InputAction::Submit, hit_map.editor_width)
-                {
-                    if let Some(operation) =
-                        prepare_prompt_operation(app, history, cwd, submitted, true)
-                    {
-                        queue.push_back(operation);
-                    }
-                }
-                return false;
-            }
             if is_clipboard_image_key(key) {
                 attach_clipboard_image_with_capability(app, image_capability);
                 return false;
             }
-            let Some(action) = map_key(key) else {
-                return false;
+            let command = if is_enqueue_key(key) {
+                app.handle_input(InputAction::Submit, hit_map.editor_width)
+            } else {
+                let Some(action) = map_key(key) else {
+                    return false;
+                };
+                app.handle_input(action, hit_map.editor_width)
             };
-            match app.handle_input(action, hit_map.editor_width) {
+            match command {
                 AppCommand::Exit => {
                     cancel.cancel();
                     true
@@ -5357,54 +5376,7 @@ fn handle_turn_event_impl(
                     false
                 }
                 AppCommand::RunSlash(submitted) => {
-                    match parse_slash_for(localpilot_tui::Host::Fullscreen, &submitted.prompt) {
-                        Some(SlashAction::Exit { print_transcript }) => {
-                            app.request_exit(print_transcript);
-                            cancel.cancel();
-                            true
-                        }
-                        // The contained takeovers stay reachable mid-operation,
-                        // matching the behaviour before they became parsed actions.
-                        Some(SlashAction::Help) => {
-                            app.open_help();
-                            false
-                        }
-                        // `/think` is a pure display toggle — reasoning streams
-                        // during a turn, so it must work mid-operation too, with the
-                        // same confirmation the idle route emits.
-                        Some(SlashAction::ToggleThinking) => {
-                            let visible = app.toggle_reasoning();
-                            app.apply_runtime(RuntimeUpdate::Notice(
-                                reasoning_visibility_notice(visible).to_string(),
-                            ));
-                            false
-                        }
-                        Some(SlashAction::Theme(None)) => {
-                            app.open_theme_picker();
-                            false
-                        }
-                        Some(SlashAction::Theme(Some(value))) => {
-                            match value.parse::<Theme>() {
-                                Ok(theme) => app.apply_theme(theme),
-                                Err(error) => {
-                                    app.apply_runtime(RuntimeUpdate::Warning(error.to_string()))
-                                }
-                            }
-                            false
-                        }
-                        Some(SlashAction::Search(query)) => {
-                            app.open_timeline_search(query.unwrap_or_default());
-                            false
-                        }
-                        // Everything else — including the idle-only settings/diff
-                        // takeovers — waits for the operation to finish.
-                        _ => {
-                            app.apply_runtime(RuntimeUpdate::Notice(
-                                "slash commands run when the current operation is idle".to_string(),
-                            ));
-                            false
-                        }
-                    }
+                    run_active_fullscreen_slash(app, submitted, live, cancel)
                 }
                 AppCommand::Submit(submitted) => {
                     if let Some(operation) =
@@ -5455,6 +5427,124 @@ fn handle_turn_event_impl(
     }
 }
 
+fn run_active_fullscreen_slash(
+    app: &mut AppModel,
+    submitted: SubmittedInput,
+    live: Option<&LiveControls>,
+    cancel: &CancellationToken,
+) -> bool {
+    if !submitted.images.is_empty() {
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "image attachments were ignored for the slash command".to_string(),
+        ));
+    }
+    let Some(action) = parse_slash_for(Host::Fullscreen, &submitted.prompt) else {
+        app.apply_runtime(RuntimeUpdate::Warning(
+            "invalid slash command input".to_string(),
+        ));
+        return false;
+    };
+    if !action.runs_live(Host::Fullscreen) {
+        app.apply_runtime(RuntimeUpdate::Notice(
+            "available during an active turn: /bg, /effort, profile commands, /think, /help, /theme, /search, and /quit"
+                .to_string(),
+        ));
+        return false;
+    }
+
+    match action {
+        SlashAction::Exit { print_transcript } => {
+            app.request_exit(print_transcript);
+            cancel.cancel();
+            true
+        }
+        SlashAction::Help => {
+            app.open_help();
+            false
+        }
+        SlashAction::ToggleThinking => {
+            let visible = app.toggle_reasoning();
+            app.apply_runtime(RuntimeUpdate::Notice(
+                reasoning_visibility_notice(visible).to_string(),
+            ));
+            false
+        }
+        SlashAction::Theme(None) => {
+            app.open_theme_picker();
+            false
+        }
+        SlashAction::Theme(Some(value)) => {
+            match value.parse::<Theme>() {
+                Ok(theme) => app.apply_theme(theme),
+                Err(error) => app.apply_runtime(RuntimeUpdate::Warning(error.to_string())),
+            }
+            false
+        }
+        SlashAction::Search(query) => {
+            app.open_timeline_search(query.unwrap_or_default());
+            false
+        }
+        SlashAction::SetProfile(profile) => {
+            match live {
+                Some(live) => {
+                    live.permissions.set(PermissionEngine::new(
+                        crate::repl::sandbox_profile(profile),
+                        Vec::new(),
+                    ));
+                    app.set_shared_profile(profile.label());
+                    app.apply_runtime(RuntimeUpdate::Notice(format!(
+                        "permission profile: {} (in force from the next tool call)",
+                        profile.label()
+                    )));
+                }
+                None => unavailable_live_controls_notice(app),
+            }
+            false
+        }
+        SlashAction::Background(command) => {
+            match live {
+                Some(live) => {
+                    let output = crate::repl::background_command_output(&live.background, command);
+                    present_command_report(app, command_report("bg", output));
+                }
+                None => unavailable_live_controls_notice(app),
+            }
+            false
+        }
+        SlashAction::SetEffort(level) => {
+            match localpilot_llm::ReasoningEffort::parse(&level) {
+                Some(effort) => match live {
+                    Some(live) => {
+                        live.reasoning_effort.set(Some(effort));
+                        app.apply_runtime(RuntimeUpdate::Notice(format!(
+                            "reasoning effort set to {} (in force from the next provider request)",
+                            effort.as_str()
+                        )));
+                    }
+                    None => unavailable_live_controls_notice(app),
+                },
+                None => app.apply_runtime(RuntimeUpdate::Notice(format!(
+                    "invalid effort {level:?}; use minimal, low, medium, or high"
+                ))),
+            }
+            false
+        }
+        _ => {
+            app.apply_runtime(RuntimeUpdate::Warning(
+                "live slash command could not be dispatched".to_string(),
+            ));
+            false
+        }
+    }
+}
+
+fn unavailable_live_controls_notice(app: &mut AppModel) {
+    app.apply_runtime(RuntimeUpdate::Notice(
+        "live runtime controls are unavailable during this operation; /bg, /effort, and profile changes were not applied"
+            .to_string(),
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 // the non-steering adapter preserves the shared router inputs
 // Retained for the focused event-handling tests; production routes through
@@ -5479,6 +5569,7 @@ fn handle_turn_event(
         history,
         cwd,
         image_capability,
+        None,
         None,
     )
 }
@@ -5508,6 +5599,7 @@ fn handle_turn_event_with_steering(
         history,
         cwd,
         image_capability,
+        None,
         Some((steer, pending_steer_items)),
     )
 }
@@ -7602,11 +7694,11 @@ mod tests {
             assert!(!exit, "{prompt} must not exit the turn");
             app
         };
-        let idle_notice = |app: &AppModel| {
+        let live_choices_notice = |app: &AppModel| {
             app.active_timeline()
                 .items()
                 .iter()
-                .any(|item| item.text.contains("run when the current operation is idle"))
+                .any(|item| item.text.contains("available during an active turn"))
         };
 
         // help/theme/search stay reachable mid-operation.
@@ -7625,13 +7717,13 @@ mod tests {
             .iter()
             .any(|item| item.text.contains("expected default")));
 
-        // settings/diff are idle-only: they emit the idle notice, never a takeover.
+        // settings/diff are idle-only: they name the live choices, never a takeover.
         let settings = submit_during_work("/settings");
         assert!(!settings.has_takeover());
-        assert!(idle_notice(&settings));
+        assert!(live_choices_notice(&settings));
         let diff = submit_during_work("/diff");
         assert!(!diff.has_takeover());
-        assert!(idle_notice(&diff));
+        assert!(live_choices_notice(&diff));
     }
 
     // Build one real single-session runtime over a temp dir + a one-provider
@@ -11099,6 +11191,149 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_clears_typeahead_before_cancelling_the_active_turn() {
+        let mut app = app();
+        app.begin_work();
+        app.editor.insert("recoverable next prompt");
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut queue = VecDeque::new();
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        ));
+        assert!(app.editor.text().is_empty());
+        assert!(app.has_stashed_draft());
+        assert!(!cancel.is_cancelled());
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        ));
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn active_turn_live_controls_apply_and_ctrl_q_never_drops_slashes() {
+        let mut app = app();
+        app.begin_work();
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut queue = VecDeque::new();
+        let live = LiveControls {
+            permissions: PermissionEngineHandle::new(PermissionEngine::new(
+                localpilot_sandbox::Profile::Default,
+                Vec::new(),
+            )),
+            background: Arc::new(BackgroundProcesses::new()),
+            reasoning_effort: localpilot_llm::ReasoningEffortHandle::new(Some(
+                localpilot_llm::ReasoningEffort::Low,
+            )),
+        };
+
+        app.editor.insert("/unrestricted");
+        assert!(!handle_turn_event_impl(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+            Some(&live),
+            None,
+        ));
+        assert_eq!(
+            live.permissions.profile(),
+            localpilot_sandbox::Profile::Unrestricted
+        );
+        assert_eq!(app.shared_profile(), "UNRESTRICTED");
+
+        app.editor.insert("/effort high");
+        assert!(!handle_turn_event_impl(
+            &mut app,
+            Event::Key(press(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+            Some(&live),
+            None,
+        ));
+        assert_eq!(
+            live.reasoning_effort.snapshot(),
+            Some(localpilot_llm::ReasoningEffort::High)
+        );
+
+        app.editor.insert("/bg");
+        assert!(!handle_turn_event_impl(
+            &mut app,
+            Event::Key(press(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+            Some(&live),
+            None,
+        ));
+
+        assert!(
+            queue.is_empty(),
+            "slash commands are never queued as prompts"
+        );
+        assert!(!cancel.is_cancelled());
+        assert!(app
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("no background processes")));
+    }
+
+    #[test]
+    fn active_runtime_controls_refuse_truthfully_without_handles() {
+        let mut app = app();
+        app.begin_work();
+        app.editor.insert("/effort high");
+        let cancel = CancellationToken::new();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let mut queue = VecDeque::new();
+
+        assert!(!handle_turn_event(
+            &mut app,
+            Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            &cancel,
+            &event_hit_map(),
+            &mut queue,
+            &history,
+            Path::new("fixture"),
+            &image_capability(false),
+        ));
+        assert!(app
+            .active_timeline()
+            .items()
+            .iter()
+            .any(|item| item.text.contains("live runtime controls are unavailable")));
+    }
+
+    #[test]
     fn active_turn_queues_typeahead_and_escape_promotes_fifo_steering() {
         let mut app = app();
         app.begin_work();
@@ -11499,8 +11734,7 @@ mod tests {
         assert!(!cancel.is_cancelled());
         assert!(history.load().is_empty());
         assert!(app.active_timeline().items().iter().any(|item| {
-            item.kind == ItemKind::Notice
-                && item.text.contains("when the current operation is idle")
+            item.kind == ItemKind::Notice && item.text.contains("available during an active turn")
         }));
     }
 
@@ -12034,6 +12268,7 @@ mod tests {
             EventLane::Runtime {
                 events: rx,
                 steering: Some(steer),
+                live: None,
             },
             QuestionMode::Serviced,
             ProgressLane::None,
@@ -12141,6 +12376,7 @@ mod tests {
             EventLane::Runtime {
                 events: rx,
                 steering: None,
+                live: None,
             },
             QuestionMode::Inert,
             ProgressLane::None,
@@ -14382,6 +14618,7 @@ mod tests {
             &history,
             std::path::Path::new("."),
             &image_capability(false),
+            None,
             None,
         ));
         assert_eq!(queue.len(), 1, "a prompt is queued");

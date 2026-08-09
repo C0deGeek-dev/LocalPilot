@@ -62,6 +62,28 @@ For Google Cloud projects that require ADC instead of an API key, configure a
 [providers.md](https://github.com/C0deGeek-dev/LocalPilot/blob/main/docs/providers.md)
 §Google Cloud Vertex AI Gemini with ADC.
 
+## Control a chat while the model is working
+
+Inline and full-screen chat keep these commands live during a model turn:
+
+- `/default`, `/relaxed`, `/bypass`, or `/unrestricted` changes permissions for
+  the next tool call.
+- `/effort minimal|low|medium|high` changes the next provider request, including
+  a later request in the current turn.
+- `/bg` (plus `stop <id>` / `stop all`) manages the session's background jobs.
+- `/think` shows or hides reasoning. Full-screen `/help`, `/theme`, `/search`,
+  and `/quit` also remain available.
+
+Other slash commands wait for idle and produce a notice instead of becoming a
+model prompt. Enter and Ctrl+Q follow the same slash rules; Ctrl+Q queues an
+ordinary typed follow-up.
+
+Ctrl+C is staged when no text is selected. If the composer contains a draft,
+the first press stashes and clears it (Ctrl+S restores it). With work active, the
+next empty-composer press cancels the turn and the following consecutive press
+exits. With no draft, cancel is the first rung. Selected timeline text still
+copies first.
+
 ## Name a conversation and resume it by name
 
 Every session has a UUID, but a name is easier to remember. Name the current

@@ -235,6 +235,27 @@ pub enum Host {
     Pair,
 }
 
+impl SlashAction {
+    /// Whether this action is safe to execute while the selected host is
+    /// driving an active model turn.
+    #[must_use]
+    pub const fn runs_live(&self, host: Host) -> bool {
+        let shared = matches!(
+            self,
+            Self::SetProfile(_) | Self::ToggleThinking | Self::SetEffort(_) | Self::Background(_)
+        );
+
+        (shared && matches!(host, Host::Inline | Host::Fullscreen))
+            || matches!(
+                (host, self),
+                (
+                    Host::Fullscreen,
+                    Self::Exit { .. } | Self::Help | Self::Theme(_) | Self::Search(_)
+                )
+            )
+    }
+}
+
 /// One catalog spelling of a command, with its per-host presentation. `None` for
 /// a host means the spelling is not shown in that host's picker. A spelling with
 /// no host description is parse-only (a hidden alias).
@@ -1037,6 +1058,40 @@ fn parse_context(args: &str) -> SlashAction {
 mod tests {
     use super::*;
     use std::collections::{BTreeSet, HashSet};
+
+    #[test]
+    fn live_actions_are_host_aware() {
+        let shared = [
+            SlashAction::SetProfile(Profile::Relaxed),
+            SlashAction::ToggleThinking,
+            SlashAction::SetEffort("high".to_string()),
+            SlashAction::Background(BackgroundCommand::List),
+        ];
+        for action in shared {
+            assert!(action.runs_live(Host::Inline));
+            assert!(action.runs_live(Host::Fullscreen));
+            assert!(!action.runs_live(Host::Pair));
+        }
+
+        for action in [
+            SlashAction::Exit {
+                print_transcript: false,
+            },
+            SlashAction::Help,
+            SlashAction::Theme(None),
+            SlashAction::Search(None),
+        ] {
+            assert!(!action.runs_live(Host::Inline));
+            assert!(action.runs_live(Host::Fullscreen));
+            assert!(!action.runs_live(Host::Pair));
+        }
+
+        for action in [SlashAction::Clear, SlashAction::Settings(None)] {
+            assert!(!action.runs_live(Host::Inline));
+            assert!(!action.runs_live(Host::Fullscreen));
+            assert!(!action.runs_live(Host::Pair));
+        }
+    }
 
     #[test]
     fn every_command_name_and_alias_is_globally_unique() {

@@ -57,7 +57,9 @@ not need a real console:
   whole-UI theme preview and mouse selection, contained settings and bounded
   two-pane tracked-diff review, role-labeled screen-reader frames and dialogs,
   bounded compact/expanded tool details with elapsed time, local refusal during
-  active work, and the full `ask_user` lifecycle: bounded typed schema, pending/
+  active work, host-aware live profile/background/effort controls, Ctrl+Q slash
+  routing without prompt enqueue, truthful no-handle refusal, and the full
+  `ask_user` lifecycle: bounded typed schema, pending/
   resolved row identity, numbered modal, automatic Other editor, keyboard/mouse
   focus, Escape/closed-host cancellation, screen-reader projection and buffered
   reply cleanup. Tests also preserve the
@@ -71,10 +73,19 @@ not need a real console:
   gates visible terminal behavior. A snapshot or PTY result alone is not proof
   of mouse, clipboard, wide-glyph, or terminal-restore parity.
 
-Ctrl+C has an explicit state-matrix test: selected text copies on the first
-press; active work cancels on the first press; idle arms exit on the first
-press; and every state exits only on a consecutive second press. Any other input
-disarms the pending exit.
+Ctrl+C has an explicit state-matrix test. Selected text copies first. With no
+selection, a typed composer is atomically stashed and cleared without arming
+exit; active work then cancels on the next empty-composer press and exits on the
+following consecutive press. An idle typed composer clears before the ordinary
+empty-composer arm/exit pair. Busy-empty and idle-empty retain their cancel/exit
+and arm/exit pairs. Any other input disarms pending exit, and a host-level test
+proves draft clearing does not cancel the active token.
+
+Stream projection tests separately pin that leading CR/LF is removed only when
+opening a new assistant/reasoning item, whitespace-only openers create no row,
+raw byte accounting is retained, mid-segment newlines survive, post-tool
+segments use the same rule, and Ratatui renders the item glyph beside first-row
+prose.
 Terminal restore tests must cover normal exit, partial setup, post-entry errors,
 panic, and the later signal/suspension paths as those paths are added.
 

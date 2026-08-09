@@ -528,7 +528,7 @@ fn render_quick_help(frame: &mut Frame<'_>, area: Rect, app: &AppModel) -> Optio
         [
             "Page Up/Down scroll timeline",
             "Mouse        disabled",
-            "Ctrl+C       copy / exit",
+            "Ctrl+C       copy / clear / cancel / exit",
             "Ctrl+F       search messages",
             "Esc          stop and steer",
             "Esc Esc      clear draft",
@@ -1514,7 +1514,7 @@ fn help_lines(
             UiRole::Foreground,
         ),
         (
-            "  Ctrl+C      Copy a selection; press twice consecutively to exit".to_string(),
+            "  Ctrl+C      Copy selection; else clear draft, cancel work, then exit".to_string(),
             UiRole::Foreground,
         ),
         (String::new(), UiRole::Foreground),
@@ -3241,10 +3241,21 @@ fn footer_state(app: &AppModel) -> String {
     match (app.active_work(), app.exit_armed) {
         (_, true) => "press Ctrl+C again to exit".to_string(),
         (crate::WorkState::Idle, false) if held && new_output => {
-            "↓ new output · timeline held · Ctrl+C twice to exit".to_string()
+            if app.editor.text().is_empty() {
+                "↓ new output · timeline held · Ctrl+C twice to exit".to_string()
+            } else {
+                "↓ new output · timeline held · Ctrl+C clear draft".to_string()
+            }
         }
         (crate::WorkState::Idle, false) if held => {
-            "timeline held · Ctrl+C twice to exit".to_string()
+            if app.editor.text().is_empty() {
+                "timeline held · Ctrl+C twice to exit".to_string()
+            } else {
+                "timeline held · Ctrl+C clear draft".to_string()
+            }
+        }
+        (crate::WorkState::Idle, false) if !app.editor.text().is_empty() => {
+            "idle · Ctrl+C clear draft".to_string()
         }
         (crate::WorkState::Idle, false) => "idle · Ctrl+C copy / twice to exit".to_string(),
         (
@@ -3284,7 +3295,7 @@ fn footer_state(app: &AppModel) -> String {
                 cancellation_requested: true,
             },
             false,
-        ) => "cancelling · Ctrl+C again to exit".to_string(),
+        ) => "cancelling · Ctrl+C twice to exit".to_string(),
     }
 }
 
@@ -3294,9 +3305,9 @@ fn working_input_actions(app: &AppModel) -> &'static str {
         return "/abort stops both peers";
     }
     if app.editor.text().is_empty() {
-        "Esc interrupt"
+        "Ctrl+C / Esc interrupt"
     } else {
-        "Esc interrupt · Ctrl+Q enqueue"
+        "Ctrl+C clear · Esc interrupt · Ctrl+Q enqueue"
     }
 }
 
@@ -4230,7 +4241,7 @@ mod tests {
         assert_eq!(working_input_actions(&pair), "/abort stops both peers");
         // Single chat keeps its exact single-turn interrupt copy.
         let single = model();
-        assert_eq!(working_input_actions(&single), "Esc interrupt");
+        assert_eq!(working_input_actions(&single), "Ctrl+C / Esc interrupt");
     }
 
     #[test]
@@ -5231,6 +5242,24 @@ mod tests {
     }
 
     #[test]
+    fn streamed_segment_glyphs_share_the_first_row_with_prose() {
+        let mut app = model();
+        app.apply_runtime(crate::RuntimeUpdate::Text("\r\n\nassistant prose".into()));
+        app.apply_runtime(crate::RuntimeUpdate::Reasoning("\nreasoning prose".into()));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+
+        terminal
+            .draw(|frame| {
+                let _ = render(frame, &app);
+            })
+            .expect("draw segments");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("● assistant prose"));
+        assert!(rendered.contains("◌ reasoning prose"));
+    }
+
+    #[test]
     fn reasoning_hidden_is_omitted_from_the_render() {
         let mut app = model();
         app.capabilities.screen_reader = true; // surfaces the "Reasoning: …" label
@@ -6000,11 +6029,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let footer = buffer_line(buffer, layout.footer.y);
 
-        assert!(footer.contains("● Working · 8.9 KiB · Esc interrupt"));
+        assert!(footer.contains("● Working · 8.9 KiB · Ctrl+C / Esc interrupt"));
         assert!(footer.trim_end().ends_with("model"));
         assert!(!footer.contains("agent · default"));
         assert!(!footer.contains("? help"));
         app.editor.insert("steer next");
+        assert!(footer_state(&app).contains("Ctrl+C clear"));
         assert!(footer_state(&app).contains("Ctrl+Q enqueue"));
         assert_eq!(
             buffer[(layout.footer.x + 1, layout.footer.y)].style().fg,
@@ -6066,6 +6096,20 @@ mod tests {
     }
 
     #[test]
+    fn footer_describes_each_ctrl_c_rung_for_a_typed_draft() {
+        let mut app = model();
+        app.editor.insert("draft");
+        assert_eq!(footer_state(&app), "idle · Ctrl+C clear draft");
+
+        app.begin_work();
+        assert!(footer_state(&app).contains("Ctrl+C clear · Esc interrupt"));
+        let _ = app.handle_input(crate::InputAction::CancelOrExit, 76);
+        assert!(footer_state(&app).contains("Ctrl+C / Esc interrupt"));
+        let _ = app.handle_input(crate::InputAction::CancelOrExit, 76);
+        assert_eq!(footer_state(&app), "press Ctrl+C again to exit");
+    }
+
+    #[test]
     fn leading_bang_owns_the_shell_mode_footer_until_escape() {
         let mut app = model();
         let _ = app.handle_input(crate::InputAction::Insert("!echo marker".to_string()), 76);
@@ -6073,7 +6117,7 @@ mod tests {
         assert_eq!(footer_state(&app), "shell mode · Esc exit shell mode");
         let _ = app.handle_input(crate::InputAction::Escape, 76);
         assert_eq!(app.editor.text(), "echo marker");
-        assert_eq!(footer_state(&app), "idle · Ctrl+C copy / twice to exit");
+        assert_eq!(footer_state(&app), "idle · Ctrl+C clear draft");
     }
 
     #[test]

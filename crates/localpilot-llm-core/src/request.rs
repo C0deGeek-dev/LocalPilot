@@ -44,6 +44,44 @@ impl ReasoningEffort {
     }
 }
 
+/// A shared, swappable reasoning-effort setting.
+///
+/// Interactive hosts clone this before an active turn begins. Each provider
+/// request snapshots it immediately before the request is built, so a live
+/// `/effort` change applies to the next provider request without needing a
+/// mutable borrow of the in-flight session runtime.
+#[derive(Debug, Clone)]
+pub struct ReasoningEffortHandle {
+    effort: std::sync::Arc<std::sync::RwLock<Option<ReasoningEffort>>>,
+}
+
+impl ReasoningEffortHandle {
+    /// Wrap the initial reasoning effort for shared access.
+    #[must_use]
+    pub fn new(effort: Option<ReasoningEffort>) -> Self {
+        Self {
+            effort: std::sync::Arc::new(std::sync::RwLock::new(effort)),
+        }
+    }
+
+    /// Snapshot the effort used by the next provider request.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<ReasoningEffort> {
+        match self.effort.read() {
+            Ok(effort) => *effort,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Replace the effort observed by subsequent provider requests.
+    pub fn set(&self, effort: Option<ReasoningEffort>) {
+        match self.effort.write() {
+            Ok(mut current) => *current = effort,
+            Err(poisoned) => *poisoned.into_inner() = effort,
+        }
+    }
+}
+
 /// A provider-neutral request. Provider-specific tuning lives under
 /// [`ModelRequest::options`], namespaced, reserving room for future first-class
 /// fields (temperature, max output tokens, response format).
@@ -209,5 +247,16 @@ mod tests {
             .with_tools(tools.clone())
             .with_tool_constraint(constraint_for(&declaration(false), &tools));
         assert!(hosted.tool_constraint.is_none());
+    }
+
+    #[test]
+    fn cloned_reasoning_effort_handles_share_swaps() {
+        let handle = ReasoningEffortHandle::new(Some(ReasoningEffort::Low));
+        let clone = handle.clone();
+
+        clone.set(Some(ReasoningEffort::High));
+
+        assert_eq!(handle.snapshot(), Some(ReasoningEffort::High));
+        assert_eq!(clone.snapshot(), Some(ReasoningEffort::High));
     }
 }
