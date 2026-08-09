@@ -14,7 +14,7 @@ use localpilot_config::redact::redact;
 use localpilot_config::{CheckConfig, RuleSeverity};
 use localpilot_core::{
     ContentBlock, EventId, Message, Role, SessionId, TokenUsage, ToolCall, ToolOutcome, ToolResult,
-    ToolUseId,
+    ToolUseId, RESEARCH_RESULT_ORIGIN, RESEARCH_TOPIC_ORIGIN,
 };
 use localpilot_llm::{
     InputBlockKind, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError,
@@ -1565,6 +1565,28 @@ impl SessionRuntime {
     #[must_use]
     pub fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    /// Record one completed host-owned research workflow as a normal
+    /// user/assistant exchange in the model-visible, durable conversation.
+    ///
+    /// The result is tagged with a stable synthetic origin so audits can tell it
+    /// from provider-authored prose while its assistant role keeps subsequent
+    /// follow-up turns conversational. Both messages use the ordinary append
+    /// authority, so transcript storage, event-log replay, compaction, fork, and
+    /// resume stay one mechanism. Refused while a provider turn is in flight or
+    /// when either side is blank; a host must project only a completed bounded
+    /// result and call this once at its completion boundary.
+    pub fn record_research_exchange(&mut self, topic: &str, result: &str) -> bool {
+        if self.turn_in_flight || topic.trim().is_empty() || result.trim().is_empty() {
+            return false;
+        }
+        self.append(
+            Message::text(Role::User, format!("Research this topic: {}", topic.trim()))
+                .into_synthetic(RESEARCH_TOPIC_ORIGIN),
+        );
+        self.append(Message::text(Role::Assistant, result).into_synthetic(RESEARCH_RESULT_ORIGIN));
+        true
     }
 
     /// The model this session will actually call.
@@ -4230,6 +4252,98 @@ mod tests {
             Vec::new(),
         );
         (runtime, dir)
+    }
+
+    #[tokio::test]
+    async fn research_exchange_enters_the_next_request_event_log_and_resume_exactly_once() {
+        use localpilot_store::MessageOrigin;
+
+        let (mut runtime, _dir) = test_runtime();
+        let session = runtime.session_id();
+        let before = runtime.messages.len();
+        assert!(runtime.record_research_exchange(
+            "cache safety",
+            "Completed research result\n[F1] caches need bounded invalidation\n[F1:S1] docs | cache.md"
+        ));
+        assert_eq!(runtime.messages.len(), before + 2);
+
+        let compacted = runtime
+            .compacted_history(0, &CancellationToken::new())
+            .await;
+        let request_text = compacted
+            .messages
+            .iter()
+            .map(message_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(request_text.contains("Research this topic: cache safety"));
+        assert!(request_text.contains("[F1] caches need bounded invalidation"));
+        assert!(request_text.contains("[F1:S1] docs | cache.md"));
+
+        let events = runtime.store.read_events(session).unwrap();
+        let topic_events = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    SessionEventKind::Message {
+                        origin: MessageOrigin::Synthetic { why },
+                        ..
+                    } if why == RESEARCH_TOPIC_ORIGIN
+                )
+            })
+            .count();
+        let result_events = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    SessionEventKind::Message {
+                        origin: MessageOrigin::Synthetic { why },
+                        ..
+                    } if why == RESEARCH_RESULT_ORIGIN
+                )
+            })
+            .count();
+        assert_eq!(topic_events, 1);
+        assert_eq!(result_events, 1);
+
+        runtime.start_new_session();
+        runtime.load_session(session).unwrap();
+        assert_eq!(
+            runtime
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.metadata.synthetic.as_deref() == Some(RESEARCH_RESULT_ORIGIN)
+                })
+                .count(),
+            1,
+            "resume replays the recorded result and never reinserts it"
+        );
+        assert_eq!(
+            runtime
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.metadata.synthetic.as_deref() == Some(RESEARCH_TOPIC_ORIGIN)
+                })
+                .count(),
+            1,
+            "resume replays the attributed topic and never reinserts it"
+        );
+    }
+
+    #[test]
+    fn research_exchange_is_refused_while_a_turn_is_in_flight_or_content_is_blank() {
+        let (mut runtime, _dir) = test_runtime();
+        let before = runtime.messages.len();
+        runtime.turn_in_flight = true;
+        assert!(!runtime.record_research_exchange("topic", "result"));
+        runtime.turn_in_flight = false;
+        assert!(!runtime.record_research_exchange("", "result"));
+        assert!(!runtime.record_research_exchange("topic", "  "));
+        assert_eq!(runtime.messages.len(), before);
     }
 
     #[test]

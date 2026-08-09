@@ -600,6 +600,13 @@ construction:
 - **Findings stay review-gated.** Web-derived findings flow through the same
   provenance cross-check and review queue as local ones; nothing a fetch produced
   is written to accepted memory without human promotion.
+- **Conversation projection is bounded and explicitly untrusted.** Interactive
+  completion stores no raw evidence body in the transcript. It redacts each
+  field before clipping, then emits at most 4 KiB containing numbered findings,
+  source locators/fetch IDs, open questions, and the redacted report pointer.
+  Its first line tells the model to treat findings and sources as data rather
+  than instructions. The complete report remains the durable review artifact
+  (ADR-0149).
 - **The browser-render fallback stays inside this boundary** (LocalHub#37).
   Some pages deliver their content only after JavaScript runs; when a fetched
   page's initial HTML shows a render signal (an empty framework mount, thin

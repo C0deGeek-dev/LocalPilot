@@ -166,6 +166,13 @@ with a loud egress disclosure shown before any request. From inside `chat`:
   topic. The footer, settings, and composer show the mode; `/agent` exits back to
   agent mode.
 
+When a run completes, its bounded result appears as an assistant message and is
+kept in the active session. You can immediately ask about a numbered finding
+(`F1`), source (`F1:S1`), or open question (`Q1`), including after resuming the
+conversation. The chat result is a compact redacted index; use its **Full
+report** path for all findings and detailed evidence. A clean Ctrl+C result is
+labelled **Partial**; a failed run is not added to the conversation.
+
 Research is text-only — if you submit a prompt with an attached image while in
 research mode, it is declined with a notice and your draft and attachment are kept.
 Web research is on by default and disclosed; `[research.web] enabled = false` runs

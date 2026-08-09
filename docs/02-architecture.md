@@ -308,6 +308,11 @@ The single source of truth for the slash-command surface across all three hosts
   mid-queue mode switch cannot retroactively reinterpret an already-queued prompt.
   Interactive `/research` shares one prepared config snapshot between the shown egress
   disclosure and the run, so what is disclosed is exactly what the run may reach. The
+  completion boundary projects the full report into one redacted, 4-KiB finding/source
+  index and asks `SessionRuntime` to append its topic/result exchange through the normal
+  transcript and event-log authority. Both interactive hosts render that same stored
+  result as assistant content; resume admits only this named synthetic origin and keeps
+  other runtime repair messages hidden (ADR-0149). The
   resume commands enter `Mode::Harness` at dispatch and snapshot the live model,
   provider, permission profile, and a retained single-host session-trust grant then
   (never launch-time), running an inner runtime whose approvals reach the host through a
@@ -884,6 +889,13 @@ Provider adapters translate messages to the provider's official API format.
 Reasoning/thinking blocks that a provider requires for continuity are stored as
 message content, including signatures or provider metadata when needed, so the
 next request can replay them through the adapter.
+
+Host-derived research topics and results use `Role::User`/`Role::Assistant` with
+the stable synthetic origins `research topic` and `research result`. Those
+origins distinguish the derived prompt and projected evidence from
+human/provider-authored prose without creating a second persistence path or
+changing the stored event schema. Unlike repair notices, both are intentionally
+model-visible and replay-visible (ADR-0149).
 
 ### Tool Calls
 

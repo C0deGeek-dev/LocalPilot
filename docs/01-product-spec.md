@@ -259,6 +259,15 @@ notice and the draft and its attachments are preserved. When a provider and mode
 model decomposes the topic; synthesis stays grounded in gathered evidence, so a
 finding is always backed.
 
+Interactive research is also a conversation turn (ADR-0149), not only a report
+viewer. After a successful or cleanly interrupted run, LocalPilot records the
+topic plus one assistant-style research result through the normal durable
+session path. The result is a redacted, at-most-4-KiB index of numbered findings,
+source locators/fetch IDs, open questions, and the complete report's path; raw
+evidence stays in the report. The next model request and a later resume therefore
+share enough bounded context for follow-up questions without duplicating the
+result. A failed run records no result.
+
 Retrieval is multi-round and coverage-driven (ADR-0078): per-question coverage
 is scored deterministically, uncovered questions are re-queried across rounds
 with drift-guarded query expansion and escalating depth, and the loop stops on

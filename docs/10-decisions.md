@@ -2,6 +2,55 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0149: Interactive Research Is A Bounded Durable Conversation Exchange
+
+Status: Accepted. Amends ADR-0060 (research outputs), ADR-0129 (full-screen
+chat), and ADR-0144 (shared long-running command hosting). Closes LocalHub#63.
+
+Decision:
+
+- **One normal session append authority.** A successful interactive research run
+  appends the topic as a user message and its projected result as an assistant
+  message through `SessionRuntime`'s existing append path. The assistant message
+  carries the stable synthetic origin `research result`; the host-derived user
+  line separately carries `research topic`. Those origins distinguish the
+  derived prompt and projected evidence from human/provider prose without
+  introducing a new event variant or stored-session format. Both enter
+  subsequent provider requests, compaction, forks, and resume exactly once.
+  Resume shows these named origins but continues hiding unrelated synthetic
+  repair messages.
+- **Bounded structured context, complete disk artifact.** The model-visible
+  projection is at most 4 KiB and contains the topic, coverage, numbered findings
+  (`F…`), bounded source locators/fetch IDs (`F…:S…`), numbered open questions
+  (`Q…`), omission counts, and a relative pointer to the Markdown report. A
+  reserved tail keeps omission/open-question metadata from being starved by long
+  findings. Raw evidence bodies remain report-only; the full redacted report is
+  still written before completion is returned.
+- **Untrusted and secret-safe by construction.** The projection labels findings
+  and sources as untrusted data, never instructions. Every field is redacted
+  before UTF-8-safe clipping (so truncation cannot split a recognizable secret
+  into an unrecognized prefix), control characters are removed, and the final
+  aggregate is redacted again.
+- **One completion boundary in both hosts.** Inline and full-screen chat render
+  the same returned projection as an assistant item and record it once after the
+  run returns. A stop request is signal-then-await: a well-formed written result
+  joins the conversation as `Partial`. An error or absent result adds no exchange;
+  a runtime already servicing a provider turn refuses the append loudly.
+
+Boundary and compatibility: no command spelling, config key, provider wire
+shape, event variant, event-format version, or report format changes. Headless
+research still prints and writes as before; it returns structured completion to
+its caller but has no session to mutate. Reverting the completion projection,
+runtime append method, and the one replay exception restores report-only
+interactive behavior. Pinned by bounded/redaction/provenance projection tests,
+next-request and event-log tests, exactly-once resume tests, synthetic-noise
+filtering, partial labeling, and refusal tests.
+
+Rejected: injecting the full Markdown report (unbounded context and raw evidence
+exposure); storing only a path (follow-up turns cannot discuss findings without a
+tool round trip); UI-only notices (lost on the next model call and resume); and a
+new `MessageOrigin` variant (unnecessary stored-event compatibility churn).
+
 ## ADR-0148: Active Input Wakeups Are Independent From Honest Working Chrome
 
 Status: Accepted. Amends ADR-0129 (the full-screen host) and ADR-0144 (the

@@ -747,7 +747,7 @@ async fn submit_current_input(
         if state.mode == Mode::Research {
             // In research mode a bare prompt is a topic to research (web per
             // config, ADR-0076), not a model turn.
-            run_research_prompt(terminal, state, prompts, host, &model_prompt).await
+            run_research_prompt(terminal, state, runtime, prompts, host, &model_prompt).await
         } else {
             state.busy = true;
             let outcome = run_turn(
@@ -1000,7 +1000,7 @@ async fn run_slash(
             // current mode unchanged.
             Some(topic) => {
                 state.apply(UiEvent::UserMessage(format!("/research {topic}")));
-                run_research_prompt(terminal, state, prompts, host, &topic).await?;
+                run_research_prompt(terminal, state, runtime, prompts, host, &topic).await?;
             }
             // A bare `/research` enters persistent research mode. The notice
             // reflects the configured egress state (ADR-0076) rather than a
@@ -1613,9 +1613,10 @@ fn replay_recent_transcript(
     }
 }
 
-/// Pick which resumed messages are re-shown: authored (non-synthetic) user and
-/// assistant text, keeping only the trailing `limit`. Returns how many eligible
-/// messages were elided along with the ones to show, oldest-first.
+/// Pick which resumed messages are re-shown: authored user/assistant text plus
+/// bounded research results. Other synthetic runtime repairs remain hidden.
+/// Keeps only the trailing `limit` and returns how many eligible messages were
+/// elided along with the ones to show, oldest-first.
 fn replay_selection(
     messages: Vec<localpilot_core::Message>,
     limit: usize,
@@ -1623,7 +1624,16 @@ fn replay_selection(
     use localpilot_core::Role;
     let shown: Vec<(Role, String)> = messages
         .into_iter()
-        .filter(|message| !message.is_synthetic())
+        .filter(|message| {
+            !message.is_synthetic()
+                || matches!(
+                    message.metadata.synthetic.as_deref(),
+                    Some(
+                        localpilot_core::RESEARCH_TOPIC_ORIGIN
+                            | localpilot_core::RESEARCH_RESULT_ORIGIN
+                    )
+                )
+        })
         .filter_map(|message| {
             if !matches!(message.role, Role::User | Role::Assistant) {
                 return None;
@@ -1811,10 +1821,12 @@ fn apply_command_result(state: &mut AppState, output: Vec<u8>, result: anyhow::R
 /// the transcript before any request. The pass calls the model provider —
 /// potentially several sequential requests, each bounded only by the provider
 /// timeout — so it is driven through the event pump: the UI stays live and
-/// Ctrl+C cancels (dropping the in-flight research future).
+/// Ctrl+C requests a bounded stop and keeps awaiting the run so a well-formed
+/// partial report can join the conversation.
 async fn run_research_prompt(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut AppState,
+    runtime: &mut SessionRuntime,
     prompts: &mut UserChannels,
     host: &CommandHost<'_>,
     topic: &str,
@@ -1877,7 +1889,18 @@ async fn run_research_prompt(
     state.busy = false;
     let (output, result) = outcome?;
     match result {
-        Some(result) => apply_command_result(state, output, result),
+        Some(Ok(completion)) => {
+            apply_command_result(state, output, Ok(()));
+            if !runtime.record_research_exchange(topic, &completion.conversational_result) {
+                state.apply(UiEvent::Notice(
+                    "research completed, but its result could not join the active conversation"
+                        .to_string(),
+                ));
+            }
+            state.apply(UiEvent::TextDelta(completion.conversational_result));
+            state.apply(UiEvent::TurnComplete);
+        }
+        Some(Err(error)) => apply_command_result(state, output, Err(error)),
         None => state.apply(UiEvent::Notice("research cancelled".to_string())),
     }
     Ok(())
@@ -3638,6 +3661,31 @@ mod tests {
         assert!(shown
             .iter()
             .all(|(role, _)| matches!(role, Role::User | Role::Assistant)));
+    }
+
+    #[test]
+    fn resume_replay_keeps_a_bounded_research_result_but_not_other_synthetic_noise() {
+        use localpilot_core::{Message, Role, RESEARCH_RESULT_ORIGIN, RESEARCH_TOPIC_ORIGIN};
+        let messages = vec![
+            Message::text(Role::User, "repair").into_synthetic("tool repair"),
+            Message::text(Role::User, "Research this topic: retained topic")
+                .into_synthetic(RESEARCH_TOPIC_ORIGIN),
+            Message::text(Role::Assistant, "[F1] retained finding")
+                .into_synthetic(RESEARCH_RESULT_ORIGIN),
+        ];
+
+        let (skipped, shown) = replay_selection(messages, 10);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            shown,
+            vec![
+                (
+                    Role::User,
+                    "Research this topic: retained topic".to_string()
+                ),
+                (Role::Assistant, "[F1] retained finding".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -95,6 +95,15 @@ opening a new assistant/reasoning item, whitespace-only openers create no row,
 raw byte accounting is retained, mid-segment newlines survive, post-tool
 segments use the same rule, and Ratatui renders the item glyph beside first-row
 prose.
+
+Interactive-research tests pin the cross-layer completion contract: the next
+provider history contains the topic, numbered finding, and source; the normal
+event log persists exactly one named research-origin assistant message; resume
+replays it once while still hiding unrelated synthetic repairs; and the chat
+projection retains provenance, a report pointer, an open question, omission
+counts, and pre-truncation redaction within 4 KiB while the disk report remains
+complete. Blank, in-flight, failed, and partial-result boundaries are tested
+separately.
 Terminal restore tests must cover normal exit, partial setup, post-entry errors,
 panic, and the later signal/suspension paths as those paths are added.
 

@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 use crate::id::MessageId;
 use crate::tool::{ToolCall, ToolResult};
 
+/// Stable synthetic-origin label for the host-derived topic side of an
+/// interactive research exchange.
+pub const RESEARCH_TOPIC_ORIGIN: &str = "research topic";
+
+/// Stable synthetic-origin label for the host-projected result side of an
+/// interactive research exchange.
+pub const RESEARCH_RESULT_ORIGIN: &str = "research result";
+
 /// Who authored a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

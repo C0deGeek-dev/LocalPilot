@@ -19,7 +19,9 @@ mod usage;
 
 pub use error::CoreError;
 pub use id::{EventId, MessageId, SessionId, ToolUseId, TurnId};
-pub use message::{ContentBlock, Message, MessageMetadata, Role};
+pub use message::{
+    ContentBlock, Message, MessageMetadata, Role, RESEARCH_RESULT_ORIGIN, RESEARCH_TOPIC_ORIGIN,
+};
 pub use search::{word_overlap, Locator};
 pub use secret::{
     is_exact_redactable, redact_exact, Secret, MIN_EXACT_REDACTION_LEN, REDACTED_EXACT,

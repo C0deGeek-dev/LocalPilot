@@ -4559,6 +4559,7 @@ async fn drive_research(
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let root = ctx.cwd.to_path_buf();
     let topic = topic.to_string();
+    let conversation_topic = topic.clone();
     let operation = {
         let cancel = cancel.clone();
         let stop = stop.clone();
@@ -4612,9 +4613,30 @@ async fn drive_research(
         QuestionMode::Inert,
         ProgressLane::None,
         operation,
-        |app: &mut AppModel, (result, out): (anyhow::Result<()>, Vec<u8>)| {
-            let output = crate::repl::command_output_from_buffer(out, result);
-            present_command_report(app, command_report("research", output));
+        |app: &mut AppModel,
+         (result, out): (anyhow::Result<crate::research::ResearchCompletion>, Vec<u8>)| {
+            match result {
+                Ok(completion) => {
+                    let recorded = runtime
+                        .record_research_exchange(
+                            &conversation_topic,
+                            &completion.conversational_result,
+                        );
+                    let output = crate::repl::command_output_from_buffer(out, Ok(()));
+                    present_command_report(app, command_report("research", output));
+                    if !recorded {
+                        app.apply_runtime(RuntimeUpdate::Warning(
+                            "research completed, but its result could not join the active conversation"
+                                .to_string(),
+                        ));
+                    }
+                    app.apply_runtime(RuntimeUpdate::Text(completion.conversational_result));
+                }
+                Err(error) => {
+                    let output = crate::repl::command_output_from_buffer(out, Err(error));
+                    present_command_report(app, command_report("research", output));
+                }
+            }
             app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
         },
     )

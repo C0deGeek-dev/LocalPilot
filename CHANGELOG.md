@@ -6,6 +6,13 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Interactive research now becomes part of the conversation.** A completed or
+  cleanly interrupted `/research` run adds one assistant-style, redacted result
+  to the active session, so the next turn and a resumed session can refer to its
+  numbered findings, sources, and open questions. The injected index is capped
+  at 4 KiB, labels evidence as untrusted, preserves source/fetch provenance and
+  a pointer to the complete report on disk, and is recorded exactly once; failed
+  runs add no synthetic result.
 - **Long `ask_user` answers remain reviewable before confirmation.** The
   full-screen Other editor wraps and grows with the answer, then keeps the
   caret visible in a bounded vertical viewport with a proportional scrollbar.
