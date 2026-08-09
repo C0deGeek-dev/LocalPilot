@@ -18,7 +18,7 @@ use localpilot_core::{
 };
 use localpilot_llm::{
     InputBlockKind, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderError,
-    ProviderRegistry, QuotaInfo, ToolSpec,
+    ProviderRegistry, QuotaInfo, ReasoningEffortHandle, ToolSpec,
 };
 use localpilot_recovery::{
     detect, BudgetController, BudgetDecision, ModelHealth, NoProgressDetector, NoProgressSignal,
@@ -223,8 +223,8 @@ pub struct SessionConfig {
     /// interactive host computes it once, trust-safely, at launch.
     pub package_discovery_disabled_but_present: bool,
     pub context_token_limit: usize,
-    /// Requested reasoning effort for provider turns; mapped (or no-op
-    /// clamped) per provider. Switchable mid-session.
+    /// Initial reasoning effort. `SessionRuntime` seeds its shared handle from
+    /// this once; later reads and live swaps use that handle, never this field.
     pub reasoning_effort: Option<localpilot_llm::ReasoningEffort>,
     /// How many times to retry a transient connection failure (network or
     /// 5xx) before giving up, with exponential backoff between attempts. Also
@@ -880,6 +880,9 @@ pub struct SessionRuntime {
     /// Shared + swappable so an interactive host can change the permission
     /// profile while a turn is in flight; every tool call snapshots it fresh.
     engine: PermissionEngineHandle,
+    /// Shared + swappable so interactive hosts can change reasoning effort
+    /// during a turn; each provider request snapshots it fresh.
+    reasoning_effort: ReasoningEffortHandle,
     approver: Arc<dyn Approver>,
     store: Store,
     workspace: localpilot_sandbox::Workspace,
@@ -1036,6 +1039,7 @@ impl SessionRuntime {
             provider,
             tools,
             engine: PermissionEngineHandle::new(engine),
+            reasoning_effort: ReasoningEffortHandle::new(config.reasoning_effort),
             approver: Arc::from(approver),
             store,
             workspace,
@@ -1681,8 +1685,8 @@ impl SessionRuntime {
     /// Set the reasoning effort for subsequent turns — switchable from the
     /// REPL, and overridable per harness step (high for planning, low for
     /// mechanical edits).
-    pub fn set_reasoning_effort(&mut self, effort: Option<localpilot_llm::ReasoningEffort>) {
-        self.config.reasoning_effort = effort;
+    pub fn set_reasoning_effort(&self, effort: Option<localpilot_llm::ReasoningEffort>) {
+        self.reasoning_effort.set(effort);
     }
 
     /// Enable (or disable) the verify-before-done gate at runtime, optionally
@@ -1701,7 +1705,15 @@ impl SessionRuntime {
     /// The currently requested reasoning effort.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<localpilot_llm::ReasoningEffort> {
-        self.config.reasoning_effort
+        self.reasoning_effort.snapshot()
+    }
+
+    /// The shared reasoning-effort handle. An interactive host clones it before
+    /// a turn so `/effort` can affect the next provider request while the
+    /// runtime remains mutably borrowed by the in-flight operation.
+    #[must_use]
+    pub fn reasoning_effort_handle(&self) -> ReasoningEffortHandle {
+        self.reasoning_effort.clone()
     }
 
     /// Attach the already-built provider registry so the active provider/model can
@@ -2686,7 +2698,7 @@ impl SessionRuntime {
                 localpilot_llm::constraint_for(self.provider.declaration(), &tools);
             let request = ModelRequest::new(self.config.model.clone(), request_messages)
                 .with_tools(tools)
-                .with_reasoning_effort(self.config.reasoning_effort)
+                .with_reasoning_effort(self.reasoning_effort.snapshot())
                 .with_tool_constraint(tool_constraint);
 
             self.record_event(SessionEventKind::TurnStarted {

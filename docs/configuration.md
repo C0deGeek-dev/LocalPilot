@@ -56,9 +56,13 @@ the terminal.
 Input submitted while the model is working appears immediately as a pending
 timeline row. Escape turns the leading run of plain-text pending prompts into
 ordered steering and restarts the current provider turn with that direction;
-Ctrl+C hard-cancels instead. A pending shell command or image prompt remains an
-ordering barrier, so Escape cancels the current work and then the queued
-operations continue in their original order rather than being reordered.
+Ctrl+C first stashes and clears a typed composer, then cancels on the next
+empty-composer press, then exits on a following consecutive press. With no typed
+draft, cancel remains the first rung; a selection still copies before composer
+handling. Restore a stashed draft with Ctrl+S. A pending shell command or image
+prompt remains an ordering barrier, so Escape cancels the current work and then
+the queued operations continue in their original order rather than being
+reordered.
 
 Set `LOCALPILOT_CHAT_SCREEN_READER=true` (or `1`) for the target-shaped
 full-screen accessible projection: tabs become a wrapped current-tab sentence,
@@ -77,7 +81,9 @@ retained tool-output path keep their existing independent limits. A tool row
 stays interleaved with the assistant text and reasoning that surround it: text
 streamed after a tool call opens its own row below that tool, in the order the
 model produced it, rather than merging into the assistant paragraph that came
-before the call.
+before the call. A new assistant/reasoning row ignores leading CR/LF provider
+framing (and an all-whitespace opening chunk); later chunks preserve their
+whitespace exactly.
 
 Interactive chat also advertises the builtin `ask_user` tool through one shared
 host-capability contract. In the full-screen host, up to four questions appear
@@ -152,9 +158,15 @@ choice for the current process. Set `LOCALPILOT_CHAT_THEME` to make the launch
 choice explicit. `/settings` opens a contained read-only view of the effective
 terminal, appearance, provider, and session values; launch-time controls remain
 environment settings. Slash invocations never enter prompt history or the
-provider prompt queue. A manually typed unsupported command produces an in-app notice
-instead of being sent to a model, and state-changing commands entered during
-active work are refused with an idle-retry notice.
+provider prompt queue. A manually typed unsupported command produces an in-app
+notice instead of being sent to a model. During an active inline or full-screen
+turn, profile commands, `/bg`, `/effort`, and `/think` execute live; profile
+changes apply from the next tool call, effort from the next provider request,
+and background commands use the session registry. Full-screen `/help`, `/theme`,
+`/search`, and exit also stay available. Enter and Ctrl+Q use the same slash
+dispatcher. Other commands, including `/clear`, are refused with a notice naming
+the live choices. Runtime operations without live session handles refuse
+profile/background/effort changes explicitly.
 
 `/diff` opens a contained two-pane review of tracked Git changes against `HEAD`
 (or the current index/worktree when no `HEAD` exists). Arrow keys navigate the

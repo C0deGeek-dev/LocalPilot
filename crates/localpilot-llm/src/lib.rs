@@ -30,7 +30,9 @@ pub use localpilot_llm_core::provider::{
     AuthRequirement, Capabilities, InputBlockKind, ModelProvider, ProviderDeclaration,
     ReasoningShape, SourceType, ToolCallShape,
 };
-pub use localpilot_llm_core::request::{constraint_for, ModelRequest, ReasoningEffort, ToolSpec};
+pub use localpilot_llm_core::request::{
+    constraint_for, ModelRequest, ReasoningEffort, ReasoningEffortHandle, ToolSpec,
+};
 
 /// Fuzzing entry points (enabled by the `fuzzing` feature; not public API).
 #[cfg(feature = "fuzzing")]

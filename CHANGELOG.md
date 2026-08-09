@@ -6,6 +6,24 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Live slash controls now agree across inline and full-screen turns.** One
+  host-aware policy keeps permission profiles, `/bg`, `/effort`, and `/think`
+  live in both hosts (with the existing safe full-screen takeovers). Profiles
+  apply from the next tool call and effort from the next provider request, even
+  within the same turn. Ctrl+Q slash submissions use the same dispatcher as
+  Enter, unsupported active-turn commands name the live choices, and operations
+  without live handles refuse explicitly instead of dropping input.
+- **Ctrl+C protects a typed full-screen draft before cancelling work.** With no
+  selection, the first press atomically stashes and clears a nonempty composer;
+  the next empty-composer press cancels active work and a following consecutive
+  press exits. Idle drafts use the same clear-first rung, Ctrl+S restores the
+  stash, other input resets exit arming, and footer/help copy tracks the current
+  behavior. Selection-copy precedence is unchanged.
+- **Assistant and reasoning rows no longer open with a blank glyph-only line.**
+  Leading CR/LF provider framing is removed only when a new streamed segment is
+  created, whitespace-only openers are dropped, and later deltas retain their
+  exact whitespace. Raw stream-byte accounting is unchanged.
+
 ## v2.8.1 - 2026-08-07
 
 Coordinated LocalX release.

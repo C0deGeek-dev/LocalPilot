@@ -2,6 +2,63 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0147: Active-Turn Controls, Staged Ctrl+C, And Stream-Segment Openers
+
+Status: Accepted. Amends ADR-0071 (mid-turn permission-profile switching) and
+ADR-0144 (the shared slash-command surface). Closes LocalHub#70, LocalHub#71,
+and LocalHub#72.
+
+Decision:
+
+- **One host-aware live-command contract.** `localpilot-slash` owns
+  `SlashAction::runs_live(Host)`. Inline and full-screen turns both admit
+  profile changes, `/bg`, `/effort`, and `/think`; the full-screen host also
+  admits its existing `/help`, `/theme`, `/search`, and exit takeovers. Pair
+  remains unchanged. Idle-only actions such as `/clear`, `/model`, settings,
+  and diff are refused with a notice that names the live alternatives. Enter
+  and Ctrl+Q pass slash submissions through the same active-turn dispatcher,
+  so Ctrl+Q can never consume a slash command without executing or refusing it.
+- **Interior-mutable live controls with explicit effect boundaries.** The
+  permission engine remains a shared `PermissionEngineHandle`, `/bg` uses the
+  session's shared background registry, and reasoning effort gains a
+  `ReasoningEffortHandle` (`Arc<RwLock<Option<ReasoningEffort>>>`). A turn clones
+  those handles before it mutably borrows `SessionRuntime`. Profile swaps govern
+  the next tool call; effort swaps govern the next provider request, including
+  a later request in the same turn. Runtime-driven operations without those
+  handles refuse rather than pretending to apply a change. Poisoned locks
+  recover their valid inner value.
+- **Ctrl+C is a state ladder when no selection is active.** Selection copy keeps
+  precedence and its established consecutive-press exit behavior. Otherwise a
+  nonempty composer is atomically stashed and cleared without arming exit. With
+  active work, the next empty-composer press requests cancellation and arms
+  exit; the following consecutive press exits. With idle work, the empty
+  composer arms and the next press exits. Any other input disarms the pending
+  exit. Footer and help text describe the current rung. The existing editor
+  snapshot preserves compact-paste and image attachments for restoration.
+- **Normalize only new streamed segment openers.** When a new assistant or
+  reasoning timeline item is opened, leading CR/LF framing is removed and a
+  whitespace-only opening delta is dropped. Once the item exists, every later
+  delta is appended unchanged, preserving intentional interior/trailing
+  whitespace. Raw stream-byte accounting remains unchanged. The rule applies
+  again after a tool boundary opens a new segment, so the item glyph shares its
+  first rendered row with prose.
+
+Boundary and compatibility: no command spelling, config key, provider wire
+shape, stored transcript format, or pair behavior changes. The shared effort
+handle is seeded from `SessionConfig.reasoning_effort`; thereafter it is the
+runtime source of truth. Reverting this ADR restores the host-local live gates,
+direct effort field read, immediate Ctrl+C cancellation, and raw segment
+openers. Pinned by the slash host-matrix tests, same-turn provider-request effort
+swap, inline/full-screen active-control tests, Ctrl+Q routing/refusal tests, the
+Ctrl+C state matrix and host cancellation test, and backend-rendered segment
+glyph tests.
+
+Rejected: separate inline/full-screen allowlists (they caused the drift); a
+mutable runtime callback from the input pump (it conflicts with the in-flight
+turn borrow); treating Ctrl+Q slash text as provider typeahead; trimming every
+stream delta (it would destroy intentional mid-segment formatting); and
+discarding a typed draft instead of using the existing atomic stash.
+
 ## ADR-0146: No-Progress Guard — Recoverable Signal, Windowed Repeats, User-Only Steering Reset, Diagnosable Stop, And Synthetic-Not-Intent Compaction
 
 Status: Accepted. Amends ADR-0052 (the always-on degenerate-loop guard's

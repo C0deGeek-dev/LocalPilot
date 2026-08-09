@@ -109,6 +109,8 @@ Owns (across the four crates):
 - provider registry
 - official provider implementations
 - local provider implementations
+- a shared, poison-recovering reasoning-effort handle, seeded from session
+  config and snapshotted immediately before each provider request
 
 Provider implementations must live behind the same trait, each in its own adapter
 crate depending on `-core`. Editing an adapter re-checks its ~1.5k-line crate in
@@ -221,9 +223,13 @@ new user direction. Its incomplete assistant segment remains visible as
 interrupted feedback but is not persisted as model history. Shell operations and
 image prompts are ordering barriers: when one is at the queue head, Escape
 hard-cancels the current work and leaves every follow-up in its original order
-instead of steering a later prompt past it. Ctrl+C remains a distinct hard
-cancel. Runtime output is inserted before later pending operations, so visible
-and provider transcript order agree.
+instead of steering a later prompt past it. Ctrl+C is a staged path: selection
+copy first; otherwise atomically stash and clear a nonempty composer; then cancel
+active work on an empty composer; then exit on the next consecutive press. Other
+input disarms exit. Runtime output is inserted before later pending operations,
+so visible and provider transcript order agree. A newly opened assistant or
+reasoning item strips only leading CR/LF provider framing and drops an all-
+whitespace opener; later deltas append unchanged, including leading newlines.
 
 For `localpilot pair`, the same backend-neutral model holds two cohesive session
 projections inside one shared application shell. At widths of 61 columns or
@@ -296,13 +302,16 @@ The single source of truth for the slash-command surface across all three hosts
   per-host `Option<&str>` description
 - `specs_for(Host)`, which projects the table into any one host's catalog in
   global order, so no host keeps a private list (ADR-0144)
+- `SlashAction::runs_live(Host)`, the single active-turn policy: inline and
+  full-screen share profile, background, effort, and reasoning-visibility
+  controls; full-screen adds its safe takeovers; pair remains unchanged
 
 Must remain:
 
 - dependency-free (no other workspace crate, no third-party crate) so both
   `localpilot-tui` and `localpilot-cli` can depend on it without a cycle
-- free of rendering, I/O, and host-specific dispatch — it defines *what* the
-  commands are, not *how* a host services them
+- free of rendering and I/O — it defines *what* commands exist and whether a
+  host may run them live, not *how* a host services them
 
 ### `localpilot-store`
 

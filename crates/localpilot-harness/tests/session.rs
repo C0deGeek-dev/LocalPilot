@@ -10,7 +10,7 @@ use localpilot_core::{ContentBlock, Message};
 use localpilot_harness::{RuntimeEvent, SessionConfig, SessionRuntime, StopReason};
 use localpilot_llm::{
     FakeProvider, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ProviderDeclaration,
-    ProviderError, QuotaInfo,
+    ProviderError, QuotaInfo, ReasoningEffort,
 };
 use localpilot_recovery::{RecoveryBudget, RecoveryEngine};
 use localpilot_sandbox::{
@@ -348,8 +348,15 @@ async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn
     use localpilot_harness::{SoftInterrupt, SoftInterruptSource};
 
     let provider = Arc::new(InterruptibleProvider::new());
-    let mut h = build_from_provider(provider.clone(), SessionConfig::default());
+    let mut h = build_from_provider(
+        provider.clone(),
+        SessionConfig {
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..SessionConfig::default()
+        },
+    );
     let steer = h.runtime.steer_queue();
+    let effort = h.runtime.reasoning_effort_handle();
     let mut rx = h.events.subscribe();
 
     let mut observed = Vec::new();
@@ -371,6 +378,7 @@ async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn
             }
         }
 
+        effort.set(Some(ReasoningEffort::High));
         steer.push_interrupt(SoftInterrupt {
             content: "STEERING_SECRET".to_string(),
             source: SoftInterruptSource::User,
@@ -402,6 +410,8 @@ async fn urgent_user_steering_preempts_an_open_stream_and_restarts_the_same_turn
 
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(requests[1].reasoning_effort, Some(ReasoningEffort::High));
     assert!(!message_text(&requests[0].messages).contains("STEERING_SECRET"));
     assert!(message_text(&requests[1].messages).contains("STEERING_SECRET"));
     drop(requests);
