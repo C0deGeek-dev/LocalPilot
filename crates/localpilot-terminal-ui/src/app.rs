@@ -7,7 +7,9 @@ use localpilot_slash::Mode;
 
 use crate::editor::{EditorSnapshot, EditorToken, SubmittedInput};
 use crate::presentation::semantic_ranges;
-use crate::projection::{ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState};
+use crate::projection::{
+    ActiveTool, ProjectionSet, SessionProjection, TimelineSearchState, WorkActivity,
+};
 use crate::{
     sanitize_text, ActivityState, ContentPoint, Editor, ItemId, ItemKind, PeerPane, ResultTone,
     SemanticRole, SessionHeader, StyledRange, TextStyle, Theme, Timeline,
@@ -1957,6 +1959,7 @@ impl AppModel {
             RuntimeUpdate::Stopped(_) => {
                 Self::style_transcript_on(projection);
                 projection.work = WorkState::Idle;
+                projection.work_activity = None;
                 projection.active_assistant = None;
                 projection.active_reasoning = None;
                 projection.active_tools.clear();
@@ -1983,7 +1986,14 @@ impl AppModel {
     }
 
     pub fn begin_work(&mut self) {
-        Self::begin_projection_work(self.projections.active_mut());
+        self.begin_work_with_label("Working");
+    }
+
+    /// Mark the active projection busy and give its existing working chrome an
+    /// honest high-level operation label. The monotonic start belongs to the
+    /// projection so elapsed time resets exactly when a new operation begins.
+    pub fn begin_work_with_label(&mut self, label: &str) {
+        Self::begin_projection_work(self.projections.active_mut(), label, Instant::now());
     }
 
     /// Marks one collaboration peer busy without changing the selected pane.
@@ -1996,14 +2006,18 @@ impl AppModel {
         let Some(projection) = self.projections.projection_mut(peer) else {
             return false;
         };
-        Self::begin_projection_work(projection);
+        Self::begin_projection_work(projection, "Working", Instant::now());
         true
     }
 
-    fn begin_projection_work(projection: &mut SessionProjection) {
+    fn begin_projection_work(projection: &mut SessionProjection, label: &str, started_at: Instant) {
         projection.work = WorkState::Busy {
             cancellation_requested: false,
         };
+        projection.work_activity = Some(WorkActivity {
+            label: sanitize_inline(label),
+            started_at,
+        });
         projection.active_assistant = None;
         projection.active_reasoning = None;
         projection.active_tools.clear();
@@ -2014,6 +2028,17 @@ impl AppModel {
     pub fn begin_work_before(&mut self, item: Option<ItemId>) {
         self.begin_work();
         self.projections.active_mut().active_insert_before = item;
+    }
+
+    /// The active operation's high-level label and monotonic elapsed time.
+    /// `None` means the projection is idle; no session-age clock is exposed.
+    #[must_use]
+    pub fn active_work_activity(&self) -> Option<(&str, Duration)> {
+        let activity = self.projections.active().work_activity.as_ref()?;
+        Some((
+            activity.label.as_str(),
+            Instant::now().saturating_duration_since(activity.started_at),
+        ))
     }
 
     pub fn clear_cancellation_request(&mut self) {
@@ -7523,5 +7548,25 @@ mod tests {
         assert!(bounded.starts_with("HEAD界"));
         assert!(bounded.ends_with("TAIL界"));
         assert!(bounded.contains("middle omitted from terminal view"));
+    }
+
+    #[test]
+    fn work_activity_tracks_only_the_current_operation() {
+        let mut app = model();
+        assert!(app.active_work_activity().is_none());
+
+        app.begin_work_with_label("Compacting");
+        let (label, elapsed) = app.active_work_activity().expect("active operation");
+        assert_eq!(label, "Compacting");
+        assert!(elapsed < Duration::from_secs(1));
+
+        app.clear_cancellation_request();
+        assert_eq!(
+            app.active_work_activity().map(|(label, _)| label),
+            Some("Compacting")
+        );
+
+        app.apply_runtime(RuntimeUpdate::Stopped(StopState::Done));
+        assert!(app.active_work_activity().is_none());
     }
 }

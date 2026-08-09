@@ -2,6 +2,52 @@
 
 This file starts the decision log. Add new records at the top.
 
+## ADR-0148: Active Input Wakeups Are Independent From Honest Working Chrome
+
+Status: Accepted. Amends ADR-0129 (the full-screen host) and ADR-0144 (the
+generic long-running operation pump). Closes LocalHub#61, LocalHub#64, and
+LocalHub#65.
+
+Decision:
+
+- **Service input separately from frames.** Active operations give Crossterm one
+  short-lived poll/read-affine reader thread that wakes the async pump as soon as
+  input exists. The pump drains records in bounded batches; an independent
+  50 ms Tokio tick drives progress, heartbeat, and elapsed frames and skips
+  missed ticks. The reader stops and its channel drains before completion is
+  projected, so a boundary Enter cannot disappear. Runtime, approval, question,
+  cancellation, completion, and geometry semantics remain on the same async
+  pump. This removes the former redraw-sized input floor without rendering for
+  every poll.
+- **Never sleep to classify an ordinary key as paste.** The Windows
+  unbracketed-paste probe uses Crossterm's zero-duration poll. Once the terminal
+  emits a real bracketed `Event::Paste`, the fallback retires for the session.
+  Before that proof, the classifier requires a dense multi-record prefix before
+  absorbing an embedded Enter and preserves a confirmed multiline paste as one
+  atomic editor unit. A final Enter after scheduler-bunched human text flushes
+  the staged text and follows normal submit routing.
+- **Derive visible activity from operation identity.** Each busy session
+  projection owns a sanitized high-level label and monotonic start instant.
+  Rendering derives a four-frame heartbeat plus `MM:SS` (or `HH:MM:SS`) elapsed
+  text. Starting a new operation resets the clock and `Stopped`/conversation
+  clear removes it. Generic turns say `Working`; manual digest/compaction says
+  `Compacting`. No timer task, percent estimate, or invented internal phase is
+  added.
+
+Boundary and compatibility: no config, command, provider, transcript, event-log,
+or stored-session schema changes. Idle terminal polling retains its established
+50 ms bound; only the generic active-operation driver changes. Pair projections
+use the same per-projection activity identity. Pinned by zero-timeout paste-probe
+tests, bracketed-paste retirement, genuine multiline-paste and bunched-human
+single-Enter tests, boundary-safe operation-pump tests, work-lifecycle tests, and
+deterministic silent-tick/heartbeat/elapsed rendering tests.
+
+Rejected: polling input only on the 50 ms frame tick (observable lag and
+queued-key paste misclassification), redrawing for every input probe
+(unnecessary terminal traffic), a second animation task (two lifecycle
+authorities), and synthetic compaction stages or percentages that the runtime
+cannot measure.
+
 ## ADR-0147: Active-Turn Controls, Staged Ctrl+C, And Stream-Segment Openers
 
 Status: Accepted. Amends ADR-0071 (mid-turn permission-profile switching) and

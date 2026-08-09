@@ -215,7 +215,19 @@ buffer lifecycle, raw event and clipboard adapters, and maps the existing
 provider-neutral runtime/approval/cancellation streams into terminal UI actions.
 Its async event pump mirrors the established inline runtime seam: each turn owns
 one broadcast receiver and cancellation token, approvals are deny-safe, and
-terminal input is drained in bounded batches. Prompts submitted during a turn
+terminal input is drained in bounded batches. During active operations one
+short-lived reader thread preserves Crossterm's poll/read affinity and wakes the
+async pump immediately; the independent 50 ms tick drives progress and activity
+frames, and missed ticks are skipped rather than replayed. The reader is stopped
+and its channel drained before completion projection so a boundary Enter cannot
+be lost. The Windows unbracketed-paste probe is non-blocking for ordinary keys.
+Once `Event::Paste` proves bracketed-paste support, the legacy heuristic retires
+for the session; until then, only a dense multi-record prefix can make an
+embedded Enter paste content while a final Enter remains normal submit.
+The backend-neutral projection stores only a sanitized operation label and a
+monotonic start instant; render derives heartbeat frames and elapsed text, so no
+second timer task or mutable animation counter can drift from work lifecycle
+(ADR-0148). Prompts submitted during a turn
 are visible stable timeline items marked pending. Escape promotes the leading
 contiguous plain-text prompts into urgent soft interrupts, preserving FIFO order;
 the open provider stream is dropped and the same runtime turn restarts with the

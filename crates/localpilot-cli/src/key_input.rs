@@ -7,6 +7,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// paste never pauses this long mid-stream, so it is committed as one block;
 /// ordinary typing never enters a burst, so this never delays it.
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(150);
+/// A legacy key-record paste presents several records effectively at once.
+/// Requiring a short dense prefix before treating Enter as paste content keeps
+/// scheduler-bunched human typing from swallowing the submit key.
+const PASTE_DENSE_WINDOW: Duration = Duration::from_millis(5);
+const PASTE_DENSE_PREFIX: usize = 3;
 
 pub(crate) fn is_key_action(key: KeyEvent) -> bool {
     key.kind == KeyEventKind::Press
@@ -36,13 +41,31 @@ pub(crate) enum PasteAction {
 pub(crate) struct PasteBurst {
     buffer: String,
     active_until: Option<Instant>,
+    dense_started_at: Option<Instant>,
+    dense_records: usize,
+    multiline_confirmed: bool,
     pending_cr: bool,
+    bracketed_paste_seen: bool,
 }
 
 impl PasteBurst {
     /// Whether a burst is mid-accumulation.
     pub(crate) fn has_pending(&self) -> bool {
         !self.buffer.is_empty()
+    }
+
+    /// A terminal that has emitted `Event::Paste` supports bracketed paste for
+    /// this session. Its later key events are therefore human input, never the
+    /// legacy unbracketed fallback.
+    pub(crate) fn unbracketed_enabled(&self) -> bool {
+        !self.bracketed_paste_seen
+    }
+
+    /// Permanently retire the legacy heuristic after the first real bracketed
+    /// paste. Any staged prefix is returned so its ordering can be preserved.
+    pub(crate) fn note_bracketed_paste(&mut self) -> Option<String> {
+        self.bracketed_paste_seen = true;
+        self.flush_pending()
     }
 
     /// Commit an in-progress burst once it has gone idle — no new input for a full
@@ -65,8 +88,18 @@ impl PasteBurst {
 
     fn take(&mut self) -> String {
         self.active_until = None;
+        self.dense_started_at = None;
+        self.dense_records = 0;
+        self.multiline_confirmed = false;
         self.pending_cr = false;
         std::mem::take(&mut self.buffer)
+    }
+
+    fn record_dense_key(&mut self, now: Instant) {
+        let started = self.dense_started_at.get_or_insert(now);
+        if now.saturating_duration_since(*started) <= PASTE_DENSE_WINDOW {
+            self.dense_records = self.dense_records.saturating_add(1);
+        }
     }
 
     /// Append one character, normalizing `\r` and `\r\n` to a single `\n` so the
@@ -92,6 +125,13 @@ impl PasteBurst {
         buffered_after: bool,
         now: Instant,
     ) -> PasteAction {
+        if !self.unbracketed_enabled() {
+            return if self.has_pending() {
+                PasteAction::FlushThenPass(self.take())
+            } else {
+                PasteAction::Pass
+            };
+        }
         let Some(c) = paste_char(key) else {
             return if self.has_pending() {
                 PasteAction::FlushThenPass(self.take())
@@ -101,7 +141,23 @@ impl PasteBurst {
         };
 
         let in_burst = buffered_after || self.active_until.is_some_and(|until| now <= until);
+        if matches!(c, '\n' | '\r') && !self.multiline_confirmed {
+            if !self.has_pending() {
+                return PasteAction::Pass;
+            }
+            let dense_prefix = self.dense_started_at.is_some_and(|started| {
+                now.saturating_duration_since(started) <= PASTE_DENSE_WINDOW
+                    && self.dense_records >= PASTE_DENSE_PREFIX
+            });
+            if !(buffered_after && dense_prefix) {
+                // An Enter that ends a bunched run is still the user's submit.
+                // Flush the staged text, but let Enter follow the normal path.
+                return PasteAction::FlushThenPass(self.take());
+            }
+            self.multiline_confirmed = true;
+        }
         if in_burst {
+            self.record_dense_key(now);
             self.push(c);
             self.active_until = Some(now + PASTE_BURST_WINDOW);
             if buffered_after {

@@ -84,6 +84,12 @@ next empty-composer press cancels the turn and the following consecutive press
 exits. With no draft, cancel is the first rung. Selected timeline text still
 copies first.
 
+The working footer animates and shows elapsed time while a turn or long-running
+operation is active. `/compact` uses the high-level label `Compacting`; the timer
+is elapsed operation time, not an estimated completion percentage. Typing and
+Enter are serviced independently from the animation refresh, including when a
+local LocalBox server is consuming the same machine.
+
 ## Name a conversation and resume it by name
 
 Every session has a UUID, but a name is easier to remember. Name the current

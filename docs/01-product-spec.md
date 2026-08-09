@@ -359,6 +359,12 @@ exits. When idle, clearing a typed draft is followed by the ordinary empty-
 composer arm-then-exit sequence. Any other input resets the exit ladder. New
 assistant/reasoning timeline segments also discard provider framing CR/LF before
 their first prose row while preserving all later streamed whitespace (ADR-0147).
+While a turn or full-screen operation runs, the footer shows an animated
+heartbeat, the current honest high-level operation label when one is available,
+and monotonic elapsed time. Input servicing is independent from the slower frame
+refresh, so LocalBox inference on the same host does not add a redraw-sized delay
+to typing or require a second Enter; manual compaction is labelled `Compacting`
+and does not claim synthetic phases or completion percentages (ADR-0148).
 
 ### Harness CLI
 

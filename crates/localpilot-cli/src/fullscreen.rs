@@ -48,8 +48,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::interactive_session::{resolved_image_support, ApprovalCall, PairPeer, QuestionCall};
 use crate::key_input::{
-    is_cancel, is_clipboard_image_key, is_key_action, is_unbracketed_paste_newline_key,
-    may_be_unbracketed_paste_key, PasteAction, PasteBurst,
+    is_cancel, is_clipboard_image_key, is_key_action, may_be_unbracketed_paste_key, PasteAction,
+    PasteBurst,
 };
 #[cfg(test)]
 use crate::pair_run::PairResultCandidate;
@@ -61,6 +61,10 @@ use crate::pair_run::{
 use crate::repl::{switch_model_target, ClipboardImageRead};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Injected test terminals are polled at interactive cadence; production input
+/// is event-driven on its single Crossterm reader thread.
+const INJECTED_INPUT_INTERVAL: Duration = Duration::from_millis(8);
+const OPERATION_FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const WHEEL_SCROLL_ROWS: isize = 3;
 const CHAT_THEME_ENV: &str = "LOCALPILOT_CHAT_THEME";
 const CHAT_COPY_ON_SELECT_ENV: &str = "LOCALPILOT_CHAT_COPY_ON_SELECT";
@@ -1133,10 +1137,13 @@ fn run_pair_trust_loop(
             continue;
         }
         let next = event::read().context("read collaboration trust input")?;
+        if matches!(next, Event::Paste(_)) {
+            note_bracketed_paste(app, &mut paste_burst, false, hit_map.editor_width);
+        }
         mouse_state.reset_gesture();
         if let Event::Key(key) = &next {
             if is_key_action(*key) {
-                let buffered_after = buffered_after_fullscreen_key(*key)
+                let buffered_after = buffered_after_fullscreen_key(*key, &paste_burst)
                     .context("poll after collaboration trust paste key")?;
                 if handle_dialog_paste_burst(app, &mut paste_burst, *key, buffered_after, false) {
                     continue;
@@ -3179,9 +3186,17 @@ async fn run_pair_event_loop(
                         break;
                     }
                     let next = event::read().context("read collaboration input")?;
+                    if matches!(next, Event::Paste(_)) {
+                        note_bracketed_paste(
+                            app,
+                            &mut paste_burst,
+                            matches!(&adapter.dialog, Some(PairDialog::Questions(_))),
+                            hit_map.editor_width,
+                        );
+                    }
                     if let Event::Key(key) = &next {
                         if is_key_action(*key) {
-                            let buffered_after = buffered_after_fullscreen_key(*key)
+                            let buffered_after = buffered_after_fullscreen_key(*key, &paste_burst)
                                 .context("poll after collaboration paste key")?;
                             let consumed = if adapter.dialog.is_some() {
                                 handle_dialog_paste_burst(
@@ -3748,11 +3763,14 @@ async fn run_event_loop(
             continue;
         }
         let next = event::read().context("read full-screen terminal event")?;
+        if matches!(next, Event::Paste(_)) {
+            note_bracketed_paste(app, &mut paste_burst, false, hit_map.editor_width);
+        }
         if app.workspace_trust_pending() {
             mouse_state.reset_gesture();
             if let Event::Key(key) = &next {
                 if is_key_action(*key) {
-                    let buffered_after = buffered_after_fullscreen_key(*key)
+                    let buffered_after = buffered_after_fullscreen_key(*key, &paste_burst)
                         .context("poll after workspace-trust paste key")?;
                     if handle_dialog_paste_burst(app, &mut paste_burst, *key, buffered_after, false)
                     {
@@ -3783,7 +3801,7 @@ async fn run_event_loop(
         }
         if let Event::Key(key) = &next {
             if is_key_action(*key) {
-                let buffered_after = buffered_after_fullscreen_key(*key)
+                let buffered_after = buffered_after_fullscreen_key(*key, &paste_burst)
                     .context("poll after full-screen paste key")?;
                 if handle_fullscreen_paste_burst(
                     app,
@@ -4160,6 +4178,7 @@ async fn drive_localbox(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     let operation = async move {
         match crate::localbox::run_terminal_adopt(
@@ -4276,11 +4295,12 @@ async fn drive_compact(
         provider_id: runtime.active_provider_id().to_string(),
         vision_capable: runtime.active_accepts_images(),
     };
-    app.begin_work();
+    app.begin_work_with_label("Compacting");
     let mut io = TerminalIo {
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     // The two methods return distinct opaque future types, so the branch awaits
     // inside a single `async` block rather than selecting a value.
@@ -4448,6 +4468,7 @@ async fn drive_ingest(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     drive_fullscreen_operation(
         app,
@@ -4569,6 +4590,7 @@ async fn drive_research(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     drive_fullscreen_operation(
         app,
@@ -4772,6 +4794,7 @@ async fn drive_harness_resume(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     drive_fullscreen_operation(
         app,
@@ -4812,6 +4835,76 @@ struct TerminalIo<P, R, D> {
     poll: P,
     read: R,
     draw: D,
+    event_driven: bool,
+}
+
+/// Owns Crossterm's required poll/read affinity on one short-lived reader
+/// thread and wakes the async operation pump as soon as input is available.
+/// The 50 ms poll bound is only a shutdown bound; `poll` itself wakes on input.
+struct CrosstermInputThread {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CrosstermInputThread {
+    fn spawn() -> (Self, mpsc::UnboundedReceiver<io::Result<(Event, bool)>>) {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let join = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match event::poll(OPERATION_FRAME_INTERVAL) {
+                    Ok(true) => match event::read() {
+                        Ok(next) => {
+                            let buffered_after = match event::poll(Duration::ZERO) {
+                                Ok(buffered_after) => buffered_after,
+                                Err(error) => {
+                                    let _ = tx.send(Err(error));
+                                    break;
+                                }
+                            };
+                            if tx.send(Ok((next, buffered_after))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(Err(error));
+                            break;
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                stop,
+                join: Some(join),
+            },
+            rx,
+        )
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+
+    fn stop(mut self) {
+        self.finish();
+    }
+}
+
+impl Drop for CrosstermInputThread {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// Runtime-event coupling for one full-screen operation. Steering promotion
@@ -4928,6 +5021,7 @@ async fn drive_shell(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     drive_fullscreen_operation(
         app,
@@ -4970,6 +5064,104 @@ async fn drive_shell(
         },
     )
     .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationInputOutcome {
+    Consumed,
+    Handled,
+    Geometry,
+    Exit,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_operation_terminal_event(
+    app: &mut AppModel,
+    next: Event,
+    buffered_after: bool,
+    pending: &mut Option<oneshot::Sender<bool>>,
+    pending_questions: &mut Option<PendingQuestions>,
+    cancel: &CancellationToken,
+    hit_map: &localpilot_terminal_ui::HitMap,
+    mouse_state: &mut MouseState,
+    paste_burst: &mut PasteBurst,
+    queue: &mut VecDeque<QueuedOperation>,
+    history: &localpilot_store::PromptHistory,
+    cwd: &Path,
+    image_capability: &ImageCapabilitySnapshot,
+    live: Option<&LiveControls>,
+    steer: Option<&SteerQueue>,
+    pending_steer_items: &mut VecDeque<ItemId>,
+) -> OperationInputOutcome {
+    if matches!(next, Event::Paste(_)) {
+        note_bracketed_paste(
+            app,
+            paste_burst,
+            pending_questions.is_some(),
+            hit_map.editor_width,
+        );
+    }
+    if let Event::Key(key) = &next {
+        if is_key_action(*key) {
+            let consumed = if pending.is_some() || pending_questions.is_some() {
+                handle_dialog_paste_burst(
+                    app,
+                    paste_burst,
+                    *key,
+                    buffered_after,
+                    pending_questions.is_some(),
+                )
+            } else {
+                handle_fullscreen_paste_burst(
+                    app,
+                    paste_burst,
+                    *key,
+                    buffered_after,
+                    hit_map.editor_width,
+                )
+            };
+            if consumed {
+                return OperationInputOutcome::Consumed;
+            }
+        }
+    }
+    let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
+    let exit = if pending_questions.is_some() {
+        handle_question_event(app, next, pending_questions, cancel, hit_map)
+    } else if pending.is_some() {
+        handle_approval_event(app, next, pending, cancel)
+    } else {
+        match route_pointer_or_navigation(app, &next, hit_map, mouse_state) {
+            RoutedEvent::Handled => false,
+            RoutedEvent::Copy(text) => {
+                copy_to_clipboard(app, text);
+                false
+            }
+            RoutedEvent::PasteClipboard => {
+                paste_text_from_clipboard(app, hit_map.editor_width);
+                false
+            }
+            RoutedEvent::Unhandled => handle_turn_event_impl(
+                app,
+                next,
+                cancel,
+                hit_map,
+                queue,
+                history,
+                cwd,
+                image_capability,
+                live,
+                steer.map(|steer| (steer, pending_steer_items)),
+            ),
+        }
+    };
+    if exit {
+        OperationInputOutcome::Exit
+    } else if geometry_event {
+        OperationInputOutcome::Geometry
+    } else {
+        OperationInputOutcome::Handled
+    }
 }
 
 // The one full-screen operation pump. Turn and shell differ only in the typed
@@ -5027,97 +5219,183 @@ where
     let mut pending_questions: Option<PendingQuestions> = None;
     let mut pending_steer_items = VecDeque::new();
     let mut on_complete = Some(on_complete);
-    let mut tick = tokio::time::interval(EVENT_POLL_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut input_tick = tokio::time::interval(INJECTED_INPUT_INTERVAL);
+    input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut frame_tick = tokio::time::interval(OPERATION_FRAME_INTERVAL);
+    frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let (mut input_thread, mut input_rx) = if io.event_driven {
+        let (thread, rx) = CrosstermInputThread::spawn();
+        (Some(thread), rx)
+    } else {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        (None, rx)
+    };
+    let mut input_open = io.event_driven;
+    progress.drain(app);
+    let mut hit_map = (io.draw)(app)?;
+    let mut render_needed = false;
     let outcome = async {
         loop {
             tokio::select! {
                 biased;
-                _ = tick.tick() => {
+                received = input_rx.recv(), if input_open => {
+                    let Some(first) = received else {
+                        input_open = false;
+                        continue;
+                    };
+                    let mut batch = VecDeque::from([first]);
+                    while batch.len() < 64 {
+                        match input_rx.try_recv() {
+                            Ok(next) => batch.push_back(next),
+                            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                    while let Some(next) = batch.pop_front() {
+                        let (next, buffered_after) = next.context(kind.read_context())?;
+                        render_needed = true;
+                        match handle_operation_terminal_event(
+                            app,
+                            next,
+                            buffered_after,
+                            &mut pending,
+                            &mut pending_questions,
+                            cancel,
+                            &hit_map,
+                            mouse_state,
+                            paste_burst,
+                            queue,
+                            history,
+                            cwd,
+                            image_capability,
+                            live,
+                            steer,
+                            &mut pending_steer_items,
+                        ) {
+                            OperationInputOutcome::Consumed | OperationInputOutcome::Handled => {}
+                            OperationInputOutcome::Geometry => {
+                                hit_map = (io.draw)(app)?;
+                                render_needed = false;
+                            }
+                            OperationInputOutcome::Exit => {
+                                cancel.cancel();
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    advance_mouse_selection(app, &hit_map, mouse_state);
+                    if render_needed {
+                        hit_map = (io.draw)(app)?;
+                        render_needed = false;
+                    }
+                }
+                _ = input_tick.tick(), if !io.event_driven => {
+                    for _ in 0..64 {
+                        if !(io.poll)(Duration::ZERO).context(kind.poll_context())? {
+                            break;
+                        }
+                        let next = (io.read)().context(kind.read_context())?;
+                        let buffered_after = if let Event::Key(key) = &next {
+                            if is_key_action(*key) {
+                                buffered_after_fullscreen_key_with(
+                                    *key,
+                                    paste_burst,
+                                    &mut io.poll,
+                                )
+                                .context(kind.paste_context())?
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        render_needed = true;
+                        match handle_operation_terminal_event(
+                            app,
+                            next,
+                            buffered_after,
+                            &mut pending,
+                            &mut pending_questions,
+                            cancel,
+                            &hit_map,
+                            mouse_state,
+                            paste_burst,
+                            queue,
+                            history,
+                            cwd,
+                            image_capability,
+                            live,
+                            steer,
+                            &mut pending_steer_items,
+                        ) {
+                            OperationInputOutcome::Consumed | OperationInputOutcome::Handled => {}
+                            OperationInputOutcome::Geometry => {
+                                hit_map = (io.draw)(app)?;
+                                render_needed = false;
+                            }
+                            OperationInputOutcome::Exit => {
+                                cancel.cancel();
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    advance_mouse_selection(app, &hit_map, mouse_state);
+                    if render_needed {
+                        hit_map = (io.draw)(app)?;
+                        render_needed = false;
+                    }
+                }
+                _ = frame_tick.tick() => {
                     workspace_index.refresh(app);
                     progress.drain(app);
-                    let mut hit_map = (io.draw)(app)?;
                     if let Some(text) = paste_burst.flush_if_idle(Instant::now()) {
                         if pending.is_none() && pending_questions.is_none() {
                             let _ = app.handle_input(InputAction::Paste(text), hit_map.editor_width);
                         } else if pending_questions.is_some() {
                             let _ = app.handle_question_input(InputAction::Paste(text));
                         }
-                    }
-                    for _ in 0..64 {
-                        if !(io.poll)(Duration::ZERO).context(kind.poll_context())? {
-                            break;
-                        }
-                        let next = (io.read)().context(kind.read_context())?;
-                        if let Event::Key(key) = &next {
-                            if is_key_action(*key) {
-                                let buffered_after =
-                                    buffered_after_fullscreen_key_with(*key, &mut io.poll)
-                                        .context(kind.paste_context())?;
-                                let consumed = if pending.is_some() || pending_questions.is_some() {
-                                    handle_dialog_paste_burst(
-                                        app,
-                                        paste_burst,
-                                        *key,
-                                        buffered_after,
-                                        pending_questions.is_some(),
-                                    )
-                                } else {
-                                    handle_fullscreen_paste_burst(
-                                        app,
-                                        paste_burst,
-                                        *key,
-                                        buffered_after,
-                                        hit_map.editor_width,
-                                    )
-                                };
-                                if consumed {
-                                    continue;
-                                }
-                            }
-                        }
-                        let geometry_event = matches!(next, Event::Mouse(_) | Event::Resize(_, _));
-                        let exit = if pending_questions.is_some() {
-                            handle_question_event(app, next, &mut pending_questions, cancel, &hit_map)
-                        } else if pending.is_some() {
-                            handle_approval_event(app, next, &mut pending, cancel)
-                        } else {
-                            match route_pointer_or_navigation(app, &next, &hit_map, mouse_state) {
-                                RoutedEvent::Handled => false,
-                                RoutedEvent::Copy(text) => {
-                                    copy_to_clipboard(app, text);
-                                    false
-                                }
-                                RoutedEvent::PasteClipboard => {
-                                    paste_text_from_clipboard(app, hit_map.editor_width);
-                                    false
-                                }
-                                RoutedEvent::Unhandled => handle_turn_event_impl(
-                                    app,
-                                    next,
-                                    cancel,
-                                    &hit_map,
-                                    queue,
-                                    history,
-                                    cwd,
-                                    image_capability,
-                                    live,
-                                    steer.map(|steer| (steer, &mut pending_steer_items)),
-                                ),
-                            }
-                        };
-                        if exit {
-                            cancel.cancel();
-                            return Ok(true);
-                        }
-                        if geometry_event {
-                            hit_map = (io.draw)(app)?;
-                        }
+                        render_needed = true;
                     }
                     advance_mouse_selection(app, &hit_map, mouse_state);
-                    let _ = (io.draw)(app)?;
+                    hit_map = (io.draw)(app)?;
+                    render_needed = false;
                 }
                 reason = &mut operation => {
+                    // Stop the sole reader before projecting completion, then
+                    // route every event it already removed from Crossterm. This
+                    // closes the boundary race without losing a final Enter.
+                    if let Some(thread) = input_thread.take() {
+                        thread.stop();
+                    }
+                    while let Ok(next) = input_rx.try_recv() {
+                        let (next, buffered_after) = next.context(kind.read_context())?;
+                        match handle_operation_terminal_event(
+                            app,
+                            next,
+                            buffered_after,
+                            &mut pending,
+                            &mut pending_questions,
+                            cancel,
+                            &hit_map,
+                            mouse_state,
+                            paste_burst,
+                            queue,
+                            history,
+                            cwd,
+                            image_capability,
+                            live,
+                            steer,
+                            &mut pending_steer_items,
+                        ) {
+                            OperationInputOutcome::Consumed | OperationInputOutcome::Handled => {}
+                            OperationInputOutcome::Geometry => {
+                                hit_map = (io.draw)(app)?;
+                            }
+                            OperationInputOutcome::Exit => {
+                                cancel.cancel();
+                                return Ok(true);
+                            }
+                        }
+                    }
                     drain_runtime_events(app, lane_events, &mut pending_steer_items);
                     progress.drain(app);
                     if let Some(done) = on_complete.take() {
@@ -5137,6 +5415,7 @@ where
                         call.request.risk_class,
                     );
                     pending = Some(call.reply);
+                    render_needed = true;
                 }
                 received = lane_events.recv() => {
                     match received {
@@ -5144,6 +5423,7 @@ where
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
+                    render_needed = true;
                 }
                 Some(call) = question_rx.recv(), if servicing && pending.is_none() && pending_questions.is_none() => {
                     mouse_state.reset_gesture();
@@ -5161,12 +5441,16 @@ where
                         };
                         questions.show_current(app);
                         pending_questions = Some(questions);
+                        render_needed = true;
                     }
                 }
             }
         }
     }
     .await;
+    if let Some(thread) = input_thread.take() {
+        thread.stop();
+    }
     deny_pending(app, &mut pending);
     deny_buffered_approvals(approval_rx);
     if servicing {
@@ -5287,6 +5571,7 @@ async fn drive_turn(
         poll: |timeout: Duration| event::poll(timeout),
         read: || event::read(),
         draw: |app: &AppModel| draw_synchronized(terminal, app),
+        event_driven: true,
     };
     drive_fullscreen_operation(
         app,
@@ -6560,8 +6845,8 @@ fn is_enqueue_key(key: KeyEvent) -> bool {
         && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
-fn buffered_after_fullscreen_key(key: KeyEvent) -> io::Result<bool> {
-    buffered_after_fullscreen_key_with(key, &mut |timeout| event::poll(timeout))
+fn buffered_after_fullscreen_key(key: KeyEvent, burst: &PasteBurst) -> io::Result<bool> {
+    buffered_after_fullscreen_key_with(key, burst, &mut |timeout| event::poll(timeout))
 }
 
 /// The paste-probe with its input poll injected, so the operation pump can route
@@ -6569,17 +6854,17 @@ fn buffered_after_fullscreen_key(key: KeyEvent) -> io::Result<bool> {
 /// exact `crossterm::event::poll`.
 fn buffered_after_fullscreen_key_with(
     key: KeyEvent,
+    burst: &PasteBurst,
     poll: &mut impl FnMut(Duration) -> io::Result<bool>,
 ) -> io::Result<bool> {
-    if !may_be_unbracketed_paste_key(key) {
+    if !burst.unbracketed_enabled() || !may_be_unbracketed_paste_key(key) {
         return Ok(false);
     }
-    let timeout = if is_unbracketed_paste_newline_key(key) {
-        Duration::from_millis(4)
-    } else {
-        Duration::from_millis(3)
-    };
-    poll(timeout)
+    // Crossterm guarantees that a zero-duration poll returns immediately. A
+    // real key-record paste already has another record queued; once detected,
+    // PasteBurst's 150 ms continuation window accepts later records. Waiting on
+    // every ordinary key made the classifier itself visible as typing latency.
+    poll(Duration::ZERO)
 }
 
 /// Normalize Windows terminals that deliver paste as a rapid key-record burst.
@@ -6603,6 +6888,22 @@ fn handle_fullscreen_paste_burst(
             let _ = app.handle_input(InputAction::Paste(text), editor_width);
             false
         }
+    }
+}
+
+fn note_bracketed_paste(
+    app: &mut AppModel,
+    burst: &mut PasteBurst,
+    question_dialog: bool,
+    editor_width: u16,
+) {
+    let Some(text) = burst.note_bracketed_paste() else {
+        return;
+    };
+    if question_dialog {
+        let _ = app.handle_question_input(InputAction::Paste(text));
+    } else {
+        let _ = app.handle_input(InputAction::Paste(text), editor_width);
     }
 }
 
@@ -6632,7 +6933,11 @@ fn handle_dialog_paste_burst(
         }
         PasteAction::FlushThenPass(text) => {
             route_text(app, text);
-            false
+            // An approval/trust dialog has no text owner. If printable records
+            // were staged before Enter, consume that Enter as paste-adjacent
+            // input rather than allowing it to approve the focused choice. The
+            // explicit question Other editor keeps ordinary submit behavior.
+            !question_dialog
         }
     }
 }
@@ -11053,12 +11358,14 @@ mod tests {
         let mut burst = PasteBurst::default();
         let keys = [
             KeyCode::Char('a'),
-            KeyCode::Enter,
             KeyCode::Char('b'),
-            KeyCode::Enter,
             KeyCode::Char('c'),
             KeyCode::Enter,
             KeyCode::Char('d'),
+            KeyCode::Enter,
+            KeyCode::Char('e'),
+            KeyCode::Enter,
+            KeyCode::Char('f'),
         ];
         for (index, code) in keys.into_iter().enumerate() {
             let consumed = handle_fullscreen_paste_burst(
@@ -11074,6 +11381,38 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_paste_probe_never_blocks_an_ordinary_key() {
+        let mut timeouts = Vec::new();
+        for code in [KeyCode::Char('x'), KeyCode::Enter] {
+            let buffered = buffered_after_fullscreen_key_with(
+                press(code, KeyModifiers::NONE),
+                &PasteBurst::default(),
+                &mut |timeout| {
+                    timeouts.push(timeout);
+                    Ok(false)
+                },
+            )
+            .expect("probe");
+            assert!(!buffered);
+        }
+        assert_eq!(timeouts, vec![Duration::ZERO, Duration::ZERO]);
+
+        let mut modern = PasteBurst::default();
+        assert_eq!(modern.note_bracketed_paste(), None);
+        let mut polled = false;
+        assert!(!buffered_after_fullscreen_key_with(
+            press(KeyCode::Char('x'), KeyModifiers::NONE),
+            &modern,
+            &mut |_timeout| {
+                polled = true;
+                Ok(true)
+            },
+        )
+        .expect("disabled probe"));
+        assert!(!polled, "bracketed paste retires the legacy probe");
+    }
+
+    #[test]
     fn fullscreen_multiline_key_burst_is_one_paste_and_never_submits_lines() {
         let mut app = app();
         feed_unbracketed_multiline_paste(&mut app);
@@ -11082,7 +11421,7 @@ mod tests {
         let AppCommand::Submit(submitted) = app.handle_input(InputAction::Submit, 76) else {
             panic!("whole paste should submit once");
         };
-        assert_eq!(submitted.prompt, "a\nb\nc\nd");
+        assert_eq!(submitted.prompt, "abc\nd\ne\nf");
         assert_eq!(submitted.pastes.len(), 1);
     }
 
@@ -11146,21 +11485,25 @@ mod tests {
             QuestionAction::None
         );
         let mut burst = PasteBurst::default();
-        for (index, code) in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Char('y')]
-            .into_iter()
-            .enumerate()
-        {
+        let pasted = [
+            KeyCode::Char('a'),
+            KeyCode::Char('b'),
+            KeyCode::Char('c'),
+            KeyCode::Enter,
+            KeyCode::Char('d'),
+        ];
+        for (index, code) in pasted.into_iter().enumerate() {
             assert!(handle_dialog_paste_burst(
                 &mut question,
                 &mut burst,
                 press(code, KeyModifiers::NONE),
-                index < 2,
+                index + 1 < pasted.len(),
                 true,
             ));
         }
         assert_eq!(
             question.handle_question_input(InputAction::Submit),
-            QuestionAction::Submit(QuestionResponse::Other("x y".to_string()))
+            QuestionAction::Submit(QuestionResponse::Other("abc d".to_string()))
         );
     }
 
@@ -11185,7 +11528,7 @@ mod tests {
         ));
 
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue.front().expect("queued").prompt().text, "a\nb\nc\nd");
+        assert_eq!(queue.front().expect("queued").prompt().text, "abc\nd\ne\nf");
         assert!(!cancel.is_cancelled());
         assert!(!app.exit_requested);
     }
@@ -12192,6 +12535,7 @@ mod tests {
                 }
                 Ok(draw_hit_map(app, 80, 24))
             }),
+            event_driven: false,
         }
     }
 
@@ -12457,6 +12801,7 @@ mod tests {
                 draw_trace.borrow_mut().push("draw");
                 Ok(draw_hit_map(a, 80, 24))
             },
+            event_driven: false,
         };
         let progress_trace = trace.clone();
         let mut progress_sink =
@@ -12490,6 +12835,10 @@ mod tests {
             "progress drains before the first draw"
         );
         assert_eq!(trace.get(1), Some(&"draw"));
+        assert!(
+            trace.iter().filter(|entry| **entry == "draw").count() >= 2,
+            "the 20 Hz frame tick redraws a silent operation"
+        );
         // Completion: progress drains before the projection, then the final draw — a
         // milestone queued just before completion is not lost.
         assert_eq!(
@@ -12695,6 +13044,7 @@ mod tests {
             poll: |_t: Duration| Ok(false),
             read: || Ok(Event::FocusGained),
             draw: |_a: &AppModel| Err(anyhow::anyhow!("draw failed")),
+            event_driven: false,
         };
         let out = drive_command_loop(
             &mut app,
@@ -14151,6 +14501,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_services_input_that_arrives_between_activity_frames() {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        let started = Instant::now();
+        let delivered = std::rc::Rc::new(std::cell::Cell::new(false));
+        let poll_delivered = delivered.clone();
+        let read_delivered = delivered;
+        let mut io = TerminalIo {
+            poll: move |_timeout: Duration| {
+                Ok(!poll_delivered.get() && started.elapsed() >= Duration::from_millis(15))
+            },
+            read: move || {
+                read_delivered.set(true);
+                Ok(Event::Key(press(KeyCode::Char('x'), KeyModifiers::NONE)))
+            },
+            draw: |app: &AppModel| Ok(draw_hit_map(app, 80, 24)),
+            event_driven: false,
+        };
+
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(35),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+
+        assert_eq!(app.editor.text(), "x");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_submits_once_when_human_input_is_scheduler_bunched() {
+        let mut app = app();
+        app.begin_work();
+        let history = localpilot_store::PromptHistory::with_store(None);
+        let (_apr, mut approval_rx) = mpsc::unbounded_channel::<ApprovalCall>();
+        let (_qtx, mut question_rx) = mpsc::unbounded_channel::<QuestionCall>();
+        let (_evt, mut rx) = broadcast::channel::<RuntimeEvent>(16);
+        let steer = SteerQueue::default();
+        let cancel = CancellationToken::new();
+        let mut queue = VecDeque::new();
+        let mut mouse_state = MouseState::default();
+        let mut paste_burst = PasteBurst::default();
+        let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
+        // All three records are already queued when the host wakes, exactly as
+        // happens when same-host inference delays scheduler service.
+        let mut io = characterization_io(
+            queued(vec![
+                Event::Key(press(KeyCode::Char('h'), KeyModifiers::NONE)),
+                Event::Key(press(KeyCode::Char('i'), KeyModifiers::NONE)),
+                Event::Key(press(KeyCode::Enter, KeyModifiers::NONE)),
+            ]),
+            cell(0),
+            cell(0),
+            None,
+        );
+
+        drive_turn_loop(
+            &mut app,
+            &mut io,
+            &mut approval_rx,
+            &mut question_rx,
+            &mut rx,
+            &steer,
+            &cancel,
+            &image_capability(false),
+            &mut queue,
+            &history,
+            std::path::Path::new("."),
+            &mut mouse_state,
+            &mut paste_burst,
+            &mut workspace_index,
+            complete_after(35),
+            |_app: &mut AppModel, _reason: ()| {},
+        )
+        .await
+        .expect("turn loop completes");
+
+        assert_eq!(queue.len(), 1, "one Enter queues the busy prompt once");
+        assert_eq!(queue.front().expect("queued prompt").prompt().text, "hi");
+        assert!(app.editor.text().is_empty());
+    }
+
+    #[tokio::test]
     async fn turn_loop_caps_the_event_batch_at_64_per_tick() {
         let mut app = app();
         let history = localpilot_store::PromptHistory::with_store(None);
@@ -14163,15 +14620,34 @@ mod tests {
         let mut mouse_state = MouseState::default();
         let mut paste_burst = PasteBurst::default();
         let mut workspace_index = WorkspaceFileIndex::start(std::path::PathBuf::from("."));
-        // 130 inert events; a single tick may drain at most 64 before yielding.
-        let reads = cell(0);
-        let mut io = characterization_io(
-            queued(vec![Event::FocusGained; 130]),
-            reads.clone(),
-            cell(0),
-            None,
-        );
-        // Complete after the first tick so exactly one batch runs.
+        // 130 inert events may span several ticks. Drawing ends a serviced
+        // batch, so track the largest number of reads between draws rather than
+        // relying on wall-clock completion racing a second tick.
+        let events = queued(vec![Event::FocusGained; 130]);
+        let poll_events = events.clone();
+        let read_events = events;
+        let reads_since_draw = cell(0);
+        let read_batch = reads_since_draw.clone();
+        let draw_batch = reads_since_draw;
+        let largest_batch = cell(0);
+        let observed_largest = largest_batch.clone();
+        let mut io = TerminalIo {
+            poll: move |_timeout: Duration| Ok(!poll_events.borrow().is_empty()),
+            read: move || {
+                let current = read_batch.get() + 1;
+                read_batch.set(current);
+                observed_largest.set(observed_largest.get().max(current));
+                Ok(read_events
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Event::FocusGained))
+            },
+            draw: move |app: &AppModel| {
+                draw_batch.set(0);
+                Ok(draw_hit_map(app, 80, 24))
+            },
+            event_driven: false,
+        };
         drive_turn_loop(
             &mut app,
             &mut io,
@@ -14192,7 +14668,11 @@ mod tests {
         )
         .await
         .expect("turn loop completes");
-        assert_eq!(reads.get(), 64, "the batch is capped at 64 reads per tick");
+        assert_eq!(
+            largest_batch.get(),
+            64,
+            "each input wake is capped at 64 reads before yielding to a draw"
+        );
     }
 
     #[tokio::test]
@@ -14405,6 +14885,7 @@ mod tests {
                 draw_trace.borrow_mut().push("draw");
                 Ok(draw_hit_map(a, 80, 24))
             },
+            event_driven: false,
         };
         let drained_before_projection = std::rc::Rc::new(std::cell::Cell::new(false));
         let seen = drained_before_projection.clone();
@@ -14509,6 +14990,7 @@ mod tests {
                 }
                 Ok(draw_hit_map(a, 80, 24))
             },
+            event_driven: false,
         };
         drive_turn_loop(
             &mut app,

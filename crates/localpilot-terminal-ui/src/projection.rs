@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::app::{PlanEntry, UsageTotals, WorkState};
 use crate::editor::EditorSnapshot;
@@ -62,6 +63,7 @@ pub(super) struct SessionProjection {
     pub(super) timeline: Timeline,
     pub(super) timeline_search: Option<TimelineSearchState>,
     pub(super) work: WorkState,
+    pub(super) work_activity: Option<WorkActivity>,
     pub(super) plan: Vec<PlanEntry>,
     pub(super) usage: Option<UsageTotals>,
     pub(super) context_usage: Option<(usize, usize)>,
@@ -72,6 +74,16 @@ pub(super) struct SessionProjection {
     pub(super) active_insert_before: Option<ItemId>,
 }
 
+/// Monotonic, presentation-neutral identity for the operation currently owning
+/// a session projection. Rendering derives elapsed time and animation frames
+/// from `started_at`; the model does not need a timer task or mutable frame
+/// counter.
+#[derive(Debug, Clone)]
+pub(super) struct WorkActivity {
+    pub(super) label: String,
+    pub(super) started_at: Instant,
+}
+
 impl SessionProjection {
     pub(super) fn new(header: SessionHeader) -> Self {
         Self {
@@ -79,6 +91,7 @@ impl SessionProjection {
             timeline: Timeline::new(),
             timeline_search: None,
             work: WorkState::Idle,
+            work_activity: None,
             plan: Vec::new(),
             usage: None,
             context_usage: None,
@@ -94,6 +107,7 @@ impl SessionProjection {
         self.timeline = Timeline::new();
         self.timeline_search = None;
         self.work = WorkState::Idle;
+        self.work_activity = None;
         self.plan.clear();
         self.usage = None;
         self.context_usage = None;

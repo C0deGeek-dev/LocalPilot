@@ -123,20 +123,20 @@ fn a_key_burst_is_absorbed_then_flushed_as_one_paste() {
 }
 
 #[test]
-fn a_burst_flushes_on_an_enter_within_the_window() {
+fn a_bunched_human_run_flushes_then_lets_enter_submit() {
     let now = Instant::now();
     let mut burst = key_input::PasteBurst::default();
 
     burst.observe(plain('a'), true, now);
-    // Enter maps to '\n'; arriving as the last of the batch, it completes the
-    // paste and the newline is part of the flushed text.
+    // One buffered character is not enough evidence to absorb Enter. Preserve
+    // the staged text, then let the normal input path submit it.
     assert_eq!(
         burst.observe(
             key(KeyCode::Enter, KeyModifiers::empty()),
             false,
             now + Duration::from_millis(1)
         ),
-        key_input::PasteAction::Flush("a\n".to_string())
+        key_input::PasteAction::FlushThenPass("a".to_string())
     );
 }
 
@@ -146,11 +146,33 @@ fn crlf_in_a_burst_is_normalized_to_one_newline() {
     let mut burst = key_input::PasteBurst::default();
 
     burst.observe(plain('a'), true, now);
-    burst.observe(plain('\r'), true, now + Duration::from_millis(1));
-    burst.observe(plain('\n'), true, now + Duration::from_millis(2));
+    burst.observe(plain('b'), true, now + Duration::from_millis(1));
+    burst.observe(plain('c'), true, now + Duration::from_millis(2));
+    burst.observe(plain('\r'), true, now + Duration::from_millis(3));
+    burst.observe(plain('\n'), true, now + Duration::from_millis(4));
     assert_eq!(
-        burst.observe(plain('b'), false, now + Duration::from_millis(3)),
-        key_input::PasteAction::Flush("a\nb".to_string())
+        burst.observe(plain('d'), false, now + Duration::from_millis(5)),
+        key_input::PasteAction::Flush("abc\nd".to_string())
+    );
+}
+
+#[test]
+fn bracketed_paste_permanently_disables_the_legacy_key_heuristic() {
+    let now = Instant::now();
+    let mut burst = key_input::PasteBurst::default();
+    assert_eq!(burst.note_bracketed_paste(), None);
+    assert!(!burst.unbracketed_enabled());
+    assert_eq!(
+        burst.observe(plain('a'), true, now),
+        key_input::PasteAction::Pass
+    );
+    assert_eq!(
+        burst.observe(
+            key(KeyCode::Enter, KeyModifiers::empty()),
+            true,
+            now + Duration::from_millis(1)
+        ),
+        key_input::PasteAction::Pass
     );
 }
 

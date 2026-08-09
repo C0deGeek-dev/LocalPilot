@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
@@ -3135,7 +3137,8 @@ fn framed_composer_rule(
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool) {
-    let state = footer_state(app);
+    let activity = working_status(app);
+    let state = footer_state_with_activity(app, activity.as_deref());
     let shortcuts = if app.is_pair() {
         "F6 peer · ? help · / commands"
     } else {
@@ -3186,18 +3189,56 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &AppModel, narrow: bool
         two_sided(&left, &context, area.width)
     };
     frame.render_widget(Paragraph::new(text).style(theme.ui(UiRole::Muted)), area);
-    if let Some(offset) = state.find("● Working") {
+    if let Some(activity) = activity {
+        let Some(offset) = state.find(&activity) else {
+            return;
+        };
         let x = area
             .x
             .saturating_add(u16::try_from(UnicodeWidthStr::width(&state[..offset])).unwrap_or(0));
+        let width = u16::try_from(UnicodeWidthStr::width(activity.as_str())).unwrap_or(u16::MAX);
         frame.render_widget(
-            Paragraph::new("● Working").style(theme.ui(UiRole::Accent)),
-            Rect::new(x, area.y, 9.min(area.right().saturating_sub(x)), 1),
+            Paragraph::new(activity).style(theme.ui(UiRole::Accent)),
+            Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
         );
     }
 }
 
+fn working_status(app: &AppModel) -> Option<String> {
+    let (label, elapsed) = app.active_work_activity()?;
+    Some(format!(
+        "{} {label} · {}",
+        working_glyph(elapsed),
+        format_elapsed(elapsed)
+    ))
+}
+
+fn working_glyph(elapsed: Duration) -> &'static str {
+    const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    let frame = usize::try_from(elapsed.as_millis() / 200).unwrap_or(usize::MAX) % FRAMES.len();
+    FRAMES[frame]
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    if minutes < 60 {
+        format!("{minutes:02}:{seconds:02}")
+    } else {
+        let hours = minutes / 60;
+        let minutes = minutes % 60;
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
 fn footer_state(app: &AppModel) -> String {
+    let activity = working_status(app);
+    footer_state_with_activity(app, activity.as_deref())
+}
+
+fn footer_state_with_activity(app: &AppModel, activity: Option<&str>) -> String {
     let held = !matches!(
         app.active_timeline().viewport,
         crate::ViewportAnchor::FollowBottom
@@ -3265,7 +3306,8 @@ fn footer_state(app: &AppModel) -> String {
             false,
         ) if held && new_output => {
             format!(
-                "↓ new output · ● Working · {} · {}",
+                "↓ new output · {} · {} · {}",
+                activity.unwrap_or("Working · 00:00"),
                 format_stream_size(app.active_stream_bytes()),
                 working_input_actions(app)
             )
@@ -3276,7 +3318,8 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) if held => format!(
-            "timeline held · ● Working · {} · {}",
+            "timeline held · {} · {} · {}",
+            activity.unwrap_or("Working · 00:00"),
             format_stream_size(app.active_stream_bytes()),
             working_input_actions(app)
         ),
@@ -3286,7 +3329,8 @@ fn footer_state(app: &AppModel) -> String {
             },
             false,
         ) => format!(
-            "● Working · {} · {}",
+            "{} · {} · {}",
+            activity.unwrap_or("Working · 00:00"),
             format_stream_size(app.active_stream_bytes()),
             working_input_actions(app)
         ),
@@ -3295,7 +3339,12 @@ fn footer_state(app: &AppModel) -> String {
                 cancellation_requested: true,
             },
             false,
-        ) => "cancelling · Ctrl+C twice to exit".to_string(),
+        ) => format!(
+            "{} · Ctrl+C twice to exit",
+            activity
+                .map(|status| status.replacen("Working", "Cancelling", 1))
+                .unwrap_or_else(|| "Cancelling · 00:00".to_string())
+        ),
     }
 }
 
@@ -6029,7 +6078,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let footer = buffer_line(buffer, layout.footer.y);
 
-        assert!(footer.contains("● Working · 8.9 KiB · Ctrl+C / Esc interrupt"));
+        assert!(footer.contains("Working · 00:00 · 8.9 KiB · Ctrl+C / Esc interrupt"));
         assert!(footer.trim_end().ends_with("model"));
         assert!(!footer.contains("agent · default"));
         assert!(!footer.contains("? help"));
@@ -6236,5 +6285,22 @@ mod tests {
         assert!(rendered.contains("✗ Shell bad-command 1 line"));
         assert!(rendered.contains("│ diagnostic"));
         assert!(!rendered.contains("exit 5"));
+    }
+
+    #[test]
+    fn working_chrome_formats_monotonic_elapsed_time_and_motion() {
+        assert_eq!(format_elapsed(Duration::ZERO), "00:00");
+        assert_eq!(format_elapsed(Duration::from_secs(754)), "12:34");
+        assert_eq!(format_elapsed(Duration::from_secs(3_661)), "01:01:01");
+        assert_ne!(
+            working_glyph(Duration::ZERO),
+            working_glyph(Duration::from_millis(200))
+        );
+
+        let mut app = model();
+        app.begin_work_with_label("Compacting");
+        let footer = footer_state(&app);
+        assert!(footer.contains("Compacting · 00:00"));
+        assert!(footer.contains("Ctrl+C / Esc interrupt"));
     }
 }

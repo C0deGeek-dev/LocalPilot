@@ -6,6 +6,16 @@ is SemVer-stable; the configuration schema stability policy is in
 
 ## Unreleased
 
+- **Full-screen input stays responsive while LocalBox is busy, and long work is
+  visibly alive.** Active operations now wake from one dedicated terminal-event
+  reader independently of a 20 Hz render cadence, and ordinary-key paste
+  detection never waits on every keystroke. Once a modern terminal emits a real
+  bracketed paste, the legacy key-burst heuristic retires for that session; its
+  fallback also requires a dense prefix before treating Enter as paste content.
+  A bunched typed follow-up therefore submits on its first Enter even when
+  inference and the TUI share a machine. Working chrome animates and shows
+  monotonic elapsed time; manual compaction is labelled `Compacting` without
+  inventing internal phases or percentages.
 - **Live slash controls now agree across inline and full-screen turns.** One
   host-aware policy keeps permission profiles, `/bg`, `/effort`, and `/think`
   live in both hosts (with the existing safe full-screen takeovers). Profiles
