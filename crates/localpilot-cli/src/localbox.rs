@@ -50,12 +50,17 @@ struct LocalBoxModelEntry {
     name: String,
     #[serde(default)]
     aliases: Vec<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     display_name: Option<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     repository: String,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     default_quant: Option<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     required_mode: Option<String>,
     run_profile: LocalBoxRunProfile,
     #[serde(default)]
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     active: Option<bool>,
 }
 
@@ -63,10 +68,14 @@ struct LocalBoxModelEntry {
 struct LocalBoxRunProfile {
     source: String,
     source_path: String,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     reason: Option<String>,
     warning: Option<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     quant: Option<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     context: Option<String>,
+    #[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
     mode: Option<String>,
 }
 
@@ -129,6 +138,7 @@ fn catalog_entry<'a>(
 
 /// Read and render the LocalBox-owned launch catalog. No server is started and
 /// no project file is written.
+#[cfg(feature = "tui")]
 pub(crate) async fn run_models() -> anyhow::Result<String> {
     let catalog = read_models_catalog().await?;
     let active_model = match detect().await {
@@ -138,6 +148,7 @@ pub(crate) async fn run_models() -> anyhow::Result<String> {
     Ok(render_models_catalog(&catalog, active_model.as_deref()))
 }
 
+#[cfg(any(test, feature = "tui"))]
 fn render_models_catalog(catalog: &LocalBoxModelsCatalog, active_model: Option<&str>) -> String {
     let mut out = String::from("LocalBox models\n");
     for model in &catalog.models {

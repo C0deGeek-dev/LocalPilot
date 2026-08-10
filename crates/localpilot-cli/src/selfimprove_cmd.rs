@@ -16,7 +16,8 @@ use localpilot_llm::ProviderRegistry;
 use localpilot_patchgen::ProposedPatch;
 use localpilot_selfimprove::{ApprovalToken, Orchestrator, SelfDevRunner, Stage};
 use localpilot_selfreview::{Finding, ReviewOptions};
-use localpilot_tui::SelfImproveAction;
+#[cfg(feature = "tui")]
+use localpilot_slash::SelfImproveAction;
 
 use crate::propose_patch::{generate_proposal, proposal_branch};
 
@@ -36,6 +37,7 @@ fn open_loop(repo_root: &Path) -> anyhow::Result<Orchestrator<SelfDevRunner>> {
 /// use this preflight only to choose cancellation and confirmation policy; the
 /// persisted orchestrator remains the sole authority for the actual transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "tui")]
 pub(crate) enum InteractiveStep {
     Read,
     Propose,
@@ -49,12 +51,14 @@ pub(crate) enum InteractiveStep {
 /// Result of one chat action. Reload is deliberately deferred until the host has
 /// restored terminal modes; every other result leaves the current chat running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "tui")]
 pub(crate) enum InteractiveOutcome {
     Complete,
     DeferredReload,
 }
 
 /// Resolve the live persisted stage into host policy without advancing it.
+#[cfg(feature = "tui")]
 pub(crate) fn interactive_step(
     repo_root: &Path,
     action: &SelfImproveAction,
@@ -63,6 +67,7 @@ pub(crate) fn interactive_step(
     Ok(interactive_step_for(stage, action))
 }
 
+#[cfg(feature = "tui")]
 fn interactive_step_for(stage: Option<Stage>, action: &SelfImproveAction) -> InteractiveStep {
     match action {
         SelfImproveAction::Status => InteractiveStep::Read,
@@ -147,10 +152,14 @@ pub fn run_status(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "tui")]
 const MAX_CHAT_FINDINGS: usize = 50;
+#[cfg(feature = "tui")]
 const MAX_CHAT_EVIDENCE_CHARS: usize = 256;
+#[cfg(feature = "tui")]
 const MAX_CHAT_BUILD_BYTES: usize = 128 * 1024;
 
+#[cfg(feature = "tui")]
 fn clipped(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let clipped: String = chars.by_ref().take(max_chars).collect();
@@ -161,6 +170,7 @@ fn clipped(value: &str, max_chars: usize) -> String {
     }
 }
 
+#[cfg(feature = "tui")]
 fn render_finding(rank: usize, finding: &Finding, out: &mut dyn Write) -> std::io::Result<()> {
     let location = match (&finding.path, &finding.span) {
         (Some(path), Some(span)) => {
@@ -192,6 +202,7 @@ fn render_finding(rank: usize, finding: &Finding, out: &mut dyn Write) -> std::i
     Ok(())
 }
 
+#[cfg(feature = "tui")]
 fn render_findings(
     report: &localpilot_selfreview::Report,
     out: &mut dyn Write,
@@ -250,11 +261,13 @@ pub(crate) fn render_pending_proposal(
     Ok(id)
 }
 
+#[cfg(feature = "tui")]
 struct CappedOutput {
     bytes: Vec<u8>,
     truncated: bool,
 }
 
+#[cfg(feature = "tui")]
 impl CappedOutput {
     fn new() -> Self {
         Self {
@@ -272,6 +285,7 @@ impl CappedOutput {
     }
 }
 
+#[cfg(feature = "tui")]
 impl Write for CappedOutput {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let remaining = MAX_CHAT_BUILD_BYTES.saturating_sub(self.bytes.len());
@@ -289,6 +303,7 @@ impl Write for CappedOutput {
 /// Execute one interactive action through the same CLI stage functions and the
 /// same persisted orchestrator. The only special result is a reload request:
 /// the host must restore its terminal before calling [`reload_after_chat`].
+#[cfg(feature = "tui")]
 pub(crate) async fn run_interactive(
     repo_root: &Path,
     action: &SelfImproveAction,
@@ -351,6 +366,7 @@ pub(crate) async fn run_interactive(
     Ok(InteractiveOutcome::Complete)
 }
 
+#[cfg(feature = "tui")]
 async fn run_interactive_status(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     match open_loop(repo_root)?.state()? {
         None => {
@@ -410,6 +426,7 @@ async fn run_interactive_status(repo_root: &Path, out: &mut dyn Write) -> anyhow
     Ok(())
 }
 
+#[cfg(feature = "tui")]
 async fn run_interactive_start(
     repo_root: &Path,
     finding: Option<usize>,
@@ -480,6 +497,7 @@ async fn run_interactive_start(
 }
 
 /// Complete a previously confirmed chat reload after terminal restoration.
+#[cfg(feature = "tui")]
 pub(crate) fn reload_after_chat(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     reload_step(repo_root, out)
 }
@@ -707,7 +725,7 @@ pub fn run_reset(repo_root: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

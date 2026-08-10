@@ -1642,6 +1642,7 @@ dependencies = [
  "localpilot-selfreview",
  "localpilot-server",
  "localpilot-skills",
+ "localpilot-slash",
  "localpilot-store",
  "localpilot-taskgraph",
  "localpilot-terminal-ui",
